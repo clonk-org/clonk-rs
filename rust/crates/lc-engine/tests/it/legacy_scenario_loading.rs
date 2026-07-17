@@ -2,7 +2,7 @@ use std::fs;
 
 use image::{Rgba, RgbaImage};
 use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, Landscape, ObjectId, Scenario, ScenarioError, Vector2};
+use lc_engine::{Engine, Landscape, ObjectId, Scenario, ScenarioError, SpawnConfig, Vector2};
 use lc_resources::Group;
 
 fn tempdir() -> std::io::Result<tempfile::TempDir> {
@@ -14,6 +14,39 @@ global func Initialize(state, random) { return nil; }
 
 global func Step(state, frame, random) { return nil; }
 "#;
+
+#[test]
+fn defcore_rct_all_timer_call_trailing_space_misses_exact_runtime_lookup(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    fs::write(
+        temp.path().join("DefCore.txt"),
+        "[DefCore]\nid=RCTA\nName= Bar \nCategory=C4D_Object\nTimer=1\nTimerCall=Foo \n",
+    )?;
+    fs::write(
+        temp.path().join("Script.c"),
+        "#strict 2\nlocal iFired;\nfunc Foo() { iFired = 1; return 1; }\n",
+    )?;
+
+    let resource = lc_resources::definition::Definition::load(&Group::open(temp.path())?)?;
+    assert_eq!(resource.core.name.as_deref(), Some("Bar "));
+    assert_eq!(resource.core.timer_call.as_deref(), Some("Foo "));
+
+    let definition = lc_engine::Definition::from_resource(&resource)?;
+    assert!(definition.has_function("Foo"));
+    assert!(!definition.has_function("Foo "));
+    let mut engine = Engine::new();
+    engine.register_definition(definition)?;
+    let object = engine.spawn_object(SpawnConfig::new("RCTA"))?;
+    engine.tick()?;
+
+    let snapshot = engine
+        .object_snapshot(object)
+        .expect("timer object survives");
+    assert_eq!(snapshot.timer, 0, "Timer=1 reached the callback gate");
+    assert_eq!(snapshot.local_vars.get("iFired"), None);
+    Ok(())
+}
 
 struct LocalDefinitionResolver;
 

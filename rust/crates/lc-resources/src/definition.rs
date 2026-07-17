@@ -1264,6 +1264,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         if !current_section_is_first {
             continue;
         }
+        // StdCompilerINIRead::ReadString skips only leading ASCII space/tab
+        // for RCT_All. Keep the fully trimmed view for the typed parsers,
+        // but preserve trailing bytes for DefCore's three whole-line strings.
+        let rct_all_value = raw_value.trim_start_matches([' ', '\t']);
         let value = raw_value.trim();
 
         let Some(section) = current_section.as_deref() else {
@@ -1294,8 +1298,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 fill_i32_array(value, &mut version);
             }
             "Name" => {
-                if !value.is_empty() {
-                    name = Some(value.to_string());
+                if !rct_all_value.is_empty() {
+                    name = Some(rct_all_value.to_string());
                 }
             }
             "RequireDef" => {
@@ -1359,7 +1363,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     reflected_int!("ColorByOwner", parse_reflected_int(value)) != 0;
             }
             "ColorByMaterial" => {
-                color_by_material = value.chars().take(15).collect();
+                color_by_material = rct_all_value.chars().take(15).collect();
             }
             "AllowPictureStack" => {
                 // StdBitfieldAdapt over the APS_* table
@@ -1620,9 +1624,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 timer = parse_i32(value).unwrap_or(35);
             }
             "TimerCall" => {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    timer_call = Some(trimmed.chars().take(29).collect());
+                if !rct_all_value.is_empty() {
+                    timer_call = Some(rct_all_value.chars().take(29).collect());
                 }
             }
             "Components" => {
@@ -4362,6 +4365,21 @@ Entrance=1,2,,4
         let raw_crew = parse_def_core(b"[DefCore]\nid=CREW\nCrewMember=-2\n")
             .expect("raw crew value parses");
         assert_eq!(raw_crew.crew_member, -2);
+    }
+
+    #[test]
+    fn parse_def_core_rct_all_skips_leading_and_preserves_trailing_whitespace() {
+        let parsed = parse_def_core(
+            b"[DefCore]\nid=RCTA\nName= \tBar \t\nTimerCall= \tFoo \t\n\
+              ColorByMaterial= \tGranite \t\nBurnTo=BURN \t\nConstructTo=DONE \t\n",
+        )
+        .expect("DefCore RCT_All strings parse");
+
+        assert_eq!(parsed.name.as_deref(), Some("Bar \t"));
+        assert_eq!(parsed.timer_call.as_deref(), Some("Foo \t"));
+        assert_eq!(parsed.color_by_material, "Granite \t");
+        assert_eq!(parsed.burn_turn_to.as_deref(), Some("BURN"));
+        assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
     }
 
     #[test]
