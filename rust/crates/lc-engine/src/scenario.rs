@@ -12209,7 +12209,9 @@ fn collect_definitions_from_group<S: AsRef<str>>(
     output: &mut Vec<CollectedDefinition>,
 ) -> Result<(), ScenarioError> {
     let mut primary_definition = false;
-    if group.exists("DefCore.txt") {
+    // C4Def::Load diverts Particle.txt groups into C4ParticleDef before it
+    // even attempts DefCore; they never become object definitions.
+    if !group.exists("Particle.txt") && group.exists("DefCore.txt") {
         // C4Def::Load checks SkipDefs immediately after DefCore, before
         // scripts, ActMap, graphics, sounds, or localized auxiliary data.
         // Probe the ID first so malformed data in a skipped definition is
@@ -12227,10 +12229,15 @@ fn collect_definitions_from_group<S: AsRef<str>>(
             if !core.has_valid_id() {
                 tracing::warn!(
                     id = %core.id,
-                    path = %group.root().display(),
+                    group = %group.root().display(),
                     "skipping definition with invalid C4ID"
                 );
-            } else if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
+            } else if skip_ids.contains(&core.id.to_ascii_uppercase()) {
+                // C4Def::Load checks SkipDefs before the graphics-mode gate.
+            } else if core.needed_gfx_mode == 2 {
+                // C4DGFXMODE_OLDGFX is no longer supported. Native returns
+                // false here without a dedicated diagnostic.
+            } else {
                 let components =
                     language_packs.component_groups(group, Some(scenario), scenario_origin);
                 match ResourceDefinitionData::load_with_core_and_languages_and_components(
@@ -12240,15 +12247,23 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                     &components,
                 ) {
                     Ok(resource) => {
-                        primary_definition = true;
-                        let mut definition =
-                            scenario_definition_from_resource(resource, Some(group.clone()));
-                        definition.script = localize_script_source_with_components(
-                            &components,
-                            &definition.script,
-                            languages,
-                        )?;
-                        output.push(CollectedDefinition::Definition(definition));
+                        if resource.graphics_image.is_none() {
+                            tracing::warn!(
+                                group = %group.root().display(),
+                                error = "required Graphics.png/Graphics.bmp is missing or invalid",
+                                "definition failed to load; skipping"
+                            );
+                        } else {
+                            primary_definition = true;
+                            let mut definition =
+                                scenario_definition_from_resource(resource, Some(group.clone()));
+                            definition.script = localize_script_source_with_components(
+                                &components,
+                                &definition.script,
+                                languages,
+                            )?;
+                            output.push(CollectedDefinition::Definition(definition));
+                        }
                     }
                     Err(error) if is_rejected_definition_error(&error) => {
                         warn_rejected_definition(group, &error);
@@ -13301,6 +13316,13 @@ fn parse_scroll_mode(value: &str) -> Result<SkyParallaxMode, ScenarioError> {
 
 fn rgb_to_bgr_u32(color: RgbColor) -> u32 {
     u32::from(color.b) | (u32::from(color.g) << 8) | (u32::from(color.r) << 16)
+}
+
+#[cfg(test)]
+fn write_test_definition_graphics(path: &Path) {
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+        .save(path.join("Graphics.png"))
+        .expect("write definition graphics");
 }
 
 #[cfg(test)]
@@ -17329,6 +17351,7 @@ global func Step(state, frame, random)
         )
         .expect("write defcore");
         std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        write_test_definition_graphics(&good);
 
         if let Some((id, script)) = extra_def {
             let extra = defs_root.join(format!("{id}.c4d"));
@@ -17339,6 +17362,7 @@ global func Step(state, frame, random)
             )
             .expect("write extra defcore");
             std::fs::write(extra.join("Script.c"), script).expect("write extra script");
+            write_test_definition_graphics(&extra);
         }
 
         let scenario_dir = dir.join("Resilience.c4s");
@@ -17370,6 +17394,7 @@ global func Step(state, frame, random)
         )
         .expect("write child defcore");
         std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+        write_test_definition_graphics(&child);
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -17411,6 +17436,7 @@ global func Step(state, frame, random)
         )
         .expect("write child DefCore");
         std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+        write_test_definition_graphics(&child);
 
         let empty_act = dir.path().join("Defs.c4d/EmptyAct.c4d");
         std::fs::create_dir_all(&empty_act).expect("empty-ActMap definition dir");
@@ -17422,6 +17448,7 @@ global func Step(state, frame, random)
         std::fs::write(empty_act.join("Script.c"), "// empty ActMap\n")
             .expect("write empty-ActMap script");
         std::fs::write(empty_act.join("ActMap.txt"), []).expect("empty ActMap");
+        write_test_definition_graphics(&empty_act);
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -17472,12 +17499,14 @@ global func Step(state, frame, random)
         std::fs::write(broken.join("Script.c"), "// parent\n").expect("write parent script");
         std::fs::write(broken.join("ActMap.txt"), "malformed action map\n")
             .expect("write malformed action map");
+        write_test_definition_graphics(&broken);
         std::fs::write(
             tail.join("DefCore.txt"),
             "[DefCore]\nid=TAIL\nName=Tail\nCategory=0\nCrewMember=0\n",
         )
         .expect("write nested defcore");
         std::fs::write(tail.join("Script.c"), "// tail\n").expect("write nested script");
+        write_test_definition_graphics(&tail);
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -17535,6 +17564,7 @@ global func Step(state, frame, random)
         )
         .expect("write child DefCore");
         std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+        write_test_definition_graphics(&child);
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -17559,6 +17589,120 @@ global func Step(state, frame, random)
                     .as_deref()
                     .is_some_and(|error| error.contains("OverlayBad.png"))
         }));
+    }
+
+    #[test]
+    fn definition_load_skip_ladder_matches_cpp() {
+        fn write_core(root: &Path, name: &str, source: &str) -> PathBuf {
+            let path = root.join(format!("{name}.c4d"));
+            std::fs::create_dir_all(&path).expect("definition directory");
+            std::fs::write(path.join("DefCore.txt"), source).expect("write DefCore");
+            path
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let defs = dir.path().join("Defs.c4d");
+
+        let truncated = write_core(&defs, "Truncated", "[DefCore]\nid=TOWER\n");
+        write_test_definition_graphics(&truncated);
+
+        let lowercase = write_core(&defs, "Lowercase", "[DefCore]\nid=lowr\n");
+        write_test_definition_graphics(&lowercase);
+
+        let old_gfx = write_core(&defs, "OldGfx", "[DefCore]\nid=OLDG\nNeededGfxMode=2\n");
+        write_test_definition_graphics(&old_gfx);
+
+        let modern_gfx = write_core(&defs, "ModernGfx", "[DefCore]\nid=MODN\nNeededGfxMode=3\n");
+        write_test_definition_graphics(&modern_gfx);
+
+        write_core(&defs, "Missing", "[DefCore]\nid=MISS\n");
+
+        let variant_only = write_core(&defs, "VariantOnly", "[DefCore]\nid=VARI\n");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]))
+            .save(variant_only.join("GraphicsAlt.png"))
+            .expect("write non-base graphics");
+
+        let corrupt_png = write_core(&defs, "CorruptPng", "[DefCore]\nid=CORR\n");
+        std::fs::write(corrupt_png.join("Graphics.png"), b"not a png").expect("write corrupt PNG");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([7, 8, 9, 255]))
+            .save(corrupt_png.join("Graphics.bmp"))
+            .expect("write valid BMP fallback candidate");
+
+        let mislabeled_png = write_core(&defs, "MislabeledPng", "[DefCore]\nid=MSLB\n");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([13, 14, 15, 255]))
+            .save_with_format(
+                mislabeled_png.join("Graphics.png"),
+                image::ImageFormat::Bmp,
+            )
+            .expect("write BMP bytes under the PNG base name");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([16, 17, 18, 255]))
+            .save(mislabeled_png.join("Graphics.bmp"))
+            .expect("write valid BMP fallback candidate");
+
+        let dual_base = write_core(&defs, "DualBase", "[DefCore]\nid=DUAL\nColorByOwner=1\n");
+        write_test_definition_graphics(&dual_base);
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([32, 32, 32, 255]))
+            .save(dual_base.join("Overlay.png"))
+            .expect("write PNG-sized overlay");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([19, 20, 21, 255]))
+            .save(dual_base.join("Graphics.bmp"))
+            .expect("write losing BMP base candidate");
+
+        let bad_overlay = write_core(&defs, "BadOverlay", "[DefCore]\nid=OVLY\nColorByOwner=1\n");
+        write_test_definition_graphics(&bad_overlay);
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([32, 32, 32, 255]))
+            .save(bad_overlay.join("Overlay.png"))
+            .expect("write mismatched overlay");
+
+        let particle = write_core(&defs, "Particle", "[DefCore]\nid=PART\n");
+        write_test_definition_graphics(&particle);
+        std::fs::write(particle.join("Particle.txt"), b"[Particle]\n")
+            .expect("write particle marker");
+        let particle_child = write_core(&particle, "Child", "[DefCore]\nid=CHLD\n");
+        write_test_definition_graphics(&particle_child);
+
+        let bitmap = write_core(&defs, "Bitmap", "[DefCore]\nid=BMAP\n");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 11, 12, 255]))
+            .save(bitmap.join("Graphics.bmp"))
+            .expect("write legacy base bitmap");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let (loaded, warnings) =
+            capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
+        let scenario = loaded.expect("rejected definitions do not abort the scenario");
+        let mut ids = scenario
+            .definitions
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["BMAP", "CHLD", "DUAL", "GOOD", "MODN", "TOWE"]);
+
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("skipping definition with invalid C4ID")
+                && warning.group.as_deref() == Some(lowercase.to_string_lossy().as_ref())
+        }));
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("definition failed to load; skipping")
+                && warning.group.as_deref() == Some(bad_overlay.to_string_lossy().as_ref())
+                && warning
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("Overlay.png"))
+        }));
+        for rejected in [&corrupt_png, &mislabeled_png, &variant_only] {
+            assert!(warnings.iter().any(|warning| {
+                warning.message.as_deref() == Some("definition failed to load; skipping")
+                    && warning.group.as_deref() == Some(rejected.to_string_lossy().as_ref())
+                    && warning
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("Graphics.png/Graphics.bmp"))
+            }));
+        }
     }
 
     fn write_definition_localization_fixture(
@@ -18471,6 +18615,7 @@ global func Step(state, frame, random)
             "#strict\npublic func ExplodeSize() { return(18); }\nprotected func Hit() { Explode(ExplodeSize()); }\n",
         )
         .expect("flint script");
+        write_test_definition_graphics(&flint);
         let bystander = defs_root.join("Bystander.c4d");
         std::fs::create_dir_all(&bystander).expect("bystander dir");
         std::fs::write(
@@ -18479,6 +18624,7 @@ global func Step(state, frame, random)
         )
         .expect("bystander defcore");
         std::fs::write(bystander.join("Script.c"), "#strict\n").expect("bystander script");
+        write_test_definition_graphics(&bystander);
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         // The live game installs planet/System.c4g before the scenario.
@@ -18548,6 +18694,7 @@ global func Step(state, frame, random)
             "#strict\npublic func Shake() { return(ShakeViewPort(100, 0, 10, 20)); }\n",
         )
         .expect("probe script");
+        write_test_definition_graphics(&probe);
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let planet =
@@ -18645,6 +18792,7 @@ global func Step(state, frame, random)
              public func SetAI(szName, iInterval) { return 7; }\n",
         )
         .expect("write boost script");
+        write_test_definition_graphics(&boost);
         let pack_system = dir.path().join("Defs.c4d/System.c4g");
         std::fs::create_dir_all(&pack_system).expect("pack system dir");
         std::fs::write(
@@ -18822,6 +18970,7 @@ global func Step(state, frame, random)
             "#strict\nglobal func NightCheck() { return 8; }\n",
         )
         .expect("write time script");
+        write_test_definition_graphics(&time);
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let snapshot = engine.snapshot();
@@ -19000,6 +19149,7 @@ global func Step(state, frame, random)
              }\n",
         )
         .expect("write rule script");
+        write_test_definition_graphics(&rule);
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         join_test_player(&mut engine);
@@ -19384,6 +19534,7 @@ public func ActualizePhase(pClonk)
             std::fs::create_dir_all(&def_dir).expect("def dir");
             std::fs::write(def_dir.join("DefCore.txt"), defcore).expect("defcore");
             std::fs::write(def_dir.join("Script.c"), script).expect("script");
+            write_test_definition_graphics(&def_dir);
         }
         // WCHR needs its Crosshair action for SetAction (content ActMap).
         std::fs::write(
@@ -19561,6 +19712,7 @@ public func ActualizePhase(pClonk)
             "#strict\nlocal seen;\npublic func Tag() { seen = 5; return seen; }\n",
         )
         .expect("write helper script");
+        write_test_definition_graphics(&helper);
 
         let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         let snapshot = engine.snapshot();
@@ -20526,6 +20678,7 @@ public func ActualizePhase(pClonk)
              #appendto TARG\npublic func Hook() { return inherited() * 10 + 1; }\n",
         )
         .expect("write old script");
+        write_test_definition_graphics(&old);
         std::fs::write(
             target.join("DefCore.txt"),
             "[DefCore]\nid=TARG\nName=Target\nCategory=0\n",
@@ -20536,6 +20689,7 @@ public func ActualizePhase(pClonk)
             "#strict\npublic func Hook() { return 0; }\n",
         )
         .expect("write target script");
+        write_test_definition_graphics(&target);
         let pack_system = defs.join("System.c4g");
         std::fs::create_dir_all(&pack_system).expect("pack system dir");
         std::fs::write(
@@ -20564,6 +20718,7 @@ public func ActualizePhase(pClonk)
              #appendto TARG\npublic func Hook() { return inherited() * 10 + 2; }\n",
         )
         .expect("write replacement script");
+        write_test_definition_graphics(&replacement);
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -20637,6 +20792,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write plain defcore");
         std::fs::write(plain.join("Script.c"), "// plain\n").expect("write plain script");
+        write_test_definition_graphics(&plain);
         std::fs::write(scenario_dir.join("Names.txt"), "Alpha\nBeta\n")
             .expect("write scenario names");
         std::fs::write(
@@ -21130,6 +21286,7 @@ public func ActualizePhase(pClonk)
             )
             .expect("write DefCore");
             std::fs::write(path.join("Script.c"), "// definition\n").expect("write script");
+            write_test_definition_graphics(path);
         }
 
         let dir = tempdir().expect("tempdir");
@@ -21189,6 +21346,7 @@ public func ActualizePhase(pClonk)
         .expect("write local defcore");
         std::fs::write(local.join("Script.c"), "func Tag() { return 5; }\n")
             .expect("write local script");
+        write_test_definition_graphics(&local);
         // ...and a local override of the pack's GOOD definition.
         let shadow = scenario_dir.join("Good.c4d");
         std::fs::create_dir_all(&shadow).expect("shadow def dir");
@@ -21199,6 +21357,7 @@ public func ActualizePhase(pClonk)
         .expect("write shadow defcore");
         std::fs::write(shadow.join("Script.c"), "// local override\n")
             .expect("write shadow script");
+        write_test_definition_graphics(&shadow);
         std::fs::write(
             scenario_dir.join("Objects.txt"),
             "[Object]\nid=THNG\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\n",
@@ -21235,6 +21394,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write shared defcore");
         std::fs::write(shared.join("Script.c"), "// shared\n").expect("write shared script");
+        write_test_definition_graphics(&shared);
 
         let defs_root = dir.path().join("Defs.c4d");
         let good = defs_root.join("Good.c4d");
@@ -21245,6 +21405,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write defcore");
         std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = folder.join("Inner.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -21282,6 +21443,7 @@ public func ActualizePhase(pClonk)
             )
             .expect("write defcore");
             std::fs::write(path.join("Script.c"), format!("// {id}\n")).expect("write script");
+            write_test_definition_graphics(path);
         }
 
         let dir = tempdir().expect("tempdir");
@@ -21359,9 +21521,11 @@ public func ActualizePhase(pClonk)
     fn packed_nested_folder_locals_load_outer_to_inner_and_retained_paths_reload() {
         fn packed_definition(id: &str) -> Vec<u8> {
             let core = format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n");
+            let graphics = encode_indexed_bmp(&[&[0x83]]);
             packed_test_group(&[
                 ("DefCore.txt", false, core.as_bytes()),
                 ("Script.c", false, b"// packed definition\n"),
+                ("Graphics.bmp", false, graphics.as_slice()),
             ])
         }
 
@@ -21375,6 +21539,7 @@ public func ActualizePhase(pClonk)
         .expect("write global defcore");
         std::fs::write(global.join("Script.c"), "// global definition\n")
             .expect("write global script");
+        write_test_definition_graphics(&global);
 
         let scenario_data = packed_test_group(&[(
             "Scenario.txt",
@@ -21492,6 +21657,7 @@ public func ActualizePhase(pClonk)
              func Probe() { return ScenarioLocalHelper(); }\n",
         )
         .expect("write script");
+        write_test_definition_graphics(&good);
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -21726,6 +21892,7 @@ public func ActualizePhase(pClonk)
              LineConnect=Nonsense|C4D_PowerInput\n",
         )
         .expect("write unknown-token DefCore");
+        write_test_definition_graphics(&bits);
         let tail = dir.path().join("Defs.c4d/Tail.c4d");
         std::fs::create_dir(&tail).expect("tail definition directory");
         std::fs::write(
@@ -21733,6 +21900,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=TAIL\nCategory=C4D_Object\n",
         )
         .expect("write trailing DefCore");
+        write_test_definition_graphics(&tail);
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -22128,6 +22296,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write defcore");
         std::fs::write(fish.join("Script.c"), "// fish\n").expect("write definition script");
+        write_test_definition_graphics(&fish);
 
         let scenario_dir = dir.path().join("ValueOverload.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -22299,6 +22468,7 @@ public func ActualizePhase(pClonk)
             std::fs::write(path.join("DefCore.txt"), core).expect("write DefCore");
             std::fs::write(path.join("Script.c"), "// definition script\n")
                 .expect("write definition script");
+            write_test_definition_graphics(&path);
         }
 
         let dir = tempdir().expect("tempdir");
@@ -22374,6 +22544,7 @@ public func ActualizePhase(pClonk)
             )
             .expect("write defcore");
             std::fs::write(definition.join("Script.c"), "// fixed module\n").expect("write script");
+            write_test_definition_graphics(&definition);
         }
 
         let scenario_dir = dir.path().join("Fixed.c4s");
@@ -22472,6 +22643,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=HOST\nName=Host\nCategory=0\n",
         )
         .expect("write host definition");
+        write_test_definition_graphics(&host_definition);
         let folder_definitions = network.join("Tutorial.c4f");
         let folder_definition = folder_definitions.join("Folder.c4d");
         std::fs::create_dir_all(&folder_definition).expect("folder definition");
@@ -22480,6 +22652,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=FOLD\nName=Folder\nCategory=0\n",
         )
         .expect("write folder definition");
+        write_test_definition_graphics(&folder_definition);
 
         let map_materials = network.join("PackageMaterial.c4g");
         std::fs::create_dir_all(&map_materials).expect("map materials");
@@ -22601,6 +22774,7 @@ public func ActualizePhase(pClonk)
                 format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
             )
             .expect("write defcore");
+            write_test_definition_graphics(&definition);
         }
         let scenario_dir = dir.path().join("Preset.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -22703,6 +22877,7 @@ public func ActualizePhase(pClonk)
             )
             .expect("write defcore");
             std::fs::write(path.join("Script.c"), "// definition\n").expect("write script");
+            write_test_definition_graphics(path);
         }
 
         struct CollisionResolver {
@@ -22772,6 +22947,7 @@ public func ActualizePhase(pClonk)
             .expect("write defcore");
             std::fs::write(definition.join("Script.c"), format!("// {id}\n"))
                 .expect("write script");
+            write_test_definition_graphics(&definition);
         }
 
         let dir = tempdir().expect("tempdir");
@@ -22925,6 +23101,7 @@ public func ActualizePhase(pClonk)
                 format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
             )
             .expect("write defcore");
+            write_test_definition_graphics(&definition);
         }
 
         let dir = tempdir().expect("tempdir");
@@ -22975,9 +23152,11 @@ public func ActualizePhase(pClonk)
 
         let rooted_core = b"[DefCore]\nid=PACK\nName=Packed\nCategory=0\n";
         let rooted_script = b"// packed rooted definition\n";
+        let rooted_graphics = encode_indexed_bmp(&[&[0x83]]);
         let nested = packed_test_group(&[
             ("DefCore.txt", false, rooted_core.as_slice()),
             ("Script.c", false, rooted_script.as_slice()),
+            ("Graphics.bmp", false, rooted_graphics.as_slice()),
         ]);
         let outer = packed_test_group_file(&[("NeStEd.C4D", true, nested.as_slice())]);
         std::fs::write(definition_root.join("PACK.C4D"), outer).expect("write outer packed group");
@@ -22990,6 +23169,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=ORIG\nName=Original\nCategory=0\n",
         )
         .expect("write original defcore");
+        write_test_definition_graphics(&original);
 
         let scenario_dir = dir.path().join("PackedRoot.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23035,6 +23215,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=FOOO\nName=Foo\nCategory=0\nCrewMember=0\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&foo_core);
 
         let scenario_dir = dir.join("SkyTest.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23234,6 +23415,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write bar defcore");
         std::fs::write(bar_core.join("Script.c"), "// bar script\n").expect("write bar script");
+        write_test_definition_graphics(&bar_core);
 
         let scenario_dir = dir.path().join("SkipDefsScenario.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23324,6 +23506,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write box defcore");
         std::fs::write(box_core.join("Script.c"), "// box script\n").expect("box script");
+        write_test_definition_graphics(&box_core);
 
         let gem_core = defs_root.join("Gem.c4d");
         std::fs::create_dir_all(&gem_core).expect("gem definition dir");
@@ -23333,6 +23516,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write gem defcore");
         std::fs::write(gem_core.join("Script.c"), "// gem script\n").expect("gem script");
+        write_test_definition_graphics(&gem_core);
 
         let scenario_dir = dir.path().join("LegacyObjects.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23484,6 +23668,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write box defcore");
         std::fs::write(box_core.join("Script.c"), "// box\n").expect("box script");
+        write_test_definition_graphics(&box_core);
 
         let scenario_dir = dir.path().join("LegacyObjects.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23557,6 +23742,7 @@ public func ActualizePhase(pClonk)
              protected func Initialize() { iMark = 2; CreateObject(GEM1, 5, 5, -1); }\n",
         )
         .expect("box script");
+        write_test_definition_graphics(&box_core);
 
         let gem_core = defs_root.join("Gem.c4d");
         std::fs::create_dir_all(&gem_core).expect("gem definition dir");
@@ -23566,6 +23752,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write gem defcore");
         std::fs::write(gem_core.join("Script.c"), "// gem script\n").expect("gem script");
+        write_test_definition_graphics(&gem_core);
 
         let scenario_dir = dir.path().join("LegacyObjects.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23705,6 +23892,7 @@ public func ActualizePhase(pClonk)
             "#strict\nlocal iWet;\npublic func Probe() { iWet = InLiquid(); return 1; }\n",
         )
         .expect("write script");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Liquid.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23859,6 +24047,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Locals.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -23962,6 +24151,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Identities.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -24173,6 +24363,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Windy.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -24254,6 +24445,7 @@ public func ActualizePhase(pClonk)
              Vertices=1\nVertexX=0\nVertexY=0\nVertexFriction=30\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Verts.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -24412,6 +24604,7 @@ public func ActualizePhase(pClonk)
             let def_dir = defs_root.join(folder);
             std::fs::create_dir_all(&def_dir).expect("definition dir");
             std::fs::write(def_dir.join("DefCore.txt"), core).expect("write defcore");
+            write_test_definition_graphics(&def_dir);
         }
 
         let scenario_dir = dir.path().join("Placements.c4s");
@@ -24544,6 +24737,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=16\nRotate=1\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Fixed.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -24706,6 +24900,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write defcore");
         std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Liquid.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -25720,6 +25915,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&good);
 
         let package = dir.path().join("Pack.c4f");
         let scenario_dir = package.join("Deep.c4s");
@@ -25891,6 +26087,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
         )
         .expect("write definition");
+        write_test_definition_graphics(&definition);
 
         let scenario_dir = dir.path().join("Tutorial10.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -25991,6 +26188,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write defcore");
         std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Borders.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -26170,6 +26368,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write defcore");
         std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+        write_test_definition_graphics(&good);
 
         let scenario_dir = dir.path().join("Scan.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -26648,6 +26847,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
         )
         .expect("write defcore");
+        write_test_definition_graphics(&definition);
 
         let scenario_dir = dir.path().join("Extend.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -27355,6 +27555,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write crew defcore");
         std::fs::write(crew_core.join("Script.c"), "// crew script\n").expect("crew script");
+        write_test_definition_graphics(&crew_core);
 
         let scenario_dir = dir.path().join("LegacyLandscape.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -27412,6 +27613,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write crew defcore");
         std::fs::write(crew_core.join("Script.c"), "// crew script\n").expect("crew script");
+        write_test_definition_graphics(&crew_core);
 
         let scenario_dir = dir.path().join("LegacyEnvironment.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -27657,6 +27859,7 @@ mod game_start_sync {
             "#strict\nfunc Still() { return(1); }\nfunc Breeze() { SetAction(\"Still\"); return(1); }\n",
         )
         .expect("script");
+        write_test_definition_graphics(&palm);
     }
 
     fn load(dir: &std::path::Path) -> (Engine, Scenario) {
@@ -27746,6 +27949,7 @@ mod game_start_sync {
             "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
         )
         .expect("defcore");
+        write_test_definition_graphics(&loaded);
         std::fs::write(
             loaded.join("ActMap.txt"),
             "[Action]\nName=Passive\nDelay=0\nLength=1\n\n\
@@ -27872,6 +28076,7 @@ mod game_start_sync {
             "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
         )
         .expect("defcore");
+        write_test_definition_graphics(&loaded);
         std::fs::write(
             loaded.join("ActMap.txt"),
             format!("[Action]\nName={matching_name}\nDelay=0\nLength=1\n"),
@@ -27955,6 +28160,7 @@ mod game_start_sync {
             "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
         )
         .expect("defcore");
+        write_test_definition_graphics(&loaded);
         std::fs::write(
             loaded.join("Script.c"),
             "#strict\nlocal seen_target1, seen_target2;\npublic func CaptureTargets() { seen_target1 = GetActionTarget(0); seen_target2 = GetActionTarget(1); return 1; }\n",
@@ -28000,6 +28206,7 @@ mod game_start_sync {
             "[DefCore]\nid=LOAD\nName=Loaded\nCategory=16\n",
         )
         .expect("defcore");
+        write_test_definition_graphics(&loaded);
         write_scenario(
             dir.path(),
             "[Object]\nid=LOAD\nNumber=100\nCategory=16\nActionTarget1=1000000042\nActionTarget2=1000000043\n\n\
@@ -28084,6 +28291,7 @@ mod game_start_sync {
             "[DefCore]\nid=GATE\nName=Gate\nCategory=2\nWidth=10\nHeight=40\nOffset=-5,-20\nSolidMask=0,0,10,40,0,0\n",
         )
         .expect("defcore");
+        write_test_definition_graphics(&gate);
         write_scenario(
             dir.path(),
             "[Object]\nid=GATE\nNumber=7\nCategory=2\nX=50\nY=50\nSolidMask=0,0,0,0,0,0\n\n\
@@ -28091,8 +28299,8 @@ mod game_start_sync {
         );
         let (engine, _) = load(dir.path());
 
-        // (The fixture def has no Graphics.png, so like C++ the def-level
-        // mask never activates for movement; the loader state is the pin.)
+        // The 1x1 fixture bitmap is too small for the def-level 10x40 mask,
+        // so like C++ that mask never activates; the loader state is the pin.
         let overrides = engine.debug_solid_mask_override(7);
         assert_eq!(
             overrides,
@@ -28122,6 +28330,7 @@ mod game_start_sync {
             "[DefCore]\nid=NPCX\nName=Npc\nCategory=66056\nCrewMember=1\nWidth=8\nHeight=20\nOffset=-4,-10\n",
         )
         .expect("npc core");
+        write_test_definition_graphics(&npc);
 
         let scenario_dir = dir.path().join("Sync.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
@@ -28231,6 +28440,7 @@ mod game_start_sync {
             "[DefCore]\nid=CANN\nName=Cannon\nCategory=16\n",
         )
         .expect("defcore");
+        write_test_definition_graphics(&cannon);
         std::fs::write(
             cannon.join("ActMap.txt"),
             "[Action]\nName=Ready\nDelay=0\nLength=8\n",
@@ -28255,6 +28465,7 @@ mod game_start_sync {
             "[DefCore]\nid=MARK\nName=Marker\nCategory=16\n",
         )
         .expect("marker core");
+        write_test_definition_graphics(&marker);
 
         write_scenario(
             dir.path(),

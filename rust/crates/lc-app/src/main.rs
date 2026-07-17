@@ -37825,21 +37825,35 @@ fn load_definitions_from_group(
     seen: &mut HashSet<String>,
     spawn_candidate: &mut Option<String>,
 ) -> Result<Option<NonNull<AudioContext>>, EngineError> {
-    if group.exists("DefCore.txt") {
-        let valid_id = match ResourceDefCore::load(group) {
-            Ok(core) if core.has_valid_id() => true,
+    if group.exists("Particle.txt") {
+        if let Some(mut ptr) = audio {
+            unsafe {
+                ptr.as_mut().register_definition_sounds("NONE", group);
+            }
+        }
+    } else if group.exists("DefCore.txt") {
+        let loadable = match ResourceDefCore::load(group) {
             Ok(core) => {
-                tracing::warn!(
-                    id = %core.id,
-                    group = %group.root().display(),
-                    "skipping install definition with invalid C4ID"
-                );
-                if let Some(mut ptr) = audio {
-                    unsafe {
-                        ptr.as_mut().register_definition_sounds(&core.id, group);
-                    }
+                let valid_id = core.has_valid_id();
+                if !valid_id {
+                    tracing::warn!(
+                        id = %core.id,
+                        group = %group.root().display(),
+                        "skipping install definition with invalid C4ID"
+                    );
                 }
-                false
+                if core.needed_gfx_mode == 2 {
+                    false
+                } else if !valid_id {
+                    if let Some(mut ptr) = audio {
+                        unsafe {
+                            ptr.as_mut().register_definition_sounds(&core.id, group);
+                        }
+                    }
+                    false
+                } else {
+                    true
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -37847,11 +37861,23 @@ fn load_definitions_from_group(
                     group = %group.root().display(),
                     "failed to load definition core"
                 );
+                if let Some(mut ptr) = audio {
+                    unsafe {
+                        ptr.as_mut().register_definition_sounds("NONE", group);
+                    }
+                }
                 false
             }
         };
-        if valid_id {
+        if loadable {
             match ResourceDefinitionData::load(group) {
+                Ok(resource) if resource.graphics_image.is_none() => {
+                    tracing::warn!(
+                        group = %group.root().display(),
+                        error = "required Graphics.png/Graphics.bmp is missing or invalid",
+                        "install definition failed to load; skipping"
+                    );
+                }
                 Ok(resource) => {
                     let id_normalized = resource.core.id.to_ascii_lowercase();
                     if seen.insert(id_normalized) {
@@ -37889,11 +37915,11 @@ fn load_definitions_from_group(
                                 );
                             }
                         }
-                        if let Some(mut ptr) = audio {
-                            unsafe {
-                                ptr.as_mut()
-                                    .register_definition_sounds(&resource.core.id, group);
-                            }
+                    }
+                    if let Some(mut ptr) = audio {
+                        unsafe {
+                            ptr.as_mut()
+                                .register_definition_sounds(&resource.core.id, group);
                         }
                     }
                 }
@@ -38070,25 +38096,48 @@ fn find_definition_in_group(
             continue;
         }
         let child = group.open_child(&entry.relative_path)?;
-        match ResourceDefCore::load(&child) {
-            Ok(core) => {
-                if core.has_valid_id() && core.id.eq_ignore_ascii_case(definition_id) {
-                    let definition = ResourceDefinitionData::load(&child)?;
-                    return Ok(Some(definition));
+        if !child.exists("Particle.txt") {
+            match ResourceDefCore::load(&child) {
+                Ok(core) => {
+                    if core.has_valid_id()
+                        && core.needed_gfx_mode != 2
+                        && core.id.eq_ignore_ascii_case(definition_id)
+                    {
+                        match ResourceDefinitionData::load(&child) {
+                            Ok(definition) if definition.graphics_image.is_some() => {
+                                return Ok(Some(definition));
+                            }
+                            Ok(_) => {}
+                            Err(error) if is_rejected_install_definition_error(&error) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
+                Err(ResourceDefinitionError::DefCoreMissing) => {}
+                Err(ResourceDefinitionError::Resources(err)) => match err {
+                    GroupError::EntryNotFound(_) => {}
+                    other => return Err(ResourceDefinitionError::Resources(other)),
+                },
+                Err(error) if is_rejected_install_definition_error(&error) => {}
+                Err(other) => return Err(other),
             }
-            Err(ResourceDefinitionError::DefCoreMissing) => {}
-            Err(ResourceDefinitionError::Resources(err)) => match err {
-                GroupError::EntryNotFound(_) => {}
-                other => return Err(ResourceDefinitionError::Resources(other)),
-            },
-            Err(other) => return Err(other),
         }
         if let Some(found) = find_definition_in_group(&child, definition_id)? {
             return Ok(Some(found));
         }
     }
     Ok(None)
+}
+
+fn is_rejected_install_definition_error(error: &ResourceDefinitionError) -> bool {
+    matches!(
+        error,
+        ResourceDefinitionError::MissingDefCoreField(_)
+            | ResourceDefinitionError::InvalidCategoryValue(_)
+            | ResourceDefinitionError::DefCoreParse(_)
+            | ResourceDefinitionError::ActMapParse(_)
+            | ResourceDefinitionError::ColorByOwnerOverlay { .. }
+    )
 }
 
 /// Composes the language fallback sequence like the C++ frontend
@@ -38918,6 +38967,12 @@ mod tests {
 
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
+
+    fn write_test_definition_graphics(path: &Path) {
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(path.join("Graphics.png"))
+            .expect("write definition graphics");
     }
 
     #[test]
@@ -43026,6 +43081,7 @@ mod tests {
             "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
         )
         .expect("write definition core");
+        write_test_definition_graphics(&definition_path);
 
         let write_player = |filename: &str, name: &str, control: i32, auto_stop: bool| {
             let path = install.path().join(filename);
@@ -43634,6 +43690,7 @@ mod tests {
         )
         .expect("write DefCore.txt");
         fs::write(def_dir.join("Script.c"), "// crew def\n").expect("write def script");
+        write_test_definition_graphics(&def_dir);
         fs::write(
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=JoinTest\n\n[Player1]\nCrew=GOOD=2\nPosition=10,10\n",
@@ -47458,6 +47515,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             "[DefCore]\nid=ORIG\nName=Original\nCategory=1\n",
         )
         .expect("original Objects DefCore");
+        write_test_definition_graphics(&rooted_objects);
+        write_test_definition_graphics(&original_objects);
         fs::write(
             scenario_path.join("Scenario.txt"),
             "[Head]\nTitle=Definition Root Start\n",
@@ -63875,6 +63934,12 @@ public func Grant(password) { return GainMissionAccess(password); }
                 b"[DefCore]\nid=HOST\nName=Host\nCategory=1\n".to_vec(),
             )
             .expect("add host definition core");
+        host_definition
+            .add_file(
+                "Graphics.png",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .expect("add host definition graphics");
         game_resource
             .add_child("Host.c4d", host_definition)
             .expect("add host definition");
@@ -64154,6 +64219,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
         )
         .expect("write definition core");
+        write_test_definition_graphics(&definition_path);
         let scenario =
             Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
                 .expect("offline-marked scenario parses");
@@ -84563,6 +84629,7 @@ protected func InputCallback(string answer, int player)
         )
         .expect("carried DefCore.txt");
         fs::write(carried_definition.join("Script.c"), "// carried\n").expect("carried Script.c");
+        write_test_definition_graphics(&carried_definition);
         let mut target = FrontendScenario::fallback();
         target.identifier = "Tutorial.c4f/Tutorial02.c4s".to_string();
         target.title = "The First Hut".to_string();
@@ -85586,6 +85653,7 @@ protected func InputCallback(string answer, int player)
                 format!("[DefCore]\nid={id}\nName={id}\nCategory=0\nValue={value}\n"),
             )
             .expect("definition core");
+            write_test_definition_graphics(&definition);
         }
 
         let dir = tempdir().expect("tempdir");
@@ -85757,6 +85825,7 @@ protected func InputCallback(string answer, int player)
                 b"[DefCore]\nid=GOOD\nName=Good\nCategory=0\n",
             ),
             ("Script.c", false, b"// packed definition\n"),
+            ("Graphics.png", false, inner_png.as_slice()),
         ]);
         let scenario = packed_test_group(&[
             (
@@ -86139,6 +86208,7 @@ protected func InputCallback(string answer, int player)
         )
         .unwrap();
         fs::write(long_id.join("Script.c"), walker_script()).unwrap();
+        write_test_definition_graphics(&long_id);
         let zero_id = planet_dir.join("objects.c4d").join("zero.c4d");
         fs::create_dir_all(&zero_id).unwrap();
         fs::write(
@@ -86155,6 +86225,46 @@ protected func InputCallback(string answer, int player)
         )
         .unwrap();
         fs::write(canonical.join("Script.c"), walker_script()).unwrap();
+        write_test_definition_graphics(&canonical);
+
+        let missing_graphics = planet_dir.join("objects.c4d").join("missing.c4d");
+        fs::create_dir_all(&missing_graphics).unwrap();
+        fs::write(
+            missing_graphics.join("DefCore.txt"),
+            "[DefCore]\nid=MISS\nName=Missing graphics\nCategory=1\n",
+        )
+        .unwrap();
+
+        let old_gfx = planet_dir.join("objects.c4d").join("oldgfx.c4d");
+        fs::create_dir_all(&old_gfx).unwrap();
+        fs::write(
+            old_gfx.join("DefCore.txt"),
+            "[DefCore]\nid=OLDG\nName=Old graphics\nCategory=1\nNeededGfxMode=2\n",
+        )
+        .unwrap();
+        write_test_definition_graphics(&old_gfx);
+
+        let particle = planet_dir.join("objects.c4d").join("particle.c4d");
+        fs::create_dir_all(&particle).unwrap();
+        fs::write(
+            particle.join("DefCore.txt"),
+            "[DefCore]\nid=PART\nName=Particle\nCategory=1\n",
+        )
+        .unwrap();
+        write_test_definition_graphics(&particle);
+        fs::write(particle.join("Particle.txt"), "[Particle]\n").unwrap();
+
+        let bad_overlay = planet_dir.join("objects.c4d").join("overlay.c4d");
+        fs::create_dir_all(&bad_overlay).unwrap();
+        fs::write(
+            bad_overlay.join("DefCore.txt"),
+            "[DefCore]\nid=OVLY\nName=Bad overlay\nCategory=1\nColorByOwner=1\n",
+        )
+        .unwrap();
+        write_test_definition_graphics(&bad_overlay);
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([32, 32, 32, 255]))
+            .save(bad_overlay.join("Overlay.png"))
+            .unwrap();
 
         let user_dir = install_dir.path().join("user-data");
         fs::create_dir_all(&user_dir).unwrap();
@@ -86177,6 +86287,9 @@ protected func InputCallback(string answer, int player)
         );
         assert!(engine.definition_ids().any(|id| id == "WIPF"));
         assert!(!engine.definition_ids().any(|id| id == "Clon"));
+        for rejected in ["MISS", "OLDG", "OVLY", "PART"] {
+            assert!(!engine.definition_ids().any(|id| id == rejected));
+        }
 
         let objects_group = Group::open(planet_dir.join("objects.c4d")).unwrap();
         assert!(
@@ -86189,6 +86302,13 @@ protected func InputCallback(string answer, int player)
                 .expect("invalid lookup skips")
                 .is_none()
         );
+        for rejected in ["MISS", "OLDG", "OVLY", "PART"] {
+            assert!(
+                find_definition_in_group(&objects_group, rejected)
+                    .expect("load-ladder rejection remains nonfatal")
+                    .is_none()
+            );
+        }
         assert_eq!(
             find_definition_in_group(&objects_group, "WIPF")
                 .expect("truncated lookup succeeds")

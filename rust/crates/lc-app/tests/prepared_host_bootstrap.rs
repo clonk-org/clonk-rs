@@ -940,6 +940,9 @@ fn minimal_install(game: Option<&[u8]>) -> MinimalInstall {
     )
     .unwrap();
     fs::write(definition.join("Script.c"), b"// fixture\n").unwrap();
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+        .save(definition.join("Graphics.png"))
+        .unwrap();
     let scenario_text = "[Head]\nTitle=Fixture\nMaxPlayer=2\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\n"
         .to_owned();
     fs::write(scenario_path.join("Scenario.txt"), &scenario_text).unwrap();

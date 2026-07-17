@@ -48,6 +48,10 @@ fn defcore_rct_all_timer_call_trailing_space_misses_exact_runtime_lookup(
     Ok(())
 }
 
+fn write_definition_graphics(path: &std::path::Path) -> Result<(), image::ImageError> {
+    RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])).save(path.join("Graphics.png"))
+}
+
 struct LocalDefinitionResolver;
 
 impl LegacyDefinitionResolver for LocalDefinitionResolver {
@@ -97,6 +101,7 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
         "[DefCore]\nid=TEST\nName=Legacy Test Object\nCategory=C4D_Object\nCrewMember=1\n",
     )?;
     fs::write(definition_dir.join("Script.c"), BASIC_SCRIPT)?;
+    write_definition_graphics(&definition_dir)?;
 
     let resolver = LocalDefinitionResolver;
     let scenario = Scenario::load_from_path_with(scenario_dir, &resolver)?;
@@ -160,6 +165,7 @@ fn legacy_scenario_landscape_insert_thrust_zero_controls_script_insert_material(
         "[DefCore]\nid=DUMY\nName=Dummy\nCategory=C4D_Object\n",
     )?;
     fs::write(definition_dir.join("Script.c"), BASIC_SCRIPT)?;
+    write_definition_graphics(&definition_dir)?;
     fs::write(
         scenario_dir.join("Scenario.txt"),
         "[Head]\nTitle=Insert thrust off\n\n[Definitions]\nDefinition1=Objects.ocd\n\n[Game]\nLandscapeInsertThrust=0\n\n[Landscape]\nMapZoom=10\n",
@@ -268,6 +274,7 @@ fn fresh_resource_object_keeps_dormant_defcore_vertex_attributes(
         definition_dir.join("Script.c"),
         "#strict\nfunc Initialize() { AddVertex(70, 80); return(1); }\n",
     )?;
+    write_definition_graphics(&definition_dir)?;
 
     let group = Group::open(&definition_dir)?;
     let resource = lc_resources::definition::Definition::load(&group)?;

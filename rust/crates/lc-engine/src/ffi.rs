@@ -3286,6 +3286,12 @@ mod tests {
     use serde_json::Value;
     use std::{ffi::CString, ptr};
 
+    fn write_definition_graphics(path: &std::path::Path) {
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(path.join("Graphics.png"))
+            .expect("write definition graphics");
+    }
+
     #[test]
     fn runtime_cross_loads_language_pack_tables_for_all_script_scopes() {
         let install = tempfile::tempdir().expect("temporary FFI install");
@@ -3306,6 +3312,7 @@ mod tests {
             "global func FfiDefinitionPackValue() { return \"$DefinitionValue$\"; }\n",
         )
         .expect("definition script");
+        write_definition_graphics(&definition);
         std::fs::write(
             scenario.join("Scenario.txt"),
             "[Head]\nTitle=Probe\n\n[Definitions]\nDefinition1=Defs.c4d\n",
@@ -4829,6 +4836,7 @@ global func Step(state, frame, random)
         )
         .expect("defcore");
         std::fs::write(defs.join("Script.c"), "// crew\n").expect("script");
+        write_definition_graphics(&defs);
         let scenario_dir = dir.path().join("Join.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
@@ -4912,6 +4920,7 @@ global func Step(state, frame, random)
         )
         .expect("defcore");
         std::fs::write(defs.join("Script.c"), "// crew\n").expect("script");
+        write_definition_graphics(&defs);
         let scenario_dir = dir.path().join("Join.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
@@ -5490,6 +5499,7 @@ global func Step(state, frame, random)
         )
         .expect("defcore");
         std::fs::write(defs.join("Script.c"), "// crew\n").expect("script");
+        write_definition_graphics(&defs);
         let scenario_dir = dir.path().join("Join.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(

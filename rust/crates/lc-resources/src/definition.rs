@@ -2428,6 +2428,8 @@ fn find_picture_entry_recursive(
     Ok(None)
 }
 
+const BASE_GRAPHICS_FILES: [&str; 2] = ["graphics.png", "graphics.bmp"];
+
 fn load_definition_graphics(
     group: &Group,
     color_by_owner: bool,
@@ -2456,10 +2458,13 @@ fn load_definition_graphics(
         }
     }
 
-    // Remove the base candidate so it does not get processed as additional graphics.
-    if let Some(base_path) = &base_path {
-        candidates.retain(|path| path != base_path);
-    }
+    // C4DefGraphics handles both bare base filenames exclusively in its base
+    // branch. If PNG wins, the losing BMP is not retried as named graphics.
+    candidates.retain(|path| {
+        !BASE_GRAPHICS_FILES
+            .iter()
+            .any(|name| is_direct_graphics_path(path, name))
+    });
 
     for path in candidates {
         if let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner)? {
@@ -2562,42 +2567,23 @@ fn collect_graphics_entries_recursive(
 }
 
 fn select_base_graphics(paths: &[PathBuf]) -> Option<PathBuf> {
-    const PRIORITY: [&str; 4] = [
-        "graphics32.png",
-        "graphics64.png",
-        "graphics.png",
-        "graphics.bmp",
-    ];
-
-    for name in PRIORITY {
-        let mut best: Option<&PathBuf> = None;
+    for name in BASE_GRAPHICS_FILES {
         for path in paths {
-            if path
-                .file_name()
-                .and_then(|file| file.to_str())
-                .map(|file| file.eq_ignore_ascii_case(name))
-                .unwrap_or(false)
-            {
-                best = match best {
-                    Some(existing) => {
-                        let existing_depth = existing.components().count();
-                        let path_depth = path.components().count();
-                        if path_depth < existing_depth {
-                            Some(path)
-                        } else {
-                            Some(existing)
-                        }
-                    }
-                    None => Some(path),
-                };
+            if is_direct_graphics_path(path, name) {
+                return Some(path.clone());
             }
-        }
-        if let Some(best) = best {
-            return Some(best.clone());
         }
     }
 
-    paths.first().cloned()
+    None
+}
+
+fn is_direct_graphics_path(path: &Path, name: &str) -> bool {
+    path.components().count() == 1
+        && path
+            .file_name()
+            .and_then(|file| file.to_str())
+            .is_some_and(|file| file.eq_ignore_ascii_case(name))
 }
 
 fn load_graphics_entry(
@@ -2608,7 +2594,19 @@ fn load_graphics_entry(
     let Some(data) = group.read_file(path).ok() else {
         return Ok(None);
     };
-    let Some(mut image) = image::load_from_memory(&data)
+    let format = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => image::ImageFormat::Png,
+        Some("bmp") => image::ImageFormat::Bmp,
+        Some("jpg" | "jpeg") => image::ImageFormat::Jpeg,
+        Some("tga") => image::ImageFormat::Tga,
+        _ => return Ok(None),
+    };
+    let Some(mut image) = image::load_from_memory_with_format(&data, format)
         .ok()
         .map(|image| image.into_rgba8())
     else {

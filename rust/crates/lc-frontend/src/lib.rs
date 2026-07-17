@@ -9878,6 +9878,9 @@ mod tests {
         )
         .expect("definition core");
         std::fs::write(definition.join("Script.c"), "// host\n").expect("definition script");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(definition.join("Graphics.png"))
+            .expect("definition graphics");
 
         let scenario_path = dir.path().join("ParallaxSave.c4s");
         std::fs::create_dir_all(&scenario_path).expect("scenario directory");

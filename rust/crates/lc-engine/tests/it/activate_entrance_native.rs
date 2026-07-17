@@ -513,6 +513,8 @@ fn legacy_section_switch_projects_its_base_reject_entrance_mask(
         "[DefCore]\nid=PRBE\nName=Probe\nCategory=1\n",
     )?;
     fs::write(probe.join("Script.c"), "#strict\n")?;
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+        .save(probe.join("Graphics.png"))?;
     fs::write(
         scenario_dir.join("Scenario.txt"),
         "[Head]\nTitle=Entrance section projection\n\
