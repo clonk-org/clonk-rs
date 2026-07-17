@@ -813,15 +813,14 @@ fn build_folder_entry(
 }
 
 /// The right-page description per `C4CFN_ScenarioDesc` = "Desc{}.rtf"
-/// (C4Components.h:74): the first `Desc<code>.rtf` of the language sequence
-/// that exists is converted from RTF to plain text
+/// (C4Components.h:74): the first nonempty `Desc<code>.rtf` loaded from the
+/// language sequence is converted from RTF to plain text
 /// (C4StartupScenSelDlg.cpp:523-531).
 fn description_from_desc_files(group: &Group, languages: &[String]) -> Option<String> {
     languages
         .iter()
         .map(|code| format!("Desc{code}.rtf"))
-        .find(|candidate| group.exists(candidate))
-        .and_then(|candidate| group.read_file(&candidate).ok())
+        .find_map(|candidate| group.load_entry_string(candidate).ok())
         .map(|bytes| crate::rtf::rtf_to_plain_text(&bytes))
         .filter(|text| !text.is_empty())
 }
@@ -968,8 +967,8 @@ fn scenario_manifest_info(
 
 /// Resolves the entry name from its title component, mirroring
 /// `C4ComponentHost::LoadEx` over `C4CFN_Title` = "Title{}.txt|Title.txt"
-/// (C4ComponentHost.cpp:56-95, C4Components.h:67): the first existing
-/// candidate file — "Title<code>.txt" per language code, then the plain
+/// (C4ComponentHost.cpp:56-95, C4Components.h:67): the first nonempty loaded
+/// candidate — "Title<code>.txt" per language code, then the plain
 /// "Title.txt" — is loaded, and the language string is looked up in it.
 fn title_from_title_files(
     group: &Group,
@@ -980,12 +979,14 @@ fn title_from_title_files(
         .map(|code| format!("Title{code}.txt"))
         .chain(std::iter::once("Title.txt".to_string()));
     for candidate in candidates {
-        if !group.exists(&candidate) {
-            continue;
-        }
-        let data = group
-            .read_file(&candidate)
-            .map_err(|err| group_error(&group.root().join(&candidate), err))?;
+        let data = match group.load_entry_string(&candidate) {
+            Ok(data) => data,
+            Err(GroupError::EntryNotFound(_) | GroupError::EmptyEntry(_)) => continue,
+            Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(group_error(&group.root().join(&candidate), error));
+            }
+        };
         let text = decode_legacy_text(&data);
         // Only the first found file is consulted (C4ComponentHost keeps a
         // single Data buffer); a failed language lookup falls back to the
@@ -1463,6 +1464,19 @@ mod tests {
         assert_eq!(entries[0].title, "From TitleUS");
     }
 
+    #[test]
+    fn empty_language_specific_title_falls_through_to_plain_title() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Alpha.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(scenario_dir.join("Scenario.txt"), "[Head]\nTitle=Core\n").unwrap();
+        fs::write(scenario_dir.join("TitleUS.txt"), []).unwrap();
+        fs::write(scenario_dir.join("Title.txt"), "US:From Title").unwrap();
+
+        let entries = discover_with_languages(dir.path(), &langs(&["US"])).expect("discover");
+        assert_eq!(entries[0].title, "From Title");
+    }
+
     // C4ScenarioListLoader::Entry::Load (C4StartupScenSelDlg.cpp:477-515):
     // Title.txt wins over the Scenario.txt [Head] Title fallback.
     #[test]
@@ -1532,6 +1546,7 @@ mod tests {
             br"{\rtf1 English\par}".as_slice(),
         )
         .unwrap();
+        fs::write(scenario_dir.join("DescFR.rtf"), []).unwrap();
 
         let us = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
         assert_eq!(us[0].description.as_deref(), Some("English\n"));
@@ -1539,7 +1554,8 @@ mod tests {
         let de = discover_with_languages(dir.path(), &langs(&["DE", "US"])).expect("discover");
         assert_eq!(de[0].description.as_deref(), Some("Deutsch\n"));
 
-        // A code without its own file falls through the sequence.
+        // A zero-byte component fails LoadEntryString and falls through to
+        // the next language just like a missing component.
         let fr = discover_with_languages(dir.path(), &langs(&["FR", "DE"])).expect("discover");
         assert_eq!(fr[0].description.as_deref(), Some("Deutsch\n"));
     }

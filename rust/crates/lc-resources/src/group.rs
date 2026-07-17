@@ -26,6 +26,8 @@ pub enum GroupError {
     InvalidGroup(String),
     #[error("entry not found: {0}")]
     EntryNotFound(PathBuf),
+    #[error("entry is empty: {0}")]
+    EmptyEntry(PathBuf),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -137,6 +139,20 @@ impl Group {
                 packed.read_file(&relative)
             }
         }
+    }
+
+    /// Reads a text component with `C4Group::LoadEntryString` semantics.
+    ///
+    /// Unlike `LoadEntry`, the C++ string loader rejects zero-sized entries.
+    /// Keep that distinction separate from `read_file`, whose callers may
+    /// legitimately need an empty binary payload.
+    pub fn load_entry_string<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
+        let relative = relative.as_ref();
+        let bytes = self.read_file(relative)?;
+        if bytes.is_empty() {
+            return Err(GroupError::EmptyEntry(relative.to_path_buf()));
+        }
+        Ok(bytes)
     }
 
     /// Reads an entry's physical payload, including the raw nested-group image
@@ -1178,6 +1194,29 @@ mod tests {
             let material = group.open_child("MATERIAL.C4G").unwrap();
             assert!(material.exists("TEXMAP.TXT"));
             assert_eq!(material.read_file("TexMap.Txt").unwrap(), b"texmap");
+        }
+    }
+
+    #[test]
+    fn load_entry_string_rejects_empty_directory_and_packed_entries() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("empty.txt"), []).unwrap();
+        fs::write(dir.path().join("nonempty.txt"), b"text").unwrap();
+
+        let directory = Group::open(dir.path()).unwrap();
+        let packed_bytes = MutableGroup::from_group(&directory)
+            .unwrap()
+            .pack()
+            .unwrap();
+        let packed = Group::from_memory(PathBuf::from("same.c4g"), packed_bytes).unwrap();
+
+        for group in [&directory, &packed] {
+            assert_eq!(group.read_file("empty.txt").unwrap(), b"");
+            assert!(matches!(
+                group.load_entry_string("empty.txt"),
+                Err(GroupError::EmptyEntry(path)) if path == Path::new("empty.txt")
+            ));
+            assert_eq!(group.load_entry_string("nonempty.txt").unwrap(), b"text");
         }
     }
 

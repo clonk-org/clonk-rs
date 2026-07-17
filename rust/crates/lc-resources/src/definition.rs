@@ -94,12 +94,9 @@ impl Definition {
 
         let mut script = load_scripts(group, languages)?;
 
-        let action_map = match group.read_file("ActMap.txt") {
-            Ok(bytes) => Some(parse_act_map(&bytes)?),
-            Err(GroupError::EntryNotFound(_)) => None,
-            Err(GroupError::Io(ref err)) if err.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(DefinitionError::Resources(error)),
-        };
+        let action_map = load_optional_entry_string(group, "ActMap.txt")?
+            .map(|bytes| parse_act_map(&bytes))
+            .transpose()?;
         script.definition_description = load_definition_description(group)?;
 
         let (graphics_image, color_by_owner_mask, additional_graphics) =
@@ -174,11 +171,10 @@ impl Definition {
 /// retained description deterministic.
 fn load_definition_description(group: &Group) -> Result<Option<String>, DefinitionError> {
     const DESCRIPTION: &str = "DescUS.txt";
-    if !group.exists(DESCRIPTION) {
+    let Some(bytes) = load_optional_entry_string(group, DESCRIPTION)? else {
         return Ok(None);
-    }
+    };
 
-    let bytes = group.read_file(DESCRIPTION)?;
     let description = decode_legacy_script_text(&bytes).trim().to_string();
     Ok((!description.is_empty()).then_some(description))
 }
@@ -191,10 +187,10 @@ fn load_definition_name<S: AsRef<str>>(
     group: &Group,
     languages: &[S],
 ) -> Result<Option<String>, DefinitionError> {
-    let Some(candidate) = first_localized_component(group, "Names", languages) else {
+    let Some(bytes) = first_localized_component(group, "Names", languages)? else {
         return Ok(None);
     };
-    let text = decode_legacy_script_text(&group.read_file(candidate)?);
+    let text = decode_legacy_script_text(&bytes);
     Ok(languages.iter().find_map(|language| {
         let needle = format!("{}:", language.as_ref());
         text.find(&needle).and_then(|position| {
@@ -214,12 +210,32 @@ fn first_localized_component<S: AsRef<str>>(
     group: &Group,
     stem: &str,
     languages: &[S],
-) -> Option<String> {
-    languages
+) -> Result<Option<Vec<u8>>, DefinitionError> {
+    for candidate in languages
         .iter()
         .map(|language| format!("{stem}{}.txt", language.as_ref()))
         .chain(std::iter::once_with(|| format!("{stem}.txt")))
-        .find(|name| group.exists(name))
+    {
+        if let Some(bytes) = load_optional_entry_string(group, candidate)? {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
+/// C++ `C4Group::LoadEntryString` reports both a missing entry and a present
+/// zero-byte entry as not loaded. Keep generic byte reads unchanged because
+/// the adjacent `LoadEntry` API accepts empty binary payloads.
+fn load_optional_entry_string<P: AsRef<Path>>(
+    group: &Group,
+    relative: P,
+) -> Result<Option<Vec<u8>>, DefinitionError> {
+    match group.load_entry_string(relative) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(GroupError::EntryNotFound(_) | GroupError::EmptyEntry(_)) => Ok(None),
+        Err(GroupError::Io(ref err)) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(DefinitionError::Resources(error)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,10 +253,10 @@ fn load_rank_name_table<S: AsRef<str>>(
     group: &Group,
     languages: &[S],
 ) -> Result<Option<RankNameTable>, DefinitionError> {
-    let Some(candidate) = first_localized_component(group, "Rank", languages) else {
+    let Some(bytes) = first_localized_component(group, "Rank", languages)? else {
         return Ok(None);
     };
-    let text = decode_legacy_script_text(&group.read_file(candidate)?);
+    let text = decode_legacy_script_text(&bytes);
     let mut ordinary_names = Vec::new();
     let mut extensions = Vec::new();
     // The C++ loop only processes lines when it encounters CR or LF within
@@ -644,10 +660,17 @@ pub struct TargetRect {
 
 impl DefCore {
     pub fn load(group: &Group) -> Result<Self, DefinitionError> {
-        let bytes = group.read_file("DefCore.txt").map_err(|err| match err {
-            GroupError::EntryNotFound(_) => DefinitionError::DefCoreMissing,
-            other => DefinitionError::Resources(other),
-        })?;
+        let bytes = group
+            .load_entry_string("DefCore.txt")
+            .map_err(|err| match err {
+                GroupError::EntryNotFound(_) | GroupError::EmptyEntry(_) => {
+                    DefinitionError::DefCoreMissing
+                }
+                GroupError::Io(ref io_error) if io_error.kind() == io::ErrorKind::NotFound => {
+                    DefinitionError::DefCoreMissing
+                }
+                other => DefinitionError::Resources(other),
+            })?;
         let mut core = parse_def_core(&bytes)?;
 
         // C4DefCore::Load adjusts the compiled Category in this order: a
@@ -3814,6 +3837,68 @@ HideHUDElements=Portrait|Bogus|Inventory
         let german = Definition::load_with_languages(&group, &["DE", "US"])
             .expect("load German definition name");
         assert_eq!(german.core.name.as_deref(), Some("Hütte"));
+    }
+
+    #[test]
+    fn zero_size_definition_text_components_follow_load_entry_string() {
+        let temp = tempdir().expect("tempdir");
+
+        let empty_core_dir = temp.path().join("EmptyCore.c4d");
+        fs::create_dir(&empty_core_dir).expect("empty-core definition directory");
+        fs::write(empty_core_dir.join("DefCore.txt"), []).expect("empty DefCore");
+        let empty_core = Group::open(&empty_core_dir).expect("open empty-core definition");
+        assert!(matches!(
+            DefCore::load(&empty_core),
+            Err(DefinitionError::DefCoreMissing)
+        ));
+
+        let def_dir = temp.path().join("EmptyComponents.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=EMTY\nName=Core Name\n",
+        )
+        .expect("DefCore");
+        fs::write(def_dir.join("ActMap.txt"), []).expect("empty ActMap");
+        fs::write(def_dir.join("NamesUS.txt"), []).expect("empty localized names");
+        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n")
+            .expect("fallback names");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition =
+            Definition::load_with_languages(&group, &["US"]).expect("empty components are absent");
+        assert!(definition.action_map.is_none());
+        assert_eq!(definition.core.name.as_deref(), Some("Fallback Name"));
+
+        fs::write(def_dir.join("ActMap.txt"), b"malformed action map\n")
+            .expect("malformed nonempty ActMap");
+        let group = Group::open(&def_dir).expect("reopen definition");
+        assert!(matches!(
+            Definition::load_with_languages(&group, &["US"]),
+            Err(DefinitionError::ActMapParse(_))
+        ));
+    }
+
+    #[test]
+    fn nonempty_names_component_still_blocks_filename_fallback() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("NamesBlock.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=NBLK\nName=Core Name\n",
+        )
+        .expect("DefCore");
+        fs::write(def_dir.join("NamesUS.txt"), b"DE:Deutsch\n")
+            .expect("nonmatching localized names");
+        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n")
+            .expect("fallback names");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load_with_languages(&group, &["US"])
+            .expect("nonempty selected component loads");
+
+        assert_eq!(definition.core.name.as_deref(), Some("Core Name"));
     }
 
     #[test]

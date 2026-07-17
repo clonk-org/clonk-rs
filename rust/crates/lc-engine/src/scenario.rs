@@ -2980,7 +2980,7 @@ impl Scenario {
             compiled.set_clonk_names(definition.resource_group.as_ref().and_then(|group| {
                 ["ClonkNamesUS.txt", "ClonkNames.txt"]
                     .iter()
-                    .find_map(|name| group.read_file(name).ok())
+                    .find_map(|name| group.load_entry_string(name).ok())
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             }));
             compiled.set_movement_profile(definition.movement);
@@ -6342,6 +6342,11 @@ fn load_loader_scenario_title<S: AsRef<str>>(
         let Some(bytes) = try_read_group_file_case_insensitive(group, &candidate)? else {
             continue;
         };
+        // C4ComponentHost retries the next language/filename candidate when
+        // C4Group::LoadEntryString rejects a present zero-byte entry.
+        if bytes.is_empty() {
+            continue;
+        }
         let source = decode_legacy_script_text(&bytes);
         let source = source.split_once('\0').map_or(source.as_str(), |(prefix, _)| prefix);
         for language in languages {
@@ -6969,9 +6974,14 @@ fn localize_legacy_team_source<S: AsRef<str>>(
             .iter()
             .map(|language| format!("StringTbl{}.txt", language.as_ref())),
     ) {
-        if group.exists(&candidate) {
-            table = Some(group.read_file(candidate)?);
-            break;
+        match group.load_entry_string(&candidate) {
+            Ok(bytes) => {
+                table = Some(bytes);
+                break;
+            }
+            Err(GroupError::EntryNotFound(_) | GroupError::EmptyEntry(_)) => {}
+            Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
     let Some(table) = table else {
@@ -11836,6 +11846,7 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         // never observed.
         let core = match ResourceDefCore::load(group) {
             Ok(core) => Some(core),
+            Err(ResourceDefinitionError::DefCoreMissing) => None,
             Err(error) if is_rejected_definition_error(&error) => {
                 warn_rejected_definition(group, &error);
                 None
@@ -13793,7 +13804,7 @@ RandomTeamCount=2
     }
 
     #[test]
-    fn initial_network_team_metadata_preserves_localized_cpp_bytes_and_name_limit() {
+    fn initial_network_team_metadata_skips_empty_table_and_preserves_cpp_bytes() {
         // C4Group::LoadEntryString and C4LangStringTable::ReplaceStrings work
         // on bytes; C4Team::Name is then read into C4MaxName+1 with a 30-byte
         // limit (C4Group.cpp:2243-2260; C4LangStringTable.cpp:33-144;
@@ -13808,7 +13819,9 @@ RandomTeamCount=2
         table.extend(std::iter::repeat_n(0xdc, 35));
         table.extend_from_slice(b"\nRoster=");
         table.extend_from_slice(&[0xc4, b'|', 0xd6, b'\n']);
-        std::fs::write(dir.path().join("StringTbl.txt"), table).expect("write string table");
+        std::fs::write(dir.path().join("StringTbl.txt"), []).expect("write empty string table");
+        std::fs::write(dir.path().join("StringTblUS.txt"), table)
+            .expect("write localized string table");
 
         let group = Group::open(dir.path()).expect("open group");
         let (teams, loaded) = load_initial_network_teams(&group, &["US"]).expect("load Teams.txt");
@@ -14273,6 +14286,24 @@ RandomTeamCount=2
 
         let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
         assert_eq!(head.scenario_title(), "one\ntwo");
+    }
+
+    #[test]
+    fn loader_head_title_skips_zero_size_language_component() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nTitle=Head fallback\n",
+        )
+        .expect("scenario core");
+        std::fs::write(directory.path().join("TitleUS.txt"), [])
+            .expect("empty localized title component");
+        std::fs::write(directory.path().join("Title.txt"), b"US:Plain fallback\n")
+            .expect("plain title component");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        assert_eq!(head.scenario_title(), "Plain fallback");
     }
 
     #[test]
@@ -16858,6 +16889,67 @@ global func Step(state, frame, random)
                     .as_deref()
                     .is_some_and(|error| error.contains("id"))
         }));
+    }
+
+    #[test]
+    fn zero_size_defcore_is_skipped_and_zero_size_actmap_uses_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+
+        let empty_core = dir.path().join("Defs.c4d/EmptyCore.c4d");
+        let child = empty_core.join("Child.c4d");
+        std::fs::create_dir_all(&child).expect("nested definition dir");
+        std::fs::write(empty_core.join("DefCore.txt"), []).expect("empty parent DefCore");
+        std::fs::write(
+            child.join("DefCore.txt"),
+            "[DefCore]\nid=CHLD\nName=Child\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write child DefCore");
+        std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+
+        let empty_act = dir.path().join("Defs.c4d/EmptyAct.c4d");
+        std::fs::create_dir_all(&empty_act).expect("empty-ActMap definition dir");
+        std::fs::write(
+            empty_act.join("DefCore.txt"),
+            "[DefCore]\nid=EACT\nName=Empty ActMap\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write empty-ActMap DefCore");
+        std::fs::write(empty_act.join("Script.c"), "// empty ActMap\n")
+            .expect("write empty-ActMap script");
+        std::fs::write(empty_act.join("ActMap.txt"), []).expect("empty ActMap");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let (loaded, warnings) = capture_definition_warnings(|| {
+            Scenario::load_from_path_with(&scenario_dir, &resolver)
+        });
+        let scenario = loaded.expect("zero-size text components do not abort the scenario");
+        let mut ids = scenario
+            .definitions
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["CHLD", "EACT", "GOOD"]);
+        assert!(scenario
+            .definitions
+            .iter()
+            .find(|definition| definition.id == "EACT")
+            .is_some_and(|definition| definition.actions.is_none()));
+        assert!(warnings.iter().all(|warning| {
+            !matches!(
+                warning.group.as_deref(),
+                Some(group)
+                    if group == empty_core.to_string_lossy()
+                        || group == empty_act.to_string_lossy()
+            )
+        }));
+
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("scenario with skipped empty definition starts");
     }
 
     #[test]
@@ -19640,6 +19732,11 @@ public func ActualizePhase(pClonk)
             "Jim\nBob\nJoe\n",
         )
         .expect("write clonk names");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/ClonkNamesUS.txt"),
+            [],
+        )
+        .expect("write empty localized clonk names");
         let plain = dir.path().join("Defs.c4d/Plain.c4d");
         std::fs::create_dir_all(&plain).expect("plain def dir");
         std::fs::write(

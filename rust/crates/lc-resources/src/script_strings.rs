@@ -50,7 +50,11 @@ fn load_script_string_table<S: AsRef<str>>(
         if !group.exists(&candidate) {
             continue;
         }
-        let bytes = group.read_file(&candidate)?;
+        let bytes = match group.load_entry_string(&candidate) {
+            Ok(bytes) => bytes,
+            Err(GroupError::EmptyEntry(_)) => continue,
+            Err(error) => return Err(error),
+        };
         // C4LangStringTable copies and scans this component as a native C
         // string; entries after the first NUL are not part of the table.
         let bytes = bytes
@@ -174,6 +178,43 @@ mod tests {
         let localized =
             localize_script_source(&group, "$Before$/$After$", &["US"]).expect("source localizes");
         assert_eq!(localized, "kept/$After$");
+    }
+
+    #[test]
+    fn empty_script_string_table_falls_through_to_localized_candidate() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("StringTbl.txt"), [])
+            .expect("write empty default string table");
+        std::fs::write(
+            directory.path().join("StringTblUS.txt"),
+            b"Greeting=localized\n",
+        )
+        .expect("write localized string table");
+        let group = Group::open(directory.path()).expect("open group");
+
+        let localized = localize_script_source(&group, "$Greeting$", &["US"])
+            .expect("empty component is skipped");
+        assert_eq!(localized, "localized");
+    }
+
+    #[test]
+    fn nonempty_malformed_string_table_still_blocks_later_candidates() {
+        let directory = tempdir().expect("tempdir");
+        std::fs::write(
+            directory.path().join("StringTbl.txt"),
+            b"not a string-table entry\n",
+        )
+        .expect("write malformed default string table");
+        std::fs::write(
+            directory.path().join("StringTblUS.txt"),
+            b"Greeting=localized\n",
+        )
+        .expect("write localized string table");
+        let group = Group::open(directory.path()).expect("open group");
+
+        let localized = localize_script_source(&group, "$Greeting$", &["US"])
+            .expect("nonempty malformed component remains selected");
+        assert_eq!(localized, "$Greeting$");
     }
 
     #[test]
