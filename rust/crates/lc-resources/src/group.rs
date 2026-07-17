@@ -55,7 +55,7 @@ struct PackedGroup {
     source: PackedSource,
     header: PackedHeader,
     entries: Vec<PackedEntry>,
-    index: HashMap<PathBuf, usize>,
+    index: HashMap<Vec<u8>, usize>,
     data_offset: u64,
     requires_rewrite: bool,
 }
@@ -630,7 +630,7 @@ impl PackedGroup {
         let index = entries
             .iter()
             .enumerate()
-            .map(|(idx, entry)| (case_fold_group_path(&entry.relative_path), idx))
+            .map(|(idx, entry)| (case_fold_group_name(&entry.name_bytes), idx))
             .collect();
 
         Ok(Self {
@@ -1162,8 +1162,14 @@ fn normalize_path(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-fn case_fold_group_path(path: &Path) -> PathBuf {
-    PathBuf::from(path.to_string_lossy().to_ascii_lowercase())
+fn case_fold_group_path(path: &Path) -> Vec<u8> {
+    case_fold_group_name(path.as_os_str().as_encoded_bytes())
+}
+
+fn case_fold_group_name(name: &[u8]) -> Vec<u8> {
+    let mut folded = name.to_vec();
+    folded.make_ascii_lowercase();
+    folded
 }
 
 fn group_name_eq(left: &[u8], right: &[u8]) -> bool {
@@ -1393,6 +1399,14 @@ mod tests {
     }
 
     fn packed_group_image_with_entries(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
+        let entries = entries
+            .iter()
+            .map(|(name, child, data)| (name.as_bytes(), *child, *data))
+            .collect::<Vec<_>>();
+        packed_group_image_with_byte_entries(&entries)
+    }
+
+    fn packed_group_image_with_byte_entries(entries: &[(&[u8], bool, &[u8])]) -> Vec<u8> {
         let mut image = Vec::new();
 
         let mut header = [0u8; GROUP_HEADER_SIZE];
@@ -1418,7 +1432,7 @@ mod tests {
             {
                 let mut cursor = Cursor::new(&mut entry[..]);
                 let mut name_bytes = [0u8; 260];
-                name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+                name_bytes[..name.len()].copy_from_slice(name);
                 cursor.write_all(&name_bytes).unwrap();
                 cursor.write_i32::<LittleEndian>(0).unwrap();
                 cursor.write_i32::<LittleEndian>(i32::from(*child)).unwrap();
@@ -1633,6 +1647,46 @@ mod tests {
 
         assert!(group.exists("HELLO.TXT"));
         assert_eq!(group.read_file("Hello.Txt").unwrap(), b"world");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn packed_group_lookup_preserves_distinct_legacy_name_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        fn legacy_path(bytes: &[u8]) -> &Path {
+            Path::new(OsStr::from_bytes(bytes))
+        }
+
+        // C4Group::GetEntry compares raw name bytes and folds only their ASCII
+        // case (src/C4Group.cpp:896-904; src/StdFile.cpp:337-367). Lossy UTF-8
+        // would map each of these legacy high bytes to the same U+FFFD key.
+        let u_child = packed_group_image_with_entry("marker.txt", false, b"u-child");
+        let o_child = packed_group_image_with_entry("marker.txt", false, b"o-child");
+        let image = packed_group_image_with_byte_entries(&[
+            (b"Gr\xfcn.txt", false, b"u-file"),
+            (b"Gr\xf6n.txt", false, b"o-file"),
+            (b"Gr\xfcn.c4g", true, &u_child),
+            (b"Gr\xf6n.c4g", true, &o_child),
+        ]);
+        let group = Group::from_memory(PathBuf::from("legacy-names.c4g"), image)
+            .expect("valid packed group");
+
+        let u_file = legacy_path(b"gR\xfcN.TXT");
+        let o_file = legacy_path(b"GR\xf6n.txt");
+        assert!(group.exists(u_file));
+        assert!(group.exists(o_file));
+        assert!(!group.exists(legacy_path(b"Gr\xe4n.txt")));
+        assert_eq!(group.read_file(u_file).unwrap(), b"u-file");
+        assert_eq!(group.read_file(o_file).unwrap(), b"o-file");
+        assert_eq!(group.read_entry_bytes(u_file).unwrap(), b"u-file");
+        assert_eq!(group.read_entry_bytes(o_file).unwrap(), b"o-file");
+
+        let u_child = group.open_child(legacy_path(b"gR\xfcN.C4G")).unwrap();
+        let o_child = group.open_child(legacy_path(b"GR\xf6n.c4g")).unwrap();
+        assert_eq!(u_child.read_file("marker.txt").unwrap(), b"u-child");
+        assert_eq!(o_child.read_file("marker.txt").unwrap(), b"o-child");
     }
 
     #[test]
