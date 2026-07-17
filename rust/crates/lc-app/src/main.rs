@@ -5062,11 +5062,33 @@ impl AudioContext {
     }
 
     fn configure_scenario(&mut self, path: Option<&Path>) {
+        self.configure_scenario_with_music_roots(path, None);
+    }
+
+    fn configure_scenario_with_definition_roots(
+        &mut self,
+        path: Option<&Path>,
+        definition_roots: &[Group],
+    ) {
+        self.configure_scenario_with_music_roots(path, Some(definition_roots));
+    }
+
+    fn configure_scenario_with_music_roots(
+        &mut self,
+        path: Option<&Path>,
+        definition_roots: Option<&[Group]>,
+    ) {
         if self.resolver.configure_scenario(path) {
             self.loaded_sounds.clear();
             self.missing_sounds.clear();
         }
-        match self.music_resolver.configure_scenario(path) {
+        let configured = match definition_roots {
+            Some(definition_roots) => self
+                .music_resolver
+                .configure_scenario_with_definition_roots(path, definition_roots),
+            None => self.music_resolver.configure_scenario(path),
+        };
+        match configured {
             Ok(true) => self.set_scenario_music_level(path.map(|_| 100)),
             Ok(false) => {}
             Err(error) => {
@@ -5500,7 +5522,10 @@ fn configure_scenario_sound_samples(
         return Vec::new();
     };
     audio.set_music_playlist(None);
-    audio.configure_scenario(Some(path));
+    audio.configure_scenario_with_definition_roots(
+        Some(path),
+        scenario.definition_root_groups(),
+    );
     scenario.visit_definition_groups(|id, group| {
         audio.register_definition_sounds(id, group);
     });
@@ -11415,10 +11440,19 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
     }
 
     fn resolve_graphics_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        self.resolve_graphics_groups_with_definition_roots(scenario, &[])
+    }
+
+    fn resolve_graphics_groups_with_definition_roots(
+        &self,
+        scenario: &Group,
+        definition_roots: &[Group],
+    ) -> Result<Vec<Group>, ScenarioError> {
         // RegisterMainGroups mirrors the active Game.GroupSet priority:
         // scenario-local Graphics.c4g, inner-to-outer scenario/origin folders,
-        // Extra.c4g's graphics, and finally the base Graphics.c4g
-        // (C4GraphicsResource.cpp:351-380; C4GroupSet.cpp:238-318).
+        // Extra.c4g's graphics, definition-pack roots, and finally the base
+        // Graphics.c4g (C4GraphicsResource.cpp:351-380;
+        // C4Game.cpp:2432-2442; C4GroupSet.cpp:87-110,238-318).
         let mut groups = Vec::new();
         let mut seen = HashSet::new();
         Self::push_graphics_child(scenario, &mut groups, &mut seen)?;
@@ -11457,6 +11491,20 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
                 }
                 Err(error) if Self::should_ignore_error(&error) => {}
                 Err(error) => return Err(ScenarioError::Resources(error)),
+            }
+        }
+
+        // Definition roots are registered at equal priority in selected-vector
+        // order. Game.GroupSet reverses that order, and RegisterMainGroups'
+        // target registration reverses it again, so the first selected pack is
+        // the first graphics lookup source. Keep duplicates: C++ reopens and
+        // registers every NRT_Definitions entry independently. A child that
+        // cannot be opened is silently skipped by RegisterGroups.
+        for definition_root in definition_roots {
+            if let Ok(Some(graphics)) =
+                open_child_flexible(definition_root, Path::new("Graphics.c4g"))
+            {
+                groups.push(graphics);
             }
         }
 
@@ -19744,7 +19792,7 @@ impl GameApp {
             )
         })?;
         let graphics_groups = InstallDefinitionResolver::new(resolver_paths.clone())
-            .resolve_graphics_groups(&scenario_group)
+            .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_groups)
             .map_err(|error| format!("failed to resolve client graphics resources: {error}"))?;
         let languages = startup_language_sequence(resolver_paths.as_deref());
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
@@ -37602,11 +37650,25 @@ impl MusicResolver {
         &mut self,
         path: Option<&Path>,
     ) -> Result<bool, lc_resources::GroupError> {
+        // `play_scenario_audio` repeats the path-only configuration after the
+        // resource-aware activation pass. Preserve that pass's definition
+        // roots when the scenario itself did not change.
         if self.scenario_root.as_deref() == path {
             return Ok(false);
         }
+        self.configure_scenario_with_definition_roots(path, &[])
+    }
+
+    fn configure_scenario_with_definition_roots(
+        &mut self,
+        path: Option<&Path>,
+        definition_roots: &[Group],
+    ) -> Result<bool, lc_resources::GroupError> {
+        // A resource-aware call marks a real scenario activation/reload. C++
+        // rebuilds its song list even when the path and selected root names are
+        // unchanged, so never reuse the prior catalog here.
         let (scenario, has_local_sources) = path
-            .map(build_scenario_music_catalog)
+            .map(|path| build_scenario_music_catalog(path, definition_roots))
             .transpose()?
             .unwrap_or_else(|| (MusicCatalog::empty(), false));
         self.scenario = scenario;
@@ -37644,6 +37706,7 @@ impl MusicResolver {
 
 fn build_scenario_music_catalog(
     path: &Path,
+    definition_roots: &[Group],
 ) -> Result<(MusicCatalog, bool), lc_resources::GroupError> {
     let scenario = Group::open(path)?;
     let mut catalog = MusicCatalog::empty();
@@ -37671,11 +37734,45 @@ fn build_scenario_music_catalog(
         parent = folder_path.parent();
     }
 
+    // FindGroup(C4GSCnt_Music) walks equal-priority definition roots newest
+    // first. Every direct Music.c4g is a local source, even when it contains no
+    // tracks, and duplicate root registrations remain independently visible.
+    for definition_root in definition_roots.iter().rev() {
+        let Some(child_path) = music_child_path(definition_root)? else {
+            continue;
+        };
+        has_local_sources = true;
+        match definition_root.open_child(&child_path) {
+            Ok(group) => {
+                if let Err(error) = catalog.extend_group(group) {
+                    tracing::warn!(
+                        root = %definition_root.root().display(),
+                        %error,
+                        "failed to enumerate definition-root Music.c4g"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    root = %definition_root.root().display(),
+                    %error,
+                    "failed to open definition-root Music.c4g"
+                );
+            }
+        }
+    }
+
     Ok((catalog, has_local_sources))
 }
 
 fn open_music_child(group: &Group) -> Result<Option<Group>, lc_resources::GroupError> {
-    group
+    music_child_path(group)?
+        .map(|path| group.open_child(path))
+        .transpose()
+}
+
+fn music_child_path(group: &Group) -> Result<Option<PathBuf>, lc_resources::GroupError> {
+    Ok(group
         .entries()?
         .into_iter()
         .find(|entry| {
@@ -37685,8 +37782,7 @@ fn open_music_child(group: &Group) -> Result<Option<Group>, lc_resources::GroupE
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.eq_ignore_ascii_case("Music.c4g"))
         })
-        .map(|entry| group.open_child(entry.relative_path))
-        .transpose()
+        .map(|entry| entry.relative_path))
 }
 
 fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
@@ -50086,6 +50182,134 @@ public func Grant(password) { return GainMissionAccess(password); }
             Some("Local Theme.ogg"),
             "loading a new scenario music catalog restores the default playlist"
         );
+    }
+
+    #[test]
+    fn definition_pack_music_is_enumerated_in_groupset_order_and_replaces_global_music() {
+        let dir = tempdir().expect("definition music fixture");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("global music group");
+        fs::write(global.join("Global.ogg"), b"global").expect("global track");
+
+        let folder = dir.path().join("Fantasy.c4f");
+        let scenario = folder.join("Scenario.c4s");
+        let folder_music = folder.join("Music.c4g");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::create_dir_all(&folder_music).expect("folder music group");
+        fs::write(folder_music.join("Shared.ogg"), b"folder").expect("folder track");
+
+        let first_pack = dir.path().join("First.c4d");
+        let second_pack = dir.path().join("Second.c4d");
+        let first_music = first_pack.join("Music.c4g");
+        let second_music = second_pack.join("Music.c4g");
+        fs::create_dir_all(&first_music).expect("first definition music");
+        fs::create_dir_all(&second_music).expect("second definition music");
+        fs::write(first_music.join("FirstOnly.ogg"), b"first only")
+            .expect("first-only track");
+        fs::write(first_music.join("PackTie.ogg"), b"first")
+            .expect("first tied track");
+        fs::write(first_music.join("Shared.ogg"), b"first shared")
+            .expect("first shared track");
+        fs::write(second_music.join("SecondOnly.ogg"), b"second only")
+            .expect("second-only track");
+        fs::write(second_music.join("PackTie.ogg"), b"second")
+            .expect("second tied track");
+
+        let roots = [
+            Group::open(&first_pack).expect("first definition root"),
+            Group::open(&second_pack).expect("second definition root"),
+        ];
+        let mut resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("global music root"),
+        )
+        .expect("global resolver");
+        assert!(
+            resolver
+                .configure_scenario_with_definition_roots(Some(&scenario), &roots)
+                .expect("configure definition music")
+        );
+
+        assert!(resolver.resolve("Global").is_none());
+        assert_eq!(
+            resolver
+                .resolve("Shared")
+                .expect("folder wins over definition roots")
+                .load_audio()
+                .expect("folder bytes"),
+            b"folder"
+        );
+        assert_eq!(
+            resolver
+                .resolve("PackTie")
+                .expect("tied definition track")
+                .load_audio()
+                .expect("definition bytes"),
+            b"second",
+            "FindGroup enumerates the later equal-priority definition root first"
+        );
+        assert!(resolver.resolve("FirstOnly").is_some());
+        assert!(resolver.resolve("SecondOnly").is_some());
+        assert!(
+            !resolver
+                .configure_scenario(Some(&scenario))
+                .expect("same-path playback configure"),
+            "the later path-only playback pass must retain definition-root music"
+        );
+        assert_eq!(
+            resolver
+                .resolve("PackTie")
+                .expect("definition catalog retained")
+                .load_audio()
+                .expect("retained definition bytes"),
+            b"second"
+        );
+
+        fs::write(second_music.join("Reloaded.ogg"), b"reloaded")
+            .expect("same-path replacement track");
+        resolver.set_playlist(Some("FirstOnly.*".to_string()));
+        assert!(
+            resolver
+                .configure_scenario_with_definition_roots(Some(&scenario), &roots)
+                .expect("resource-aware same-path reload"),
+            "a real activation must rebuild even when path and roots are unchanged"
+        );
+        assert!(resolver.playlist.is_none());
+        assert_eq!(
+            resolver
+                .resolve("Reloaded")
+                .expect("replacement track discovered")
+                .load_audio()
+                .expect("replacement bytes"),
+            b"reloaded"
+        );
+    }
+
+    #[test]
+    fn malformed_definition_pack_music_child_clears_global_without_aborting() {
+        let dir = tempdir().expect("malformed definition music fixture");
+        let global = dir.path().join("Music.c4g");
+        let scenario = dir.path().join("Scenario.c4s");
+        let definition = dir.path().join("Broken.c4d");
+        fs::create_dir_all(&global).expect("global music group");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::create_dir_all(&definition).expect("definition group");
+        fs::write(global.join("Global.ogg"), b"global").expect("global track");
+        fs::write(definition.join("Music.c4g"), b"not a group")
+            .expect("malformed music child");
+
+        let mut resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("global music root"),
+        )
+        .expect("global resolver");
+        resolver
+            .configure_scenario_with_definition_roots(
+                Some(&scenario),
+                &[Group::open(&definition).expect("definition root")],
+            )
+            .expect("malformed child is a logged LoadDir miss");
+
+        assert!(resolver.resolve("Global").is_none());
+        assert!(resolver.active_filenames().is_empty());
     }
 
     #[test]
@@ -83769,12 +83993,18 @@ protected func InputCallback(string answer, int player)
         let scenario = family.join("Tutorial01.c4s");
         write_definition(&global, "Global.c4d", "GLOB", 1);
         write_definition(&global, "Shared.c4d", "SAME", 1);
+        let global_graphics = global.join("Graphics.c4g");
+        fs::create_dir_all(&global_graphics).expect("definition graphics group");
+        write_preview_png(
+            &global_graphics.join("DefinitionSky.png"),
+            [0x12, 0x34, 0x56, 0xff],
+        );
         write_definition(&local, "Local.c4d", "LOCL", 2);
         write_definition(&local, "Shared.c4d", "SAME", 2);
         fs::create_dir_all(&scenario).expect("scenario directory");
         fs::write(
             scenario.join("Scenario.txt"),
-            "[Head]\nTitle=Collision\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+            "[Head]\nTitle=Collision\n\n[Definitions]\nDefinition1=Objects.c4d\n\n[Landscape]\nSky=DefinitionSky\n",
         )
         .expect("scenario core");
 
@@ -83796,7 +84026,28 @@ protected func InputCallback(string answer, int player)
 
         let loaded = Scenario::load_from_path_with(&scenario, &resolver)
             .expect("collision scenario loads through app resolver");
-        assert_eq!(loaded.definition_resource_paths(), [global, family]);
+        assert_eq!(
+            loaded.definition_resource_paths(),
+            [global.clone(), family.clone()]
+        );
+        assert_eq!(
+            loaded
+                .definition_root_groups()
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [global, family],
+            "folder-local definitions are appended to C++'s final NRT_Definitions vector"
+        );
+        assert_eq!(
+            &loaded
+                .sky()
+                .and_then(|sky| sky.surface.as_ref())
+                .expect("definition-pack SkyDef surface")
+                .pixels()[..4],
+            &[0x12, 0x34, 0x56, 0xff],
+            "the retained definition root participates in the live graphics chain"
+        );
         let mut engine = Engine::new();
         loaded
             .apply(&mut engine)
@@ -83834,6 +84085,165 @@ protected func InputCallback(string answer, int player)
         assert_eq!(
             graphics[0].read_file("Shared.png").expect("local graphic"),
             b"scenario"
+        );
+    }
+
+    #[test]
+    fn definition_pack_gui_sheet_enters_the_runtime_override_chain() {
+        let _env_lock = crate::tests::env_lock().lock();
+        let root = tempdir().expect("definition GUI fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let scenario = content.join("Scenario.c4s");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=GUI Override\n")
+            .expect("scenario core");
+
+        let definition = content.join("Objects.c4d");
+        let definition_graphics = definition.join("Graphics.c4g");
+        fs::create_dir_all(&definition_graphics).expect("definition Graphics.c4g");
+        write_preview_png(
+            &definition_graphics.join("GUIBigArrows.png"),
+            [0x12, 0x34, 0x56, 0xff],
+        );
+        let base_graphics = root.path().join("planet/Graphics.c4g");
+        fs::create_dir_all(&base_graphics).expect("base Graphics.c4g");
+        write_preview_png(
+            &base_graphics.join("GUIBigArrows.png"),
+            [0xaa, 0xbb, 0xcc, 0xff],
+        );
+
+        let scenario_group = Group::open(&scenario).expect("scenario group");
+        let head = ScenarioLoaderHead::load_from_group(&scenario_group).expect("scenario head");
+        let registrations = definition_graphics_source_registrations(
+            &head,
+            &scenario_group,
+            &ScenarioDefinitionLoad::Fixed {
+                modules: vec!["Objects.c4d".to_string()],
+                definition_root: None,
+            },
+            &paths,
+            0,
+        )
+        .expect("definition root registration");
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].priority, 1);
+        assert_eq!(registrations[0].group.root(), definition.as_path());
+
+        let overrides = classic_global_gui_runtime_overrides(
+            &registrations,
+            &Group::open(&base_graphics).expect("base graphics group"),
+        );
+        assert_eq!(
+            overrides.get("GUIBigArrows"),
+            Some(&format!(
+                "{}:GUIBigArrows.png",
+                definition_graphics.display()
+            )),
+            "the definition-pack GUI sheet wins over the priority-zero base sheet"
+        );
+    }
+
+    #[test]
+    fn definition_pack_graphics_sits_below_scenario_folders_and_extra_but_above_base() {
+        let _env_lock = crate::tests::env_lock().lock();
+        let root = tempdir().expect("definition graphics fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let family = content.join("Family.c4f");
+        let scenario = family.join("Scenario.c4s");
+        let scenario_graphics = scenario.join("Graphics.c4g");
+        let folder_graphics = family.join("Graphics.c4g");
+        let extra_graphics = content.join("Extra.c4g/Graphics.c4g");
+        let first_pack = root.path().join("First.c4d");
+        let second_pack = root.path().join("Second.c4d");
+        let first_graphics = first_pack.join("Graphics.c4g");
+        let second_graphics = second_pack.join("Graphics.c4g");
+        let base_graphics = root.path().join("planet/Graphics.c4g");
+        for graphics in [
+            &scenario_graphics,
+            &folder_graphics,
+            &extra_graphics,
+            &first_graphics,
+            &second_graphics,
+            &base_graphics,
+        ] {
+            fs::create_dir_all(graphics).expect("graphics group");
+        }
+        for (graphics, entries) in [
+            (&scenario_graphics, &["ScenarioWins.png"][..]),
+            (
+                &folder_graphics,
+                &["ScenarioWins.png", "FolderWins.png"][..],
+            ),
+            (
+                &extra_graphics,
+                &["ScenarioWins.png", "FolderWins.png", "ExtraWins.png"][..],
+            ),
+            (
+                &first_graphics,
+                &[
+                    "ScenarioWins.png",
+                    "FolderWins.png",
+                    "ExtraWins.png",
+                    "PackWins.png",
+                    "PackTie.png",
+                ][..],
+            ),
+            (&second_graphics, &["PackTie.png"][..]),
+            (
+                &base_graphics,
+                &[
+                    "ScenarioWins.png",
+                    "FolderWins.png",
+                    "ExtraWins.png",
+                    "PackWins.png",
+                    "PackTie.png",
+                ][..],
+            ),
+        ] {
+            for entry in entries {
+                fs::write(graphics.join(entry), graphics.to_string_lossy().as_bytes())
+                    .expect("graphics entry");
+            }
+        }
+
+        let scenario_group = Group::open(&scenario).expect("scenario group");
+        let definition_roots = [
+            Group::open(&first_pack).expect("first definition pack"),
+            Group::open(&second_pack).expect("second definition pack"),
+        ];
+        let graphics = InstallDefinitionResolver::new(Some(Arc::new(paths)))
+            .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_roots)
+            .expect("graphics chain resolves");
+
+        assert_eq!(
+            graphics
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [
+                scenario_graphics.clone(),
+                folder_graphics.clone(),
+                extra_graphics.clone(),
+                first_graphics.clone(),
+                second_graphics,
+                base_graphics,
+            ]
+        );
+        let winner = |name: &str| {
+            graphics
+                .iter()
+                .find(|group| group.read_file(name).is_ok())
+                .map(|group| group.root().to_path_buf())
+                .expect("winning graphics source")
+        };
+        assert_eq!(winner("ScenarioWins.png"), scenario_graphics);
+        assert_eq!(winner("FolderWins.png"), folder_graphics);
+        assert_eq!(winner("ExtraWins.png"), extra_graphics);
+        assert_eq!(winner("PackWins.png"), first_graphics);
+        assert_eq!(
+            winner("PackTie.png"),
+            first_pack.join("Graphics.c4g"),
+            "RegisterMainGroups' second reversal makes the first selected definition pack win"
         );
     }
 

@@ -393,6 +393,12 @@ pub struct Scenario {
     /// override as unresolved in `lobby_metadata`; the scenario group itself
     /// is deliberately absent.
     definition_resource_paths: Vec<PathBuf>,
+    /// Exact ordered `NRT_Definitions` roots registered in `Game.GroupSet`.
+    /// This includes folder-local definition roots after the selected external
+    /// vector: C++ first registers those folders at folder priority, then adds
+    /// them to `DefinitionFilenames` and registers them again at definition
+    /// priority (C4Game.cpp:210-213,2432-2442,3961-3994).
+    definition_root_groups: Vec<Group>,
     /// The scenario's own System.c4g sources. C++ loads these after defs
     /// specifically to give them overload priority (C4Game.cpp:2606-2617).
     scenario_system_scripts: Vec<(String, String)>,
@@ -1529,6 +1535,17 @@ pub trait LegacyDefinitionResolver {
             Err(error) => Err(error),
         }
     }
+
+    /// Ordered graphics lookup chain after the exact external definition-pack
+    /// roots have been registered in the game group set. Implementations that
+    /// do not model that group set retain their existing graphics chain.
+    fn resolve_graphics_groups_with_definition_roots(
+        &self,
+        scenario: &Group,
+        _definition_roots: &[Group],
+    ) -> Result<Vec<Group>, ScenarioError> {
+        self.resolve_graphics_groups(scenario)
+    }
 }
 
 struct AuthoritativeNetworkResourceResolver<'a> {
@@ -2193,6 +2210,7 @@ impl Scenario {
             .collect();
         let mut load_items = Vec::new();
         let mut definition_resource_paths = Vec::new();
+        let mut definition_root_groups = Vec::new();
 
         // C4Game::InitDefs loads explicit definition resources first, then
         // folder-local resources from outermost to innermost, and finally the
@@ -2229,6 +2247,7 @@ impl Scenario {
             for spec in definition_specs_to_resolve {
                 let definition_group = resolve_rooted_definition_group(definition_root, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
+                definition_root_groups.push(definition_group.clone());
                 collect_definitions_from_group(
                     &definition_group,
                     true,
@@ -2240,6 +2259,7 @@ impl Scenario {
             for spec in definition_specs_to_resolve {
                 let definition_group = resolve_one_definition_group(group, resolver, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
+                definition_root_groups.push(definition_group.clone());
                 collect_definitions_from_group(
                     &definition_group,
                     true,
@@ -2252,6 +2272,7 @@ impl Scenario {
             for spec in definition_specs_to_resolve {
                 let definition_group = resolve_one_definition_group(group, resolver, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
+                definition_root_groups.push(definition_group.clone());
                 collect_definitions_from_group(
                     &definition_group,
                     true,
@@ -2265,6 +2286,7 @@ impl Scenario {
         if discover_folder_definitions {
             for folder_group in folder_local_definition_groups(group)? {
                 definition_resource_paths.push(folder_group.root().to_path_buf());
+                definition_root_groups.push(folder_group.clone());
                 collect_definitions_from_group(
                     &folder_group,
                     true,
@@ -2376,7 +2398,13 @@ impl Scenario {
         let weather_init = derive_legacy_weather_init(&manifest)?;
         // C4Sky always initializes for a running game (C4Sky::Init,
         // C4Sky.cpp:71-152): bitmap sky or fade gradient.
-        let sky = derive_legacy_sky(group, resolver, &mut manifest, random_seed)?;
+        let sky = derive_legacy_sky(
+            group,
+            resolver,
+            &definition_root_groups,
+            &mut manifest,
+            random_seed,
+        )?;
         // C4Sky::Init mutates the stored SkyDef's comma separators whenever
         // the direct scenario `Sky` bitmap misses. Retain that post-init core
         // for script reflection and save/network serialization.
@@ -2483,6 +2511,7 @@ impl Scenario {
                 .then_some(manifest.core.head.forced_control_style != 0),
             definition_load_steps,
             definition_resource_paths,
+            definition_root_groups,
             scenario_system_scripts,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
             teams,
@@ -2551,6 +2580,12 @@ impl Scenario {
     /// this as the C++-effective vector for an old exact save.
     pub fn definition_resource_paths(&self) -> &[PathBuf] {
         &self.definition_resource_paths
+    }
+
+    /// Exact ordered resources registered as `C4GSCnt_DefinitionRoot`,
+    /// including folder-local definition roots appended by C++.
+    pub fn definition_root_groups(&self) -> &[Group] {
+        &self.definition_root_groups
     }
 
     /// Immutable legacy pre-game metadata. JSON-only engine fixtures return
@@ -3567,6 +3602,7 @@ impl Scenario {
             forced_control_style: None,
             definition_load_steps,
             definition_resource_paths: Vec::new(),
+            definition_root_groups: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -9443,6 +9479,7 @@ const LEGACY_SKY_FADE_BOTTOM_DEFAULT: RgbColor = RgbColor::new(192, 196, 252);
 fn derive_legacy_sky<R: LegacyDefinitionResolver>(
     group: &Group,
     resolver: &R,
+    definition_roots: &[Group],
     manifest: &mut LegacyScenarioManifest,
     random_seed: u64,
 ) -> Result<SkyConfig, ScenarioError> {
@@ -9472,7 +9509,8 @@ fn derive_legacy_sky<R: LegacyDefinitionResolver>(
         if !selected.is_empty() && selected != "Default" {
             surface = load_legacy_sky_surface(group, &selected);
             if surface.is_none() {
-                let graphics_groups = resolver.resolve_graphics_groups(group)?;
+                let graphics_groups = resolver
+                    .resolve_graphics_groups_with_definition_roots(group, definition_roots)?;
                 surface = load_legacy_sky_surface_from_groups(&graphics_groups, &selected);
             }
         }
@@ -16463,6 +16501,7 @@ global func Step(state, frame, random)
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             definition_resource_paths: Vec::new(),
+            definition_root_groups: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -16589,6 +16628,7 @@ global func Step(state, frame, random)
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             definition_resource_paths: Vec::new(),
+            definition_root_groups: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),

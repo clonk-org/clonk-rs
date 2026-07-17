@@ -835,6 +835,58 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
             path: identifier.to_owned(),
         })
     }
+
+    fn resolve_graphics_groups_with_definition_roots(
+        &self,
+        scenario: &Group,
+        definition_roots: &[Group],
+    ) -> Result<Vec<Group>, ScenarioError> {
+        let mut groups = Vec::new();
+        for definition_root in definition_roots {
+            // C4GroupSet::RegisterGroups silently skips a definition root
+            // whose direct Graphics.c4g child cannot be opened.
+            if let Ok(graphics) = definition_root.open_child(Path::new("Graphics.c4g")) {
+                groups.push(graphics);
+            }
+        }
+        groups.extend(self.resolve_graphics_groups(scenario)?);
+        Ok(groups)
+    }
+}
+
+#[cfg(test)]
+mod definition_root_graphics_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn definition_pack_graphics_precede_prepared_host_base_graphics() {
+        let dir = tempdir().expect("prepared host graphics fixture");
+        let scenario = dir.path().join("Scenario.c4s");
+        let definition = dir.path().join("Objects.c4d");
+        let definition_graphics = definition.join("Graphics.c4g");
+        let base_graphics = dir.path().join("Graphics.c4g");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::create_dir_all(&definition_graphics).expect("definition graphics");
+        fs::create_dir_all(&base_graphics).expect("base graphics");
+
+        let roots = [dir.path().to_path_buf()];
+        let resolver = InstallRootDefinitionResolver { roots: &roots };
+        let graphics = resolver
+            .resolve_graphics_groups_with_definition_roots(
+                &Group::open(&scenario).expect("scenario root"),
+                &[Group::open(&definition).expect("definition root")],
+            )
+            .expect("prepared host graphics chain");
+
+        assert_eq!(
+            graphics
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [definition_graphics, base_graphics]
+        );
+    }
 }
 
 fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHostBootstrapError> {
