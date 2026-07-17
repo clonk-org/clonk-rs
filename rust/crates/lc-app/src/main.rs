@@ -1112,10 +1112,121 @@ fn effective_loader_definition_modules(
     })
 }
 
+fn extra_definition_filename(module: &str) -> Option<&str> {
+    module
+        .rsplit(|character| character == '/' || (cfg!(windows) && character == '\\'))
+        .next()
+        .filter(|name| !name.is_empty())
+}
+
+fn extra_definition_group_names(
+    head: &ScenarioLoaderHead,
+    definition_load: &ScenarioDefinitionLoad,
+    scenario_path: &Path,
+) -> Result<Vec<String>> {
+    let modules = effective_loader_definition_modules(head, definition_load)?;
+    let module_names = modules
+        .iter()
+        .filter_map(|module| extra_definition_filename(module).map(str::to_string))
+        .collect::<Vec<_>>();
+    let definition_root = match definition_load {
+        ScenarioDefinitionLoad::Seed {
+            definition_root, ..
+        }
+        | ScenarioDefinitionLoad::Fixed {
+            definition_root, ..
+        } => definition_root,
+    };
+    let mut names = Vec::new();
+    // OpenScenario prepends a rooted copy of the selected vector whenever
+    // DefinitionPath is active, then retains the original entries.
+    if definition_root.is_some() {
+        names.extend(module_names.iter().cloned());
+    }
+    names.extend(module_names);
+
+    // FoldersWithLocalsDefs appends each outer-to-inner c4f ancestor that
+    // directly contains at least one definition child.
+    for parent_path in loader_parent_paths(scenario_path) {
+        let parent = open_group_path_for_folder_map(&parent_path)?;
+        let has_definitions = parent.entries()?.into_iter().any(|entry| {
+            entry.relative_path.components().count() == 1
+                && entry
+                    .relative_path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("c4d"))
+        });
+        if has_definitions {
+            if let Some(name) = parent_path.file_name().and_then(|name| name.to_str()) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn register_classic_extra_groups(
+    paths: &AppPaths,
+    definition_names: &[String],
+    registrations: &mut Vec<LoaderGroupRegistration>,
+    registration_order: &mut usize,
+) -> Result<()> {
+    let Some(extra_path) = mapped_classic_extra_group_path(paths)? else {
+        return Ok(());
+    };
+    let extra = match Group::open(&extra_path) {
+        Ok(extra) => extra,
+        Err(error) => {
+            tracing::warn!(
+                path = %extra_path.display(),
+                %error,
+                "failed to open optional global Extra.c4g"
+            );
+            return Ok(());
+        }
+    };
+    registrations.push(LoaderGroupRegistration {
+        priority: 2,
+        registration_order: *registration_order,
+        group: extra.clone(),
+    });
+    *registration_order = registration_order.saturating_add(1);
+
+    for name in definition_names {
+        let group = match open_child_flexible(&extra, Path::new(name)) {
+            Ok(Some(group)) => group,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    extra = %extra_path.display(),
+                    definition = name,
+                    %error,
+                    "failed to open activated Extra.c4g definition group"
+                );
+                continue;
+            }
+        };
+        tracing::info!(
+            extra = %extra_path.display(),
+            definition = name,
+            "loading activated Extra.c4g definition group"
+        );
+        registrations.push(LoaderGroupRegistration {
+            priority: 3,
+            registration_order: *registration_order,
+            group,
+        });
+        *registration_order = registration_order.saturating_add(1);
+    }
+    Ok(())
+}
+
 fn classic_loader_registrations(
     scenario: &FrontendScenario,
     scenario_group: &Group,
     head: &ScenarioLoaderHead,
+    definition_load: &ScenarioDefinitionLoad,
     paths: &AppPaths,
 ) -> Result<Vec<LoaderGroupRegistration>> {
     let scenario_path = scenario
@@ -1152,24 +1263,13 @@ fn classic_loader_registrations(
         }
     }
 
-    // Extra.Init depends on the final post-OpenScenario DefinitionFilenames
-    // vector (including old-save replacement and DefinitionPath duplication).
-    // That vector is not fully owned by the pre-load app state, so an
-    // installed Extra.c4g is an explicit boundary instead of an approximation.
-    if let Some(extra_path) = mapped_classic_extra_group_path(paths)? {
-        // Validate that the discovered global hit is actually a readable group
-        // before returning the intentional activation-vector boundary.
-        Group::open(&extra_path).with_context(|| {
-            format!(
-                "classic scenario loader cannot open global Extra group {}",
-                extra_path.display()
-            )
-        })?;
-        anyhow::bail!(
-            "classic scenario loader cannot establish Extra.c4g's post-OpenScenario definition activation vector for {}",
-            extra_path.display()
-        );
-    }
+    let extra_names = extra_definition_group_names(head, definition_load, scenario_path)?;
+    register_classic_extra_groups(
+        paths,
+        &extra_names,
+        &mut registrations,
+        &mut registration_order,
+    )?;
     Ok(registrations)
 }
 
@@ -1628,12 +1728,20 @@ fn loader_graphics_registrations(
 ) -> Result<Vec<LoaderGroupRegistration>> {
     let mut graphics = Vec::new();
     for registration in registrations {
-        if let Some(group) = open_child_flexible(&registration.group, Path::new("Graphics.c4g"))? {
-            graphics.push(LoaderGroupRegistration {
+        match open_child_flexible(&registration.group, Path::new("Graphics.c4g")) {
+            Ok(Some(group)) => graphics.push(LoaderGroupRegistration {
                 priority: registration.priority,
                 registration_order: registration.registration_order,
                 group,
-            });
+            }),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    root = %registration.group.root().display(),
+                    %error,
+                    "failed to open optional registered Graphics.c4g"
+                );
+            }
         }
     }
     Ok(graphics)
@@ -2498,16 +2606,21 @@ fn load_classic_loader_gamma(paths: Option<&AppPaths>) -> Option<lc_graphics::Ga
 
 fn startup_loader_registrations(paths: &AppPaths) -> Result<Vec<LoaderGroupRegistration>> {
     match mapped_classic_extra_group_path(paths)? {
-        Some(extra_path) => Ok(vec![LoaderGroupRegistration {
-            priority: 2,
-            registration_order: 0,
-            group: Group::open(&extra_path).with_context(|| {
-                format!(
-                    "classic startup loader cannot open global Extra group {}",
-                    extra_path.display()
-                )
-            })?,
-        }]),
+        Some(extra_path) => match Group::open(&extra_path) {
+            Ok(group) => Ok(vec![LoaderGroupRegistration {
+                priority: 2,
+                registration_order: 0,
+                group,
+            }]),
+            Err(error) => {
+                tracing::warn!(
+                    path = %extra_path.display(),
+                    %error,
+                    "failed to open optional startup Extra.c4g"
+                );
+                Ok(Vec::new())
+            }
+        },
         None => Ok(Vec::new()),
     }
 }
@@ -2573,7 +2686,13 @@ fn build_scenario_loader(
         .with_context(|| format!("failed to open scenario group at {}", path.display()))?;
     let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
     let graphics = main_graphics_group(paths)?;
-    let registrations = classic_loader_registrations(scenario, &scenario_group, &head, paths)?;
+    let registrations = classic_loader_registrations(
+        scenario,
+        &scenario_group,
+        &head,
+        definition_load,
+        paths,
+    )?;
     validate_loader_graphics_font_sources(&registrations)?;
     let tier = highest_loader_tier(&registrations)?;
     let selected =
@@ -11476,10 +11595,16 @@ impl InstallDefinitionResolver {
         groups: &mut Vec<Group>,
         seen: &mut HashSet<PathBuf>,
     ) -> Result<(), ScenarioError> {
-        if let Some(graphics) = open_child_flexible(parent, Path::new("Graphics.c4g"))
-            .map_err(ScenarioError::Resources)?
-        {
-            Self::push_group(groups, seen, graphics);
+        match open_child_flexible(parent, Path::new("Graphics.c4g")) {
+            Ok(Some(graphics)) => Self::push_group(groups, seen, graphics),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    root = %parent.root().display(),
+                    %error,
+                    "failed to open optional registered Graphics.c4g"
+                );
+            }
         }
         Ok(())
     }
@@ -11633,7 +11758,9 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         }
 
         // Extra.c4g root has lower priority than folders but higher priority
-        // than the final executable-data Material.c4g.
+        // than the final executable-data Material.c4g. Per-definition Extra
+        // children register only after OpenScenario has snapshotted GameRes,
+        // so they deliberately do not enter this simulation material chain.
         for base in self.executable_data_bases() {
             let extra_path = base.join("Extra.c4g");
             match Group::open(&extra_path) {
@@ -11702,6 +11829,39 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
             let extra_path = base.join("Extra.c4g");
             match Group::open(&extra_path) {
                 Ok(extra) => {
+                    // Extra.Init registers one matching child per final
+                    // DefinitionFilenames entry. RegisterMainGroups reverses
+                    // the equal-priority child order a second time, so the
+                    // earlier activated child is the earlier graphics source.
+                    for definition_root in definition_roots {
+                        let Some(name) = definition_root.root().file_name() else {
+                            continue;
+                        };
+                        let child = match open_child_flexible(&extra, Path::new(name)) {
+                            Ok(Some(child)) => child,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                tracing::warn!(
+                                    extra = %extra.root().display(),
+                                    definition = %name.to_string_lossy(),
+                                    %error,
+                                    "failed to open activated Extra.c4g graphics group"
+                                );
+                                continue;
+                            }
+                        };
+                        match open_child_flexible(&child, Path::new("Graphics.c4g")) {
+                            Ok(Some(graphics)) => groups.push(graphics),
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    root = %child.root().display(),
+                                    %error,
+                                    "failed to open optional Extra definition Graphics.c4g"
+                                );
+                            }
+                        }
+                    }
                     Self::push_graphics_child(&extra, &mut groups, &mut seen)?;
                     break;
                 }
@@ -34329,14 +34489,6 @@ impl GameApp {
             .with_context(|| format!("failed to open saved scenario at {}", path.display()))?;
         let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
         let graphics = main_graphics_group(paths)?;
-        let mut registrations =
-            classic_loader_registrations(frontend, &scenario_group, &head, paths)?;
-        let font_catalog_registrations = registrations.clone();
-        let mut font_failure =
-            validate_classic_loader_font(paths, Some(head.font()), &registrations)
-                .and_then(|()| validate_loader_graphics_font_sources(&registrations))
-                .err()
-                .map(|error| error.to_string());
         let fallback_definition_load;
         let definition_load = match definition_load {
             Some(definition_load) => definition_load,
@@ -34348,6 +34500,19 @@ impl GameApp {
                 &fallback_definition_load
             }
         };
+        let mut registrations = classic_loader_registrations(
+            frontend,
+            &scenario_group,
+            &head,
+            definition_load,
+            paths,
+        )?;
+        let font_catalog_registrations = registrations.clone();
+        let mut font_failure =
+            validate_classic_loader_font(paths, Some(head.font()), &registrations)
+                .and_then(|()| validate_loader_graphics_font_sources(&registrations))
+                .err()
+                .map(|error| error.to_string());
         let first_definition_order = registrations
             .iter()
             .map(|registration| registration.registration_order)
@@ -34397,9 +34562,6 @@ impl GameApp {
         let scenario_group = open_group_path_for_folder_map(path)
             .with_context(|| format!("failed to open saved scenario at {}", path.display()))?;
         let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
-        let catalog_registrations =
-            classic_loader_registrations(frontend, &scenario_group, &head, paths)?;
-        let mut graphics_registrations = catalog_registrations.clone();
         let fallback_definition_load;
         let definition_load = match definition_load {
             Some(definition_load) => definition_load,
@@ -34411,6 +34573,14 @@ impl GameApp {
                 &fallback_definition_load
             }
         };
+        let catalog_registrations = classic_loader_registrations(
+            frontend,
+            &scenario_group,
+            &head,
+            definition_load,
+            paths,
+        )?;
+        let mut graphics_registrations = catalog_registrations.clone();
         let first_definition_order = graphics_registrations
             .iter()
             .map(|registration| registration.registration_order)
@@ -38082,6 +38252,7 @@ impl MusicAsset {
 
 struct MusicResolver {
     global: MusicCatalog,
+    extra: Option<Group>,
     scenario: MusicCatalog,
     scenario_has_local_sources: bool,
     scenario_root: Option<PathBuf>,
@@ -38090,37 +38261,65 @@ struct MusicResolver {
 
 impl MusicResolver {
     fn discover() -> Self {
+        let paths = match AppPaths::discover() {
+            Ok(paths) => paths,
+            Err(error) => {
+                tracing::warn!(%error, "music resource discovery skipped");
+                return Self {
+                    global: MusicCatalog::empty(),
+                    extra: None,
+                    scenario: MusicCatalog::empty(),
+                    scenario_has_local_sources: false,
+                    scenario_root: None,
+                    playlist: None,
+                };
+            }
+        };
         let global = (|| -> anyhow::Result<MusicCatalog> {
-            let paths = AppPaths::discover()?;
             let path = find_music_group(&paths)?;
             let group = Group::open(&path)
                 .with_context(|| format!("failed to open music group at {}", path.display()))?;
             MusicCatalog::from_group(group).map_err(anyhow::Error::from)
         })();
-        match global {
-            Ok(global) => Self {
-                global,
-                scenario: MusicCatalog::empty(),
-                scenario_has_local_sources: false,
-                scenario_root: None,
-                playlist: None,
-            },
+        let global = match global {
+            Ok(global) => global,
             Err(error) => {
                 tracing::warn!(%error, "global music catalog discovery skipped");
-                Self {
-                    global: MusicCatalog::empty(),
-                    scenario: MusicCatalog::empty(),
-                    scenario_has_local_sources: false,
-                    scenario_root: None,
-                    playlist: None,
-                }
+                MusicCatalog::empty()
             }
+        };
+        let extra = match mapped_classic_extra_group_path(&paths) {
+            Ok(Some(path)) => match Group::open(&path) {
+                Ok(extra) => Some(extra),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "failed to open optional Extra.c4g music root"
+                    );
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "Extra.c4g music discovery skipped");
+                None
+            }
+        };
+        Self {
+            global,
+            extra,
+            scenario: MusicCatalog::empty(),
+            scenario_has_local_sources: false,
+            scenario_root: None,
+            playlist: None,
         }
     }
 
     fn with_global_group(group: Group) -> Result<Self, lc_resources::GroupError> {
         Ok(Self {
             global: MusicCatalog::from_group(group)?,
+            extra: None,
             scenario: MusicCatalog::empty(),
             scenario_has_local_sources: false,
             scenario_root: None,
@@ -38150,7 +38349,9 @@ impl MusicResolver {
         // rebuilds its song list even when the path and selected root names are
         // unchanged, so never reuse the prior catalog here.
         let (scenario, has_local_sources) = path
-            .map(|path| build_scenario_music_catalog(path, definition_roots))
+            .map(|path| {
+                build_scenario_music_catalog(path, definition_roots, self.extra.as_ref())
+            })
             .transpose()?
             .unwrap_or_else(|| (MusicCatalog::empty(), false));
         self.scenario = scenario;
@@ -38189,6 +38390,7 @@ impl MusicResolver {
 fn build_scenario_music_catalog(
     path: &Path,
     definition_roots: &[Group],
+    extra: Option<&Group>,
 ) -> Result<(MusicCatalog, bool), lc_resources::GroupError> {
     let scenario = Group::open(path)?;
     let mut catalog = MusicCatalog::empty();
@@ -38214,6 +38416,72 @@ fn build_scenario_music_catalog(
             catalog.extend_group(group)?;
         }
         parent = folder_path.parent();
+    }
+
+    // Extra children sit above the Extra root and definition roots. Direct
+    // Game.GroupSet iteration keeps later equal-priority registrations first.
+    if let Some(extra) = extra {
+        for definition_root in definition_roots.iter().rev() {
+            let Some(name) = definition_root.root().file_name() else {
+                continue;
+            };
+            let child = match open_child_flexible(extra, Path::new(name)) {
+                Ok(Some(child)) => child,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        extra = %extra.root().display(),
+                        definition = %name.to_string_lossy(),
+                        %error,
+                        "failed to open activated Extra.c4g definition group for music"
+                    );
+                    continue;
+                }
+            };
+            let Some(child_path) = music_child_path(&child)? else {
+                continue;
+            };
+            has_local_sources = true;
+            match child.open_child(&child_path) {
+                Ok(group) => {
+                    if let Err(error) = catalog.extend_group(group) {
+                        tracing::warn!(
+                            root = %child.root().display(),
+                            %error,
+                            "failed to enumerate Extra definition Music.c4g"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        root = %child.root().display(),
+                        %error,
+                        "failed to open Extra definition Music.c4g"
+                    );
+                }
+            }
+        }
+        if let Some(child_path) = music_child_path(extra)? {
+            has_local_sources = true;
+            match extra.open_child(&child_path) {
+                Ok(group) => {
+                    if let Err(error) = catalog.extend_group(group) {
+                        tracing::warn!(
+                            root = %extra.root().display(),
+                            %error,
+                            "failed to enumerate Extra root Music.c4g"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        root = %extra.root().display(),
+                        %error,
+                        "failed to open Extra root Music.c4g"
+                    );
+                }
+            }
+        }
     }
 
     // FindGroup(C4GSCnt_Music) walks equal-priority definition roots newest
@@ -50770,6 +51038,71 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn extra_music_uses_later_activated_children_then_root_and_skips_inactive_children() {
+        let dir = tempdir().expect("Extra music fixture");
+        let global = dir.path().join("Music.c4g");
+        let scenario = dir.path().join("Scenario.c4s");
+        let first_pack = dir.path().join("First.c4d");
+        let second_pack = dir.path().join("Second.c4d");
+        let extra = dir.path().join("Extra.c4g");
+        let extra_root_music = extra.join("Music.c4g");
+        let first_music = extra.join("First.c4d/Music.c4g");
+        let second_music = extra.join("Second.c4d/Music.c4g");
+        let unused_music = extra.join("Unused.c4d/Music.c4g");
+        for path in [
+            &global,
+            &scenario,
+            &first_pack,
+            &second_pack,
+            &extra_root_music,
+            &first_music,
+            &second_music,
+            &unused_music,
+        ] {
+            fs::create_dir_all(path).expect("music fixture group");
+        }
+        fs::write(global.join("Global.ogg"), b"global").expect("global track");
+        fs::write(extra_root_music.join("RootOnly.ogg"), b"root").expect("root track");
+        fs::write(first_music.join("ChildTie.ogg"), b"first").expect("first child track");
+        fs::write(second_music.join("ChildTie.ogg"), b"second")
+            .expect("second child track");
+        fs::write(unused_music.join("Unused.ogg"), b"unused").expect("unused child track");
+
+        let roots = [
+            Group::open(&first_pack).expect("first definition root"),
+            Group::open(&second_pack).expect("second definition root"),
+        ];
+        let mut resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("global music root"),
+        )
+        .expect("global resolver");
+        resolver.extra = Some(Group::open(&extra).expect("Extra root"));
+        resolver
+            .configure_scenario_with_definition_roots(Some(&scenario), &roots)
+            .expect("configure Extra music");
+
+        assert!(resolver.resolve("Global").is_none());
+        assert_eq!(
+            resolver
+                .resolve("ChildTie")
+                .expect("activated child tie")
+                .load_audio()
+                .expect("second child bytes"),
+            b"second",
+            "direct GroupSet iteration keeps the later activated Extra child first"
+        );
+        assert_eq!(
+            resolver
+                .resolve("RootOnly")
+                .expect("Extra root track")
+                .load_audio()
+                .expect("root bytes"),
+            b"root"
+        );
+        assert!(resolver.resolve("Unused").is_none());
+    }
+
+    #[test]
     fn malformed_definition_pack_music_child_clears_global_without_aborting() {
         let dir = tempdir().expect("malformed definition music fixture");
         let global = dir.path().join("Music.c4g");
@@ -53929,6 +54262,49 @@ public func Grant(password) { return GainMissionAccess(password); }
         (scenario, group, head)
     }
 
+    fn loader_fixture_definition_load() -> ScenarioDefinitionLoad {
+        ScenarioDefinitionLoad::Fixed {
+            modules: Vec::new(),
+            definition_root: None,
+        }
+    }
+
+    #[test]
+    fn extra_definition_names_follow_definition_path_and_local_folder_vector_order() {
+        let root = tempdir().expect("Extra activation-vector fixture");
+        let outer = root.path().join("Outer.c4f");
+        let inner = outer.join("Inner.c4f");
+        let scenario = inner.join("Scenario.c4s");
+        fs::create_dir_all(outer.join("OuterDefs.c4d")).expect("outer local definitions");
+        fs::create_dir_all(inner.join("InnerDefs.c4d")).expect("inner local definitions");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=Vector\n")
+            .expect("scenario core");
+        let scenario_group = Group::open(&scenario).expect("scenario group");
+        let head = ScenarioLoaderHead::load_from_group(&scenario_group).expect("loader head");
+        let names = extra_definition_group_names(
+            &head,
+            &ScenarioDefinitionLoad::Fixed {
+                modules: vec!["Packs/Objects.c4d".to_string()],
+                definition_root: Some(root.path().join("Definitions")),
+            },
+            &scenario,
+        )
+        .expect("final Extra activation names");
+        assert_eq!(
+            names,
+            ["Objects.c4d", "Objects.c4d", "Outer.c4f", "Inner.c4f"]
+        );
+        assert_eq!(
+            extra_definition_filename(r"Packs\Windows.c4d"),
+            Some(if cfg!(windows) {
+                "Windows.c4d"
+            } else {
+                r"Packs\Windows.c4d"
+            })
+        );
+    }
+
     #[test]
     fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
         let root = tempdir().expect("loader Origin fixture");
@@ -53939,8 +54315,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (scenario, scenario_group, head) =
             loader_origin_fixture_scenario(&scenario_path, "Parent.c4f/Missing.c4s");
 
-        let registrations = classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
-            .expect("missing final Origin leaf does not block parent registration");
+        let registrations = classic_loader_registrations(
+            &scenario,
+            &scenario_group,
+            &head,
+            &loader_fixture_definition_load(),
+            &paths,
+        )
+        .expect("missing final Origin leaf does not block parent registration");
         assert_eq!(registrations.len(), 2);
         assert_eq!(registrations[0].priority, 200);
         assert_eq!(registrations[1].priority, 100);
@@ -53955,8 +54337,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (scenario, scenario_group, head) = loader_origin_fixture_scenario(&scenario_path, "");
         assert_eq!(head.origin(), Some("empty"));
 
-        let registrations = classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
-            .expect("validated empty Origin is a no-op");
+        let registrations = classic_loader_registrations(
+            &scenario,
+            &scenario_group,
+            &head,
+            &loader_fixture_definition_load(),
+            &paths,
+        )
+        .expect("validated empty Origin is a no-op");
         assert_eq!(registrations.len(), 1);
         assert_eq!(registrations[0].group.root(), scenario_path.as_path());
     }
@@ -53970,8 +54358,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (scenario, scenario_group, head) =
             loader_origin_fixture_scenario(&scenario_path, "Parent.c4f/Actual.c4s");
 
-        let registrations = classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
-            .expect("identical Origin");
+        let registrations = classic_loader_registrations(
+            &scenario,
+            &scenario_group,
+            &head,
+            &loader_fixture_definition_load(),
+            &paths,
+        )
+        .expect("identical Origin");
         assert_eq!(registrations.len(), 2);
         assert_eq!(
             registrations
@@ -53995,8 +54389,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (scenario, scenario_group, head) =
             loader_origin_fixture_scenario(&scenario_path, "Outer.c4f/inner.c4f/Missing.c4s");
 
-        let registrations = classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
-            .expect("packed logical Origin parents");
+        let registrations = classic_loader_registrations(
+            &scenario,
+            &scenario_group,
+            &head,
+            &loader_fixture_definition_load(),
+            &paths,
+        )
+        .expect("packed logical Origin parents");
         assert_eq!(registrations.len(), 3);
         assert_eq!(registrations[1].group.root(), outer_path.as_path());
         assert_eq!(registrations[1].priority, 100);
@@ -54182,11 +54582,77 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn planet_extra_is_used_at_startup_and_blocks_unresolved_scenario_activation() {
+    fn planet_extra_registers_root_and_only_activated_definition_children() {
         let root = tempdir().expect("loader planet Extra fixture");
         let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
         let extra_path = paths.planet_dir().join("Extra.c4g");
         fs::create_dir(&extra_path).expect("planet Extra group");
+        let extra_graphics = extra_path.join("Graphics.c4g");
+        let objects = extra_path.join("Objects.c4d");
+        let objects_graphics = objects.join("Graphics.c4g");
+        let objects_materials = objects.join("Material.c4g");
+        let second = extra_path.join("Second.c4d");
+        let second_graphics = second.join("Graphics.c4g");
+        let unused = extra_path.join("Unused.c4d");
+        let unused_graphics = unused.join("Graphics.c4g");
+        for path in [
+            &extra_graphics,
+            &objects_graphics,
+            &second_graphics,
+            &unused_graphics,
+        ] {
+            fs::create_dir_all(path).expect("Extra graphics group");
+        }
+        write_preview_png(
+            &extra_graphics.join("ChildWins.png"),
+            [0x11, 0x22, 0x33, 0xff],
+        );
+        write_preview_png(
+            &objects_graphics.join("ChildWins.png"),
+            [0x44, 0x55, 0x66, 0xff],
+        );
+        write_preview_png(
+            &objects_graphics.join("ScenarioWins.png"),
+            [0x77, 0x88, 0x99, 0xff],
+        );
+        write_preview_png(
+            &objects_graphics.join("ChildTie.png"),
+            [0x12, 0x34, 0x56, 0xff],
+        );
+        write_preview_png(
+            &second_graphics.join("ChildTie.png"),
+            [0x65, 0x43, 0x21, 0xff],
+        );
+        write_preview_png(
+            &unused_graphics.join("UnusedWins.png"),
+            [0xaa, 0xbb, 0xcc, 0xff],
+        );
+        write_preview_png(
+            &extra_path.join("LoaderRoot.png"),
+            [0x11, 0x22, 0x33, 0xff],
+        );
+        write_preview_png(
+            &objects.join("LoaderObjects.png"),
+            [0x44, 0x55, 0x66, 0xff],
+        );
+        write_preview_png(
+            &second.join("LoaderSecond.png"),
+            [0x65, 0x43, 0x21, 0xff],
+        );
+        write_preview_png(
+            &unused.join("LoaderUnused.png"),
+            [0xaa, 0xbb, 0xcc, 0xff],
+        );
+        let extra_materials = extra_path.join("Material.c4g");
+        let global_materials = paths.planet_dir().join("Material.c4g");
+        for (path, marker) in [
+            (&objects_materials, b"child".as_slice()),
+            (&extra_materials, b"root".as_slice()),
+            (&global_materials, b"global".as_slice()),
+        ] {
+            fs::create_dir_all(path).expect("material group");
+            fs::write(path.join("Source.txt"), marker).expect("material marker");
+        }
 
         let startup = startup_loader_registrations(&paths).expect("startup Extra registration");
         assert_eq!(startup.len(), 1);
@@ -54195,13 +54661,168 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let scenario_path = content.join("Actual.c4s");
         let (scenario, scenario_group, head) = loader_origin_fixture_scenario(&scenario_path, "");
-        let error = classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
-            .err()
-            .expect("scenario Extra activation vector is unresolved");
-        assert!(error.to_string().contains("post-OpenScenario"));
-        assert!(error
-            .to_string()
-            .contains(&extra_path.display().to_string()));
+        let scenario_graphics = scenario_path.join("Graphics.c4g");
+        fs::create_dir(&scenario_graphics).expect("scenario Graphics.c4g");
+        write_preview_png(
+            &scenario_graphics.join("ScenarioWins.png"),
+            [0xdd, 0xee, 0xff, 0xff],
+        );
+        let definitions = ScenarioDefinitionLoad::Fixed {
+            modules: vec!["Objects.c4d".to_string(), "Second.c4d".to_string()],
+            definition_root: None,
+        };
+        let registrations = classic_loader_registrations(
+            &scenario,
+            &scenario_group,
+            &head,
+            &definitions,
+            &paths,
+        )
+        .expect("cosmetic Extra content no longer aborts scenario setup");
+        assert_eq!(
+            registrations
+                .iter()
+                .map(|registration| (registration.priority, registration.group.root()))
+                .collect::<Vec<_>>(),
+            [
+                (200, scenario_path.as_path()),
+                (2, extra_path.as_path()),
+                (3, objects.as_path()),
+                (3, second.as_path()),
+            ]
+        );
+        assert!(registrations
+            .iter()
+            .all(|registration| registration.group.root() != unused.as_path()));
+
+        let loader_tier = highest_loader_tier(&registrations).expect("Extra loader tier");
+        assert_eq!(
+            loader_tier
+                .iter()
+                .map(|group| group.root())
+                .collect::<Vec<_>>(),
+            [second.as_path(), objects.as_path()],
+            "priority-3 children pool later-first and exclude the priority-2 Extra root"
+        );
+
+        let graphics = loader_graphics_registrations(&registrations)
+            .expect("registered Extra Graphics.c4g children");
+        let base_graphics = paths.planet_dir().join("Graphics.c4g");
+        fs::create_dir(&base_graphics).expect("base Graphics.c4g");
+        let base = Group::open(&base_graphics).expect("base graphics group");
+        assert_eq!(
+            load_named_graphics_image("ChildWins", &graphics, &base)
+                .expect("activated child graphic")
+                .pixels(),
+            [0x44, 0x55, 0x66, 0xff],
+            "the activated child sits above the Extra root"
+        );
+        assert_eq!(
+            load_named_graphics_image("ScenarioWins", &graphics, &base)
+                .expect("scenario graphic")
+                .pixels(),
+            [0xdd, 0xee, 0xff, 0xff],
+            "scenario graphics remain above activated Extra children"
+        );
+        assert_eq!(
+            load_named_graphics_image("ChildTie", &graphics, &base)
+                .expect("equal-priority Extra child graphic")
+                .pixels(),
+            [0x12, 0x34, 0x56, 0xff],
+            "RegisterMainGroups reverses the child tie a second time"
+        );
+        assert!(select_named_graphics_image_source("UnusedWins", &graphics, &base).is_err());
+
+        let first_definition_root = content.join("Objects.c4d");
+        let second_definition_root = content.join("Second.c4d");
+        fs::create_dir(&first_definition_root).expect("first activated definition root");
+        fs::create_dir(&second_definition_root).expect("second activated definition root");
+        let definition_roots = [
+            Group::open(&first_definition_root).expect("first activated definition"),
+            Group::open(&second_definition_root).expect("second activated definition"),
+        ];
+        let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
+        let resolved_graphics = resolver
+            .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_roots)
+            .expect("runtime Extra graphics chain");
+        assert_eq!(
+            resolved_graphics
+                .iter()
+                .map(|group| group.root())
+                .collect::<Vec<_>>(),
+            [
+                scenario_graphics.as_path(),
+                objects_graphics.as_path(),
+                second_graphics.as_path(),
+                extra_graphics.as_path(),
+                base_graphics.as_path(),
+            ]
+        );
+
+        let materials = resolver
+            .resolve_material_groups(&scenario_group)
+            .expect("native pre-Extra.Init material snapshot");
+        assert_eq!(
+            materials
+                .iter()
+                .map(|group| group.root())
+                .collect::<Vec<_>>(),
+            [extra_materials.as_path(), global_materials.as_path()],
+            "Extra child materials register after C4GameParameters snapshots the material chain"
+        );
+    }
+
+    #[test]
+    fn classic_loader_setup_accepts_an_activated_cosmetic_extra_child() {
+        let root = tempdir().expect("cosmetic Extra loader fixture");
+        install_global_gui_and_loader_test_root(root.path());
+        let content = root.path().join("content");
+        let scenario_path = content.join("Scenario.c4s");
+        fs::create_dir_all(&scenario_path).expect("scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Cosmetic Extra\nLoader=LoaderExtra\n",
+        )
+        .expect("scenario core");
+        fs::create_dir(content.join("Objects.c4d")).expect("activated definition root");
+        let extra_child = root.path().join("planet/Extra.c4g/Objects.c4d");
+        fs::create_dir_all(&extra_child).expect("activated Extra child");
+        write_preview_png(
+            &extra_child.join("LoaderExtra.png"),
+            [0x12, 0x34, 0x56, 0xff],
+        );
+        fs::write(extra_child.join("Graphics.c4g"), b"not a group")
+            .expect("malformed optional Extra graphics child");
+        let user = root.path().join("user");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_CONTENT_DIR", Some(content.as_path())),
+            ("LC_USER_DATA_DIR", Some(user.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("cosmetic Extra paths");
+        paths.ensure_user_dirs().expect("fixture user directories");
+        persist_config_value(&paths, "General", "LanguageEx", "US")
+            .expect("fixture loader language");
+        let assets = FrontendAssets::load(Some(&paths));
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "Scenario.c4s".to_string();
+        scenario.title = "Cosmetic Extra".to_string();
+        scenario.kind = ScenarioKind::Scenario;
+        scenario.path = Some(scenario_path);
+        let setup = build_scenario_loader(
+            &scenario,
+            &ScenarioDefinitionLoad::Fixed {
+                modules: vec!["Objects.c4d".to_string()],
+                definition_root: None,
+            },
+            &paths,
+            &assets,
+        )
+        .expect("cosmetic Extra no longer aborts classic loader setup");
+        assert_eq!(
+            setup.screen.selection().selected_filename(),
+            "LoaderExtra.png"
+        );
     }
 
     #[test]
