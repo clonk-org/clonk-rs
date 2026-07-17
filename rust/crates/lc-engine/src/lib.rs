@@ -44796,26 +44796,7 @@ impl Engine {
                 )
                 .is_contact()
             })
-            .filter(|object| {
-                let check_mask = object.frame_t_attach | CNAT_BOTTOM;
-                object.state.vertices.iter().any(|vertex| {
-                    if vertex.cnat & CNAT_NO_COLLISION != 0 {
-                        return false;
-                    }
-                    let x = object.state.position.x + vertex.x;
-                    let y = object.state.position.y + vertex.y;
-                    (check_mask & CNAT_CENTER != 0
-                        && bake.provides_attachment_density_at(vehicle, x, y))
-                        || (check_mask & CNAT_LEFT != 0
-                            && bake.provides_attachment_density_at(vehicle, x - 1, y))
-                        || (check_mask & CNAT_RIGHT != 0
-                            && bake.provides_attachment_density_at(vehicle, x + 1, y))
-                        || (check_mask & CNAT_TOP != 0
-                            && bake.provides_attachment_density_at(vehicle, x, y - 1))
-                        || (check_mask & CNAT_BOTTOM != 0
-                            && bake.provides_attachment_density_at(vehicle, x, y + 1))
-                })
-            })
+            .filter(|object| Self::object_contacts_solid_mask_bake(object, &bake, vehicle))
             .map(|object| object.id)
             .collect();
         Some(SolidMaskAttachmentBackup {
@@ -44906,10 +44887,17 @@ impl Engine {
         .is_empty()
     }
 
-    fn object_contacts_solid_mask(&self, index: usize, bake: &SolidMaskBake, vehicle: u8) -> bool {
-        let Some(object) = self.objects.get(index) else {
+    fn object_contacts_solid_mask_bake(
+        object: &Object,
+        bake: &SolidMaskBake,
+        vehicle: u8,
+    ) -> bool {
+        // C4SolidMask::DensityProvider returns C4M_Solid (50) for a mask
+        // pixel, and C4Shape::GetVertexContact compares it inclusively to
+        // the candidate shape's live ContactDensity.
+        if CONTACT_DENSITY_SOLID < object.state.contact_density {
             return false;
-        };
+        }
         let check_mask = object.frame_t_attach | CNAT_BOTTOM;
         object.state.vertices.iter().any(|vertex| {
             if vertex.cnat & CNAT_NO_COLLISION != 0 {
@@ -44927,6 +44915,12 @@ impl Engine {
                     && bake.provides_attachment_density_at(vehicle, x, y - 1))
                 || (check_mask & CNAT_BOTTOM != 0
                     && bake.provides_attachment_density_at(vehicle, x, y + 1))
+        })
+    }
+
+    fn object_contacts_solid_mask(&self, index: usize, bake: &SolidMaskBake, vehicle: u8) -> bool {
+        self.objects.get(index).is_some_and(|object| {
+            Self::object_contacts_solid_mask_bake(object, bake, vehicle)
         })
     }
 

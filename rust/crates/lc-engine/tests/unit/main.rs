@@ -56036,63 +56036,69 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
-    fn first_domotion_captures_riders_at_the_pre_motion_position() {
-        let mut platform = movement_mask_definition("PLAT", 3, -2);
-        platform.set_category(CATEGORY_OBJECT);
-        let mut rider = simple_definition("RIDE");
-        rider.set_category(CATEGORY_OBJECT);
-        rider.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
-        rider.set_shape_vertices(vec![
-            ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM),
-        ]);
-        rider.set_contact_density(50);
+    fn solid_mask_rider_capture_respects_contact_density_boundary() {
+        fn move_platform(contact_density: i32) -> (Vector2, Vector2) {
+            let mut platform = movement_mask_definition("PLAT", 3, -2);
+            platform.set_category(CATEGORY_OBJECT);
+            let mut rider = simple_definition("RIDE");
+            rider.set_category(CATEGORY_OBJECT);
+            rider.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+            rider.set_shape_vertices(vec![
+                ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM),
+            ]);
+            rider.set_contact_density(contact_density);
 
-        let mut engine = Engine::with_seed(63);
-        engine.set_landscape(vehicle_grid_landscape(30, 20));
-        engine.set_physics(PhysicsSettings::new(0, 20, -20));
-        engine
-            .register_definition(platform)
-            .expect("platform registers");
-        engine.register_definition(rider).expect("rider registers");
-        let platform = engine
-            .spawn_object(
-                SpawnConfig::new("PLAT")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(10, 10))
-                    .with_fixed_position(FixedVec2::from_ints(10, 10))
-                    .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
-                    .with_mobile(true)
-                    .with_loaded(true),
-            )
-            .expect("platform spawns");
-        let platform_index = engine
-            .find_object_index(platform)
-            .expect("platform exists");
-        engine.update_solid_mask(platform_index);
-        let rider = engine
-            .spawn_object(
-                SpawnConfig::new("RIDE")
-                    .with_category(CATEGORY_OBJECT)
-                    .with_position(Vector2::new(10, 9))
-                    .with_fixed_position(FixedVec2::from_ints(10, 9))
-                    .with_loaded(true),
-            )
-            .expect("rider spawns");
-
-        engine.tick().expect("platform movement succeeds");
-
-        assert_eq!(
+            let mut engine = Engine::with_seed(63);
+            engine.set_landscape(vehicle_grid_landscape(30, 20));
+            engine.set_physics(PhysicsSettings::new(0, 20, -20));
             engine
-                .object_snapshot(platform)
-                .expect("platform remains")
-                .position,
-            Vector2::new(12, 10)
-        );
-        assert_eq!(
-            engine.object_snapshot(rider).expect("rider remains").position,
-            Vector2::new(12, 9),
-            "the first DoMotion backup translates the rider by the full delta"
-        );
+                .register_definition(platform)
+                .expect("platform registers");
+            engine.register_definition(rider).expect("rider registers");
+            let platform = engine
+                .spawn_object(
+                    SpawnConfig::new("PLAT")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(10, 10))
+                        .with_fixed_position(FixedVec2::from_ints(10, 10))
+                        .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
+                        .with_mobile(true)
+                        .with_loaded(true),
+                )
+                .expect("platform spawns");
+            let platform_index = engine
+                .find_object_index(platform)
+                .expect("platform exists");
+            engine.update_solid_mask(platform_index);
+            let rider = engine
+                .spawn_object(
+                    SpawnConfig::new("RIDE")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(10, 9))
+                        .with_fixed_position(FixedVec2::from_ints(10, 9))
+                        .with_contact_density(contact_density)
+                        .with_loaded(true),
+                )
+                .expect("rider spawns");
+
+            engine.tick().expect("platform movement succeeds");
+
+            (
+                engine
+                    .object_snapshot(platform)
+                    .expect("platform remains")
+                    .position,
+                engine.object_snapshot(rider).expect("rider remains").position,
+            )
+        }
+
+        for (contact_density, expected_rider) in
+            [(50, Vector2::new(12, 9)), (51, Vector2::new(10, 9))]
+        {
+            let (platform, rider) = move_platform(contact_density);
+            assert_eq!(platform, Vector2::new(12, 10));
+            assert_eq!(rider, expected_rider, "ContactDensity={contact_density}");
+        }
     }
 
     #[test]
