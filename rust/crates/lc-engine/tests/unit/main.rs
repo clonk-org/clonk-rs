@@ -43238,18 +43238,24 @@ public func Swap() { return(ChangeDef(NEWD)); }
     }
 
     #[test]
-    fn shipped_power_line_old_endpoint_fallback_ignores_only_vehicle_pixels() {
+    fn shipped_power_line_old_endpoint_fallback_uses_cpp_material_index_quirk() {
         // C4Shape::LineConnect falls back to the OLD endpoint only after all
         // 4/8/12-pixel bend candidates fail, and tests both fallback legs via
-        // PathFreeIgnoreVehicle (src/C4Shape.cpp:303-313). Its pixel predicate
-        // accepts solid-mask/closed-border Vehicle pixels but rejects every
-        // other solid material (src/C4Landscape.cpp:2044-2052).
+        // PathFreeIgnoreVehicle (src/C4Shape.cpp:303-313). C++ accidentally
+        // applies DensitySolid to the material index, so every material in
+        // this one-entry set is passable despite its solid density
+        // (src/C4Landscape.cpp:2044-2052).
         fn run_case(
             resource: &ResourceDefinitionData,
             material: &str,
             move_first_endpoint: bool,
         ) -> Option<Vec<(i32, i32)>> {
             let mut engine = Engine::with_seed(0);
+            let library = MaterialLibrary::parse(&format!(
+                "[Material {material}]\nName={material}\nDensity=100\n"
+            ))
+            .expect("single solid material parses");
+            engine.set_materials(MaterialSet::from_resource_library(&library));
             let mut power_line =
                 Definition::from_resource(resource).expect("compile shipped PWRL definition");
             power_line.set_line(resource.core.line);
@@ -43339,14 +43345,14 @@ public func Swap() { return(ChangeDef(NEWD)); }
             "last endpoint keeps the old point as a bend through Vehicle"
         );
         assert_eq!(
-            run_case(&resource, "Earth", true),
-            None,
-            "ordinary solid terrain still breaks first-endpoint movement"
+            run_case(&resource, "Granite", true),
+            Some(vec![(2, 10), (5, 10), (18, 10)]),
+            "low-index Granite keeps the old point as a first-endpoint bend"
         );
         assert_eq!(
-            run_case(&resource, "Earth", false),
-            None,
-            "ordinary solid terrain still breaks last-endpoint movement"
+            run_case(&resource, "Granite", false),
+            Some(vec![(2, 10), (15, 10), (18, 10)]),
+            "low-index Granite keeps the old point as a last-endpoint bend"
         );
     }
 

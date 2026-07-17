@@ -3781,10 +3781,10 @@ impl Landscape {
         }
     }
 
-    /// `PathFreeIgnoreVehiclePix` (C4Landscape.cpp:2044-2052): the same
-    /// `GBackPix`/`Pix2Dens` solid test as [`Self::is_solid_at`], except every
-    /// pixel mapped to the Vehicle material is passable. This includes closed
-    /// borders (MCVehic) and every texture slot whose Pix2Mat is MVehic.
+    /// `PathFreeIgnoreVehiclePix` (C4Landscape.cpp:2044-2052) passes the
+    /// *material index* from `GetPixMat` to `DensitySolid`, rather than the
+    /// material's density. Consequently every material below index 50 is
+    /// passable, irrespective of density; MVehic is passable at any index.
     pub(crate) fn is_solid_ignoring_vehicle_at(&self, x: i32, y: i32) -> bool {
         match self.border_pixel(x, y) {
             Some(BorderPixel::Sky | BorderPixel::Vehicle) => return false,
@@ -3794,25 +3794,18 @@ impl Landscape {
             let Some(byte) = grid.byte_at(x, y) else {
                 return false;
             };
-            if byte == 0 || grid.density_of(byte) < C4M_SOLID {
+            if byte == 0 {
                 return false;
             }
-            let slot = usize::from(byte & 0x7f);
-            let vehicle_name = grid
-                .material_names
-                .get(slot)
-                .and_then(Option::as_deref)
-                .is_some_and(|name| name.eq_ignore_ascii_case("Vehicle"));
-            let vehicle_id = self.vehicle_material.is_some_and(|vehicle| {
-                grid.materials.get(slot).copied().flatten() == Some(vehicle)
+            return grid.material_for_byte(byte).is_some_and(|material| {
+                material.index() >= C4M_SOLID as usize
+                    && Some(material) != self.vehicle_material
             });
-            return !(vehicle_name || vehicle_id);
         }
 
-        self.is_solid_at(x, y)
-            && self
-                .vehicle_material
-                .is_none_or(|vehicle| self.material_at(x, y) != Some(vehicle))
+        self.material_at(x, y).is_some_and(|material| {
+            material.index() >= C4M_SOLID as usize && Some(material) != self.vehicle_material
+        })
     }
 
     /// `GBackSemiSolid` (C4Material.h:202): density >= C4M_SemiSolid(25),
@@ -6924,34 +6917,70 @@ mod tests {
     }
 
     #[test]
-    fn ignore_vehicle_solid_probe_uses_material_identity_and_closed_borders() {
-        // PathFreeIgnoreVehiclePix compares Pix2Mat(pixel) to MVehic, not the
-        // one default MCVehic byte (C4Landscape.cpp:2044-2052). Thus every
-        // Vehicle texture slot, its IFT form, and closed borders are free;
-        // equally dense Earth remains blocked.
-        let grid = PixelGrid::new(
+    fn ignore_vehicle_solid_probe_treats_every_low_index_material_as_free() {
+        // C++ accidentally passes Pix2Mat(pixel), a material index, to
+        // DensitySolid. With fewer than 50 materials even dense Granite is
+        // free, as are sky, Vehicle pixels (including IFT), and closed borders.
+        let granite = MaterialId::new(17).expect("low Granite index");
+        let vehicle = MaterialId::new(18).expect("low Vehicle index");
+        let mut grid = PixelGrid::new(
             4,
             1,
-            vec![1, 2, 3, 0x83],
-            vec![0, 100, 100, 100],
-            vec![
-                None,
-                Some("Earth".to_owned()),
-                Some("Vehicle".to_owned()),
-                Some("Vehicle".to_owned()),
-            ],
-            vec![None; 4],
+            vec![1, 0, 2, 0x81],
+            vec![0, 100, 100],
+            vec![None, Some("Granite".to_owned()), Some("Vehicle".to_owned())],
+            vec![None; 3],
         );
+        grid.resolve_materials(|name| match name {
+            "Granite" => Some(granite),
+            "Vehicle" => Some(vehicle),
+            _ => None,
+        });
         let mut landscape = Landscape::new(4, vec![1; 4]).expect("landscape builds");
         landscape.set_pixel_grid(grid);
         landscape.set_world_height(1);
+        landscape.set_vehicle_material(Some(vehicle));
 
-        assert!(landscape.is_solid_ignoring_vehicle_at(0, 0));
+        assert!(!landscape.is_solid_ignoring_vehicle_at(0, 0));
         assert!(!landscape.is_solid_ignoring_vehicle_at(1, 0));
         assert!(!landscape.is_solid_ignoring_vehicle_at(2, 0));
         assert!(!landscape.is_solid_ignoring_vehicle_at(3, 0));
         assert!(!landscape.is_solid_ignoring_vehicle_at(-1, 0));
         assert!(!landscape.is_solid_ignoring_vehicle_at(4, 0));
+    }
+
+    #[test]
+    fn ignore_vehicle_solid_probe_blocks_only_non_vehicle_index_at_least_50() {
+        let dense_low = MaterialId::new(49).expect("last passable material index");
+        let sparse_high = MaterialId::new(50).expect("first blocking material index");
+        let vehicle = MaterialId::new(51).expect("high Vehicle index");
+        let mut grid = PixelGrid::new(
+            3,
+            1,
+            vec![1, 2, 3],
+            vec![0, 100, 1, 100],
+            vec![
+                None,
+                Some("DenseLow".to_owned()),
+                Some("SparseHigh".to_owned()),
+                Some("Vehicle".to_owned()),
+            ],
+            vec![None; 4],
+        );
+        grid.resolve_materials(|name| match name {
+            "DenseLow" => Some(dense_low),
+            "SparseHigh" => Some(sparse_high),
+            "Vehicle" => Some(vehicle),
+            _ => None,
+        });
+        let mut landscape = Landscape::new(3, vec![1; 3]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(1);
+        landscape.set_vehicle_material(Some(vehicle));
+
+        assert!(!landscape.is_solid_ignoring_vehicle_at(0, 0));
+        assert!(landscape.is_solid_ignoring_vehicle_at(1, 0));
+        assert!(!landscape.is_solid_ignoring_vehicle_at(2, 0));
     }
 
     #[test]
