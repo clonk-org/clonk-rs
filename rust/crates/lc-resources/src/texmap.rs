@@ -23,48 +23,109 @@ pub struct TextureMap {
 /// ("Index +128 for underground materials", TexMap.txt header).
 pub const IFT_BIT: u8 = 0x80;
 
+fn parse_decimal_prefix(text: &str) -> Option<i32> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    let negative = match bytes.get(cursor) {
+        Some(b'-') => {
+            cursor += 1;
+            true
+        }
+        Some(b'+') => {
+            cursor += 1;
+            false
+        }
+        _ => false,
+    };
+    let start = cursor;
+    let mut value = 0i64;
+    while let Some(digit) = bytes.get(cursor).and_then(|byte| byte.checked_sub(b'0')) {
+        if digit > 9 {
+            break;
+        }
+        value = value.checked_mul(10)?.checked_add(i64::from(digit))?;
+        cursor += 1;
+    }
+    if cursor == start {
+        return None;
+    }
+    let value = if negative {
+        value.checked_neg()?
+    } else {
+        value
+    };
+    i32::try_from(value).ok()
+}
+
 impl TextureMap {
-    /// Parse a TexMap.txt source. Unknown or malformed lines are skipped
-    /// (the C++ loader logs and continues); `#` starts a comment.
+    /// Parse the first material group's TexMap.txt through
+    /// `C4TextureMap::LoadMap`. Unknown or malformed lines are skipped; only
+    /// a `#` in column zero suppresses entry parsing.
     pub fn parse(source: &str) -> Self {
         let mut map = Self {
             entries: vec![None; 128],
             overload_materials: false,
             overload_textures: false,
         };
-        for raw_line in source.lines() {
-            let line = raw_line.trim().trim_start_matches('\u{feff}').trim();
-            if line.is_empty() || line.starts_with('#') {
+        for raw_line in source.split('\n') {
+            // LoadMap decides between entries and flags before removing CR:
+            // entries require exactly one '=' and a non-comment first byte.
+            if raw_line.starts_with('#')
+                || raw_line.bytes().filter(|byte| *byte == b'=').count() != 1
+            {
+                if raw_line.starts_with("OverloadMaterials") {
+                    map.overload_materials = true;
+                }
+                if raw_line.starts_with("OverloadTextures") {
+                    map.overload_textures = true;
+                }
                 continue;
             }
-            // C++ matches the directives by PREFIX on non-entry lines
-            // (C4Texture.cpp:220-221).
-            if line.starts_with("OverloadMaterials") {
-                map.overload_materials = true;
-                continue;
-            }
-            if line.starts_with("OverloadTextures") {
-                map.overload_textures = true;
-                continue;
-            }
+            // SReplaceChar(line, '\r', '\0') makes the first CR terminate all
+            // subsequent C-string operations.
+            let line = raw_line.split('\r').next().unwrap_or_default();
             let Some((index_text, pair)) = line.split_once('=') else {
                 continue;
             };
-            let Ok(index) = index_text.trim().parse::<u8>() else {
+            let Some(index) = parse_decimal_prefix(index_text) else {
                 continue;
             };
             // AddEntry rejects index 0 (sky) and >= C4M_MaxTexIndex=127
             // (C4Texture.cpp:116-119; C4Constants.h:60).
-            if index == 0 || index as usize >= 127 {
+            if !(1..127).contains(&index) {
                 continue;
             }
-            let Some((material, texture)) = pair.trim().split_once('-') else {
+            let Some((material, texture)) = pair.split_once('-') else {
                 continue;
             };
             map.entries[index as usize] = Some(TexMapEntry {
-                material: material.trim().to_string(),
-                texture: texture.trim().to_string(),
+                material: material.to_string(),
+                texture: texture.to_string(),
             });
+        }
+        map
+    }
+
+    /// Read continuation flags from a later material group through
+    /// `C4TextureMap::LoadFlags`. Unlike [`Self::parse`], this is a raw
+    /// prefix scan and deliberately accepts suffixes such as `=1`.
+    pub fn parse_flags(source: &str) -> Self {
+        let mut map = Self {
+            entries: vec![None; 128],
+            overload_materials: false,
+            overload_textures: false,
+        };
+        for raw_line in source.split('\n') {
+            let line = raw_line.trim_start_matches('\r');
+            if line.starts_with("OverloadMaterials") {
+                map.overload_materials = true;
+            }
+            if line.starts_with("OverloadTextures") {
+                map.overload_textures = true;
+            }
         }
         map
     }
@@ -134,5 +195,81 @@ mod tests {
         assert_eq!(map.material_for_pixel(126), Some("Earth"));
         assert_eq!(map.material_for_pixel(127), None);
         assert_eq!(map.material_for_pixel(255), None, "255 = 127|IFT stays sky");
+    }
+
+    #[test]
+    fn load_map_requires_one_equals_before_checking_flag_prefixes() {
+        let map = TextureMap::parse("20=Water-Sm=ooth\nOverloadMaterials=1\nOverloadTextures==1\n");
+        assert!(map.entry(20).is_none());
+        assert!(!map.overload_materials);
+        assert!(
+            map.overload_textures,
+            "two equals select LoadMap's prefix-based flag branch"
+        );
+    }
+
+    #[test]
+    fn load_map_preserves_mapping_whitespace_and_does_not_strip_bom() {
+        let map =
+            TextureMap::parse("\u{feff}29=Earth-Rough\n30= Earth-Smooth\n31=Earth - Smooth \n");
+        assert!(
+            map.entry(29).is_none(),
+            "a BOM makes strtol return index zero"
+        );
+        assert_eq!(
+            map.entry(30),
+            Some(&TexMapEntry {
+                material: " Earth".into(),
+                texture: "Smooth".into(),
+            })
+        );
+        assert_eq!(
+            map.entry(31),
+            Some(&TexMapEntry {
+                material: "Earth ".into(),
+                texture: " Smooth ".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn load_map_index_uses_the_strtol_decimal_prefix() {
+        let map = TextureMap::parse(" 30 junk=Earth-Smooth\n+31=Rock-Rough\n0x20=Gold-Rough\n");
+        assert_eq!(map.material_for_pixel(30), Some("Earth"));
+        assert_eq!(map.material_for_pixel(31), Some("Rock"));
+        assert!(map.entry(32).is_none());
+    }
+
+    #[test]
+    fn later_group_load_flags_keeps_raw_prefix_semantics() {
+        let map = TextureMap::parse_flags(
+            "OverloadMaterials=1\nOverloadTextures suffix\n30=Earth-Smooth\n",
+        );
+        assert!(map.overload_materials);
+        assert!(map.overload_textures);
+        assert!(
+            map.entry(30).is_none(),
+            "LoadFlags never parses table entries"
+        );
+    }
+
+    #[test]
+    fn shipped_global_texmap_retains_all_well_formed_entries() {
+        let map = TextureMap::parse(include_str!("../../../../content/Material.c4g/TEXMAP.TXT"));
+        assert_eq!(map.entries.iter().flatten().count(), 48);
+        assert_eq!(
+            map.entry(10),
+            Some(&TexMapEntry {
+                material: "Tunnel".into(),
+                texture: "Smooth".into(),
+            })
+        );
+        assert_eq!(
+            map.entry(81),
+            Some(&TexMapEntry {
+                material: "FlySand".into(),
+                texture: "Smooth3".into(),
+            })
+        );
     }
 }

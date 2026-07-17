@@ -8523,7 +8523,7 @@ pub(crate) fn build_map_pixel_classifier(
             let Ok(source) = material_group.read_file("TexMap.txt") else {
                 break;
             };
-            Some(lc_resources::texmap::TextureMap::parse(
+            Some(lc_resources::texmap::TextureMap::parse_flags(
                 &String::from_utf8_lossy(&source),
             ))
         };
@@ -23919,7 +23919,8 @@ public func ActualizePhase(pClonk)
     #[test]
     fn texmap_init_clears_unresolved_entries_and_frees_their_slots() {
         // C4TextureMap::Init clears both a known material with an unloaded
-        // texture and an unknown material before CrossMapMaterials. Once
+        // texture and an untrimmed, therefore unknown, material before
+        // CrossMapMaterials. Once
         // slots 1..29 are occupied, GetIndex must therefore be able to reuse
         // the cleared slot 30 (C4Texture.cpp:68-104,229-244,319-345).
         let dir = tempdir().expect("tempdir");
@@ -23927,7 +23928,7 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&materials).expect("materials dir");
         std::fs::write(
             materials.join("TexMap.txt"),
-            "1=Earth-NoSuchTex\n30=Earth-NoSuchTex\n31=NoSuchMat-Rough\n",
+            "1=Earth-NoSuchTex\n30=Earth-NoSuchTex\n31= Earth-Rough\n",
         )
         .expect("write texmap");
         std::fs::write(

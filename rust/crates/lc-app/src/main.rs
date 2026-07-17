@@ -12145,7 +12145,7 @@ fn admitted_material_groups(
             let Some(source) = read_group_file_case_insensitive(&group, "TexMap.txt") else {
                 break;
             };
-            lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&source))
+            lc_resources::texmap::TextureMap::parse_flags(&String::from_utf8_lossy(&source))
         };
         let current_materials = load_materials;
         let current_textures = load_textures;
