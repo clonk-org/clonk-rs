@@ -13958,6 +13958,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetCrewEnabled", set_crew_enabled);
     script.register_host_function("GetCrewEnabled", get_crew_enabled);
     script.register_host_function("GetChar", get_char);
+    script.register_host_function("GetColor", get_color);
     script.register_host_function("GetColorDw", get_color_dw);
     script.register_host_function("SetCursor", set_cursor_host);
     script.register_host_function("Fling", fling);
@@ -24757,6 +24758,14 @@ fn get_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(Value::Int)
             .unwrap_or(Value::Nil))
     })
+}
+
+/// FnGetColor (C4Script.cpp:3629-3633): deprecated oldgfx stub.
+fn get_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    if let Some(target) = args.first() {
+        let _ = parse_object_reference_argument(target, "GetColor", "obj")?;
+    }
+    Ok(Value::Int(0))
 }
 
 /// FnSetCrewEnabled (C4Script.cpp:4814-4836): CrewDisabled = !enabled;
@@ -47360,6 +47369,7 @@ mod tests {
         "GetChar",
         "GetClimate",
         "GetClrModulation",
+        "GetColor",
         "GetColorDw",
         "GetComDir",
         "GetCommand",
@@ -47705,6 +47715,33 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn deprecated_get_color_stub_returns_zero_and_local_override_wins() {
+        let mut builtin = lc_script::Engine::new();
+        register_host_functions(&mut builtin);
+        builtin
+            .load_script("#strict 2\nfunc Probe() { return GetColor(); }")
+            .expect("builtin GetColor probe compiles");
+        assert_eq!(
+            builtin.call("Probe", &[]).expect("builtin GetColor runs"),
+            Value::Int(0)
+        );
+
+        let mut overridden = lc_script::Engine::new();
+        register_host_functions(&mut overridden);
+        overridden
+            .load_script(
+                "#strict 2\nfunc GetColor() { return 37; }\nfunc Probe() { return GetColor(); }",
+            )
+            .expect("local GetColor override compiles");
+        assert_eq!(
+            overridden
+                .call("Probe", &[])
+                .expect("local GetColor override runs"),
+            Value::Int(37)
+        );
     }
 
     fn scenario_section_world_object(id: u64, status: ObjectStatus) -> HostWorldObject {
