@@ -4726,45 +4726,129 @@ fn parse_legacy_version(_field: &str, raw: &str) -> Result<[i32; 5], ScenarioErr
     Ok(version)
 }
 
+fn parse_base_functionality_number(raw: &str, position: &mut usize) -> Option<i32> {
+    skip_std_whitespace(raw, position);
+    let bytes = raw.as_bytes();
+    let number_start = *position;
+    let mut cursor = number_start;
+    // StdCompilerINIRead selects base 16 only for an unsigned token that
+    // starts with 0x. A sign therefore makes `-0x10` decimal -0 plus junk.
+    let radix = if bytes.get(cursor) == Some(&b'0')
+        && matches!(bytes.get(cursor + 1), Some(b'x' | b'X'))
+    {
+        cursor += 2;
+        16u32
+    } else {
+        10u32
+    };
+    let negative = if radix == 10 {
+        match bytes.get(cursor) {
+            Some(b'-') => {
+                cursor += 1;
+                true
+            }
+            Some(b'+') => {
+                cursor += 1;
+                false
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let digits_start = cursor;
+    let mut magnitude = 0u128;
+    while let Some(digit) = bytes.get(cursor).and_then(|byte| match byte {
+        b'0'..=b'9' => Some(u32::from(*byte - b'0')),
+        b'a'..=b'f' if radix == 16 => Some(u32::from(*byte - b'a') + 10),
+        b'A'..=b'F' if radix == 16 => Some(u32::from(*byte - b'A') + 10),
+        _ => None,
+    }) {
+        if digit >= radix {
+            break;
+        }
+        magnitude = magnitude
+            .saturating_mul(u128::from(radix))
+            .saturating_add(u128::from(digit));
+        cursor += 1;
+    }
+    if cursor == digits_start {
+        if radix == 16 {
+            // strtol("0xG", ..., 16) still consumes the leading zero.
+            *position = number_start + 1;
+            return Some(0);
+        }
+        return None;
+    }
+
+    // strtol saturates to native C long; assigning that result to int32_t
+    // then supplies the platform's ordinary modulo narrowing.
+    let long_bits = std::mem::size_of::<std::os::raw::c_long>() * 8;
+    let long_max = (1u128 << (long_bits - 1)) - 1;
+    let long_min_magnitude = 1u128 << (long_bits - 1);
+    let signed = if negative {
+        if magnitude >= long_min_magnitude {
+            -(long_min_magnitude as i128)
+        } else {
+            -(magnitude as i128)
+        }
+    } else {
+        magnitude.min(long_max) as i128
+    };
+    *position = cursor;
+    Some((signed as i64) as i32)
+}
+
 fn parse_base_functionality(field: &str, raw: &str) -> Result<i32, ScenarioError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if raw.trim().is_empty() {
         return Ok(BASEFUNC_DEFAULT);
     }
-    if let Ok(value) = parse_i32(trimmed) {
-        return Ok(value);
-    }
+
     let mut value = 0;
-    for token in trimmed.split(['|', ',', '&']) {
-        let entry = token.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let flag = match entry {
-            "BASEFUNC_Default" => BASEFUNC_DEFAULT,
-            "BASEFUNC_AutoSellContents" => BASEFUNC_AUTO_SELL_CONTENTS,
-            "BASEFUNC_RegenerateEnergy" => BASEFUNC_REGENERATE_ENERGY,
-            "BASEFUNC_Buy" => BASEFUNC_BUY,
-            "BASEFUNC_Sell" => BASEFUNC_SELL,
-            "BASEFUNC_RejectEntrance" => BASEFUNC_REJECT_ENTRANCE,
-            "BASEFUNC_Extinguish" => BASEFUNC_EXTINGUISH,
-            other => {
+    let mut position = 0;
+    loop {
+        if let Some(flag) = parse_base_functionality_number(raw, &mut position) {
+            value |= flag;
+        } else {
+            let start = position;
+            while raw
+                .as_bytes()
+                .get(position)
+                .is_some_and(|byte| is_std_identifier_byte(*byte))
+            {
+                position += 1;
+            }
+            if position == start {
                 return Err(ScenarioError::LegacyParse(format!(
-                    "unknown BaseFunctionality token `{other}` in `{field}`"
+                    "missing BaseFunctionality token in `{field}`"
                 )));
             }
-        };
-        if flag == BASEFUNC_DEFAULT {
-            value |= BASEFUNC_DEFAULT;
-        } else {
+            let entry = &raw[start..position];
+            let flag = match entry {
+                "BASEFUNC_Default" => BASEFUNC_DEFAULT,
+                "BASEFUNC_AutoSellContents" => BASEFUNC_AUTO_SELL_CONTENTS,
+                "BASEFUNC_RegenerateEnergy" => BASEFUNC_REGENERATE_ENERGY,
+                "BASEFUNC_Buy" => BASEFUNC_BUY,
+                "BASEFUNC_Sell" => BASEFUNC_SELL,
+                "BASEFUNC_RejectEntrance" => BASEFUNC_REJECT_ENTRANCE,
+                "BASEFUNC_Extinguish" => BASEFUNC_EXTINGUISH,
+                _ => {
+                    tracing::warn!(
+                        field,
+                        token = entry,
+                        "unknown BaseFunctionality bit name"
+                    );
+                    0
+                }
+            };
             value |= flag;
         }
+
+        if !consume_std_separator(raw, &mut position, b'|') {
+            break;
+        }
     }
-    if value == 0 {
-        Ok(0)
-    } else {
-        Ok(value)
-    }
+    Ok(value)
 }
 
 fn parse_i32_array<const N: usize>(_field: &str, raw: &str) -> Result<[i32; N], ScenarioError> {
@@ -20138,6 +20222,94 @@ public func ActualizePhase(pClonk)
         assert_eq!(parse_i32("-15x").expect("parses"), -15);
         assert_eq!(parse_i32(" 42 trailing words").expect("parses"), 42);
         assert!(parse_i32("junk").is_err(), "no digits is still an error");
+    }
+
+    fn parsed_base_functionality(raw: &str) -> i32 {
+        parse_legacy_scenario_text(&format!("[Game]\nBaseFunctionality={raw}\n"))
+            .expect("scenario core parses")
+            .core
+            .game
+            .realism
+            .base_functionality
+    }
+
+    #[test]
+    fn base_functionality_parses_each_numeric_or_named_pipe_element() {
+        assert_eq!(
+            parsed_base_functionality("1|BASEFUNC_Buy"),
+            BASEFUNC_AUTO_SELL_CONTENTS | BASEFUNC_BUY
+        );
+        assert_eq!(
+            parsed_base_functionality("BASEFUNC_RegenerateEnergy|8"),
+            BASEFUNC_REGENERATE_ENERGY | BASEFUNC_SELL
+        );
+        assert_eq!(
+            parsed_base_functionality(" BASEFUNC_Buy \t| 8 "),
+            BASEFUNC_BUY | BASEFUNC_SELL
+        );
+        assert_eq!(parsed_base_functionality("0x10|4"), 20);
+        assert_eq!(parsed_base_functionality("-0x10|4"), 0);
+        assert_eq!(parsed_base_functionality("077"), 77);
+        assert_eq!(
+            parsed_base_functionality(
+                "BASEFUNC_Buy|8junk|BASEFUNC_AutoSellContents"
+            ),
+            BASEFUNC_BUY | BASEFUNC_SELL,
+            "strtol consumes the numeric prefix and the junk terminates the list"
+        );
+        assert_eq!(
+            parsed_base_functionality("0xG|BASEFUNC_Buy"),
+            0,
+            "invalid hexadecimal syntax still consumes the leading zero"
+        );
+        let narrowed_overflow = if std::mem::size_of::<std::os::raw::c_long>() == 8 {
+            0
+        } else {
+            i32::MAX
+        };
+        assert_eq!(
+            parsed_base_functionality("4294967296|BASEFUNC_Buy"),
+            narrowed_overflow | BASEFUNC_BUY,
+            "strtol narrows its native-long result to int32 before the OR"
+        );
+    }
+
+    #[test]
+    fn base_functionality_unknown_names_warn_without_dropping_known_elements() {
+        let (parsed, warnings) = capture_definition_warnings(|| {
+            parsed_base_functionality(
+                "BASEFUNC_Buy|BASEFUNC_Bogus|BASEFUNC_AutoSellContents",
+            )
+        });
+
+        assert_eq!(parsed, BASEFUNC_BUY | BASEFUNC_AUTO_SELL_CONTENTS);
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("unknown BaseFunctionality bit name")
+        }));
+    }
+
+    #[test]
+    fn base_functionality_only_pipe_continues_the_element_loop() {
+        assert_eq!(
+            parsed_base_functionality("BASEFUNC_Buy,BASEFUNC_Sell"),
+            BASEFUNC_BUY
+        );
+        assert_eq!(
+            parsed_base_functionality("BASEFUNC_Buy&BASEFUNC_Sell"),
+            BASEFUNC_BUY
+        );
+        assert_eq!(
+            parsed_base_functionality("BASEFUNC_Buy||BASEFUNC_Sell"),
+            BASEFUNC_DEFAULT,
+            "an empty element invalidates the whole naming"
+        );
+    }
+
+    #[test]
+    fn base_functionality_numeric_tail_round_trips_cpp_decompiler_output() {
+        let serialized = format_base_functionality(65).expect("nondefault mask serializes");
+        assert_eq!(serialized, "BASEFUNC_AutoSellContents|64");
+        assert_eq!(parsed_base_functionality(&serialized), 65);
     }
 
     #[test]
