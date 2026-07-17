@@ -1521,17 +1521,11 @@ impl Parser<'_, '_> {
                 let pending = match field {
                     "mat" => {
                         let name = str_par()?.to_string();
-                        // MatMap->Get validity (src/C4MapCreatorS2.cpp:341-343);
-                        // "Sky" is the MNone idiom in shipped content.
+                        // MatMap->Get validity (src/C4MapCreatorS2.cpp:341-343).
                         if self.classifier.material(&name).is_none() {
-                            if name.eq_ignore_ascii_case("sky") {
-                                None
-                            } else {
-                                return Err(format!("material '{name}' not found"));
-                            }
-                        } else {
-                            Some(Pending::Material(name))
+                            return Err(format!("material '{name}' not found"));
                         }
+                        Some(Pending::Material(name))
                     }
                     "tex" => {
                         let name = str_par()?.to_string();
@@ -2504,6 +2498,77 @@ mod tests {
             vec![0, 2],
             "missing ScriptAlgoMissing paints nothing and parsing continues"
         );
+    }
+
+    #[test]
+    fn mapgen_mat_sky_without_loaded_material_truncates_parse() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let base = rng.count;
+        let creation = create_s2_map_with_state(
+            "map M { \
+               overlay { mat=Sky; }; \
+               overlay { mat=Earth; tex=Rough; sub=0; }; \
+             };",
+            &mut classifier,
+            LegacyC4SVal::new(2, 0, 2, 2),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+        );
+
+        assert_eq!(
+            rng.count - base,
+            2,
+            "the incomplete top-level map is never re-evaluated after MatNotFound"
+        );
+        assert_eq!(
+            creation.bitmap.expect("the incomplete map still renders").indices,
+            vec![0, 0],
+            "MatNotFound leaves the map subtree unevaluated, so its material colors stay zero"
+        );
+        let map = last_map(&creation.creator.tree).expect("the incomplete map stays linked");
+        assert_eq!(
+            creation.creator.tree.nodes[map].children.len(),
+            1,
+            "the failing overlay stays linked but the later Earth overlay is never parsed"
+        );
+    }
+
+    #[test]
+    fn mapgen_mat_sky_resolves_loaded_literal_material() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material]\nName=Sky\nDensity=0\n",
+        )
+        .expect("Sky material parses");
+        let densities = [0; 128];
+        let mut names = vec![None; 128];
+        names[1] = Some("Sky".to_string());
+        let mut textures = vec![None; 128];
+        textures[1] = Some("Rough".to_string());
+        let mut classifier = MapPixelClassifier::from_slots_with_library(
+            densities,
+            names,
+            textures,
+            vec![None; 128],
+            library,
+            vec!["rough".to_string()],
+        );
+        let mut rng = LcgRng::seed_from_u64(1);
+        let map = create_s2_map(
+            "map M { overlay { mat=sKy; tex=Rough; sub=0; }; };",
+            &mut classifier,
+            LegacyC4SVal::new(1, 0, 1, 1),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+        )
+        .expect("a loaded Sky material renders normally");
+
+        assert_eq!(map.indices, vec![1]);
+        assert_eq!(classifier.get_index("Sky", Some("Rough"), false), 1);
     }
 
     #[test]
