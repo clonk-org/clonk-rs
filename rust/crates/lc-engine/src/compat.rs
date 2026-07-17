@@ -830,7 +830,7 @@ impl HostSolidMaskImage {
     fn mask_pixels(
         &self,
         mask: crate::DefinitionTargetRect,
-    ) -> Option<(crate::DefinitionTargetRect, Rc<Vec<u8>>)> {
+    ) -> Option<(crate::DefinitionTargetRect, Arc<Vec<u8>>)> {
         let source_x = mask.x.max(0);
         let source_y = mask.y.max(0);
         let width = mask.width.min(self.width.saturating_sub(mask.x));
@@ -887,7 +887,7 @@ impl HostSolidMaskImage {
                 solid.push(u8::from(alpha.is_none_or(|alpha| alpha >= 128)));
             }
         }
-        Some((mask, Rc::new(solid)))
+        Some((mask, Arc::new(solid)))
     }
 }
 
@@ -921,7 +921,7 @@ impl HostSolidMaskMetadata {
         &self,
         mask: crate::DefinitionTargetRect,
         name: Option<&str>,
-    ) -> Option<(crate::DefinitionTargetRect, Option<Rc<Vec<u8>>>)> {
+    ) -> Option<(crate::DefinitionTargetRect, Option<Arc<Vec<u8>>>)> {
         match name.filter(|name| !name.is_empty()) {
             Some(name) => self
                 .named_images
@@ -1729,6 +1729,11 @@ pub struct HostWorldContext {
     /// landscape so native operations such as DoCon can remove/re-put masks
     /// before nested script callbacks inspect GBack*.
     solid_mask_bakes: Rc<Vec<(ObjectId, crate::SolidMaskBake)>>,
+    /// Live C4SolidMask instance ages, including eligible off-landscape
+    /// masks that have no raster bake.
+    solid_mask_instance_sequences: Rc<RefCell<HashMap<ObjectId, u64>>>,
+    /// First unused instance age at callback entry.
+    next_solid_mask_instance_sequence: Rc<Cell<u64>>,
     /// Definitions whose default graphics carry a ColorByOwner surface.
     /// This drives SetGraphics/ChangeDef's immediate Color reset.
     color_by_owner_definitions: Rc<HashSet<DefinitionId>>,
@@ -1896,6 +1901,16 @@ pub struct HostWorldContext {
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
 }
 
+/// Exact callback-final raster state threaded into the next callback phase.
+/// The authoritative engine still replays ordered operations separately.
+#[derive(Debug, Clone)]
+pub(crate) struct HostRasterPreview {
+    landscape: Option<Landscape>,
+    solid_mask_bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
+    solid_mask_instance_sequences: HashMap<ObjectId, u64>,
+    next_solid_mask_instance_sequence: u64,
+}
+
 fn default_sky_fade() -> [RgbColor; 2] {
     let settings = crate::SkySettings::default();
     [settings.fade_top, settings.fade_bottom]
@@ -1914,6 +1929,8 @@ impl Default for HostWorldContext {
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
             solid_mask_bakes: Rc::new(Vec::new()),
+            solid_mask_instance_sequences: Rc::new(RefCell::new(HashMap::new())),
+            next_solid_mask_instance_sequence: Rc::new(Cell::new(1)),
             color_by_owner_definitions: Rc::new(HashSet::new()),
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
@@ -2160,6 +2177,8 @@ impl HostWorldContext {
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
             solid_mask_bakes: Rc::new(Vec::new()),
+            solid_mask_instance_sequences: Rc::new(RefCell::new(HashMap::new())),
+            next_solid_mask_instance_sequence: Rc::new(Cell::new(1)),
             color_by_owner_definitions: Rc::new(HashSet::new()),
             base_auto_sell_definitions: Rc::new(HashSet::new()),
             rebuyable_definitions: Rc::new(HashSet::new()),
@@ -2794,22 +2813,81 @@ impl HostWorldContext {
         }
     }
 
-    /// Thread a foreign command target's live object locals through one
-    /// deferred effect batch. C++ callbacks all mutate the same C4Object;
-    /// cloned host-world snapshots must therefore expose callback N's final
-    /// cells to callback N+1 before authoritative outcomes are folded.
-    pub(crate) fn preview_object_local_vars(
-        &mut self,
-        id: ObjectId,
-        local_vars: &HashMap<String, Value>,
-    ) {
+    /// Carry mask-driving foreign-object writes between callbacks in one
+    /// deferred effect batch. C++ mutates the live object immediately; a
+    /// cloned host world must therefore seed the next callback from the
+    /// preceding callback's final geometry and graphics state.
+    pub(crate) fn preview_object_update(&mut self, id: ObjectId, update: &ObjectUpdate) {
+        if let Some(definition_id) = update.change_def.as_deref() {
+            self.preview_object_change_def(id, definition_id);
+        }
         let Some(object) = Rc::make_mut(&mut self.objects).get_mut(&id) else {
             return;
         };
-        let Some(state) = object.state.as_mut() else {
-            return;
-        };
-        Rc::make_mut(state).local_vars = local_vars.clone();
+        if let Some(position) = update.position {
+            object.position = position;
+            object.fixed_position = FixedVec2::from_ints(position.x, position.y);
+        }
+        if let Some(position) = update.resolved_docon_position {
+            object.position = position;
+        }
+        if let Some(position) = update.resolved_docon_fixed_position {
+            object.fixed_position = position;
+        }
+        if let Some(rotation) = update.rotation {
+            object.rotation = rotation;
+            object.fixed_rotation = itofix(rotation);
+        }
+        if let Some(construction) = update.construction {
+            object.construction = construction.max(0);
+        }
+        if let Some(container) = update.container {
+            object.container = container;
+        }
+        if let Some(status) = update.status {
+            object.status = status;
+        }
+
+        if let Some(state) = object.state.as_mut() {
+            let state = Rc::make_mut(state);
+            if update.change_def.is_some() {
+                state.solid_mask_override = None;
+            }
+            if let Some(position) = update.position {
+                state.position = position;
+            }
+            if let Some(position) = update.resolved_docon_position {
+                state.position = position;
+            }
+            if let Some(rotation) = update.rotation {
+                state.rotation = rotation;
+            }
+            if let Some(construction) = update.construction {
+                state.construction = construction.max(0);
+            }
+            if let Some(container) = update.container {
+                state.container = container;
+            }
+            if let Some(status) = update.status {
+                state.status = status;
+            }
+            if let Some(mask) = update.solid_mask_override {
+                state.solid_mask_override = Some(mask);
+            }
+            if let Some(base_graphics) = update.base_graphics.clone() {
+                state.base_graphics = base_graphics;
+            }
+            if let Some(local_vars) = update.local_vars.as_ref() {
+                state.local_vars = local_vars.clone();
+            }
+        }
+    }
+
+    pub(crate) fn preview_object_destroyed(&mut self, id: ObjectId) {
+        Rc::make_mut(&mut self.objects).remove(&id);
+        Rc::make_mut(&mut self.order).retain(|object_id| *object_id != id);
+        Rc::make_mut(&mut self.master_order).retain(|object_id| *object_id != id);
+        self.solid_mask_instance_sequences.borrow_mut().remove(&id);
     }
 
     pub(crate) fn object_ids(&self) -> &[ObjectId] {
@@ -2928,6 +3006,22 @@ impl HostWorldContext {
                     );
                 }
             }
+            LandscapeOperation::DrawMaterialQuad {
+                material_texture,
+                vertices,
+                ift,
+            } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
+                let _ = landscape.preview_draw_material_quad_with_masks(
+                    bakes,
+                    material_texture,
+                    *vertices,
+                    *ift,
+                );
+            }
             LandscapeOperation::DrawMatChunks {
                 origin,
                 width,
@@ -3041,6 +3135,98 @@ impl HostWorldContext {
     ) -> Self {
         self.solid_mask_bakes = Rc::new(bakes);
         self
+    }
+
+    pub(crate) fn with_solid_mask_instance_sequences(
+        mut self,
+        sequences: HashMap<ObjectId, u64>,
+        next_sequence: u64,
+    ) -> Self {
+        self.solid_mask_instance_sequences = Rc::new(RefCell::new(sequences));
+        self.next_solid_mask_instance_sequence = Rc::new(Cell::new(next_sequence));
+        self
+    }
+
+    /// Thread synchronous mask raster state between callbacks that otherwise
+    /// receive independent copy-on-write HostWorldContext clones.
+    pub(crate) fn preview_solid_mask_operations(
+        &mut self,
+        operations: &[crate::HostSolidMaskOperation],
+    ) {
+        if operations.is_empty() {
+            return;
+        }
+        for operation in operations {
+            if let crate::HostSolidMaskOperation::Landscape { operation } = operation {
+                self.preview_runtime_landscape_operation(operation);
+                continue;
+            }
+            let object_id = match operation {
+                crate::HostSolidMaskOperation::Remove { object_id }
+                | crate::HostSolidMaskOperation::Put { object_id, .. } => *object_id,
+                crate::HostSolidMaskOperation::Landscape { .. } => unreachable!(),
+            };
+            let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                continue;
+            };
+            let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
+            let previous = remove_host_solid_mask_raster(landscape, bakes, object_id);
+            match operation {
+                crate::HostSolidMaskOperation::Remove { .. } => {
+                    self.solid_mask_instance_sequences
+                        .borrow_mut()
+                        .remove(&object_id);
+                }
+                crate::HostSolidMaskOperation::Put {
+                    spec,
+                    position,
+                    instance_sequence,
+                    ..
+                } => {
+                    self.solid_mask_instance_sequences
+                        .borrow_mut()
+                        .insert(object_id, *instance_sequence);
+                    self.next_solid_mask_instance_sequence.set(
+                        self.next_solid_mask_instance_sequence.get().max(
+                            instance_sequence
+                                .checked_add(1)
+                                .expect("C4SolidMask instance sequence overflow"),
+                        ),
+                    );
+                    if let Some(bake) = crate::put_solid_mask_raster(
+                        landscape,
+                        spec.clone(),
+                        *position,
+                        *instance_sequence,
+                    ) {
+                        let insert_at = previous
+                            .map(|(index, _)| index)
+                            .unwrap_or(bakes.len())
+                            .min(bakes.len());
+                        bakes.insert(insert_at, (object_id, bake));
+                    }
+                }
+                crate::HostSolidMaskOperation::Landscape { .. } => unreachable!(),
+            }
+        }
+    }
+
+    pub(crate) fn apply_host_raster_preview(&mut self, preview: HostRasterPreview) {
+        self.landscape = preview.landscape.map(Rc::new);
+        self.solid_mask_bakes = Rc::new(preview.solid_mask_bakes);
+        self.solid_mask_instance_sequences =
+            Rc::new(RefCell::new(preview.solid_mask_instance_sequences));
+        self.next_solid_mask_instance_sequence =
+            Rc::new(Cell::new(preview.next_solid_mask_instance_sequence));
+    }
+
+    pub(crate) fn host_raster_preview(&self) -> HostRasterPreview {
+        HostRasterPreview {
+            landscape: self.landscape.as_deref().cloned(),
+            solid_mask_bakes: self.solid_mask_bakes.as_ref().clone(),
+            solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
+            next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
+        }
     }
 
     fn movement_density_at(&self, x: i32, y: i32) -> Option<i32> {
@@ -8541,6 +8727,7 @@ fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
         object.set_solid_mask_rect(rect);
+        context.update_live_solid_mask(target, true);
         Ok(Value::Bool(true))
     })
 }
@@ -8720,6 +8907,7 @@ fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, RuntimeError>
     }
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
+            context.update_live_solid_mask(target, true);
             let _ = refresh_live_object_ocf(context, target);
         }
     });
@@ -9504,6 +9692,7 @@ fn exit_object_at_position_with_full_motion_and_calls(
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             let _ = refresh_live_object_ocf(context, target);
+            context.update_live_solid_mask(target, false);
         }
     });
 
@@ -9762,6 +9951,7 @@ fn enter_object_live_internal(
             }
         }
         let _ = refresh_live_object_ocf(context, target);
+        context.update_live_solid_mask(target, false);
         refresh_container_collection_ocf(context, container);
         true
     });
@@ -10038,7 +10228,7 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
         if let Some(context) = borrow.as_mut() {
             // pSolidMaskData->Remove is the last modeled AssignRemoval side
             // arm, after Game.ClearPointers (C4Object.cpp:309-313).
-            context.update_live_solid_mask(target);
+            context.update_live_solid_mask(target, false);
         }
     });
     Ok(true)
@@ -11252,6 +11442,7 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
         scope.pending_update.rotation = Some(rotation);
         scope.set_fixed_velocity(FixedVec2::new(itofix(txdir), itofix(tydir)));
         scope.set_rotation_velocity(itofix(trdir) / 10);
+        context.update_live_solid_mask(target, false);
         Some(previous_container)
     });
     let Some(previous_container) = exited else {
@@ -17512,6 +17703,13 @@ pub struct EffectContextOutcome {
     pub physics: Option<PhysicsDelta>,
     pub spawns: Vec<SpawnConfig>,
     pub landscape: Vec<LandscapeOperation>,
+    /// Synchronous C4Object::UpdateSolidMask calls in their original host
+    /// call order. Object/foreign-object outcome channels lose that order,
+    /// so the engine replays this dedicated stream after state copy-out.
+    pub(crate) solid_mask_operations: Vec<crate::HostSolidMaskOperation>,
+    /// Callback-final COW raster used only as the next synchronous phase's
+    /// read view; authoritative state comes from ordered operation replay.
+    pub(crate) host_raster_preview: Option<HostRasterPreview>,
     pub particles: Vec<ParticleCommand>,
     pub transfer_zones: Vec<TransferZoneCommand>,
     pub messages: Vec<MessageCommand>,
@@ -17568,6 +17766,8 @@ impl EffectContextOutcome {
             physics,
             spawns,
             landscape,
+            solid_mask_operations: Vec::new(),
+            host_raster_preview: None,
             particles: Vec::new(),
             transfer_zones,
             messages,
@@ -17598,6 +17798,8 @@ impl EffectContextOutcome {
             physics: None,
             spawns: Vec::new(),
             landscape: Vec::new(),
+            solid_mask_operations: Vec::new(),
+            host_raster_preview: None,
             particles: Vec::new(),
             transfer_zones: Vec::new(),
             messages: Vec::new(),
@@ -22074,7 +22276,7 @@ fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeError> {
             // ejection and SetAction(Idle), so callbacks fired by either
             // path must already see the new landscape (C4Object.cpp:
             // 1450-1472).
-            context.update_live_solid_mask(target);
+            context.update_live_solid_mask(target, false);
         }
         Some((
             metadata,
@@ -22207,7 +22409,7 @@ fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeError> {
             // DoCon's keep-bottom/lift arm calls UpdateSolidMask again at
             // the adjusted position before Completion/Initialize.
             if moved {
-                context.update_live_solid_mask(target);
+                context.update_live_solid_mask(target, false);
             }
         });
     }
@@ -28115,11 +28317,13 @@ fn draw_material_quad(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.resolve_runtime_material_texture(&material_texture) {
             return Ok(Value::Bool(false));
         }
-        context.register_landscape_operation(LandscapeOperation::DrawMaterialQuad {
+        let operation = LandscapeOperation::DrawMaterialQuad {
             material_texture,
             vertices,
             ift,
-        });
+        };
+        context.preview_draw_material_quad(&operation);
+        context.register_landscape_operation(operation);
         Ok(Value::Bool(true))
     })
 }
@@ -28205,18 +28409,21 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         context.runtime_texmap = Some(texmap.clone());
         let Some(bitmap) = rendered? else {
             if texmap != texmap_before {
-                context
-                    .register_landscape_operation(LandscapeOperation::SyncRuntimeTexMap { texmap });
+                let operation = LandscapeOperation::SyncRuntimeTexMap { texmap };
+                context.world.preview_runtime_landscape_operation(&operation);
+                context.register_landscape_operation(operation);
             }
             return Ok(Value::Int(0));
         };
-        context.register_landscape_operation(LandscapeOperation::DrawMap {
+        let operation = LandscapeOperation::DrawMap {
             origin: Vector2::new(clipped_x, clipped_y),
             bitmap,
             map_width,
             map_height,
             texmap,
-        });
+        };
+        context.world.preview_runtime_landscape_operation(&operation);
+        context.register_landscape_operation(operation);
         Ok(Value::Int(1))
     })
 }
@@ -28304,14 +28511,16 @@ fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
         // the resized and re-evaluated tree; the operation carries the same
         // state into the authoritative engine fold.
         context.preview_runtime_map_creator(map_creator.clone());
-        context.register_landscape_operation(LandscapeOperation::DrawDefMap {
+        let operation = LandscapeOperation::DrawDefMap {
             origin: Vector2::new(clipped_x, clipped_y),
             bitmap,
             map_width,
             map_height,
             texmap,
             map_creator: RetainedMapCreatorUpdate(map_creator),
-        });
+        };
+        context.world.preview_runtime_landscape_operation(&operation);
+        context.register_landscape_operation(operation);
         Ok(Value::Int(1))
     })
 }
@@ -30042,6 +30251,7 @@ fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         object.set_rotation(rotation);
+        context.update_live_solid_mask(target, false);
         Ok(Value::Bool(true))
     })
 }
@@ -33862,17 +34072,27 @@ fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return Ok(Value::Bool(false));
         }
-        let Some(scope) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
+        let changed = {
+            let Some(scope) = context.object_scope_mut(target) else {
+                return Ok(Value::Bool(false));
+            };
+
+            let mut position = Vector2::new(x, y);
+            if check_bounds {
+                let vertices: Vec<ObjectVertex> = scope.vertices().to_vec();
+                position = apply_position_bounds(position, &vertices, landscape_snapshot.as_ref());
+            }
+
+            let changed = scope.effective_position() != position;
+            scope.set_position(position);
+            changed
         };
-
-        let mut position = Vector2::new(x, y);
-        if check_bounds {
-            let vertices: Vec<ObjectVertex> = scope.vertices().to_vec();
-            position = apply_position_bounds(position, &vertices, landscape_snapshot.as_ref());
+        if changed {
+            // C4Object::ForcePosition removes and re-puts the live mask only
+            // after the integer X/Y early-return gate (C4Movement.cpp:
+            // 536-545). The C4SolidMask instance itself survives.
+            context.update_live_solid_mask(target, false);
         }
-
-        scope.set_position(position);
         Ok(Value::Bool(true))
     })
 }
@@ -34215,6 +34435,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
             );
         }
+        context.update_live_solid_mask(target, false);
         !was_full && final_construction >= FULL_CON
     });
 
@@ -34587,6 +34808,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
                 );
             }
+            context.update_live_solid_mask(target, false);
             !was_full && final_construction >= FULL_CON
         });
         if crossed_full_con {
@@ -35001,6 +35223,7 @@ fn finish_placement_object_creation(
                 FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
             );
         }
+        context.update_live_solid_mask(target, false);
         !was_full && final_construction >= FULL_CON
     });
     if crossed_full_con {
@@ -35643,6 +35866,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
             );
         }
+        context.update_live_solid_mask(target, false);
         (
             !was_full && final_construction >= FULL_CON,
             final_construction,
@@ -36801,12 +37025,18 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
                     blit_mode,
                 })
             };
-            let Some(object) = context.object_scope_mut(object_id) else {
-                return Ok(Value::Bool(false));
+            let changed = {
+                let Some(object) = context.object_scope_mut(object_id) else {
+                    return Ok(Value::Bool(false));
+                };
+                let changed = object.set_base_graphics(base_graphics);
+                if changed && !color_by_owner {
+                    object.pending_update.color = Some(0);
+                }
+                changed
             };
-            let changed = object.set_base_graphics(base_graphics);
-            if changed && !color_by_owner {
-                object.pending_update.color = Some(0);
+            if changed {
+                context.update_live_solid_mask(object_id, true);
             }
             return Ok(Value::Bool(true));
         }
@@ -37281,6 +37511,7 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
             // authoritative, but seed the spawn for the no-write case.
             spawn.rotation = initial_rotation;
         }
+        context.update_live_solid_mask(target, false);
         !was_full && final_construction >= FULL_CON
     });
     if crossed_full_con {
@@ -39049,10 +39280,16 @@ fn stage_object_color(target_id: Option<ObjectId>, value: u32) -> bool {
         if !context.ensure_object_scope(target) {
             return false;
         }
-        context
+        let staged = context
             .object_scope_mut(target)
             .map(|object| object.pending_update.color = Some(value))
-            .is_some()
+            .is_some();
+        if staged {
+            // SetColor/SetColorDw unconditionally run UpdateFace(false),
+            // whose UpdateSolidMask keeps the instance but re-puts it.
+            context.update_live_solid_mask(target, false);
+        }
+        staged
     })
 }
 
@@ -39745,10 +39982,10 @@ fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
                     .map(|graphics| graphics.definition.as_str().to_string())
             })
             .unwrap_or_else(|| definition_id.clone());
-        let owner_color = (new_owner != OWNER_NONE
-            && context
-                .world
-                .definition_color_by_owner(&graphics_definition_id))
+        let color_by_owner = context
+            .world
+            .definition_color_by_owner(&graphics_definition_id);
+        let owner_color = (new_owner != OWNER_NONE && color_by_owner)
         .then(|| {
             context
                 .player_state(new_owner)
@@ -39759,7 +39996,7 @@ fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
                 .unwrap_or(0)
         });
 
-        let (old_owner, flag_base_target) = {
+        let (old_owner, flag_base_target, owner_changed) = {
             let object = context.object_scope_mut(target)?;
             // C++ refreshes the currently selected ColorByOwner graphics
             // before its same-owner early return.
@@ -39767,16 +40004,26 @@ fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
                 object.pending_update.color = Some(color);
             }
             let old_owner = object.owner();
-            if old_owner == new_owner {
-                return Some(None);
-            }
             let flag_base_target = (definition_id == "FLAG"
                 && object.effective_action_name() == "FlyBase")
                 .then(|| object.effective_action_target(0))
                 .flatten();
-            object.set_owner(new_owner);
-            (old_owner, flag_base_target)
+            let owner_changed = old_owner != new_owner;
+            if owner_changed {
+                object.set_owner(new_owner);
+            }
+            (old_owner, flag_base_target, owner_changed)
         };
+
+        // C4Object::SetOwner refreshes selected ColorByOwner graphics before
+        // its same-owner early return. UpdateFace(false) performs an ordinary
+        // sequence-preserving solid-mask re-put.
+        if new_owner != OWNER_NONE && color_by_owner {
+            context.update_live_solid_mask(target, false);
+        }
+        if !owner_changed {
+            return Some(None);
+        }
 
         // A flying flag transfers only a still-present base that belongs to
         // the old owner. Inactive targets have nonzero C++ Status and count.
@@ -40898,7 +41145,7 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 clear_player_object_pointers_host(target);
                 HOST_CONTEXT.with(|cell| {
                     if let Some(context) = cell.borrow_mut().as_mut() {
-                        context.update_live_solid_mask(target);
+                        context.update_live_solid_mask(target, false);
                     }
                 });
             }
@@ -41048,6 +41295,11 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
             object.set_status(status);
         }
         context.preview_object_status_change(object_id, status);
+        if status == ObjectStatus::Normal {
+            // StatusActivate::UpdateFace(true) still performs the ordinary
+            // UpdateSolidMask remove/re-put before UpdateTransferZone.
+            context.update_live_solid_mask(object_id, false);
+        }
         if status == ObjectStatus::Inactive && !clear_pointers {
             // The no-clear branch only clears transfer zones. Clear-mode
             // does this later as part of Game.ClearPointers, after every
@@ -42171,6 +42423,66 @@ pub(crate) fn value_raw_truthy(value: &Value) -> bool {
     !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
 }
 
+/// Raster-only C4SolidMask::Remove shared by a live callback context and the
+/// threaded preview between successive callbacks in one effect batch.
+fn remove_host_solid_mask_raster(
+    landscape: &mut Landscape,
+    bakes: &mut Vec<(ObjectId, crate::SolidMaskBake)>,
+    id: ObjectId,
+) -> Option<(usize, u64)> {
+    let index = bakes.iter().position(|(object_id, _)| *object_id == id)?;
+    let (_, bake) = bakes.remove(index);
+    let instance_sequence = bake.instance_sequence;
+    let vehicle = landscape.grid_vehicle_byte()?;
+    for cy in 0..bake.height {
+        for cx in 0..bake.width {
+            let saved = bake.buffer[(cy * bake.width + cx) as usize];
+            if saved == vehicle {
+                continue;
+            }
+            let lx = bake.x + cx;
+            let ly = bake.y + cy;
+            if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
+                landscape.grid_write_byte(lx, ly, saved);
+            }
+        }
+    }
+    let mut overlapping_masks = bakes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, other))| other.overlaps(&bake).then_some(index))
+        .collect::<Vec<_>>();
+    overlapping_masks.sort_unstable_by(|&left, &right| {
+        bakes[right]
+            .1
+            .instance_sequence
+            .cmp(&bakes[left].1.instance_sequence)
+    });
+    for other_index in overlapping_masks {
+        let (_, other) = &mut bakes[other_index];
+        let clip_x0 = bake.x.max(other.x);
+        let clip_y0 = bake.y.max(other.y);
+        let clip_x1 = (bake.x + bake.width).min(other.x + other.width);
+        let clip_y1 = (bake.y + bake.height).min(other.y + other.height);
+        for ly in clip_y0..clip_y1 {
+            for lx in clip_x0..clip_x1 {
+                let mx = other.tx + (lx - other.x);
+                let my = other.ty + (ly - other.y);
+                if !other.mask_set(mx, my) {
+                    continue;
+                }
+                let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                if current != vehicle {
+                    other.buffer[((ly - other.y) * other.width + (lx - other.x)) as usize] =
+                        current;
+                }
+                landscape.grid_write_byte(lx, ly, vehicle);
+            }
+        }
+    }
+    Some((index, instance_sequence))
+}
+
 struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     /// Definition context for no-object script execution (`cthr->Def`).
@@ -42212,6 +42524,13 @@ struct EffectHostContext {
     /// updated together with `world.landscape` so nested callbacks observe
     /// C++'s immediate C4SolidMask Remove/Put lifecycle.
     solid_mask_bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
+    /// Live instance ages also cover eligible masks clipped fully outside
+    /// the raster and therefore absent from `solid_mask_bakes`.
+    solid_mask_instance_sequences: Rc<RefCell<HashMap<ObjectId, u64>>>,
+    next_solid_mask_instance_sequence: Rc<Cell<u64>>,
+    /// C4Object::UpdateSolidMask calls made by this VM invocation, retained
+    /// independently of the outer/foreign object outcome split.
+    solid_mask_operations: Vec<crate::HostSolidMaskOperation>,
     world: HostWorldContext,
     /// Mutable C4Def metadata preview for this synchronous VM session.
     /// Definition writes are folded into Engine after the callback returns,
@@ -42308,6 +42627,8 @@ impl EffectHostContext {
             .and_then(Landscape::raster_state)
             .map(|state| state.texmap().clone());
         let solid_mask_bakes = world.solid_mask_bakes.as_ref().clone();
+        let solid_mask_instance_sequences = Rc::clone(&world.solid_mask_instance_sequences);
+        let next_solid_mask_instance_sequence = Rc::clone(&world.next_solid_mask_instance_sequence);
         let resolved_script_definition = definition_context.clone().or_else(|| {
             script_object_context.and_then(|script_object| {
                 object
@@ -42492,6 +42813,9 @@ impl EffectHostContext {
             script_definition_context,
             global,
             solid_mask_bakes,
+            solid_mask_instance_sequences,
+            next_solid_mask_instance_sequence,
+            solid_mask_operations: Vec::new(),
             world,
             definition_metadata_overrides: HashMap::new(),
             player_overrides: HashMap::new(),
@@ -42640,75 +42964,93 @@ impl EffectHostContext {
     /// Raster-only C4SolidMask::Remove for the callback-private landscape.
     /// It restores saved bytes and re-puts every overlapping bake, including
     /// refreshing those masks' buffers exactly like C4SolidMask.cpp:233-283.
-    fn remove_live_solid_mask(&mut self, id: ObjectId) -> Option<usize> {
-        let index = self
-            .solid_mask_bakes
-            .iter()
-            .position(|(object_id, _)| *object_id == id)?;
-        let (_, bake) = self.solid_mask_bakes.remove(index);
+    fn remove_live_solid_mask(&mut self, id: ObjectId) -> Option<(usize, u64)> {
         let landscape = self.world.landscape.as_mut().map(Rc::make_mut)?;
-        let vehicle = landscape.grid_vehicle_byte()?;
-        for cy in 0..bake.height {
-            for cx in 0..bake.width {
-                let saved = bake.buffer[(cy * bake.width + cx) as usize];
-                if saved == vehicle {
-                    continue;
-                }
-                let lx = bake.x + cx;
-                let ly = bake.y + cy;
-                if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
-                    landscape.grid_write_byte(lx, ly, saved);
-                }
-            }
+        remove_host_solid_mask_raster(landscape, &mut self.solid_mask_bakes, id)
+    }
+
+    fn allocate_solid_mask_instance_sequence(&mut self) -> u64 {
+        let sequence = self.next_solid_mask_instance_sequence.get();
+        self.next_solid_mask_instance_sequence.set(
+            sequence
+                .checked_add(1)
+                .expect("C4SolidMask instance sequence overflow"),
+        );
+        sequence
+    }
+
+    /// Persist a host-time construction token across the callback copy-out
+    /// boundary. C++ has already linked this instance even when Rust will
+    /// materialize its spawn or object update later.
+    fn record_solid_mask_instance_sequence(&mut self, id: ObjectId, sequence: u64) {
+        if let Some(scope) = self.object_scope_mut(id) {
+            scope.pending_update.solid_mask_instance_sequence = Some(sequence);
         }
-        for (_, other) in &mut self.solid_mask_bakes {
-            if !other.overlaps(&bake) {
-                continue;
-            }
-            let clip_x0 = bake.x.max(other.x);
-            let clip_y0 = bake.y.max(other.y);
-            let clip_x1 = (bake.x + bake.width).min(other.x + other.width);
-            let clip_y1 = (bake.y + bake.height).min(other.y + other.height);
-            for ly in clip_y0..clip_y1 {
-                for lx in clip_x0..clip_x1 {
-                    let mx = other.tx + (lx - other.x);
-                    let my = other.ty + (ly - other.y);
-                    if !other.mask_set(mx, my) {
-                        continue;
-                    }
-                    let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                    if current != vehicle {
-                        other.buffer[((ly - other.y) * other.width + (lx - other.x)) as usize] =
-                            current;
-                    }
-                    landscape.grid_write_byte(lx, ly, vehicle);
-                }
-            }
+        if let Some(spawn) = self
+            .pending_spawns
+            .iter_mut()
+            .rev()
+            .find(|spawn| spawn.id == Some(id))
+        {
+            spawn.solid_mask_instance_sequence = Some(sequence);
         }
-        Some(index)
     }
 
     /// Callback-time C4Object::UpdateSolidMask. The authoritative engine
     /// performs the real update when this outcome folds; this copy exists
-    /// solely so callbacks nested before that fold see the same landscape.
-    fn update_live_solid_mask(&mut self, id: ObjectId) {
-        let previous_index = self.remove_live_solid_mask(id);
+    /// so nested callbacks observe both the immediate raster and exact live
+    /// C4SolidMask instance age. `recreate` mirrors callers that delete the
+    /// instance first (SetSolidMask, ChangeDef, real SetGraphics changes).
+    fn update_live_solid_mask(&mut self, id: ObjectId, recreate: bool) {
+        let previous = self.remove_live_solid_mask(id);
         let Some(spec) = self.live_solid_mask_spec(id) else {
+            self.solid_mask_instance_sequences.borrow_mut().remove(&id);
+            self.solid_mask_operations
+                .push(crate::HostSolidMaskOperation::Remove { object_id: id });
             return;
         };
+        let previous_sequence = self
+            .solid_mask_instance_sequences
+            .borrow()
+            .get(&id)
+            .copied()
+            .or_else(|| previous.map(|(_, sequence)| sequence));
+        let (instance_sequence, constructed) = if recreate {
+            (self.allocate_solid_mask_instance_sequence(), true)
+        } else if let Some(sequence) = previous_sequence {
+            (sequence, false)
+        } else {
+            (self.allocate_solid_mask_instance_sequence(), true)
+        };
+        self.solid_mask_instance_sequences
+            .borrow_mut()
+            .insert(id, instance_sequence);
+        if constructed {
+            self.record_solid_mask_instance_sequence(id, instance_sequence);
+        }
         let Some(position) = self
             .object_scope(id)
             .map(ObjectScopeContext::effective_position)
         else {
+            self.solid_mask_operations
+                .push(crate::HostSolidMaskOperation::Remove { object_id: id });
             return;
         };
+        self.solid_mask_operations
+            .push(crate::HostSolidMaskOperation::Put {
+                object_id: id,
+                spec: spec.clone(),
+                position,
+                instance_sequence,
+            });
         let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
             return;
         };
-        let Some(bake) = crate::put_solid_mask_raster(landscape, spec, position) else {
+        let Some(bake) = crate::put_solid_mask_raster(landscape, spec, position, instance_sequence)
+        else {
             return;
         };
-        let insert_at = previous_index.unwrap_or_else(|| {
+        let insert_at = previous.map(|(index, _)| index).unwrap_or_else(|| {
             let rank = self
                 .world
                 .order
@@ -42887,6 +43229,10 @@ impl EffectHostContext {
     }
 
     fn register_landscape_operation(&mut self, operation: LandscapeOperation) {
+        self.solid_mask_operations
+            .push(crate::HostSolidMaskOperation::Landscape {
+                operation: operation.clone(),
+            });
         self.pending_landscape_ops.push(operation);
     }
 
@@ -42926,6 +43272,26 @@ impl EffectHostContext {
             texmap.clone(),
         );
         self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
+    }
+
+    fn preview_draw_material_quad(&mut self, operation: &LandscapeOperation) {
+        let LandscapeOperation::DrawMaterialQuad {
+            material_texture,
+            vertices,
+            ift,
+        } = operation
+        else {
+            return;
+        };
+        let Some(landscape) = self.world.landscape.as_mut().map(Rc::make_mut) else {
+            return;
+        };
+        let _ = landscape.preview_draw_material_quad_with_masks(
+            &mut self.solid_mask_bakes,
+            material_texture,
+            *vertices,
+            *ift,
+        );
     }
 
     /// FnDrawVolcanoBranch mutates Surface8 before returning to script, so
@@ -45735,6 +46101,19 @@ impl EffectHostContext {
                 .retain(|spawn| spawn.id.is_none_or(|id| !destroyed.contains(&id)));
         }
 
+        let host_raster_preview = (!self.solid_mask_operations.is_empty()).then(|| {
+            HostRasterPreview {
+                landscape: self.world.landscape.as_deref().cloned(),
+                solid_mask_bakes: self.solid_mask_bakes.clone(),
+                solid_mask_instance_sequences: self
+                    .solid_mask_instance_sequences
+                    .borrow()
+                    .clone(),
+                next_solid_mask_instance_sequence: self
+                    .next_solid_mask_instance_sequence
+                    .get(),
+            }
+        });
         let audio_events = self.audio.take_events();
         let mut outcome = EffectContextOutcome::new(
             object_effects,
@@ -45765,6 +46144,8 @@ impl EffectHostContext {
         outcome.particles = self.pending_particles;
         outcome.next_mission_commands = self.next_mission_commands;
         outcome.other_objects = other_objects;
+        outcome.solid_mask_operations = self.solid_mask_operations;
+        outcome.host_raster_preview = host_raster_preview;
         outcome
     }
 }
@@ -56188,6 +56569,7 @@ public func RejectConstruction(x, y, builder)
         world.with_solid_mask_bakes(vec![(
             ObjectId::new(90),
             crate::SolidMaskBake {
+                instance_sequence: 1,
                 x: 5,
                 y: 4,
                 width: 2,
@@ -56780,10 +57162,9 @@ public func RejectConstruction(x, y, builder)
         );
         assert_eq!(grid.texture_names()[4].as_deref(), Some("Ridge"));
 
-        // DrawMaterialQuad is one of the older deferred-preview writers. Its
-        // authoritative fold must run before RemoveUnused rescans Surface8;
-        // otherwise the callback's stale preview list would clear slot 4
-        // after the quad has written pixels that use it.
+        // DrawMaterialQuad mutates Surface8 synchronously. RemoveUnused must
+        // therefore see the new slot-4 pixel in this same callback and keep
+        // that texture entry live.
         let ordered_world = remove_unused_texmap_world();
         let ordered_initial = ordered_world
             .landscape_ref()
@@ -56822,8 +57203,8 @@ public func RejectConstruction(x, y, builder)
             );
         };
         assert!(
-            cleared_slots.contains(&4),
-            "callback preview has not folded the earlier quad"
+            !cleared_slots.contains(&4),
+            "callback preview exposes the earlier quad"
         );
 
         let mut ordered_engine = crate::Engine::new();

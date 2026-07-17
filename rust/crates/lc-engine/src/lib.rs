@@ -4683,6 +4683,10 @@ struct ObjectDelta {
     /// C4Object::ColorMod overwrite (FnSetClrModulation).
     color_modulation: Option<u32>,
     solid_mask_override: Option<DefinitionTargetRect>,
+    /// Host-time C4SolidMask construction token. Callback copy-out may fold
+    /// object updates and spawns in a different order than C++; carrying the
+    /// token preserves the native linked-list age across that boundary.
+    solid_mask_instance_sequence: Option<u64>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
     /// Some(None) = closed, Some(Some(_)) = open/replaced.
     menu: Option<Option<ObjectMenuState>>,
@@ -4945,6 +4949,9 @@ impl ObjectDelta {
         if let Some(rect) = update.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
+        if let Some(sequence) = update.solid_mask_instance_sequence {
+            self.solid_mask_instance_sequence = Some(sequence);
+        }
         if let Some(menu) = update.menu {
             self.menu = Some(menu);
         }
@@ -5056,6 +5063,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             selected: update.selected,
             crew_disabled: update.crew_disabled,
             solid_mask_override: update.solid_mask_override,
+            solid_mask_instance_sequence: update.solid_mask_instance_sequence,
             menu: update.menu,
             shape_override: update.shape_override,
             alive: update.alive,
@@ -5152,6 +5160,11 @@ pub struct ObjectUpdate {
     /// SetSolidMask's rect update (Some = set; zero-area = mask OFF).
     #[serde(default)]
     pub solid_mask_override: Option<DefinitionTargetRect>,
+    /// Runtime-only C4SolidMask construction order reserved while a script
+    /// callback is still executing. It must not enter save/control data.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub solid_mask_instance_sequence: Option<u64>,
     /// FnChangeDef's definition swap (C4Object::ChangeDef,
     /// C4Object.cpp:1180-1231).
     #[serde(default)]
@@ -5590,6 +5603,7 @@ impl ObjectUpdate {
             && self.color.is_none()
             && self.color_modulation.is_none()
             && self.solid_mask_override.is_none()
+            && self.solid_mask_instance_sequence.is_none()
             && self.shape_override.is_none()
             && self.change_def.is_none()
             && !self.change_def_reinsert
@@ -5824,6 +5838,10 @@ pub struct Object {
     /// The baked solid mask (grid worlds only; C4Object::pSolidMaskData).
     #[doc(hidden)]
     pub solid_mask_bake: Option<SolidMaskBake>,
+    /// Construction order of the live C4SolidMask instance. This survives
+    /// ordinary Remove/Put cycles (including fully off-landscape puts) and is
+    /// cleared only when C++ would delete pSolidMaskData.
+    solid_mask_instance_sequence: Option<u64>,
     /// This frame's latched Action.t_attach (C4Object.cpp:4692 + the
     /// per-procedure assignments): ExecAction computes it BEFORE the
     /// phase-wrap SetAction — the movement that follows runs with the
@@ -5974,6 +5992,7 @@ impl Object {
             frame_t_attach: 0,
             frame_t_contact: 0,
             solid_mask_bake: None,
+            solid_mask_instance_sequence: None,
             state,
             upright_t_attach: 0,
             last_attach_movement_frame: None,
@@ -6196,6 +6215,20 @@ impl Object {
     ) -> ApplyDeltaOutcome {
         if delta.change_def.is_some() {
             self.change_def_contents_sort = delta.change_def_contents_sort.clone();
+        }
+        if let Some(sequence) = delta.solid_mask_instance_sequence {
+            self.solid_mask_instance_sequence = Some(sequence);
+        } else if delta.change_def.is_some()
+            || delta.solid_mask_override.is_some()
+            || delta
+                .base_graphics
+                .as_ref()
+                .is_some_and(|graphics| self.state.base_graphics.as_ref() != graphics.as_ref())
+        {
+            // ChangeDef, SetSolidMask and a real SetGraphics change delete
+            // pSolidMaskData before UpdateSolidMask constructs a new tail
+            // instance (C4Object.cpp:382-400,1207-1244,3809-3817).
+            self.solid_mask_instance_sequence = None;
         }
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
@@ -7813,6 +7846,11 @@ pub struct SpawnConfig {
     /// keeps the definition mask, C4Object.cpp:2770).
     #[serde(default)]
     pub solid_mask: Option<DefinitionTargetRect>,
+    /// Runtime-only C4SolidMask construction order reserved by synchronous
+    /// script creation before this deferred spawn materializes.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub solid_mask_instance_sequence: Option<u64>,
     /// Construction/Initialize already ran synchronously inside the
     /// creating host call (C4Game::NewObject semantics,
     /// C4Game.cpp:1117-1127) - materialization must not repeat them.
@@ -7874,6 +7912,7 @@ impl SpawnConfig {
             local_vars: HashMap::new(),
             loaded: false,
             solid_mask: None,
+            solid_mask_instance_sequence: None,
             initialized: false,
             position_adjusted: false,
         }
@@ -9710,7 +9749,7 @@ enum SolidMaskPixels {
     #[default]
     Rectangle,
     /// Per-pixel alpha mask (1 = solid).
-    Alpha(Rc<Vec<u8>>),
+    Alpha(Arc<Vec<u8>>),
     /// Mask rect out of the sprite bounds: ignore the mask entirely.
     OutOfBounds,
 }
@@ -11052,7 +11091,7 @@ impl Definition {
                 ));
             }
         }
-        SolidMaskPixels::Alpha(Rc::new(pixels))
+        SolidMaskPixels::Alpha(Arc::new(pixels))
     }
 
     /// Extract the SolidMask alpha pixels from the sprite (alpha != 0 =
@@ -11096,7 +11135,7 @@ impl Definition {
                 ));
             }
         }
-        self.solid_mask_pixels = SolidMaskPixels::Alpha(Rc::new(pixels));
+        self.solid_mask_pixels = SolidMaskPixels::Alpha(Arc::new(pixels));
     }
 
     pub fn shape_vertices(&self) -> &[ObjectVertex] {
@@ -11666,6 +11705,8 @@ impl Definition {
             physics: physics_from_host,
             spawns: host_spawns,
             landscape: host_landscape_ops,
+            solid_mask_operations: host_solid_mask_operations,
+            host_raster_preview,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -11722,6 +11763,10 @@ impl Definition {
         if !host_landscape_ops.is_empty() {
             batch.landscape_ops.extend(host_landscape_ops);
         }
+        batch
+            .solid_mask_operations
+            .extend(host_solid_mask_operations);
+        batch.host_raster_preview = host_raster_preview;
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
         }
@@ -11888,6 +11933,8 @@ impl Definition {
             physics: physics_from_host,
             spawns: host_spawns,
             landscape: host_landscape_ops,
+            solid_mask_operations: host_solid_mask_operations,
+            host_raster_preview,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -11925,6 +11972,10 @@ impl Definition {
         }
         batch.spawns.extend(host_spawns);
         batch.landscape_ops.extend(host_landscape_ops);
+        batch
+            .solid_mask_operations
+            .extend(host_solid_mask_operations);
+        batch.host_raster_preview = host_raster_preview;
         batch.particles.extend(host_particles);
         batch.transfer_zones.extend(host_transfer_zones);
         batch.messages.extend(host_messages);
@@ -12066,6 +12117,8 @@ impl Definition {
             physics: physics_from_host,
             spawns: host_spawns,
             landscape: host_landscape_ops,
+            solid_mask_operations: host_solid_mask_operations,
+            host_raster_preview,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -12122,6 +12175,10 @@ impl Definition {
         if !host_landscape_ops.is_empty() {
             batch.landscape_ops.extend(host_landscape_ops);
         }
+        batch
+            .solid_mask_operations
+            .extend(host_solid_mask_operations);
+        batch.host_raster_preview = host_raster_preview;
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
         }
@@ -12264,9 +12321,29 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| {
-            script_execution_error(self.id.clone(), kind.context().to_string(), source, None)
-        })?;
+        let mut host_effects = host_effects;
+        if !environment_delta.is_empty() {
+            host_effects.environment = Some(environment_delta);
+        }
+        if !physics_delta.is_empty() {
+            host_effects.physics = Some(physics_delta);
+        }
+        let audio_state = audio_guard.finish();
+        let (value, updated_local_vars) = match result {
+            Ok(value) => value,
+            Err(source) => {
+                return Err(script_execution_error(
+                    self.id.clone(),
+                    kind.context().to_string(),
+                    source,
+                    Some(Box::new(ScriptCallRecovery {
+                        outcome: host_effects,
+                        audio: audio_state,
+                        rng,
+                    })),
+                ));
+            }
+        };
 
         // Action callbacks can return any value in C4Script.
         // The return value is typically used to indicate success/failure (e.g., return 1).
@@ -12274,7 +12351,6 @@ impl Definition {
         // This matches the C++ engine behavior where callbacks like Scaling() return int.
         drop(value);
 
-        let mut host_effects = host_effects;
         // Store updated local variables so they persist
         if let Some(object_update) = &mut host_effects.object_update {
             object_update.local_vars = Some(updated_local_vars);
@@ -12283,14 +12359,6 @@ impl Definition {
             update.local_vars = Some(updated_local_vars);
             host_effects.object_update = Some(update);
         }
-        if !environment_delta.is_empty() {
-            host_effects.environment = Some(environment_delta);
-        }
-        if !physics_delta.is_empty() {
-            host_effects.physics = Some(physics_delta);
-        }
-
-        let audio_state = audio_guard.finish();
         Ok((host_effects, audio_state, rng))
     }
 
@@ -14215,6 +14283,8 @@ impl ScenarioScript {
             physics: physics_from_host,
             spawns: host_spawns,
             landscape: host_landscape_ops,
+            solid_mask_operations: host_solid_mask_operations,
+            host_raster_preview,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -14259,6 +14329,10 @@ impl ScenarioScript {
         if !host_landscape_ops.is_empty() {
             batch.landscape_ops.extend(host_landscape_ops);
         }
+        batch
+            .solid_mask_operations
+            .extend(host_solid_mask_operations);
+        batch.host_raster_preview.0 = host_raster_preview;
         if let Some(delta) = environment_from_host {
             merge_environment_delta(&mut environment_delta, &delta);
         }
@@ -14484,6 +14558,8 @@ impl ScenarioScript {
             physics: physics_from_host,
             spawns: host_spawns,
             landscape: host_landscape_ops,
+            solid_mask_operations: host_solid_mask_operations,
+            host_raster_preview,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -14511,6 +14587,10 @@ impl ScenarioScript {
             .extend(host_next_mission_commands);
         batch.global_effects.extend(host_global_effects);
         batch.landscape_ops.extend(host_landscape_ops);
+        batch
+            .solid_mask_operations
+            .extend(host_solid_mask_operations);
+        batch.host_raster_preview.0 = host_raster_preview;
         if let Some(delta) = environment_from_host {
             merge_environment_delta(&mut environment_delta, &delta);
         }
@@ -14591,6 +14671,8 @@ struct CommandBatch {
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
     landscape_ops: Vec<LandscapeOperation>,
+    solid_mask_operations: Vec<HostSolidMaskOperation>,
+    host_raster_preview: Option<compat::HostRasterPreview>,
     particles: Vec<ParticleCommand>,
     transfer_zones: Vec<TransferZoneCommand>,
     audio: Vec<AudioCommand>,
@@ -14603,6 +14685,24 @@ struct CommandBatch {
     script_counter: Option<i32>,
 }
 
+/// Opaque carrier required by ScenarioBatch's externally constructible
+/// compatibility surface. Runtime callers cannot forge replay operations.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct HostSolidMaskOperations(Vec<HostSolidMaskOperation>);
+
+impl HostSolidMaskOperations {
+    fn extend(&mut self, operations: impl IntoIterator<Item = HostSolidMaskOperation>) {
+        self.0.extend(operations);
+    }
+}
+
+/// Opaque callback-final raster carrier for ScenarioBatch's public
+/// compatibility surface.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct HostRasterPreviewState(Option<compat::HostRasterPreview>);
+
 #[derive(Debug, Default)]
 #[doc(hidden)]
 pub struct ScenarioBatch {
@@ -14613,6 +14713,8 @@ pub struct ScenarioBatch {
     #[doc(hidden)] pub environment: Option<EnvironmentDelta>,
     #[doc(hidden)] pub physics: Option<PhysicsDelta>,
     #[doc(hidden)] pub landscape_ops: Vec<LandscapeOperation>,
+    #[doc(hidden)] pub solid_mask_operations: HostSolidMaskOperations,
+    #[doc(hidden)] pub host_raster_preview: HostRasterPreviewState,
     #[doc(hidden)] pub landscape: Vec<LandscapeCommand>,
     #[doc(hidden)] pub particles: Vec<ParticleCommand>,
     #[doc(hidden)] pub transfer_zones: Vec<TransferZoneCommand>,
@@ -14884,6 +14986,18 @@ pub struct Engine {
     materials_shared: std::cell::RefCell<Option<Rc<MaterialSet>>>,
     #[doc(hidden)] pub objects: Vec<Object>,
     #[doc(hidden)] pub next_object_id: u64,
+    /// Next C4SolidMask construction-order token. Runtime-only: native
+    /// pSolidMaskData is NoSave and is rebuilt after a load.
+    next_solid_mask_instance_sequence: u64,
+    /// Channel folds are suppressed while chronological host mask
+    /// operations are staged for replay.
+    defer_solid_mask_updates: bool,
+    /// Operations accumulated by the outermost deferred fold. Nested spawn,
+    /// effect, and callback folds append to this same chronological stream.
+    deferred_solid_mask_operations: Vec<HostSolidMaskOperation>,
+    /// Exact callback-final raster exposed to synchronous callbacks that run
+    /// before the outermost chronological stream reaches authoritative replay.
+    deferred_host_raster_preview: Option<compat::HostRasterPreview>,
     #[doc(hidden)] pub rng: LcgRng,
     /// Game.Script.Go — the scenario Script%d counter gate (FnScriptGo,
     /// C4Script.cpp:2782-2786).
@@ -15281,14 +15395,37 @@ struct LayerMovementBounds {
 /// (C4Object::UpdateSolidMask reads SolidMask/Shape/r off the object,
 /// C4Object.cpp:5648-5656).
 #[derive(Debug, Clone)]
-struct SolidMaskSpec {
+pub(crate) struct SolidMaskSpec {
     mask: DefinitionTargetRect,
-    pixels: Option<Rc<Vec<u8>>>,
+    pixels: Option<Arc<Vec<u8>>>,
     shape_x: i32,
     shape_y: i32,
     /// MaskPutRotation (C4SolidMask.cpp:42): the object's `r` at put
     /// time; nonzero only with Def->RotatedSolidmasks.
     rotation: i32,
+}
+
+/// One synchronous C4Object::UpdateSolidMask result captured while script
+/// callbacks run against their copy-on-write host world. Replaying these in
+/// call order preserves buffer ownership across Rust's separate outer and
+/// foreign-object outcome channels.
+#[derive(Debug, Clone)]
+pub(crate) enum HostSolidMaskOperation {
+    Remove {
+        object_id: ObjectId,
+    },
+    Put {
+        object_id: ObjectId,
+        spec: SolidMaskSpec,
+        position: Vector2,
+        instance_sequence: u64,
+    },
+    /// Landscape calls share the synchronous timeline with C4SolidMask
+    /// Remove/Put. Transactional calls may commute with masks, but not with
+    /// raw SetPix-style writes or with one another.
+    Landscape {
+        operation: LandscapeOperation,
+    },
 }
 
 /// The rotated-put parameters of a bake (C4SolidMask.cpp:108-174): the
@@ -15311,6 +15448,9 @@ struct RotatedBake {
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct SolidMaskBake {
+    /// C4SolidMask linked-list construction order. Higher means newer and
+    /// therefore earlier in the native Last->Prev survivor re-put walk.
+    instance_sequence: u64,
     /// MaskPutRect (landscape space, clipped).
     x: i32,
     y: i32,
@@ -15324,7 +15464,7 @@ pub struct SolidMaskBake {
     /// Full mask width (the alpha-pixel row pitch).
     mask_width: i32,
     /// Per-pixel alpha mask (1 = solid); None = full rectangle.
-    pixels: Option<Rc<Vec<u8>>>,
+    pixels: Option<Arc<Vec<u8>>>,
     /// Saved background bytes, row-major width*height (the clipped
     /// window of C++'s MatBuffPitch-pitched pSolidMaskMatBuff).
     buffer: Vec<u8>,
@@ -15445,6 +15585,7 @@ fn put_solid_mask_raster(
     landscape: &mut Landscape,
     spec: SolidMaskSpec,
     position: Vector2,
+    instance_sequence: u64,
 ) -> Option<SolidMaskBake> {
     let vehicle = landscape.grid_vehicle_byte()?;
     let (grid_width, grid_height) = landscape.grid_dimensions()?;
@@ -15477,6 +15618,7 @@ fn put_solid_mask_raster(
             return None;
         }
         let mut bake = SolidMaskBake {
+            instance_sequence,
             x: rect_x,
             y: rect_y,
             width,
@@ -15537,6 +15679,7 @@ fn put_solid_mask_raster(
         return None;
     }
     let mut bake = SolidMaskBake {
+        instance_sequence,
         x: rect_x,
         y: rect_y,
         width,
@@ -15590,7 +15733,7 @@ struct SolidMaskRect {
     y: i32,
     width: i32,
     height: i32,
-    pixels: Option<Rc<Vec<u8>>>,
+    pixels: Option<Arc<Vec<u8>>>,
 }
 
 impl SolidMaskRect {
@@ -17072,6 +17215,10 @@ impl Engine {
             materials_shared: std::cell::RefCell::new(None),
             objects: Vec::new(),
             next_object_id: 1,
+            next_solid_mask_instance_sequence: 1,
+            defer_solid_mask_updates: false,
+            deferred_solid_mask_operations: Vec::new(),
+            deferred_host_raster_preview: None,
             rng: {
                 let mut rng = LcgRng::seed_from_u64(seed);
                 rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
@@ -19449,23 +19596,25 @@ impl Engine {
                     .unwrap_or(0)
             });
 
-        let (old_owner, flag_base_target) = {
+        let old_owner = self.objects[index].state.owner;
+        if let Some(color) = owner_color {
+            // C4Object::SetOwner refreshes the ColorByOwner face before its
+            // same-owner early return (C4Object.cpp:5497-5506).
+            self.objects[index].state.color = color;
+            self.update_solid_mask(index);
+        }
+        if old_owner == new_owner {
+            return Ok(());
+        }
+
+        let flag_base_target = {
             let object = &mut self.objects[index];
-            if let Some(color) = owner_color {
-                // C++ refreshes ColorByOwner even when the owner is unchanged.
-                object.state.color = color;
-            }
-            let old_owner = object.state.owner;
-            if old_owner == new_owner {
-                return Ok(());
-            }
             object.state.owner = new_owner;
             object.state.controller = new_owner;
-            let flag_base_target = (definition_id.as_str() == "FLAG"
+            (definition_id.as_str() == "FLAG"
                 && object.state.action.name == "FlyBase")
                 .then_some(object.state.action.target)
-                .flatten();
-            (old_owner, flag_base_target)
+                .flatten()
         };
 
         self.actualize_object_fow_after_owner_change(object_id, new_owner);
@@ -20838,12 +20987,6 @@ impl Engine {
                         position.y.wrapping_add(control.ty),
                     );
                     self.force_object_position(index, target);
-                    if target != position {
-                        // ForcePosition updates a put solid mask only when
-                        // integer x/y changed; its same-position fast path
-                        // merely resynchronizes fixed coordinates.
-                        self.update_solid_mask(index);
-                    }
                     let object = &mut self.objects[index];
                     object.fixed_velocity = FixedVec2::ZERO;
                     object.state.velocity = Vector2::ZERO;
@@ -21970,7 +22113,7 @@ impl Engine {
             },
             |sky| [sky.settings().fade_top, sky.settings().fade_bottom],
         );
-        HostWorldContext::with_landscape_shared(
+        let mut world = HostWorldContext::with_landscape_shared(
             self.objects.iter().map(|object| {
                 let definition = self.definitions.get(&object.definition_id);
                 let procedure = definition
@@ -22063,6 +22206,17 @@ impl Engine {
                 .iter()
                 .filter_map(|object| object.solid_mask_bake.clone().map(|bake| (object.id, bake)))
                 .collect(),
+        )
+        .with_solid_mask_instance_sequences(
+            self.objects
+                .iter()
+                .filter_map(|object| {
+                    object
+                        .solid_mask_instance_sequence
+                        .map(|sequence| (object.id, sequence))
+                })
+                .collect(),
+            self.next_solid_mask_instance_sequence,
         )
         .with_scenario_values(Rc::clone(&self.scenario_values))
         .with_scenario_sections(
@@ -22210,7 +22364,13 @@ impl Engine {
             self.host_crew_info_state(),
         )
         .with_sky_adjustment(sky_adjustment)
-        .with_sky_fade(sky_fade[0], sky_fade[1])
+        .with_sky_fade(sky_fade[0], sky_fade[1]);
+        if self.defer_solid_mask_updates {
+            if let Some(preview) = self.deferred_host_raster_preview.clone() {
+                world.apply_host_raster_preview(preview);
+            }
+        }
+        world
     }
 
     /// The shared definition-script table host contexts carry (nested
@@ -22958,6 +23118,22 @@ impl Engine {
         &mut self,
         batch: ScenarioBatch,
     ) -> Result<Vec<ObjectId>, EngineError> {
+        let solid_mask_operations = batch.solid_mask_operations.0.clone();
+        let host_raster_preview = batch.host_raster_preview.0.clone();
+        let was_deferred = self.defer_solid_mask_updates;
+        let mut outermost = self.stage_host_solid_mask_operations(
+            solid_mask_operations,
+            host_raster_preview,
+        );
+        let result = self.apply_scenario_batch_inner(batch);
+        outermost |= !was_deferred && self.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, result)
+    }
+
+    fn apply_scenario_batch_inner(
+        &mut self,
+        batch: ScenarioBatch,
+    ) -> Result<Vec<ObjectId>, EngineError> {
         let ScenarioBatch {
             spawns,
             other_objects,
@@ -22965,6 +23141,8 @@ impl Engine {
             environment,
             physics,
             landscape_ops,
+            solid_mask_operations: _,
+            host_raster_preview: _,
             landscape,
             particles,
             transfer_zones,
@@ -25226,11 +25404,16 @@ impl Engine {
     }
 
     pub fn spawn_object(&mut self, config: SpawnConfig) -> Result<ObjectId, EngineError> {
-        let (id, additional, nested_outcomes) = self.spawn_single(config)?;
-        self.process_spawn_queue_with_outcomes(additional, nested_outcomes)?;
-        self.refresh_elimination_state();
-        self.check_game_over()?;
-        Ok(id)
+        let was_deferred = self.defer_solid_mask_updates;
+        let result = (|| {
+            let (id, additional, nested_outcomes) = self.spawn_single(config)?;
+            self.process_spawn_queue_with_outcomes(additional, nested_outcomes)?;
+            self.refresh_elimination_state();
+            self.check_game_over()?;
+            Ok(id)
+        })();
+        let outermost = !was_deferred && self.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, result)
     }
 
     /// `C4Game::NewObject` for engine-owned creation sites which do not run
@@ -26982,6 +27165,8 @@ impl Engine {
                     effect_transfer_zones,
                     effect_spawns,
                     effect_other_objects,
+                    effect_solid_mask_operations,
+                    effect_host_raster_preview,
                     effect_solid_mask_changed,
                     effect_change_def_reinsert,
                     effect_next_object_id,
@@ -27013,65 +27198,76 @@ impl Engine {
                         self.audio_registry.clone(),
                     )?
                 };
-                self.rng = new_rng;
-                self.audio_registry = audio_state;
-                if effect_solid_mask_changed {
-                    self.update_solid_mask(idx);
-                }
-                self.sync_next_object_id(effect_next_object_id);
-                if !effect_spawns.is_empty() {
-                    self.process_spawn_queue(effect_spawns)?;
-                }
-                if !effect_transfer_zones.is_empty() {
-                    self.apply_transfer_zone_commands(effect_transfer_zones)?;
-                }
-                if !effect_other_objects.is_empty() {
-                    self.apply_nested_object_outcomes(effect_other_objects)?;
-                }
-                if !landscape_ops.is_empty() {
-                    self.apply_landscape_operations(landscape_ops);
-                }
-                if !player_commands.is_empty() {
-                    self.apply_player_commands(player_commands)?;
-                }
-                self.pending_object_order_commands.extend(object_order_commands);
-                self.apply_next_mission_commands(next_mission_commands);
-                if !audio_events.is_empty() {
-                    self.pending_audio.extend(audio_events);
-                }
-                if !event_messages.is_empty() {
-                    for command in event_messages {
-                        self.messages.apply_command(command);
+                let was_deferred = self.defer_solid_mask_updates;
+                let mut outermost = self.stage_host_solid_mask_operations(
+                    effect_solid_mask_operations,
+                    effect_host_raster_preview,
+                );
+                let fold_result = (|| -> Result<(), EngineError> {
+                    self.rng = new_rng;
+                    self.audio_registry = audio_state;
+                    if effect_solid_mask_changed {
+                        self.update_solid_mask(idx);
                     }
-                }
-                if let Some(go) = effect_script_go {
-                    self.scenario_script_go = go;
-                }
-                if let Some(counter) = effect_script_counter {
-                    self.scenario_script_counter = counter;
-                }
-                if triggered_game_over {
-                    self.request_game_over()?;
-                }
-                if !physics_delta.is_empty() {
-                    self.apply_physics_delta(physics_delta);
-                }
-                if !global_cmds.is_empty() {
-                    self.apply_global_effect_commands(&global_cmds);
-                }
-                self.apply_particle_commands(emitted_particles);
-                let new_container = self.objects[idx].state.container;
-                if previous_container != new_container {
-                    self.apply_container_change(
-                        object_id,
-                        previous_container,
-                        new_container,
-                        false,
-                    )?;
-                }
-                if effect_change_def_reinsert.unwrap_or(false) {
-                    self.reinsert_change_def_contents_link(object_id)?;
-                }
+                    self.sync_next_object_id(effect_next_object_id);
+                    if !effect_spawns.is_empty() {
+                        self.process_spawn_queue(effect_spawns)?;
+                    }
+                    if !effect_transfer_zones.is_empty() {
+                        self.apply_transfer_zone_commands(effect_transfer_zones)?;
+                    }
+                    if !effect_other_objects.is_empty() {
+                        self.apply_nested_object_outcomes(effect_other_objects)?;
+                    }
+                    if !landscape_ops.is_empty() {
+                        self.apply_landscape_operations(landscape_ops);
+                    }
+                    if !player_commands.is_empty() {
+                        self.apply_player_commands(player_commands)?;
+                    }
+                    self.pending_object_order_commands
+                        .extend(object_order_commands);
+                    self.apply_next_mission_commands(next_mission_commands);
+                    if !audio_events.is_empty() {
+                        self.pending_audio.extend(audio_events);
+                    }
+                    if !event_messages.is_empty() {
+                        for command in event_messages {
+                            self.messages.apply_command(command);
+                        }
+                    }
+                    if let Some(go) = effect_script_go {
+                        self.scenario_script_go = go;
+                    }
+                    if let Some(counter) = effect_script_counter {
+                        self.scenario_script_counter = counter;
+                    }
+                    if triggered_game_over {
+                        self.request_game_over()?;
+                    }
+                    if !physics_delta.is_empty() {
+                        self.apply_physics_delta(physics_delta);
+                    }
+                    if !global_cmds.is_empty() {
+                        self.apply_global_effect_commands(&global_cmds);
+                    }
+                    self.apply_particle_commands(emitted_particles);
+                    let new_container = self.objects[idx].state.container;
+                    if previous_container != new_container {
+                        self.apply_container_change(
+                            object_id,
+                            previous_container,
+                            new_container,
+                            false,
+                        )?;
+                    }
+                    if effect_change_def_reinsert.unwrap_or(false) {
+                        self.reinsert_change_def_contents_link(object_id)?;
+                    }
+                    Ok(())
+                })();
+                outermost |= !was_deferred && self.defer_solid_mask_updates;
+                self.finish_host_solid_mask_operations(outermost, fold_result)?;
             }
 
             self.finish_object_command_execution(object_id)?;
@@ -27599,6 +27795,8 @@ impl Engine {
                 environment,
                 physics,
                 landscape_ops,
+                solid_mask_operations,
+                host_raster_preview: command_host_raster_preview,
                 particles,
                 transfer_zones,
                 audio,
@@ -27611,242 +27809,132 @@ impl Engine {
                 script_counter,
             } = command;
 
-            let change_def = delta.change_def.clone();
-            let change_def_reinsert = delta.change_def_reinsert;
-
-            let action_library = change_def
-                .as_deref()
-                .and_then(|new_def| {
-                    self.apply_change_object_def(idx, new_def);
-                    self.definitions
-                        .get(&self.objects[idx].definition_id)
-                        .map(|definition| definition.action_library().clone())
-                })
-                .unwrap_or(action_library);
-
-            if let Some(go) = script_go {
-                self.scenario_script_go = go;
-            }
-            if let Some(counter) = script_counter {
-                self.scenario_script_counter = counter;
-            }
-            if trigger_game_over {
-                self.request_game_over()?;
-            }
-
-            if !player_commands.is_empty() {
-                self.apply_player_commands(player_commands)?;
-            }
-            self.pending_object_order_commands.extend(object_order_commands);
-            self.apply_next_mission_commands(next_mission_commands);
-
-            if !landscape_ops.is_empty() {
-                self.apply_landscape_operations(landscape_ops);
-            }
-
-            if let Some(update) = environment {
-                self.apply_environment_delta(&update);
-            }
-            if let Some(delta) = physics {
-                self.apply_physics_delta(delta);
-            }
-
-            let mut effect_events = Vec::new();
-            if !messages.is_empty() {
-                for command in messages {
-                    self.messages.apply_command(command);
-                }
-            }
-            let (
-                object_id,
-                previous_owner,
-                previous_crew,
-                new_owner,
-                new_crew,
-                previous_status,
-                new_status,
-                container_change,
-            ) = {
-                let object = &mut self.objects[idx];
-                let previous_owner = object.state.owner;
-                let previous_crew = object.state.crew_member;
-                let previous_status = object.state.status;
-                let mut container_change = None;
-                let callbacks_dispatched = delta
-                    .action
-                    .as_ref()
-                    .map(|action| action.callbacks_dispatched)
-                    .unwrap_or(false);
-                let delta_outcome = object.apply_delta(&delta, &action_library);
-                if let Some(change) = delta_outcome.action_change {
-                    if !callbacks_dispatched {
-                        object.record_action_event(change.previous, ActionTransitionKind::Forced);
-                    }
-                }
-                if let Some(change) = delta_outcome.container_change {
-                    container_change = Some(change);
-                }
-                let mut applied = object.apply_effect_commands(&effects);
-                effect_events.append(&mut applied);
-                if !matches!(
-                    action_library.procedure_for_entry(
-                        &object.state.action.name,
-                        object.state.action.act_map_index,
-                    ),
-                    ActionProcedure::Flight
-                ) {
-                    object.clamp_velocity(&self.physics);
-                }
-                if destroy {
-                    effect_events.extend(object.mark_destroyed());
-                }
-                if !command_ops.is_empty() {
-                    object.apply_command_operations(command_ops);
-                }
-                if !commands.is_empty() {
-                    object.enqueue_commands(commands);
-                }
-                (
-                    object.id,
-                    previous_owner,
-                    previous_crew,
-                    object.state.owner,
-                    object.state.crew_member,
-                    previous_status,
-                    object.state.status,
-                    container_change,
-                )
-            };
-            self.update_inactive_list_for_status_change(object_id, previous_status, new_status);
-            self.update_sector_for_index(idx);
-            if !audio.is_empty() {
-                self.pending_audio.extend(audio);
-            }
-            self.update_selection_for_state_change(
-                object_id,
-                previous_owner,
-                previous_crew,
-                new_owner,
-                new_crew,
+            let was_deferred = self.defer_solid_mask_updates;
+            let mut outermost = self.stage_host_solid_mask_operations(
+                solid_mask_operations,
+                command_host_raster_preview,
             );
-            if let Some((previous_container, new_container)) = container_change {
-                self.apply_container_change(object_id, previous_container, new_container, false)?;
-            }
-            if change_def_reinsert {
-                self.reinsert_change_def_contents_link(object_id)?;
-            }
-            if change_def.is_some() {
-                self.update_solid_mask(idx);
-                self.refresh_object_ocf(idx);
-            }
+            let command_fold_result = (|| -> Result<(), EngineError> {
+                let change_def = delta.change_def.clone();
+                let change_def_reinsert = delta.change_def_reinsert;
 
-            self.apply_particle_commands(particles);
-            if !transfer_zones.is_empty() {
-                self.apply_transfer_zone_commands(transfer_zones)?;
-            }
+                let action_library = change_def
+                    .as_deref()
+                    .and_then(|new_def| {
+                        self.apply_change_object_def(idx, new_def);
+                        self.definitions
+                            .get(&self.objects[idx].definition_id)
+                            .map(|definition| definition.action_library().clone())
+                    })
+                    .unwrap_or_else(|| action_library.clone());
 
-            if !global_effects.is_empty() {
-                self.apply_global_effect_commands(&global_effects);
-            }
+                if let Some(go) = script_go {
+                    self.scenario_script_go = go;
+                }
+                if let Some(counter) = script_counter {
+                    self.scenario_script_counter = counter;
+                }
+                if trigger_game_over {
+                    self.request_game_over()?;
+                }
 
-            if !effect_events.is_empty() {
-                let previous_container = self.objects[idx].state.container;
-                let world = self.host_world_context();
-                let (
-                    global_cmds,
-                    emitted_particles,
-                    physics_delta,
-                    audio_events,
-                    event_messages,
-                    player_commands,
-                    object_order_commands,
-                    next_mission_commands,
-                    landscape_ops,
-                    effect_transfer_zones,
-                    effect_spawns,
-                    effect_other_objects,
-                    effect_solid_mask_changed,
-                    effect_change_def_reinsert,
-                    effect_next_object_id,
-                    triggered_game_over,
-                    effect_script_go,
-                    effect_script_counter,
-                    audio_state,
-                    new_rng,
-                ) = {
-                    let definition = self
-                        .definitions
-                        .get(&definition_id)
-                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
-                    let global_view = self.global_effects.clone();
-                    let rng_state = self.rng.clone();
-                    let object = &mut self.objects[idx];
-                    Self::run_effect_events_for_object(
-                        definition,
-                        definitions_ref,
-                        self.game_over_triggered,
-                        rng_state,
-                        object_id,
-                        object,
-                        effect_events,
-                        global_view,
-                        &mut self.environment,
-                        self.physics,
-                        self.frame,
-                        world.clone(),
-                        self.audio_registry.clone(),
-                    )?
-                };
-                self.rng = new_rng;
-                self.audio_registry = audio_state;
-                if effect_solid_mask_changed {
-                    self.update_solid_mask(idx);
-                }
-                self.sync_next_object_id(effect_next_object_id);
-                if !effect_spawns.is_empty() {
-                    self.process_spawn_queue(effect_spawns)?;
-                }
-                if !effect_transfer_zones.is_empty() {
-                    self.apply_transfer_zone_commands(effect_transfer_zones)?;
-                }
-                if !effect_other_objects.is_empty() {
-                    self.apply_nested_object_outcomes(effect_other_objects)?;
-                }
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
                 self.pending_object_order_commands.extend(object_order_commands);
                 self.apply_next_mission_commands(next_mission_commands);
+
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
                 }
-                if !audio_events.is_empty() {
-                    self.pending_audio.extend(audio_events);
+
+                if let Some(update) = environment {
+                    self.apply_environment_delta(&update);
                 }
-                if !event_messages.is_empty() {
-                    for command in event_messages {
+                if let Some(delta) = physics {
+                    self.apply_physics_delta(delta);
+                }
+
+                let mut effect_events = Vec::new();
+                if !messages.is_empty() {
+                    for command in messages {
                         self.messages.apply_command(command);
                     }
                 }
-                if let Some(go) = effect_script_go {
-                    self.scenario_script_go = go;
+                let (
+                    object_id,
+                    previous_owner,
+                    previous_crew,
+                    new_owner,
+                    new_crew,
+                    previous_status,
+                    new_status,
+                    container_change,
+                ) = {
+                    let object = &mut self.objects[idx];
+                    let previous_owner = object.state.owner;
+                    let previous_crew = object.state.crew_member;
+                    let previous_status = object.state.status;
+                    let mut container_change = None;
+                    let callbacks_dispatched = delta
+                        .action
+                        .as_ref()
+                        .map(|action| action.callbacks_dispatched)
+                        .unwrap_or(false);
+                    let delta_outcome = object.apply_delta(&delta, &action_library);
+                    if let Some(change) = delta_outcome.action_change {
+                        if !callbacks_dispatched {
+                            object
+                                .record_action_event(change.previous, ActionTransitionKind::Forced);
+                        }
+                    }
+                    if let Some(change) = delta_outcome.container_change {
+                        container_change = Some(change);
+                    }
+                    let mut applied = object.apply_effect_commands(&effects);
+                    effect_events.append(&mut applied);
+                    if !matches!(
+                        action_library.procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        ),
+                        ActionProcedure::Flight
+                    ) {
+                        object.clamp_velocity(&self.physics);
+                    }
+                    if destroy {
+                        effect_events.extend(object.mark_destroyed());
+                    }
+                    if !command_ops.is_empty() {
+                        object.apply_command_operations(command_ops);
+                    }
+                    if !commands.is_empty() {
+                        object.enqueue_commands(commands);
+                    }
+                    (
+                        object.id,
+                        previous_owner,
+                        previous_crew,
+                        object.state.owner,
+                        object.state.crew_member,
+                        previous_status,
+                        object.state.status,
+                        container_change,
+                    )
+                };
+                self.update_inactive_list_for_status_change(object_id, previous_status, new_status);
+                self.update_sector_for_index(idx);
+                if !audio.is_empty() {
+                    self.pending_audio.extend(audio);
                 }
-                if let Some(counter) = effect_script_counter {
-                    self.scenario_script_counter = counter;
-                }
-                if triggered_game_over {
-                    self.request_game_over()?;
-                }
-                if !physics_delta.is_empty() {
-                    self.apply_physics_delta(physics_delta);
-                }
-                let new_container = self.objects[idx].state.container;
-                if !global_cmds.is_empty() {
-                    self.apply_global_effect_commands(&global_cmds);
-                }
-                self.apply_particle_commands(emitted_particles);
-                if previous_container != new_container {
+                self.update_selection_for_state_change(
+                    object_id,
+                    previous_owner,
+                    previous_crew,
+                    new_owner,
+                    new_crew,
+                );
+                if let Some((previous_container, new_container)) = container_change {
                     self.apply_container_change(
                         object_id,
                         previous_container,
@@ -27854,13 +27942,147 @@ impl Engine {
                         false,
                     )?;
                 }
-                if effect_change_def_reinsert.unwrap_or(false) {
+                if change_def_reinsert {
                     self.reinsert_change_def_contents_link(object_id)?;
                 }
-            }
-            self.update_sector_for_index(idx);
+                if change_def.is_some() {
+                    self.update_solid_mask(idx);
+                    self.refresh_object_ocf(idx);
+                }
 
-            self.apply_nested_object_outcomes(other_objects)?;
+                self.apply_particle_commands(particles);
+                if !transfer_zones.is_empty() {
+                    self.apply_transfer_zone_commands(transfer_zones)?;
+                }
+
+                if !global_effects.is_empty() {
+                    self.apply_global_effect_commands(&global_effects);
+                }
+
+                if !effect_events.is_empty() {
+                    let previous_container = self.objects[idx].state.container;
+                    let world = self.host_world_context();
+                    let (
+                        global_cmds,
+                        emitted_particles,
+                        physics_delta,
+                        audio_events,
+                        event_messages,
+                        player_commands,
+                        object_order_commands,
+                        next_mission_commands,
+                        landscape_ops,
+                        effect_transfer_zones,
+                        effect_spawns,
+                        effect_other_objects,
+                        effect_solid_mask_operations,
+                        effect_host_raster_preview,
+                        effect_solid_mask_changed,
+                        effect_change_def_reinsert,
+                        effect_next_object_id,
+                        triggered_game_over,
+                        effect_script_go,
+                        effect_script_counter,
+                        audio_state,
+                        new_rng,
+                    ) = {
+                        let definition = self
+                            .definitions
+                            .get(&definition_id)
+                            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                        let definitions_ref = &self.definitions;
+                        let global_view = self.global_effects.clone();
+                        let rng_state = self.rng.clone();
+                        let object = &mut self.objects[idx];
+                        Self::run_effect_events_for_object(
+                            definition,
+                            definitions_ref,
+                            self.game_over_triggered,
+                            rng_state,
+                            object_id,
+                            object,
+                            effect_events,
+                            global_view,
+                            &mut self.environment,
+                            self.physics,
+                            self.frame,
+                            world.clone(),
+                            self.audio_registry.clone(),
+                        )?
+                    };
+                    self.stage_host_solid_mask_operations(
+                        effect_solid_mask_operations,
+                        effect_host_raster_preview,
+                    );
+                    self.rng = new_rng;
+                    self.audio_registry = audio_state;
+                    if effect_solid_mask_changed {
+                        self.update_solid_mask(idx);
+                    }
+                    self.sync_next_object_id(effect_next_object_id);
+                    if !effect_spawns.is_empty() {
+                        self.process_spawn_queue(effect_spawns)?;
+                    }
+                    if !effect_transfer_zones.is_empty() {
+                        self.apply_transfer_zone_commands(effect_transfer_zones)?;
+                    }
+                    if !effect_other_objects.is_empty() {
+                        self.apply_nested_object_outcomes(effect_other_objects)?;
+                    }
+                    if !player_commands.is_empty() {
+                        self.apply_player_commands(player_commands)?;
+                    }
+                    self.pending_object_order_commands
+                        .extend(object_order_commands);
+                    self.apply_next_mission_commands(next_mission_commands);
+                    if !landscape_ops.is_empty() {
+                        self.apply_landscape_operations(landscape_ops);
+                    }
+                    if !audio_events.is_empty() {
+                        self.pending_audio.extend(audio_events);
+                    }
+                    if !event_messages.is_empty() {
+                        for command in event_messages {
+                            self.messages.apply_command(command);
+                        }
+                    }
+                    if let Some(go) = effect_script_go {
+                        self.scenario_script_go = go;
+                    }
+                    if let Some(counter) = effect_script_counter {
+                        self.scenario_script_counter = counter;
+                    }
+                    if triggered_game_over {
+                        self.request_game_over()?;
+                    }
+                    if !physics_delta.is_empty() {
+                        self.apply_physics_delta(physics_delta);
+                    }
+                    let new_container = self.objects[idx].state.container;
+                    if !global_cmds.is_empty() {
+                        self.apply_global_effect_commands(&global_cmds);
+                    }
+                    self.apply_particle_commands(emitted_particles);
+                    if previous_container != new_container {
+                        self.apply_container_change(
+                            object_id,
+                            previous_container,
+                            new_container,
+                            false,
+                        )?;
+                    }
+                    if effect_change_def_reinsert.unwrap_or(false) {
+                        self.reinsert_change_def_contents_link(object_id)?;
+                    }
+                }
+                self.update_sector_for_index(idx);
+
+                self.apply_nested_object_outcomes(other_objects)?;
+
+                Ok(())
+            })();
+            outermost |= !was_deferred && self.defer_solid_mask_updates;
+            self.finish_host_solid_mask_operations(outermost, command_fold_result)?;
 
             self.trigger_action_callbacks(idx, Some(previous_action_name))?;
             self.update_sector_for_index(idx);
@@ -28149,6 +28371,7 @@ impl Engine {
             info_link,
             crew_disabled,
             solid_mask_override: update_solid_mask,
+            solid_mask_instance_sequence,
             change_def,
             change_def_reinsert,
             alive,
@@ -28169,6 +28392,13 @@ impl Engine {
             menu: update_menu,
             ..
         } = update;
+        if let Some(sequence) = solid_mask_instance_sequence {
+            self.next_solid_mask_instance_sequence = self.next_solid_mask_instance_sequence.max(
+                sequence
+                    .checked_add(1)
+                    .expect("C4SolidMask instance sequence overflow"),
+            );
+        }
         let fow_range_changed = plr_view_range.is_some();
         let fow_crew_actualize = crew_member == Some(true);
 
@@ -28184,8 +28414,10 @@ impl Engine {
         };
 
         let mut energy_died = false;
-        let mut solid_mask_refresh =
-            rotation.is_some() || change_def.is_some() || construction.is_some();
+        let mut solid_mask_refresh = rotation.is_some()
+            || change_def.is_some()
+            || construction.is_some()
+            || solid_mask_instance_sequence.is_some();
         // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply it
         // BEFORE the staged fields so an action write in the same update
         // resolves against the NEW def's ActMap.
@@ -28367,6 +28599,7 @@ impl Engine {
             }
             if let Some(rect) = update_solid_mask {
                 object.state.solid_mask_override = Some(rect);
+                object.solid_mask_instance_sequence = None;
                 solid_mask_refresh = true;
             }
             if let Some(alive) = alive {
@@ -28436,8 +28669,12 @@ impl Engine {
             if let Some(base_graphics) = update_base_graphics {
                 if object.state.base_graphics != base_graphics {
                     object.state.base_graphics = base_graphics;
+                    object.solid_mask_instance_sequence = None;
                     solid_mask_refresh = true;
                 }
+            }
+            if let Some(sequence) = solid_mask_instance_sequence {
+                object.solid_mask_instance_sequence = Some(sequence);
             }
             if let Some(components) = components {
                 object.state.component_order = normalized_component_order(
@@ -28738,6 +28975,16 @@ impl Engine {
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
+        let callback = callback.map_err(|error| {
+            self.apply_script_error_recovery(
+                error,
+                index,
+                &action_library,
+                object_id,
+                &definition_id,
+                true,
+            )
+        });
         // StartCall/EndCall/PhaseCall/AbortCall are engine-initiated game
         // calls: a script error logs and the action proceeds (C++ fail-safe
         // exec, C4AulExec.cpp:1318-1342).
@@ -28861,6 +29108,39 @@ impl Engine {
         definition_id: &str,
         clamp_velocity: bool,
     ) -> Result<(), EngineError> {
+        let solid_mask_operations = outcome.solid_mask_operations.clone();
+        let host_raster_preview = outcome.host_raster_preview.clone();
+        // The outcome's outer-object, spawn, and foreign-object channels do
+        // not preserve the interleaving of synchronous UpdateSolidMask
+        // calls. Apply every non-mask state change first while suppressing
+        // their channel-local mask folds, then replay the captured C++ call
+        // order against the now-materialized objects.
+        let was_deferred = self.defer_solid_mask_updates;
+        let mut outermost = self.stage_host_solid_mask_operations(
+            solid_mask_operations,
+            host_raster_preview,
+        );
+        let result = self.apply_callback_outcome_inner(
+            index,
+            outcome,
+            action_library,
+            object_id,
+            definition_id,
+            clamp_velocity,
+        );
+        outermost |= !was_deferred && self.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, result)
+    }
+
+    fn apply_callback_outcome_inner(
+        &mut self,
+        index: usize,
+        outcome: compat::EffectContextOutcome,
+        action_library: &ActionLibrary,
+        object_id: ObjectId,
+        definition_id: &str,
+        clamp_velocity: bool,
+    ) -> Result<(), EngineError> {
         let compat::EffectContextOutcome {
             object: object_effects,
             global: global_effects,
@@ -28874,6 +29154,8 @@ impl Engine {
             physics,
             spawns,
             landscape: host_landscape_ops,
+            solid_mask_operations: _,
+            host_raster_preview: _,
             particles,
             transfer_zones,
             messages,
@@ -29075,6 +29357,7 @@ impl Engine {
             || object_update.as_ref().is_some_and(|update| {
                 update.change_def.is_some()
                     || update.solid_mask_override.is_some()
+                    || update.position.is_some()
                     || update.rotation.is_some()
                     || update.construction.is_some()
             });
@@ -29221,6 +29504,8 @@ impl Engine {
                 effect_transfer_zones,
                 effect_spawns,
                 effect_other_objects,
+                nested_effect_solid_mask_operations,
+                nested_effect_host_raster_preview,
                 nested_effect_solid_mask_changed,
                 nested_effect_change_def_reinsert,
                 effect_next_object_id,
@@ -29244,6 +29529,10 @@ impl Engine {
                 world.clone(),
                 self.audio_registry.clone(),
             )?;
+            self.stage_host_solid_mask_operations(
+                nested_effect_solid_mask_operations,
+                nested_effect_host_raster_preview,
+            );
             self.rng = new_rng;
             self.audio_registry = audio_state;
             effect_solid_mask_changed |= nested_effect_solid_mask_changed;
@@ -29358,6 +29647,16 @@ impl Engine {
         &mut self,
         outcomes: Vec<compat::NestedObjectOutcome>,
     ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
+        let was_deferred = self.defer_solid_mask_updates;
+        let result = self.apply_nested_object_outcomes_retaining_missing_inner(outcomes);
+        let outermost = !was_deferred && self.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, result)
+    }
+
+    fn apply_nested_object_outcomes_retaining_missing_inner(
+        &mut self,
+        outcomes: Vec<compat::NestedObjectOutcome>,
+    ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
         let mut retained = Vec::new();
         for outcome in outcomes {
             let requested_death = outcome.assign_death;
@@ -29390,6 +29689,7 @@ impl Engine {
                 .is_some_and(|update| {
                     update.change_def.is_some()
                         || update.solid_mask_override.is_some()
+                        || update.position.is_some()
                         || update.rotation.is_some()
                         || update.construction.is_some()
                 });
@@ -29543,6 +29843,8 @@ impl Engine {
                     effect_transfer_zones,
                     effect_spawns,
                     effect_other_objects,
+                    nested_effect_solid_mask_operations,
+                    nested_effect_host_raster_preview,
                     nested_effect_solid_mask_changed,
                     nested_effect_change_def_reinsert,
                     effect_next_object_id,
@@ -29566,6 +29868,10 @@ impl Engine {
                     world.clone(),
                     self.audio_registry.clone(),
                 )?;
+                self.stage_host_solid_mask_operations(
+                    nested_effect_solid_mask_operations,
+                    nested_effect_host_raster_preview,
+                );
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
                 effect_solid_mask_changed |= nested_effect_solid_mask_changed;
@@ -31019,6 +31325,8 @@ impl Engine {
             effect_transfer_zones,
             effect_spawns,
             effect_other_objects,
+            effect_solid_mask_operations,
+            effect_host_raster_preview,
             effect_solid_mask_changed,
             effect_change_def_reinsert,
             effect_next_object_id,
@@ -31050,61 +31358,69 @@ impl Engine {
                 self.audio_registry.clone(),
             )?
         };
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        if effect_solid_mask_changed {
-            self.update_solid_mask(idx);
-        }
-        self.sync_next_object_id(effect_next_object_id);
-        if !effect_spawns.is_empty() {
-            self.process_spawn_queue(effect_spawns)?;
-        }
-        if !effect_transfer_zones.is_empty() {
-            self.apply_transfer_zone_commands(effect_transfer_zones)?;
-        }
-        if !effect_other_objects.is_empty() {
-            self.apply_nested_object_outcomes(effect_other_objects)?;
-        }
-        if !landscape_ops.is_empty() {
-            self.apply_landscape_operations(landscape_ops);
-        }
-        if !player_commands.is_empty() {
-            self.apply_player_commands(player_commands)?;
-        }
-        self.pending_object_order_commands.extend(object_order_commands);
-        self.apply_next_mission_commands(next_mission_commands);
-        if !audio_events.is_empty() {
-            self.pending_audio.extend(audio_events);
-        }
-        if !event_messages.is_empty() {
-            for command in event_messages {
-                self.messages.apply_command(command);
+        let outermost = self.stage_host_solid_mask_operations(
+            effect_solid_mask_operations,
+            effect_host_raster_preview,
+        );
+        let fold_result = (|| -> Result<(), EngineError> {
+            self.rng = new_rng;
+            self.audio_registry = audio_state;
+            if effect_solid_mask_changed {
+                self.update_solid_mask(idx);
             }
-        }
-        if let Some(go) = effect_script_go {
-            self.scenario_script_go = go;
-        }
-        if let Some(counter) = effect_script_counter {
-            self.scenario_script_counter = counter;
-        }
-        if triggered_game_over {
-            self.request_game_over()?;
-        }
-        if !physics_delta.is_empty() {
-            self.apply_physics_delta(physics_delta);
-        }
-        if !global_cmds.is_empty() {
-            self.apply_global_effect_commands(&global_cmds);
-        }
-        self.apply_particle_commands(emitted_particles);
-        let new_container = self.objects[idx].state.container;
-        if previous_container != new_container {
-            self.apply_container_change(object_id, previous_container, new_container, false)?;
-        }
-        if effect_change_def_reinsert.unwrap_or(false) {
-            self.reinsert_change_def_contents_link(object_id)?;
-        }
-        Ok(())
+            self.sync_next_object_id(effect_next_object_id);
+            if !effect_spawns.is_empty() {
+                self.process_spawn_queue(effect_spawns)?;
+            }
+            if !effect_transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(effect_transfer_zones)?;
+            }
+            if !effect_other_objects.is_empty() {
+                self.apply_nested_object_outcomes(effect_other_objects)?;
+            }
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
+            self.pending_object_order_commands
+                .extend(object_order_commands);
+            self.apply_next_mission_commands(next_mission_commands);
+            if !audio_events.is_empty() {
+                self.pending_audio.extend(audio_events);
+            }
+            if !event_messages.is_empty() {
+                for command in event_messages {
+                    self.messages.apply_command(command);
+                }
+            }
+            if let Some(go) = effect_script_go {
+                self.scenario_script_go = go;
+            }
+            if let Some(counter) = effect_script_counter {
+                self.scenario_script_counter = counter;
+            }
+            if triggered_game_over {
+                self.request_game_over()?;
+            }
+            if !physics_delta.is_empty() {
+                self.apply_physics_delta(physics_delta);
+            }
+            if !global_cmds.is_empty() {
+                self.apply_global_effect_commands(&global_cmds);
+            }
+            self.apply_particle_commands(emitted_particles);
+            let new_container = self.objects[idx].state.container;
+            if previous_container != new_container {
+                self.apply_container_change(object_id, previous_container, new_container, false)?;
+            }
+            if effect_change_def_reinsert.unwrap_or(false) {
+                self.reinsert_change_def_contents_link(object_id)?;
+            }
+            Ok(())
+        })();
+        self.finish_host_solid_mask_operations(outermost, fold_result)
     }
 
     fn run_effect_events_for_object(
@@ -31135,6 +31451,8 @@ impl Engine {
             Vec<TransferZoneCommand>,
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
+            Vec<HostSolidMaskOperation>,
+            Option<compat::HostRasterPreview>,
             bool,
             Option<bool>,
             u64,
@@ -31161,6 +31479,8 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
+                None,
                 false,
                 None,
                 next_object_id,
@@ -31196,6 +31516,7 @@ impl Engine {
         // model's deferred fold; C++ mutates live state mid-call): the
         // CALLER applies them via apply_nested_object_outcomes.
         let mut pending_other_objects = Vec::new();
+        let mut pending_solid_mask_operations = Vec::new();
         let mut solid_mask_changed = false;
         let mut change_def_reinsert = None;
         let mut game_over_requested = false;
@@ -31739,6 +32060,8 @@ impl Engine {
                 environment: environment_update,
                 physics: physics_update,
                 landscape: host_landscape_ops,
+                solid_mask_operations: event_solid_mask_operations,
+                host_raster_preview: event_host_raster_preview,
                 particles: mut emitted_particles,
                 transfer_zones: event_transfer_zones,
                 messages: event_messages,
@@ -31755,6 +32078,13 @@ impl Engine {
                 other_objects: event_other_objects,
                 ..
             } = outcome;
+
+            if let Some(preview) = event_host_raster_preview {
+                world.apply_host_raster_preview(preview);
+            } else {
+                world.preview_solid_mask_operations(&event_solid_mask_operations);
+            }
+            pending_solid_mask_operations.extend(event_solid_mask_operations);
 
             // Every effect callback receives a cloned host world. Replay
             // transfer-zone mutations into the threaded copy before the
@@ -31779,12 +32109,10 @@ impl Engine {
             if !event_other_objects.is_empty() {
                 for nested in &event_other_objects {
                     if let Some(update) = nested.update.as_ref() {
-                        if let Some(local_vars) = update.local_vars.as_ref() {
-                            world.preview_object_local_vars(nested.object_id, local_vars);
-                        }
-                        if let Some(new_definition) = update.change_def.as_deref() {
-                            world.preview_object_change_def(nested.object_id, new_definition);
-                        }
+                        world.preview_object_update(nested.object_id, update);
+                    }
+                    if nested.destroy {
+                        world.preview_object_destroyed(nested.object_id);
                     }
                 }
                 pending_other_objects.extend(event_other_objects);
@@ -31792,9 +32120,6 @@ impl Engine {
             world = world.with_next_object_id(next_object_id);
 
             if !host_landscape_ops.is_empty() {
-                for operation in &host_landscape_ops {
-                    world.preview_runtime_landscape_operation(operation);
-                }
                 pending_landscape_ops.extend(host_landscape_ops);
             }
 
@@ -31996,6 +32321,8 @@ impl Engine {
         *environment = current_environment;
 
         let next_object_id = world.next_object_id();
+        let host_raster_preview = (!pending_solid_mask_operations.is_empty())
+            .then(|| world.host_raster_preview());
         Ok((
             global_commands,
             pending_particles,
@@ -32009,6 +32336,8 @@ impl Engine {
             pending_transfer_zones,
             pending_spawns,
             pending_other_objects,
+            pending_solid_mask_operations,
+            host_raster_preview,
             solid_mask_changed,
             change_def_reinsert,
             next_object_id,
@@ -33664,7 +33993,7 @@ impl Engine {
         let mut contact_audio = self.audio_registry.clone();
         let mut contact_next_object_id = self.next_object_id;
         let contact_global_effects = self.global_effects.clone();
-        let contact_world = if movement.contact_function_calls {
+        let mut contact_world = if movement.contact_function_calls {
             self.host_world_context()
         } else {
             HostWorldContext::default()
@@ -33737,6 +34066,14 @@ impl Engine {
                     contact_rng = new_rng;
                     contact_audio = audio_state;
                     contact_next_object_id = outcome.next_object_id;
+
+                    if let Some(preview) = outcome.host_raster_preview.clone() {
+                        contact_world.apply_host_raster_preview(preview);
+                    } else {
+                        contact_world.preview_solid_mask_operations(
+                            &outcome.solid_mask_operations,
+                        );
+                    }
 
                     if let Some(update) = outcome.object_update.take() {
                         let previous_owner = object.state.owner;
@@ -36911,12 +37248,14 @@ impl Engine {
     /// resyncs; movement zeroed by the callers that need it.
     #[doc(hidden)]
     pub fn force_object_position(&mut self, idx: usize, target: Vector2) {
+        let position_changed = self.objects[idx].state.position != target;
         let object = &mut self.objects[idx];
         object.fixed_position = FixedVec2::from_ints(target.x, target.y);
         object.state.position = target;
-        let object_id = object.id;
-        let _ = object_id;
         self.update_sector_for_index(idx);
+        if position_changed {
+            self.update_solid_mask(idx);
+        }
     }
 
     /// ObjectActionStand (C4ObjectCom.cpp:41-46): set ComDir Stop, then use
@@ -41360,6 +41699,7 @@ impl Engine {
         let previous_rect = object.current_shape_rect();
         let previous_construction = object.state.construction;
         object.definition_id = new_def.to_string();
+        object.solid_mask_instance_sequence = None;
         object.unsorted = true;
         object.state.base_graphics = None;
         // Category is an object field, initialized from Def only in Init.
@@ -43598,7 +43938,7 @@ impl Engine {
         let pixels = match self.solid_mask_pixels_for_object(object, mask) {
             SolidMaskPixels::OutOfBounds => return None,
             SolidMaskPixels::Rectangle => None,
-            SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
+            SolidMaskPixels::Alpha(pixels) => Some(Arc::clone(&pixels)),
         };
         let shape = definition.shape_rect()?;
         Some(SolidMaskSpec {
@@ -43614,6 +43954,52 @@ impl Engine {
     /// clip the mask to the landscape, save the background bytes, write
     /// MCVehic. No-op when already put or ineligible.
     fn put_solid_mask(&mut self, index: usize) {
+        if self.defer_solid_mask_updates {
+            return;
+        }
+        if index >= self.objects.len() || self.objects[index].solid_mask_bake.is_some() {
+            return;
+        }
+        let Some(spec) = self.solid_mask_spec(index) else {
+            // UpdateSolidMask deletes pSolidMaskData whenever its eligibility
+            // gates fail (C4Object.cpp:5688-5690).
+            self.objects[index].solid_mask_instance_sequence = None;
+            return;
+        };
+        let instance_sequence = match self.objects[index].solid_mask_instance_sequence {
+            Some(sequence) => {
+                self.next_solid_mask_instance_sequence =
+                    self.next_solid_mask_instance_sequence.max(
+                        sequence
+                            .checked_add(1)
+                            .expect("C4SolidMask instance sequence overflow"),
+                    );
+                sequence
+            }
+            None => {
+                let sequence = self.next_solid_mask_instance_sequence;
+                self.next_solid_mask_instance_sequence = self
+                    .next_solid_mask_instance_sequence
+                    .checked_add(1)
+                    .expect("C4SolidMask instance sequence overflow");
+                self.objects[index].solid_mask_instance_sequence = Some(sequence);
+                sequence
+            }
+        };
+        let position = self.objects[index].state.position;
+        self.put_solid_mask_with_spec(index, spec, position, instance_sequence);
+    }
+
+    /// Raster half of C4SolidMask::Put. Host-operation replay supplies the
+    /// call-time spec and position because later outcome channels may have
+    /// already advanced the object's final state.
+    fn put_solid_mask_with_spec(
+        &mut self,
+        index: usize,
+        spec: SolidMaskSpec,
+        position: Vector2,
+        instance_sequence: u64,
+    ) {
         if index >= self.objects.len() || self.objects[index].solid_mask_bake.is_some() {
             return;
         }
@@ -43624,9 +44010,6 @@ impl Engine {
         else {
             return;
         };
-        let Some(spec) = self.solid_mask_spec(index) else {
-            return;
-        };
         let Some((grid_width, grid_height)) = self
             .landscape
             .as_ref()
@@ -43635,7 +44018,14 @@ impl Engine {
             return;
         };
         if spec.rotation != 0 {
-            self.put_solid_mask_rotated(index, vehicle, spec, (grid_width, grid_height));
+            self.put_solid_mask_rotated(
+                index,
+                vehicle,
+                spec,
+                position,
+                (grid_width, grid_height),
+                instance_sequence,
+            );
             return;
         }
         let SolidMaskSpec {
@@ -43645,7 +44035,6 @@ impl Engine {
             shape_y,
             ..
         } = spec;
-        let position = self.objects[index].state.position;
         let ox = position.x + shape_x + mask.target_x;
         let oy = position.y + shape_y + mask.target_y;
         let mut rect_x = ox;
@@ -43666,6 +44055,7 @@ impl Engine {
             return;
         }
         let mut bake = SolidMaskBake {
+            instance_sequence,
             x: rect_x,
             y: rect_y,
             width,
@@ -43706,7 +44096,9 @@ impl Engine {
         index: usize,
         vehicle: u8,
         spec: SolidMaskSpec,
+        position: Vector2,
         (grid_width, grid_height): (i32, i32),
+        instance_sequence: u64,
     ) {
         let SolidMaskSpec {
             mask,
@@ -43715,7 +44107,6 @@ impl Engine {
             shape_y,
             rotation,
         } = spec;
-        let position = self.objects[index].state.position;
         // MatBuffPitch = int(sqrt(Wdt^2+Hgt^2)) + 1 (ctor,
         // C4SolidMask.cpp:415): f64 sqrt of an exact integer is correctly
         // rounded on both sides, and `as i32` truncates like the C++
@@ -43758,6 +44149,7 @@ impl Engine {
             return;
         }
         let mut bake = SolidMaskBake {
+            instance_sequence,
             x: rect_x,
             y: rect_y,
             width,
@@ -43820,7 +44212,13 @@ impl Engine {
     /// (SetRotation/DoCon/Enter/Exit/destruction all pass false in C++).
     #[doc(hidden)]
     pub fn remove_solid_mask(&mut self, index: usize) {
+        if self.defer_solid_mask_updates {
+            return;
+        }
         self.remove_solid_mask_impl(index, true, false);
+        if index < self.objects.len() && self.solid_mask_spec(index).is_none() {
+            self.objects[index].solid_mask_instance_sequence = None;
+        }
     }
 
     /// C4Object::DoMotion removes its mask with fBackupAttachment=true
@@ -43883,17 +44281,33 @@ impl Engine {
             }
         }
         // Re-put overlapping masks: doubled MCVehic pixels were just
-        // removed inside the freed rect (C4SolidMask.cpp:271-283).
-        for other in 0..self.objects.len() {
-            if other == index {
-                continue;
-            }
+        // removed inside the freed rect. C++ walks the live instance list
+        // Last->Prev, i.e. newest construction first (C4SolidMask.cpp:
+        // 263-274,395-400).
+        let mut overlapping_masks = (0..self.objects.len())
+            .filter(|&other| {
+                other != index
+                    && self.objects[other]
+                        .solid_mask_bake
+                        .as_ref()
+                        .is_some_and(|other_bake| other_bake.overlaps(&bake))
+            })
+            .collect::<Vec<_>>();
+        overlapping_masks.sort_unstable_by(|&left, &right| {
+            let left = self.objects[left]
+                .solid_mask_bake
+                .as_ref()
+                .map_or(0, |bake| bake.instance_sequence);
+            let right = self.objects[right]
+                .solid_mask_bake
+                .as_ref()
+                .map_or(0, |bake| bake.instance_sequence);
+            right.cmp(&left)
+        });
+        for other in overlapping_masks {
             let Some(other_bake) = self.objects[other].solid_mask_bake.clone() else {
                 continue;
             };
-            if !other_bake.overlaps(&bake) {
-                continue;
-            }
             let clip_x0 = bake.x.max(other_bake.x);
             let clip_y0 = bake.y.max(other_bake.y);
             let clip_x1 = (bake.x + bake.width).min(other_bake.x + other_bake.width);
@@ -44114,8 +44528,155 @@ impl Engine {
     /// re-put when (still) eligible.
     #[doc(hidden)]
     pub fn update_solid_mask(&mut self, index: usize) {
+        if self.defer_solid_mask_updates {
+            return;
+        }
         self.remove_solid_mask(index);
         self.put_solid_mask(index);
+    }
+
+    /// Apply the exact synchronous UpdateSolidMask history captured by a
+    /// callback host. Each Put denotes the complete remove/re-put call; its
+    /// call-time geometry is intentionally independent of the object's final
+    /// copy-out state.
+    fn replay_host_solid_mask_operations(&mut self, operations: Vec<HostSolidMaskOperation>) {
+        for operation in operations {
+            if let HostSolidMaskOperation::Landscape { operation } = operation {
+                self.apply_landscape_operations(vec![operation]);
+                continue;
+            }
+            let object_id = match &operation {
+                HostSolidMaskOperation::Remove { object_id }
+                | HostSolidMaskOperation::Put { object_id, .. } => *object_id,
+                HostSolidMaskOperation::Landscape { .. } => unreachable!(),
+            };
+            let Some(index) = self.find_object_index(object_id) else {
+                continue;
+            };
+
+            self.remove_solid_mask_impl(index, true, false);
+            match operation {
+                HostSolidMaskOperation::Remove { .. } => {
+                    self.objects[index].solid_mask_instance_sequence = None;
+                }
+                HostSolidMaskOperation::Put {
+                    spec,
+                    position,
+                    instance_sequence,
+                    ..
+                } => {
+                    self.objects[index].solid_mask_instance_sequence = Some(instance_sequence);
+                    self.next_solid_mask_instance_sequence =
+                        self.next_solid_mask_instance_sequence.max(
+                            instance_sequence
+                                .checked_add(1)
+                                .expect("C4SolidMask instance sequence overflow"),
+                        );
+                    self.put_solid_mask_with_spec(index, spec, position, instance_sequence);
+                }
+                HostSolidMaskOperation::Landscape { .. } => unreachable!(),
+            }
+        }
+    }
+
+    /// Join a mask-operation stream to the active chronological fold. The
+    /// outermost participant owns replay; nested participants only append.
+    fn stage_host_solid_mask_operations(
+        &mut self,
+        operations: Vec<HostSolidMaskOperation>,
+        host_raster_preview: Option<compat::HostRasterPreview>,
+    ) -> bool {
+        if operations.is_empty() {
+            debug_assert!(host_raster_preview.is_none());
+            return false;
+        }
+        let outermost = !self.defer_solid_mask_updates;
+        if outermost {
+            debug_assert!(self.deferred_solid_mask_operations.is_empty());
+            self.defer_solid_mask_updates = true;
+        }
+        self.deferred_solid_mask_operations.extend(operations);
+        if host_raster_preview.is_some() {
+            self.deferred_host_raster_preview = host_raster_preview;
+        }
+        outermost
+    }
+
+    /// A materialized spawn normally gets its first mask at the final
+    /// UpdateSolidMask below. When a creation callback opened a deferred
+    /// chronological fold using only foreign-object operations, that normal
+    /// put is suppressed and must join the stream explicitly.
+    fn stage_materialized_spawn_solid_mask(&mut self, index: usize) {
+        if !self.defer_solid_mask_updates
+            || self.objects[index].solid_mask_bake.is_some()
+            || self.deferred_solid_mask_operations.iter().any(|operation| {
+                matches!(operation,
+                    HostSolidMaskOperation::Put { object_id, .. }
+                    | HostSolidMaskOperation::Remove { object_id }
+                    if *object_id == self.objects[index].id)
+            })
+        {
+            return;
+        }
+        let Some(spec) = self.solid_mask_spec(index) else {
+            return;
+        };
+        self.next_solid_mask_instance_sequence = self
+            .deferred_solid_mask_operations
+            .iter()
+            .filter_map(|operation| match operation {
+                HostSolidMaskOperation::Put {
+                    instance_sequence,
+                    ..
+                } => instance_sequence.checked_add(1),
+                HostSolidMaskOperation::Remove { .. }
+                | HostSolidMaskOperation::Landscape { .. } => None,
+            })
+            .fold(self.next_solid_mask_instance_sequence, u64::max);
+        let instance_sequence = self.objects[index]
+            .solid_mask_instance_sequence
+            .unwrap_or_else(|| {
+                let sequence = self.next_solid_mask_instance_sequence;
+                self.next_solid_mask_instance_sequence = self
+                    .next_solid_mask_instance_sequence
+                    .checked_add(1)
+                    .expect("C4SolidMask instance sequence overflow");
+                self.objects[index].solid_mask_instance_sequence = Some(sequence);
+                sequence
+            });
+        self.next_solid_mask_instance_sequence = self.next_solid_mask_instance_sequence.max(
+            instance_sequence
+                .checked_add(1)
+                .expect("C4SolidMask instance sequence overflow"),
+        );
+        let operation = HostSolidMaskOperation::Put {
+            object_id: self.objects[index].id,
+            spec,
+            position: self.objects[index].state.position,
+            instance_sequence,
+        };
+        let mut world = self.host_world_context();
+        world.preview_solid_mask_operations(std::slice::from_ref(&operation));
+        self.deferred_host_raster_preview = Some(world.host_raster_preview());
+        self.deferred_solid_mask_operations.push(operation);
+    }
+
+    /// Close a chronological fold and replay only when this caller opened
+    /// the outermost scope. Replay precedes propagation of either success or
+    /// failure because C++ retains mutations made before a script error.
+    fn finish_host_solid_mask_operations<T>(
+        &mut self,
+        outermost: bool,
+        result: Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        if !outermost {
+            return result;
+        }
+        self.defer_solid_mask_updates = false;
+        self.deferred_host_raster_preview = None;
+        let operations = std::mem::take(&mut self.deferred_solid_mask_operations);
+        self.replay_host_solid_mask_operations(operations);
+        result
     }
 
     fn solid_masks_for_movement(&self, candidate_indices: &[usize]) -> Vec<SolidMaskRect> {
@@ -44160,7 +44721,7 @@ impl Engine {
             let mask_pixels = match self.solid_mask_pixels_for_object(object, mask) {
                 SolidMaskPixels::OutOfBounds => continue,
                 SolidMaskPixels::Rectangle => None,
-                SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(&pixels)),
+                SolidMaskPixels::Alpha(pixels) => Some(Arc::clone(&pixels)),
             };
             let shape_offset = definition
                 .shape_rect()
@@ -47454,6 +48015,11 @@ impl Engine {
             return;
         }
         for operation in operations {
+            if self.defer_solid_mask_updates {
+                // Host landscape calls share the chronological mask stream
+                // and replay there after copy-out channels materialize.
+                continue;
+            }
             match operation {
                 LandscapeOperation::DigCircle {
                     center,
@@ -49465,6 +50031,8 @@ impl Engine {
                 object_order_commands,
                 next_mission_commands,
                 landscape_ops,
+                solid_mask_operations,
+                host_raster_preview,
                 transfer_zones,
                 spawns,
                 other_objects,
@@ -49475,45 +50043,56 @@ impl Engine {
                 audio_state,
                 rng,
             } = outcome?;
-            self.rng = rng;
-            self.audio_registry = audio_state;
-            self.sync_next_object_id(next_object_id);
-            if !spawns.is_empty() {
-                self.process_spawn_queue(spawns)?;
-            }
-            if !transfer_zones.is_empty() {
-                self.apply_transfer_zone_commands(transfer_zones)?;
-            }
-            if !other_objects.is_empty() {
-                self.apply_nested_object_outcomes(other_objects)?;
-            }
-            if !landscape_ops.is_empty() {
-                self.apply_landscape_operations(landscape_ops);
-            }
-            if !player_commands.is_empty() {
-                self.apply_player_commands(player_commands)?;
-            }
-            self.pending_object_order_commands.extend(object_order_commands);
-            self.apply_next_mission_commands(next_mission_commands);
-            if !audio_events.is_empty() {
-                self.pending_audio.extend(audio_events);
-            }
-            for command in messages {
-                self.messages.apply_command(command);
-            }
-            if let Some(go) = script_go {
-                self.scenario_script_go = go;
-            }
-            if let Some(counter) = script_counter {
-                self.scenario_script_counter = counter;
-            }
-            if game_over {
-                self.request_game_over()?;
-            }
-            if !physics_delta.is_empty() {
-                self.apply_physics_delta(physics_delta);
-            }
-            self.apply_particle_commands(particles);
+            let was_deferred = self.defer_solid_mask_updates;
+            let mut outermost = self.stage_host_solid_mask_operations(
+                solid_mask_operations,
+                host_raster_preview,
+            );
+            let fold_result = (|| -> Result<(), EngineError> {
+                self.rng = rng;
+                self.audio_registry = audio_state;
+                self.sync_next_object_id(next_object_id);
+                if !spawns.is_empty() {
+                    self.process_spawn_queue(spawns)?;
+                }
+                if !transfer_zones.is_empty() {
+                    self.apply_transfer_zone_commands(transfer_zones)?;
+                }
+                if !other_objects.is_empty() {
+                    self.apply_nested_object_outcomes(other_objects)?;
+                }
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
+                }
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
+                self.pending_object_order_commands
+                    .extend(object_order_commands);
+                self.apply_next_mission_commands(next_mission_commands);
+                if !audio_events.is_empty() {
+                    self.pending_audio.extend(audio_events);
+                }
+                for command in messages {
+                    self.messages.apply_command(command);
+                }
+                if let Some(go) = script_go {
+                    self.scenario_script_go = go;
+                }
+                if let Some(counter) = script_counter {
+                    self.scenario_script_counter = counter;
+                }
+                if game_over {
+                    self.request_game_over()?;
+                }
+                if !physics_delta.is_empty() {
+                    self.apply_physics_delta(physics_delta);
+                }
+                self.apply_particle_commands(particles);
+                Ok(())
+            })();
+            outermost |= !was_deferred && self.defer_solid_mask_updates;
+            self.finish_host_solid_mask_operations(outermost, fold_result)?;
         }
         Ok(())
     }
@@ -49553,6 +50132,7 @@ impl Engine {
         let mut pending_landscape_ops = Vec::new();
         let mut pending_transfer_zones = Vec::new();
         let mut pending_other_objects = Vec::new();
+        let mut pending_solid_mask_operations = Vec::new();
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
         let mut script_counter_requested: Option<i32> = None;
@@ -49751,6 +50331,8 @@ impl Engine {
                 environment: environment_update,
                 physics: physics_update,
                 landscape: host_landscape_ops,
+                solid_mask_operations: event_solid_mask_operations,
+                host_raster_preview: event_host_raster_preview,
                 particles: mut emitted_particles,
                 transfer_zones: event_transfer_zones,
                 messages: event_messages,
@@ -49767,6 +50349,13 @@ impl Engine {
                 ..
             } = event_outcome;
 
+            if let Some(preview) = event_host_raster_preview {
+                world.apply_host_raster_preview(preview);
+            } else {
+                world.preview_solid_mask_operations(&event_solid_mask_operations);
+            }
+            pending_solid_mask_operations.extend(event_solid_mask_operations);
+
             for command in &event_transfer_zones {
                 world.preview_transfer_zone_command(command);
             }
@@ -49778,21 +50367,16 @@ impl Engine {
             if !event_other_objects.is_empty() {
                 for nested in &event_other_objects {
                     if let Some(update) = nested.update.as_ref() {
-                        if let Some(local_vars) = update.local_vars.as_ref() {
-                            world.preview_object_local_vars(nested.object_id, local_vars);
-                        }
-                        if let Some(new_definition) = update.change_def.as_deref() {
-                            world.preview_object_change_def(nested.object_id, new_definition);
-                        }
+                        world.preview_object_update(nested.object_id, update);
+                    }
+                    if nested.destroy {
+                        world.preview_object_destroyed(nested.object_id);
                     }
                 }
                 pending_other_objects.extend(event_other_objects);
             }
             world = world.with_next_object_id(next_object_id);
             if !host_landscape_ops.is_empty() {
-                for operation in &host_landscape_ops {
-                    world.preview_runtime_landscape_operation(operation);
-                }
                 pending_landscape_ops.extend(host_landscape_ops);
             }
             if !effect_player_commands.is_empty() {
@@ -49852,6 +50436,8 @@ impl Engine {
 
         *environment = current_environment;
         let next_object_id = world.next_object_id();
+        let host_raster_preview = (!pending_solid_mask_operations.is_empty())
+            .then(|| world.host_raster_preview());
         Ok(GlobalEffectRunOutcome {
             particles: pending_particles,
             physics_delta: accumulated_physics,
@@ -49861,6 +50447,8 @@ impl Engine {
             object_order_commands: pending_object_order_commands,
             next_mission_commands: pending_next_mission_commands,
             landscape_ops: pending_landscape_ops,
+            solid_mask_operations: pending_solid_mask_operations,
+            host_raster_preview,
             transfer_zones: pending_transfer_zones,
             spawns: pending_spawns,
             other_objects: pending_other_objects,
@@ -49874,6 +50462,13 @@ impl Engine {
     }
 
     fn spawn_single(
+        &mut self,
+        config: SpawnConfig,
+    ) -> Result<(ObjectId, Vec<SpawnConfig>, Vec<compat::NestedObjectOutcome>), EngineError> {
+        self.spawn_single_inner(config)
+    }
+
+    fn spawn_single_inner(
         &mut self,
         config: SpawnConfig,
     ) -> Result<(ObjectId, Vec<SpawnConfig>, Vec<compat::NestedObjectOutcome>), EngineError> {
@@ -49924,9 +50519,17 @@ impl Engine {
             local_vars,
             loaded,
             solid_mask,
+            solid_mask_instance_sequence,
             position_adjusted,
             initialized,
         } = config;
+        if let Some(sequence) = solid_mask_instance_sequence {
+            self.next_solid_mask_instance_sequence = self.next_solid_mask_instance_sequence.max(
+                sequence
+                    .checked_add(1)
+                    .expect("C4SolidMask instance sequence overflow"),
+            );
+        }
 
         let (
             action_library,
@@ -50278,6 +50881,7 @@ impl Engine {
             shape_template,
             own_shape_vertices,
         );
+        object.solid_mask_instance_sequence = solid_mask_instance_sequence;
         // C4Object::Clear initializes fix_r to zero. Objects.txt compiles
         // Rotation and FixR independently, so an absent FixR must not inherit
         // the serialized integer Rotation until SyncClearance synchronizes it.
@@ -50411,6 +51015,8 @@ impl Engine {
                     environment,
                     physics,
                     landscape_ops,
+                    solid_mask_operations: construction_solid_mask_operations,
+                    host_raster_preview: construction_host_raster_preview,
                     particles,
                     transfer_zones,
                     audio,
@@ -50444,6 +51050,10 @@ impl Engine {
                     self.audio_registry.clone(),
                 )?
             };
+            self.stage_host_solid_mask_operations(
+                construction_solid_mask_operations,
+                construction_host_raster_preview,
+            );
             // Fail-safe game call: a script error logs and the object
             // spawns WITH the callback's pre-error effects — C4AulExec
             // aborts the call but rolls nothing back
@@ -50597,6 +51207,8 @@ impl Engine {
                     environment,
                     physics,
                     landscape_ops,
+                    solid_mask_operations: initialize_solid_mask_operations,
+                    host_raster_preview: initialize_host_raster_preview,
                     particles,
                     transfer_zones,
                     audio,
@@ -50639,6 +51251,10 @@ impl Engine {
                     self.audio_registry.clone(),
                 )?
             };
+            self.stage_host_solid_mask_operations(
+                initialize_solid_mask_operations,
+                initialize_host_raster_preview,
+            );
             // Fail-safe game call: a script error logs and the object
             // spawns WITH the callback's pre-error effects — C4AulExec
             // aborts the call but rolls nothing back
@@ -50781,6 +51397,8 @@ impl Engine {
                 effect_transfer_zones,
                 effect_spawns,
                 effect_other_objects,
+                effect_solid_mask_operations,
+                effect_host_raster_preview,
                 _effect_solid_mask_changed,
                 effect_change_def_reinsert,
                 effect_next_object_id,
@@ -50804,6 +51422,10 @@ impl Engine {
                 world,
                 self.audio_registry.clone(),
             )?;
+            self.stage_host_solid_mask_operations(
+                effect_solid_mask_operations,
+                effect_host_raster_preview,
+            );
             self.rng = new_rng;
             self.audio_registry = audio_state;
             if let Some(marker) = effect_change_def_reinsert {
@@ -50903,6 +51525,9 @@ impl Engine {
         }
         let index = self.objects.len() - 1;
         self.update_sector_for_index(index);
+        if !destroy_requested {
+            self.stage_materialized_spawn_solid_mask(index);
+        }
         self.update_solid_mask(index);
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new, loaded)?;
@@ -51027,6 +51652,17 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn process_spawn_queue_with_outcomes(
+        &mut self,
+        queue: Vec<SpawnConfig>,
+        nested_outcomes: Vec<compat::NestedObjectOutcome>,
+    ) -> Result<Vec<ObjectId>, EngineError> {
+        let was_deferred = self.defer_solid_mask_updates;
+        let result = self.process_spawn_queue_with_outcomes_inner(queue, nested_outcomes);
+        let outermost = !was_deferred && self.defer_solid_mask_updates;
+        self.finish_host_solid_mask_operations(outermost, result)
+    }
+
+    fn process_spawn_queue_with_outcomes_inner(
         &mut self,
         queue: Vec<SpawnConfig>,
         nested_outcomes: Vec<compat::NestedObjectOutcome>,
@@ -51716,6 +52352,8 @@ struct GlobalEffectRunOutcome {
     object_order_commands: Vec<ObjectOrderCommand>,
     next_mission_commands: Vec<NextMissionCommand>,
     landscape_ops: Vec<LandscapeOperation>,
+    solid_mask_operations: Vec<HostSolidMaskOperation>,
+    host_raster_preview: Option<compat::HostRasterPreview>,
     transfer_zones: Vec<TransferZoneCommand>,
     spawns: Vec<SpawnConfig>,
     other_objects: Vec<compat::NestedObjectOutcome>,
