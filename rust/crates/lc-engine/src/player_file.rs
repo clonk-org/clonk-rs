@@ -24,6 +24,134 @@ fn default_crew_rank_name() -> String {
     "Clonk".to_string()
 }
 
+#[derive(Debug)]
+struct ObjectInfoIniNode {
+    name: String,
+    value: Option<String>,
+    indent: usize,
+    parent: Option<usize>,
+    children: Vec<usize>,
+}
+
+/// The ordered subset of `StdCompilerINIRead::CreateNameTree` needed by
+/// `C4ObjectInfoCore::CompileFunc`. Names are exact, and indentation decides
+/// which nodes are direct children or siblings.
+#[derive(Debug)]
+struct ObjectInfoIniTree {
+    nodes: Vec<ObjectInfoIniNode>,
+}
+
+impl ObjectInfoIniTree {
+    fn parse(source: &str) -> Self {
+        let source = source.split_once('\0').map_or(source, |(prefix, _)| prefix);
+        let mut tree = Self {
+            nodes: vec![ObjectInfoIniNode {
+                name: String::new(),
+                value: None,
+                indent: 0,
+                parent: None,
+                children: Vec::new(),
+            }],
+        };
+        let mut current = 0;
+
+        for line in source.split(['\r', '\n']) {
+            let bytes = line.as_bytes();
+            let indent = bytes
+                .iter()
+                .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+                .count();
+            let mut position = indent;
+            let section = bytes.get(position) == Some(&b'[')
+                && bytes.get(position + 1).is_some_and(u8::is_ascii_alphabetic);
+            if section {
+                position += 1;
+            } else if !bytes.get(position).is_some_and(u8::is_ascii_alphabetic) {
+                continue;
+            }
+
+            let node_indent = indent + usize::from(!section);
+            // CreateNameTree changes its current tree position before it
+            // validates the delimiter, so malformed dedented lines still
+            // close an indented section.
+            while current != 0 && tree.nodes[current].indent >= node_indent {
+                current = tree.nodes[current].parent.unwrap_or(0);
+            }
+
+            let name_start = position;
+            while bytes
+                .get(position)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_'))
+            {
+                position += 1;
+            }
+            let name = &line[name_start..position];
+            while bytes
+                .get(position)
+                .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+            {
+                position += 1;
+            }
+            let delimiter = if section { b']' } else { b'=' };
+            if bytes.get(position) != Some(&delimiter) {
+                continue;
+            }
+            position += 1;
+
+            let index = tree.nodes.len();
+            tree.nodes.push(ObjectInfoIniNode {
+                name: name.to_string(),
+                value: (!section).then(|| line[position..].to_string()),
+                indent: node_indent,
+                parent: Some(current),
+                children: Vec::new(),
+            });
+            tree.nodes[current].children.push(index);
+            if section {
+                current = index;
+            }
+        }
+
+        tree
+    }
+
+    fn first_named_child(&self, parent: usize, name: &str) -> Option<usize> {
+        self.nodes[parent]
+            .children
+            .iter()
+            .copied()
+            .find(|index| self.nodes[*index].name == name)
+    }
+
+    fn value(&self, parent: usize, name: &str) -> Option<&str> {
+        self.first_named_child(parent, name).map(|index| {
+            // Naming lookup consumes the first matching node even if it was
+            // written with section syntax and therefore has no value payload.
+            self.nodes[index].value.as_deref().unwrap_or("")
+        })
+    }
+
+    fn followed_root_physical(&self, object_info: usize) -> Option<usize> {
+        let parent = self.nodes[object_info].parent?;
+        let siblings = &self.nodes[parent].children;
+        let position = siblings.iter().position(|index| *index == object_info)?;
+        let next = *siblings.get(position + 1)?;
+        if self.nodes[next].name != "Physical" {
+            return None;
+        }
+
+        // FollowName first validates the next sibling, removes ObjectInfo,
+        // then performs a fresh Name("Physical") lookup from the parent.
+        // Consequently, an earlier Physical node wins this second lookup.
+        self.first_named_child(parent, "Physical")
+    }
+}
+
+fn projected_object_info_value(value: &str) -> String {
+    let value = value.split_once("//").map_or(value, |(prefix, _)| prefix);
+    value.trim().to_string()
+}
+
 /// One crew-roster entry: C4ObjectInfoCore (C4InfoCore.cpp:526-548) with
 /// the runtime recruitment flags (C4ObjectInfo::InAction / HasDied) that
 /// `GetIdle` filters on (C4ObjectInfoList.cpp:113-142) — both start clear
@@ -97,27 +225,21 @@ pub struct CrewInfo {
 }
 
 impl CrewInfo {
-    fn from_sections(
-        sections: &[(String, Vec<(String, String)>)],
-        has_custom_portrait: bool,
-    ) -> Self {
-        let entry = |section: &str, key: &str| -> Option<String> {
-            sections
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(section))
-                .and_then(|(_, entries)| {
-                    entries
-                        .iter()
-                        .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
-                        .map(|(_, value)| value.clone())
-                })
+    fn from_object_info_source(source: &str, has_custom_portrait: bool) -> Self {
+        let tree = ObjectInfoIniTree::parse(source);
+        let object_info = tree.first_named_child(0, "ObjectInfo");
+        let physical_section = object_info.and_then(|index| tree.followed_root_physical(index));
+        let entry = |parent: Option<usize>, key: &str| -> Option<String> {
+            parent
+                .and_then(|parent| tree.value(parent, key))
+                .map(projected_object_info_value)
         };
-        let int = |section: &str, key: &str, default: i32| -> i32 {
-            entry(section, key)
+        let int = |key: &str, default: i32| -> i32 {
+            entry(object_info, key)
                 .and_then(|value| parse_leading_i32(&value))
                 .unwrap_or(default)
         };
-        let rank = int("ObjectInfo", "Rank", 0);
+        let rank = int("Rank", 0);
         let mut physical = PhysicalInfo::default();
         for name in [
             "Energy",
@@ -142,42 +264,45 @@ impl CrewInfo {
             "CorrosionResist",
             "BreatheWater",
         ] {
-            if let Some(value) = entry("Physical", name).and_then(|value| parse_leading_i32(&value))
+            if let Some(value) =
+                entry(physical_section, name).and_then(|value| parse_leading_i32(&value))
             {
                 physical.set_by_name(name, value);
             }
         }
         let physical = crate::promotion_updated_physical(physical, rank, None);
-        let id = entry("ObjectInfo", "id").unwrap_or_default();
-        let mut portrait_file = entry("ObjectInfo", "PortraitFile")
+        let id = entry(object_info, "id").unwrap_or_default();
+        let mut portrait_file = entry(object_info, "PortraitFile")
             .map(|name| bounded_crew_portrait_file(&name))
             .unwrap_or_default();
         let portraits = loaded_portrait_state(&id, &mut portrait_file, has_custom_portrait);
-        let death_message = entry("ObjectInfo", "DeathMessage")
+        let death_message = object_info
+            .and_then(|parent| tree.value(parent, "DeathMessage"))
+            .map(|value| value.trim_start_matches([' ', '\t']).to_string())
             .map(normalize_death_message)
             .unwrap_or_default();
         Self {
             id,
-            name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
+            name: entry(object_info, "Name").unwrap_or_else(|| "Clonk".to_string()),
             death_message,
             core: CrewInfoCoreFields {
                 portrait_file,
-                next_rank_name: entry("ObjectInfo", "NextRankName").unwrap_or_default(),
-                type_name: entry("ObjectInfo", "TypeName")
+                next_rank_name: entry(object_info, "NextRankName").unwrap_or_default(),
+                type_name: entry(object_info, "TypeName")
                     .map(|name| bounded_loaded_crew_type_name(&name))
                     .unwrap_or_else(|| "Clonk".to_string()),
-                next_rank_exp: int("ObjectInfo", "NextRankExp", 0),
+                next_rank_exp: int("NextRankExp", 0),
             },
             rank,
-            rank_name: entry("ObjectInfo", "RankName").unwrap_or_else(default_crew_rank_name),
-            experience: int("ObjectInfo", "Experience", 0),
-            rounds: int("ObjectInfo", "Rounds", 0),
+            rank_name: entry(object_info, "RankName").unwrap_or_else(default_crew_rank_name),
+            experience: int("Experience", 0),
+            rounds: int("Rounds", 0),
             physical,
-            death_count: int("ObjectInfo", "DeathCount", 0),
-            total_playing_time: int("ObjectInfo", "TotalPlayingTime", 0),
-            birthday: int("ObjectInfo", "Birthday", 0),
-            age: int("ObjectInfo", "Age", 0),
-            participation: int("ObjectInfo", "Participation", 1),
+            death_count: int("DeathCount", 0),
+            total_playing_time: int("TotalPlayingTime", 0),
+            birthday: int("Birthday", 0),
+            age: int("Age", 0),
+            participation: int("Participation", 1),
             in_action: false,
             was_in_action: false,
             in_action_time: 0,
@@ -444,15 +569,8 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
         if is_info {
             if let Ok(bytes) = child.read_file("ObjectInfo.txt") {
                 let text = lc_script::c4_string_from_bytes(&bytes);
-                let sections = parse_ini_sections(&text);
                 let has_custom_portrait = custom_portrait_loads(&child);
-                let mut info = CrewInfo::from_sections(&sections, has_custom_portrait);
-                // String-valued StdCompiler entries retain their payload;
-                // the generic INI projection trims/comments values for the
-                // numeric fields, so recover this verbatim field separately.
-                info.death_message = parse_object_info_death_message(&text)
-                    .map(normalize_death_message)
-                    .unwrap_or_default();
+                let info = CrewInfo::from_object_info_source(&text, has_custom_portrait);
                 crew.push(info);
             }
         } else if entry.is_directory {
@@ -463,40 +581,6 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
         collect_crew(&child, crew)?;
     }
     Ok(())
-}
-
-/// Exact-case `[ObjectInfo] DeathMessage` payload. StdCompiler skips leading
-/// horizontal whitespace after `=`, but neither treats `//` as an inline
-/// comment nor strips trailing message bytes.
-fn parse_object_info_death_message(text: &str) -> Option<String> {
-    let mut object_info = false;
-    let mut object_info_seen = false;
-    for (line_index, raw_line) in text.lines().enumerate() {
-        let line = if line_index == 0 {
-            raw_line.trim_start_matches('\u{feff}')
-        } else {
-            raw_line
-        };
-        let line = line.trim_start_matches([' ', '\t']);
-        if let Some(section) = line.strip_prefix('[').and_then(|line| line.split_once(']')) {
-            if object_info {
-                break;
-            }
-            object_info = !object_info_seen && section.0 == "ObjectInfo";
-            object_info_seen |= object_info;
-            continue;
-        }
-        if !object_info {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key == "DeathMessage" {
-            return Some(value.trim_start_matches([' ', '\t']).to_string());
-        }
-    }
-    None
 }
 
 fn custom_portrait_loads(group: &Group) -> bool {
@@ -717,6 +801,103 @@ mod tests {
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
+    }
+
+    #[test]
+    fn object_info_ini_names_are_exact_case() {
+        let wrong_section = CrewInfo::from_object_info_source(
+            "[objectinfo]\nid=WRONG\nName=Wrong\nNextRankExp=77\n[Physical]\nWalk=90000\n",
+            false,
+        );
+        assert!(wrong_section.id.is_empty());
+        assert_eq!(wrong_section.name, "Clonk");
+        assert_eq!(wrong_section.core.next_rank_exp, 0);
+        assert_eq!(wrong_section.physical.walk, 0);
+
+        let wrong_values = CrewInfo::from_object_info_source(
+            "[ObjectInfo]\nid=CASE\nnextrankexp=77\n[Physical]\nwalk=90000\n",
+            false,
+        );
+        assert_eq!(wrong_values.id, "CASE");
+        assert_eq!(wrong_values.core.next_rank_exp, 0);
+        assert_eq!(wrong_values.physical.walk, 0);
+
+        let wrong_physical_section = CrewInfo::from_object_info_source(
+            "[ObjectInfo]\nid=CASE\n[physical]\nWalk=90000\n",
+            false,
+        );
+        assert_eq!(wrong_physical_section.physical.walk, 0);
+    }
+
+    #[test]
+    fn object_info_ini_duplicate_nodes_are_first_exact_match() {
+        let info = CrewInfo::from_object_info_source(
+            "[ObjectInfo]\n\
+             id=FIRST\n\
+             Name=First\n\
+             nextrankexp=1\n\
+             NextRankExp=40\n\
+             NextRankExp=50\n\
+             Experience=7\n\
+             Experience=8\n\
+             [Physical]\n\
+             walk=3\n\
+             Walk=200\n\
+             Walk=300\n\
+             [ObjectInfo]\n\
+             id=SECOND\n\
+             Name=Ignored\n\
+             NextRankExp=999\n\
+             [Physical]\n\
+             Jump=444\n",
+            false,
+        );
+
+        assert_eq!(info.id, "FIRST");
+        assert_eq!(info.name, "First");
+        assert_eq!(info.core.next_rank_exp, 40);
+        assert_eq!(info.experience, 7);
+        assert_eq!(info.physical.walk, 200);
+        assert_eq!(info.physical.jump, 0);
+    }
+
+    #[test]
+    fn object_info_ini_physical_follows_cpp_tree_position() {
+        for (label, source, expected_walk) in [
+            (
+                "adjacent root sibling",
+                "[ObjectInfo]\nName=Adjacent\n[Physical]\nWalk=101\n",
+                101,
+            ),
+            (
+                "intervening root sibling",
+                "[ObjectInfo]\nName=Blocked\n[Other]\nValue=1\n[Physical]\nWalk=202\n",
+                0,
+            ),
+            (
+                "nested physical",
+                "[ObjectInfo]\nName=Nested physical\n [Physical]\n Walk=303\n",
+                0,
+            ),
+            (
+                "nested intervening section",
+                "[ObjectInfo]\nName=Nested other\n [Other]\n  Value=1\n[Physical]\nWalk=404\n",
+                404,
+            ),
+            (
+                "repeated object info",
+                "[ObjectInfo]\nName=First\n[ObjectInfo]\nName=Second\n[Physical]\nWalk=505\n",
+                0,
+            ),
+            (
+                "earlier physical wins after adjacency gate",
+                "[Physical]\nWalk=111\n[ObjectInfo]\nName=Middle\n[Physical]\nWalk=222\n",
+                111,
+            ),
+        ] {
+            let info = CrewInfo::from_object_info_source(source, false);
+            assert_eq!(info.physical.walk, expected_walk, "{label}");
+        }
     }
 
     #[test]
