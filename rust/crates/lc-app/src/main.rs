@@ -141,7 +141,7 @@ use lc_network::{ClientId, ParticipantKind, Tick};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     DefCore as ResourceDefCore, DefinitionError as ResourceDefinitionError, GraphicsError,
-    GraphicsImage, GraphicsResource, Group, GroupError,
+    GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks,
     ResourceDefinition as ResourceDefinitionData, load_endeavour_font,
     scenario as resource_scenario,
 };
@@ -541,6 +541,14 @@ struct ClassicLoaderSetup {
     screen: LoaderScreen,
     refreshed_resources: LoaderResources,
     refreshed_global_gui_overrides: HashMap<&'static str, String>,
+    scenario_title: Option<String>,
+}
+
+fn retain_selected_scenario_title(frontend: &mut FrontendScenario, title: Option<&str>) {
+    if let Some(title) = title {
+        frontend.title.clear();
+        frontend.title.push_str(title);
+    }
 }
 
 #[derive(Clone)]
@@ -882,6 +890,22 @@ fn existing_classic_global_group_paths(paths: &AppPaths, filename: &str) -> Resu
         }
     }
     Ok(hits.into_iter().map(|(_, path)| path).collect())
+}
+
+fn classic_language_packs(paths: &AppPaths) -> LanguagePacks {
+    let mut logical_roots = Vec::new();
+    if let Some(content) = paths.content_dir() {
+        logical_roots.push(content.to_path_buf());
+    }
+    logical_roots.extend([
+        paths.planet_dir().to_path_buf(),
+        paths.install_root().to_path_buf(),
+    ]);
+    // C4Language::Init opens one process-global `Language.c4g`. The Rust
+    // install layout maps that classic global-data namespace to `planet`;
+    // similarly named containers under content/install roots must not be
+    // concatenated into an invented precedence chain.
+    LanguagePacks::discover(&[paths.planet_dir().join("Language.c4g")], &logical_roots)
 }
 
 fn mapped_classic_extra_group_path(paths: &AppPaths) -> Result<Option<PathBuf>> {
@@ -1699,21 +1723,76 @@ fn classic_loader_bounded_config_value<'a>(
 }
 
 fn classic_loader_language_sequence(paths: &AppPaths) -> Result<Vec<String>> {
+    classic_configured_language_sequence(paths, false)
+}
+
+/// `C4Language::LoadLanguage` parses the same configured `LanguageEx`
+/// sequence as component loading, except that its `SCopySegment` call skips
+/// leading C++ whitespace on every segment. Keep that distinction local to
+/// the process resource table; `C4ComponentHost` deliberately keeps the raw
+/// two-byte prefixes.
+fn classic_runtime_language_sequence(paths: &AppPaths) -> Result<Vec<String>> {
+    classic_configured_language_sequence(paths, true)
+}
+
+fn load_classic_global_system_scripts(
+    paths: &AppPaths,
+    system: &Group,
+) -> Result<Vec<(String, String)>> {
+    // C4Config has already materialized LanguageEx before InitScriptEngine.
+    // The strict loader helper cannot derive that platform default on every
+    // Rust target, so preserve the app's existing startup fallback when no
+    // explicit Language/LanguageEx value is available.
     let config = load_classic_loader_config(paths)?;
+    let has_explicit_language = config.as_ref().is_some_and(|config| {
+        ["LanguageEx", "Language"].into_iter().any(|key| {
+            classic_loader_config_value(config, key)
+                .is_some_and(|value| !value.is_empty())
+        })
+    });
+    let languages = match classic_configured_language_sequence_from_config(
+        config.as_ref(),
+        false,
+    ) {
+        Ok(languages) => languages,
+        Err(_) if !has_explicit_language => startup_language_sequence(Some(paths)),
+        Err(error) => return Err(error),
+    };
+    let language_packs = classic_language_packs(paths);
+    let components = language_packs.component_groups(system, None, None);
+    lc_engine::scenario::load_system_scripts_with_components(system, &components, &languages)
+        .map_err(anyhow::Error::from)
+}
+
+fn classic_configured_language_sequence(
+    paths: &AppPaths,
+    language_ex_skip_whitespace: bool,
+) -> Result<Vec<String>> {
+    let config = load_classic_loader_config(paths)?;
+    classic_configured_language_sequence_from_config(
+        config.as_ref(),
+        language_ex_skip_whitespace,
+    )
+}
+
+fn classic_configured_language_sequence_from_config(
+    config: Option<&Config>,
+    language_ex_skip_whitespace: bool,
+) -> Result<Vec<String>> {
     let language_ex = config
-        .as_ref()
         .map(|config| classic_loader_bounded_config_value(config, "LanguageEx"))
         .transpose()?
         .flatten();
     if let Some(language_ex) = language_ex.filter(|value| !value.is_empty()) {
         return language_ex
             .split(',')
-            .map(|segment| classic_loader_language_prefix(segment, false, "LanguageEx"))
+            .map(|segment| {
+                classic_loader_language_prefix(segment, language_ex_skip_whitespace, "LanguageEx")
+            })
             .collect();
     }
 
     let configured_primary = config
-        .as_ref()
         .map(|config| classic_loader_bounded_config_value(config, "Language"))
         .transpose()?
         .flatten()
@@ -1735,20 +1814,6 @@ fn classic_loader_language_sequence(paths: &AppPaths) -> Result<Vec<String>> {
         codes.push(String::new());
     }
     Ok(codes)
-}
-
-fn ensure_no_classic_language_packs(paths: &AppPaths, context: &str) -> Result<()> {
-    let language_pack_paths = existing_classic_global_group_paths(paths, "Language.c4g")?;
-    anyhow::ensure!(
-        language_pack_paths.is_empty(),
-        "{context} cannot establish external Language.c4g precedence at {} (including Origin-remapped pack paths)",
-        language_pack_paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2021,36 +2086,13 @@ fn guard_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<()> {
     Ok(())
 }
 
-fn read_runtime_help_language_file(group: &Group, filename: &str) -> Result<Option<Vec<u8>>> {
-    let mut matches = group
-        .entries()?
-        .into_iter()
-        .filter(|entry| {
-            entry.relative_path.components().count() == 1
-                && entry
-                    .relative_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.eq_ignore_ascii_case(filename))
-        })
-        .map(|entry| entry.relative_path)
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        matches.len() <= 1,
-        "classic runtime-help System.c4g contains ambiguous case-insensitive matches for {filename}: {}",
-        matches
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let Some(path) = matches.pop() else {
-        return Ok(None);
-    };
-    let bytes = group
-        .read_file(&path)
-        .with_context(|| format!("reading {} as {filename}", path.display()))?;
-    Ok((!bytes.is_empty()).then_some(bytes))
+fn read_runtime_help_language_file(group: &Group, filename: &str) -> Option<Vec<u8>> {
+    // C4Language::LoadStringTable treats every LoadEntryString failure as a
+    // miss, closes this group, and continues with the next registered pack.
+    // Group::read_file already performs C4Group's native-order,
+    // ASCII-case-insensitive lookup for folder groups.
+    let bytes = group.read_file(filename).ok()?;
+    (!bytes.is_empty()).then_some(bytes)
 }
 
 fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLanguageTable> {
@@ -2071,31 +2113,25 @@ fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLangua
             system_path.display()
         )
     })?;
-    let language_packs = existing_classic_global_group_paths(paths, "Language.c4g")?;
-    for code in classic_loader_language_sequence(paths)? {
+    let language_packs = classic_language_packs(paths);
+    let system_groups = language_packs.system_groups(&system);
+    for code in classic_runtime_language_sequence(paths)? {
         let filename = format!("Language{code}.txt");
-        match read_runtime_help_language_file(&system, &filename)? {
-            Some(bytes) => return parse_runtime_language_table(&bytes, &filename),
-            None => {
-                anyhow::ensure!(
-                    language_packs.is_empty(),
-                    "runtime help cannot resolve {filename} through external Language.c4g precedence at {}",
-                    language_packs
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+        for group in system_groups.groups() {
+            if let Some(bytes) = read_runtime_help_language_file(group, &filename) {
+                return parse_runtime_language_table(&bytes, &filename);
             }
         }
     }
 
-    match read_runtime_help_language_file(&system, "LanguageUS.txt")? {
-        Some(bytes) => parse_runtime_language_table(&bytes, "LanguageUS.txt"),
-        None => anyhow::bail!(
-            "loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"
-        ),
+    for group in system_groups.groups() {
+        if let Some(bytes) = read_runtime_help_language_file(group, "LanguageUS.txt") {
+            return parse_runtime_language_table(&bytes, "LanguageUS.txt");
+        }
     }
+    anyhow::bail!(
+        "loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"
+    )
 }
 
 fn load_runtime_help_language_table(paths: Option<&AppPaths>) -> Result<HashMap<String, String>> {
@@ -2255,10 +2291,14 @@ fn load_classic_scenario_loader_head(
     scenario_group: &Group,
     paths: &AppPaths,
 ) -> Result<ScenarioLoaderHead> {
-    ensure_no_classic_language_packs(paths, "classic scenario loader title lookup")?;
     let languages = classic_loader_language_sequence(paths)?;
-    ScenarioLoaderHead::load_from_group_with_languages(scenario_group, &languages)
-        .map_err(anyhow::Error::from)
+    let language_packs = classic_language_packs(paths);
+    ScenarioLoaderHead::load_from_group_with_languages_and_packs(
+        scenario_group,
+        &languages,
+        &language_packs,
+    )
+    .map_err(anyhow::Error::from)
 }
 
 fn parse_classic_loader_bool(raw: &str) -> Option<bool> {
@@ -2375,6 +2415,7 @@ fn build_startup_loader(paths: &AppPaths, assets: &FrontendAssets) -> Result<Cla
         screen,
         refreshed_resources: resources,
         refreshed_global_gui_overrides: HashMap::new(),
+        scenario_title: None,
     })
 }
 
@@ -2453,6 +2494,7 @@ fn build_scenario_loader(
         screen,
         refreshed_resources,
         refreshed_global_gui_overrides,
+        scenario_title: Some(head.scenario_title().to_string()),
     })
 }
 
@@ -11142,11 +11184,19 @@ fn compare_case_insensitive(a: &str, b: &str) -> Ordering {
 
 struct InstallDefinitionResolver {
     app_paths: Option<Arc<AppPaths>>,
+    language_packs: LanguagePacks,
 }
 
 impl InstallDefinitionResolver {
     fn new(app_paths: Option<Arc<AppPaths>>) -> Self {
-        Self { app_paths }
+        let language_packs = app_paths
+            .as_deref()
+            .map(classic_language_packs)
+            .unwrap_or_default();
+        Self {
+            app_paths,
+            language_packs,
+        }
     }
 
     fn sanitize_identifier(identifier: &str) -> Option<PathBuf> {
@@ -11387,6 +11437,10 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         identifier: &str,
     ) -> Result<Vec<Group>, ScenarioError> {
         self.resolve_definition_groups_ordered(scenario, identifier, true)
+    }
+
+    fn resolve_language_packs(&self, _scenario: &Group) -> Result<LanguagePacks, ScenarioError> {
+        Ok(self.language_packs.clone())
     }
 
     fn resolve_material_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
@@ -13123,6 +13177,11 @@ fn build_network_host_preparation(
         scenario_title: scenario.title.clone(),
         install_roots,
         languages: startup_language_sequence(app.app_paths.as_ref()),
+        language_packs: app
+            .app_paths
+            .as_ref()
+            .map(classic_language_packs)
+            .unwrap_or_default(),
         network_work_path,
         network_directory,
         group_maker: value("General", "Name").unwrap_or_default(),
@@ -14388,15 +14447,20 @@ impl GameApp {
             ),
         };
         let (system_scripts, standard_names) = paths
-            .map(AppPaths::system_group_path)
-            .and_then(|path| Group::open(path).ok())
-            .map(|group| {
-                let scripts = lc_engine::scenario::load_system_scripts(&group).unwrap_or_default();
+            .and_then(|paths| {
+                let group = Group::open(paths.system_group_path()).ok()?;
+                let scripts = match load_classic_global_system_scripts(paths, &group) {
+                    Ok(scripts) => scripts,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to localize System.c4g scripts");
+                        Vec::new()
+                    }
+                };
                 let names = group
                     .read_file("Names.txt")
                     .ok()
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-                (scripts, names)
+                Some((scripts, names))
             })
             .unwrap_or_default();
         if system_scripts.is_empty() {
@@ -19807,14 +19871,19 @@ impl GameApp {
             .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_groups)
             .map_err(|error| format!("failed to resolve client graphics resources: {error}"))?;
         let languages = startup_language_sequence(resolver_paths.as_deref());
+        let language_packs = resolver_paths
+            .as_deref()
+            .map(classic_language_packs)
+            .unwrap_or_default();
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
-        let scenario_data = Scenario::load_network_from_path_with_languages_and_seed(
+        let scenario_data = Scenario::load_network_from_path_with_languages_and_seed_and_packs(
             &combined_path,
             &definition_groups,
             &material_groups,
             &graphics_groups,
             &languages,
             random_seed,
+            &language_packs,
         )
         .map_err(|error| error.to_string())?;
         validate_client_network_scenario(&scenario_data)?;
@@ -33066,7 +33135,7 @@ impl GameApp {
 
     fn prepare_network_host_scenario(
         &self,
-        frontend: FrontendScenario,
+        mut frontend: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) -> Result<StagedNetworkHostScenario> {
         let paths = self.app_paths.as_ref().ok_or_else(|| {
@@ -33185,6 +33254,10 @@ impl GameApp {
                         detail: format!("scenario loader backdrop is unavailable: {error}"),
                     })
                 })?;
+        retain_selected_scenario_title(
+            &mut frontend,
+            loader_setup.scenario_title.as_deref(),
+        );
         let (fair_crew, fair_crew_strength) =
             resolve_scenario_fair_crew_parameters(metadata, &options);
         let lobby = ClassicHostLobbyProjection {
@@ -33242,7 +33315,7 @@ impl GameApp {
 
     fn begin_loading_scenario(
         &mut self,
-        scenario: FrontendScenario,
+        mut scenario: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) -> Result<(), EngineError> {
         let path = scenario
@@ -33277,6 +33350,14 @@ impl GameApp {
                         ))
                     })
             })?;
+        // `C4Game::OpenScenario` resolves the running Parameters title through
+        // the same pack-aware Title component used by the selected loader.
+        // Retain that exact result instead of re-reading a local-only
+        // `Title.txt` after the worker finishes.
+        retain_selected_scenario_title(
+            &mut scenario,
+            loader_setup.scenario_title.as_deref(),
+        );
         self.loader_screen = Some(loader_setup.screen);
         self.loader_error = None;
 
@@ -33801,11 +33882,9 @@ impl GameApp {
                 .set_material_render_info(Arc::clone(&self.material_render_info));
         }
 
-        // Parameters.ScenarioTitle: the Title.txt language entry beats
-        // C4S.Head.Title (C4Game.cpp:253-255).
-        let label = scenario_title_from_group(&path)
-            .or_else(|| scenario_data.name().map(|name| name.to_string()))
-            .unwrap_or_else(|| scenario.title.clone());
+        // `begin_loading_scenario` stores the pack-aware Title component (or
+        // C4S.Head.Title fallback) selected while opening the scenario.
+        let label = scenario.title.clone();
         let ground = match scenario_data.ground_height_hint() {
             Some(hint) => hint.max(0),
             None => Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT),
@@ -35582,20 +35661,6 @@ fn collect_viewport_inputs_with_film_view<'a>(
         primary.focus = object;
     }
     Ok(inputs)
-}
-
-/// The C4CFN_Title component: `Title.txt` language lines like
-/// `US:Gold Rush` (C4ComponentHost::GetLanguageString via
-/// C4Game::OpenScenario, src/C4Game.cpp:253-255). Only US is consulted
-/// until the language config is ported.
-fn scenario_title_from_group(path: &Path) -> Option<String> {
-    let group = Group::open(path).ok()?;
-    let bytes = group.read_file("Title.txt").ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    text.lines()
-        .filter_map(|line| line.trim().strip_prefix("US:"))
-        .map(|title| title.trim().to_string())
-        .find(|title| !title.is_empty())
 }
 
 /// [`draw_commands::CommandContext`] over the live engine, the local
@@ -37456,13 +37521,18 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
     match AppPaths::discover() {
         Ok(paths) => {
             let languages = startup_language_sequence(Some(&paths));
+            let language_packs = classic_language_packs(&paths);
             let roots = scenario_roots(&paths);
             let existing_roots: Vec<_> = roots.iter().filter(|root| root.path.exists()).collect();
             if !existing_roots.is_empty() {
                 let mut combined_entries: Vec<(resource_scenario::ScenarioEntry, String)> =
                     Vec::new();
                 for root in existing_roots {
-                    match resource_scenario::discover_with_languages(&root.path, &languages) {
+                    match resource_scenario::discover_with_languages_and_packs(
+                        &root.path,
+                        &languages,
+                        &language_packs,
+                    ) {
                         Ok(entries) => combined_entries
                             .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
                         Err(err) => {
@@ -47903,7 +47973,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             .state()
             .title()
             .to_string();
-        assert_ne!(expected_title, staged.frontend.title);
+        assert_eq!(
+            expected_title, staged.frontend.title,
+            "the selected loader's pack-aware title is retained for JoinData"
+        );
         app.staged_network_host_scenario = Some(staged);
 
         let (manager, _events) = NetworkManager::test_stub();
@@ -53645,24 +53718,77 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn external_language_pack_title_source_takes_loader_boundary() {
+    fn selected_loader_title_cross_loads_from_origin_and_local_candidate_wins() {
         let root = tempdir().expect("loader language-pack fixture");
         let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        fs::create_dir_all(paths.config_dir()).expect("loader config directory");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("configure loader language");
         let scenario_path = content.join("Actual.c4s");
-        let (_, scenario_group, _) = loader_origin_fixture_scenario(&scenario_path, "");
+        let (_, scenario_group, _) = loader_origin_fixture_scenario(
+            &scenario_path,
+            "Archive.c4f/Original.c4s",
+        );
         let packed_title = paths
             .planet_dir()
             .join("Language.c4g")
             .join("Test.c4g")
-            .join("Actual.c4s");
-        fs::create_dir_all(&packed_title).expect("mapped language-pack scenario group");
+            .join("Archive.c4f/Original.c4s");
+        fs::create_dir_all(&packed_title).expect("Origin-mapped language-pack scenario group");
         fs::write(packed_title.join("TitleUS.txt"), "US:Pack title\n")
             .expect("language-pack title component");
 
-        let error = load_classic_scenario_loader_head(&scenario_group, &paths)
-            .expect_err("external title precedence must not be silently ignored");
-        assert!(error.to_string().contains("Language.c4g precedence"));
-        assert!(error.to_string().contains("Origin-remapped"));
+        let packed = load_classic_scenario_loader_head(&scenario_group, &paths)
+            .expect("pack-only Origin title is selected");
+        assert_eq!(packed.scenario_title(), "Pack title");
+        let mut staged = FrontendScenario::fallback();
+        staged.title = "Catalog fallback".to_string();
+        retain_selected_scenario_title(&mut staged, Some(packed.scenario_title()));
+        assert_eq!(staged.title, "Pack title");
+
+        fs::write(scenario_path.join("TitleUS.txt"), "US:Local title\n")
+            .expect("local title component");
+        let local = load_classic_scenario_loader_head(&scenario_group, &paths)
+            .expect("local same-candidate title overrides the pack");
+        assert_eq!(local.scenario_title(), "Local title");
+    }
+
+    #[test]
+    fn frontend_discovery_cross_loads_pack_title_and_local_candidate_wins() {
+        let root = tempdir().expect("frontend language-pack fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        paths.ensure_user_dirs().expect("frontend config directory");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("configure frontend language");
+        let scenario_path = content.join("Actual.c4s");
+        fs::create_dir_all(&scenario_path).expect("frontend scenario");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Core fallback\n",
+        )
+        .expect("scenario core");
+        let pack_scenario = paths
+            .planet_dir()
+            .join("Language.c4g/Test.c4g/Actual.c4s");
+        fs::create_dir_all(&pack_scenario).expect("pack scenario mirror");
+        fs::write(pack_scenario.join("TitleUS.txt"), "US:Pack catalog title\n")
+            .expect("pack-only catalog title");
+
+        let packed = load_frontend_scenarios();
+        let packed = packed
+            .iter()
+            .find(|entry| entry.identifier.ends_with("Actual.c4s"))
+            .expect("discover pack-localized scenario");
+        assert_eq!(packed.title, "Pack catalog title");
+
+        fs::write(scenario_path.join("TitleUS.txt"), "US:Local catalog title\n")
+            .expect("local catalog title");
+        let local = load_frontend_scenarios();
+        let local = local
+            .iter()
+            .find(|entry| entry.identifier.ends_with("Actual.c4s"))
+            .expect("rediscover locally localized scenario");
+        assert_eq!(local.title, "Local catalog title");
     }
 
     #[test]
@@ -80788,6 +80914,124 @@ protected func InputCallback(string answer, int player)
         let columns = build_runtime_help_columns(&table.entries).expect("build German help");
         assert!(columns.left.starts_with("[Spielfunktionen]\n"));
         assert!(columns.left.contains("F1</c> - Hilfe"));
+    }
+
+    #[test]
+    fn runtime_language_table_loads_from_language_pack() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("runtime language-pack install fixture");
+        let user_data = tempdir().expect("runtime language-pack user fixture");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("empty local System.c4g");
+        fs::create_dir(install.path().join("planet/System.c4g/LanguageFI.txt"))
+            .expect("unreadable local language-table candidate");
+        let pack_system = install
+            .path()
+            .join("planet/Language.c4g/Finnish.c4g/System.c4g");
+        fs::create_dir_all(&pack_system).expect("language-pack System.c4g");
+        fs::write(
+            pack_system.join("LanguageFI.txt"),
+            "IDS_LANG_CHARSET=UTF-8\nProbe=paketti\n",
+        )
+        .expect("pack Finnish language table");
+        let decoy_system = install.path().join("Language.c4g/Decoy.c4g/System.c4g");
+        fs::create_dir_all(&decoy_system).expect("non-global decoy Language.c4g");
+        fs::write(
+            decoy_system.join("LanguageUS.txt"),
+            "IDS_LANG_CHARSET=UTF-8\nProbe=wrong namespace\n",
+        )
+        .expect("decoy language table");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover language-pack fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US, FI\n")
+            .expect("configure whitespace-prefixed Finnish language");
+
+        assert_eq!(
+            classic_loader_language_sequence(&paths).expect("component language sequence"),
+            vec!["US".to_string(), " F".to_string()]
+        );
+        assert_eq!(
+            classic_runtime_language_sequence(&paths).expect("LoadLanguage sequence"),
+            vec!["US".to_string(), "FI".to_string()]
+        );
+
+        let table = load_runtime_language_table(Some(&paths))
+            .expect("LanguageFI.txt loads from Finnish.c4g");
+        assert_eq!(table.charset, RuntimeHelpCharset::Utf8);
+        assert_eq!(
+            table.entries.get("Probe").map(String::as_str),
+            Some("paketti")
+        );
+    }
+
+    #[test]
+    fn global_system_scripts_use_pack_only_string_table() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("global System language-pack fixture");
+        let user_data = tempdir().expect("global System user fixture");
+        let system = install.path().join("planet/System.c4g");
+        fs::create_dir_all(&system).expect("local System.c4g");
+        fs::write(
+            system.join("Probe.c"),
+            "global func PackProbe() { return \"$PackProbe$\"; }\n",
+        )
+        .expect("global script");
+        let pack_system = install
+            .path()
+            .join("planet/Language.c4g/Finnish.c4g/System.c4g");
+        fs::create_dir_all(&pack_system).expect("pack System.c4g");
+        fs::write(
+            pack_system.join("StringTblUS.txt"),
+            "PackProbe=Pack-localized global\n",
+        )
+        .expect("pack-only global string table");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover global script fixture");
+        paths.ensure_user_dirs().expect("create config directory");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("configure component language");
+
+        let group = Group::open(&system).expect("open System.c4g");
+        let scripts = load_classic_global_system_scripts(&paths, &group)
+            .expect("localize global scripts from Language.c4g");
+        assert_eq!(scripts.len(), 1);
+        assert!(scripts[0].1.contains("Pack-localized global"));
+        assert!(!scripts[0].1.contains("$PackProbe$"));
+    }
+
+    #[test]
+    fn global_system_scripts_do_not_hide_invalid_explicit_language_config() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("global System config fixture");
+        let user_data = tempdir().expect("global System user fixture");
+        let system = install.path().join("planet/System.c4g");
+        fs::create_dir_all(&system).expect("local System.c4g");
+        fs::write(system.join("Probe.c"), "global func Probe() { return true; }\n")
+            .expect("global script");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover global script fixture");
+        paths.ensure_user_dirs().expect("create config directory");
+        fs::write(
+            paths.config_file(),
+            format!("[General]\nLanguageEx={}\n", "X".repeat(1025)),
+        )
+        .expect("write over-capacity explicit language config");
+
+        let group = Group::open(&system).expect("open System.c4g");
+        let error = load_classic_global_system_scripts(&paths, &group)
+            .expect_err("explicit invalid config must not use the platform fallback");
+        assert!(error.to_string().contains("LanguageEx"));
+        assert!(error.to_string().contains("1024-byte"));
     }
 
     #[test]

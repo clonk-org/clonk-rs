@@ -31,7 +31,7 @@ use lc_network::{
     NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership, compose_initial_network_dynamic,
     fill_scenario_derived_join_parameters, join_team_list_snapshot, publish_host_initial_resources,
 };
-use lc_resources::{Group, GroupError};
+use lc_resources::{Group, GroupError, LanguagePacks};
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -63,6 +63,9 @@ pub struct PreparedHostBootstrapSpec<'a> {
     /// Ordered legacy language fallbacks used while loading scenario-owned
     /// definitions and Teams.txt from `scenario_path`.
     pub languages: &'a [String],
+    /// Process-global external language packs discovered from the app's one
+    /// classic `Language.c4g` namespace.
+    pub language_packs: &'a LanguagePacks,
     /// Logical `Config.Network.WorkPath` carried by resource core filenames.
     /// This must not be inferred from the host's physical cache directory.
     pub network_work_path: &'a str,
@@ -539,6 +542,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         &scenario_group,
         &InstallRootDefinitionResolver {
             roots: spec.install_roots,
+            language_packs: spec.language_packs,
         },
         spec.languages,
     )?;
@@ -813,6 +817,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
 
 struct InstallRootDefinitionResolver<'a> {
     roots: &'a [PathBuf],
+    language_packs: &'a LanguagePacks,
 }
 
 impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
@@ -852,6 +857,10 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
         groups.extend(self.resolve_graphics_groups(scenario)?);
         Ok(groups)
     }
+
+    fn resolve_language_packs(&self, _scenario: &Group) -> Result<LanguagePacks, ScenarioError> {
+        Ok(self.language_packs.clone())
+    }
 }
 
 #[cfg(test)]
@@ -871,7 +880,11 @@ mod definition_root_graphics_tests {
         fs::create_dir_all(&base_graphics).expect("base graphics");
 
         let roots = [dir.path().to_path_buf()];
-        let resolver = InstallRootDefinitionResolver { roots: &roots };
+        let language_packs = LanguagePacks::default();
+        let resolver = InstallRootDefinitionResolver {
+            roots: &roots,
+            language_packs: &language_packs,
+        };
         let graphics = resolver
             .resolve_graphics_groups_with_definition_roots(
                 &Group::open(&scenario).expect("scenario root"),

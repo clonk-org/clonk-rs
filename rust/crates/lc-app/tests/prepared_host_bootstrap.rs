@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lc_network::{HostInitialResourceSource, NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY};
-use lc_resources::Group;
+use lc_resources::{Group, LanguagePacks};
 
 #[path = "../src/host_game_resource_sources.rs"]
 pub mod host_game_resource_sources;
@@ -31,6 +31,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     fs::write(network.path().join("DynTutorial01.c4s"), b"collision").unwrap();
     let install_roots = vec![content, planet];
     let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let language_packs = LanguagePacks::default();
     let player_sources = Vec::new();
 
     let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
@@ -38,6 +39,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
         scenario_title: "The First Tutorial",
         install_roots: &install_roots,
         languages: &languages,
+        language_packs: &language_packs,
         network_directory: network.path(),
         network_work_path: "Network",
         start_unix_seconds: 1_720_000_122,
@@ -559,6 +561,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
     let scenario_path = content.join("Knights.c4f/Regicide.c4s");
     let install_roots = vec![content, planet];
     let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let language_packs = LanguagePacks::default();
     let network = tempfile::tempdir().unwrap();
     let player_directory = tempfile::tempdir().unwrap();
     let player_path = player_directory.path().join("Alice.c4p");
@@ -577,6 +580,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
             scenario_title: "Regicide",
             install_roots: &install_roots,
             languages: &languages,
+            language_packs: &language_packs,
             network_directory: network.path(),
             network_work_path: "Network",
             start_unix_seconds: 1_720_000_122,
@@ -875,11 +879,13 @@ fn prepare_with_names(
     netpuncher_address: &str,
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
     let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let language_packs = LanguagePacks::default();
     prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &fixture.scenario_path,
         scenario_title: "Fixture",
         install_roots: &fixture.install_roots,
         languages: &languages,
+        language_packs: &language_packs,
         network_directory: fixture.network.path(),
         network_work_path: "Network",
         start_unix_seconds: 1_699_999_999,

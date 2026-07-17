@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lc_network::HostInitialResourceSource;
+use lc_resources::LanguagePacks;
 
 use crate::prepared_host_bootstrap::{
     prepare_host_bootstrap, PrepareHostBootstrapError, PreparedHostBootstrap,
@@ -16,6 +17,7 @@ pub struct NetworkHostPreparation {
     pub scenario_title: String,
     pub install_roots: Vec<PathBuf>,
     pub languages: Vec<String>,
+    pub language_packs: LanguagePacks,
     pub network_work_path: String,
     pub network_directory: PathBuf,
     pub group_maker: String,
@@ -39,6 +41,7 @@ impl NetworkHostPreparation {
             scenario_title: &self.scenario_title,
             install_roots: &self.install_roots,
             languages: &self.languages,
+            language_packs: &self.language_packs,
             network_work_path: &self.network_work_path,
             network_directory: &self.network_directory,
             start_unix_seconds,

@@ -12,9 +12,9 @@ use lc_resources::definition::{
 };
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
-    DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
-    ResourceDefinition as ResourceDefinitionData, decode_legacy_script_text,
-    localize_script_source,
+    ComponentGroups, DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
+    LanguagePacks, ResourceDefinition as ResourceDefinitionData, decode_legacy_script_text,
+    localize_script_source_with_components,
 };
 use serde::de::Error as _;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
@@ -163,6 +163,7 @@ struct ScenarioDefinition {
     rank_names: Option<Vec<String>>,
     rank_symbol_count: Option<u32>,
     resource_group: Option<Group>,
+    resource_components: Option<ComponentGroups>,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
     /// DefCore shape vertices + rect (the spawn shape; task #15 carries
@@ -719,10 +720,23 @@ impl ScenarioLoaderHead {
         group: &Group,
         languages: &[S],
     ) -> Result<Self, ScenarioError> {
+        Self::load_from_group_with_languages_and_packs(group, languages, &LanguagePacks::default())
+    }
+
+    pub fn load_from_group_with_languages_and_packs<S: AsRef<str>>(
+        group: &Group,
+        languages: &[S],
+        language_packs: &LanguagePacks,
+    ) -> Result<Self, ScenarioError> {
         let manifest = parse_legacy_scenario_manifest(group)?;
         let savegame_definition_override =
             load_savegame_definition_override(group, manifest.core.head.save_game != 0)?;
-        let scenario_title = match load_loader_scenario_title(group, languages)? {
+        let components = language_packs.component_groups(
+            group,
+            Some(group),
+            manifest.core.head.origin.as_deref(),
+        );
+        let scenario_title = match load_loader_scenario_title(&components, languages)? {
             Some(title) => title,
             None => validate_name_ex_no_empty(manifest.core.head.title.clone())?,
         };
@@ -1504,6 +1518,13 @@ pub trait LegacyDefinitionResolver {
         identifier: &str,
     ) -> Result<Vec<Group>, ScenarioError>;
 
+    /// External language packs installed beside the executable data. The
+    /// default keeps embedders and synchronized network resource resolvers
+    /// independent from machine-local localization packs.
+    fn resolve_language_packs(&self, _scenario: &Group) -> Result<LanguagePacks, ScenarioError> {
+        Ok(LanguagePacks::default())
+    }
+
     /// Ordered external `NRT_Material` sources. Material overloads walk a
     /// resource chain and therefore must not inherit the one-group semantics
     /// of an explicit `DefinitionFilenames` vector entry.
@@ -1553,6 +1574,7 @@ struct AuthoritativeNetworkResourceResolver<'a> {
     definition_groups: &'a [Group],
     material_groups: &'a [Group],
     graphics_groups: &'a [Group],
+    language_packs: &'a LanguagePacks,
 }
 
 impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
@@ -1577,6 +1599,10 @@ impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
 
     fn resolve_graphics_groups(&self, _scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
         Ok(self.graphics_groups.to_vec())
+    }
+
+    fn resolve_language_packs(&self, _scenario: &Group) -> Result<LanguagePacks, ScenarioError> {
+        Ok(self.language_packs.clone())
     }
 }
 
@@ -1878,6 +1904,34 @@ impl Scenario {
     where
         S: AsRef<str>,
     {
+        Self::load_network_from_path_with_languages_and_seed_and_packs(
+            path,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            &LanguagePacks::default(),
+        )
+    }
+
+    /// Pack-aware network-client scenario loader. Language packs remain
+    /// machine-local presentation resources, while definitions/materials
+    /// continue to come exclusively from the synchronized authoritative
+    /// vectors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_path_with_languages_and_seed_and_packs<S>(
+        path: impl AsRef<Path>,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+    {
         let group = Group::open(path)?;
         let definition_modules = (0..definition_groups.len())
             .map(|index| format!("__NetworkDefinition{index}.c4d"))
@@ -1887,6 +1941,7 @@ impl Scenario {
             definition_groups,
             material_groups,
             graphics_groups,
+            language_packs,
         };
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             &group,
@@ -2252,6 +2307,10 @@ impl Scenario {
         S: AsRef<str>,
     {
         let mut manifest = parse_legacy_scenario_manifest(group)?;
+        let language_packs = resolver.resolve_language_packs(group)?;
+        let scenario_origin = manifest.core.head.origin.clone();
+        let scenario_components =
+            language_packs.component_groups(group, Some(group), scenario_origin.as_deref());
         let is_savegame = manifest.core.head.save_game != 0;
         let runtime_landscape = load_runtime_landscape_data(group, is_savegame)?;
         // Exact old saves replace the normal definition vector from Game.txt.
@@ -2316,6 +2375,9 @@ impl Scenario {
                     true,
                     &skip_ids,
                     languages,
+                    &language_packs,
+                    group,
+                    scenario_origin.as_deref(),
                     &mut load_items,
                 )?;
             }
@@ -2328,6 +2390,9 @@ impl Scenario {
                     true,
                     &skip_ids,
                     languages,
+                    &language_packs,
+                    group,
+                    scenario_origin.as_deref(),
                     &mut load_items,
                 )?;
             }
@@ -2341,6 +2406,9 @@ impl Scenario {
                     true,
                     &skip_ids,
                     languages,
+                    &language_packs,
+                    group,
+                    scenario_origin.as_deref(),
                     &mut load_items,
                 )?;
             }
@@ -2355,6 +2423,9 @@ impl Scenario {
                     true,
                     &skip_ids,
                     languages,
+                    &language_packs,
+                    group,
+                    scenario_origin.as_deref(),
                     &mut load_items,
                 )?;
             }
@@ -2362,7 +2433,16 @@ impl Scenario {
 
         // InitDefs' scenario pass disables System.c4g discovery because the
         // scenario-local group is loaded later by LoadScenarioScripts.
-        collect_definitions_from_group(group, false, &skip_ids, languages, &mut load_items)?;
+        collect_definitions_from_group(
+            group,
+            false,
+            &skip_ids,
+            languages,
+            &language_packs,
+            group,
+            scenario_origin.as_deref(),
+            &mut load_items,
+        )?;
 
         // fOverload replaces and destroys an earlier same-ID C4Def script,
         // while System hosts loaded between the two definitions remain live.
@@ -2402,8 +2482,13 @@ impl Scenario {
             return Err(ScenarioError::NoDefinitions);
         }
 
-        let script = load_legacy_scenario_script(group, languages)?;
-        let scenario_system_scripts = load_scenario_system_scripts(group)?;
+        let script = load_legacy_scenario_script(group, &scenario_components, languages)?;
+        let scenario_system_scripts = load_scenario_system_scripts(
+            group,
+            &language_packs,
+            scenario_origin.as_deref(),
+            languages,
+        )?;
         let map_callback_functions = scenario_map_callback_functions(
             script.as_ref(),
             &collected,
@@ -2487,8 +2572,10 @@ impl Scenario {
             &map_callback_functions,
             &post_init_map_callbacks,
         )?;
-        let (_, legacy_team_metadata) = load_initial_network_teams(group, languages)?;
-        let (teams, lobby_teams) = load_legacy_teams(group, languages, &manifest.core)?;
+        let (_, legacy_team_metadata) =
+            load_initial_network_teams(group, &scenario_components, languages)?;
+        let (teams, lobby_teams) =
+            load_legacy_teams(group, &scenario_components, languages, &manifest.core)?;
         let game_parameter_defaults = game_parameter_defaults(&manifest.core);
         let embedded_game_parameters =
             load_legacy_game_parameter_overrides(group, &game_parameter_defaults)?;
@@ -3040,12 +3127,7 @@ impl Scenario {
             // C4Def.cpp:645-652): the language-suffixed list first, then
             // the plain one. Only US is consulted until the language
             // config is ported.
-            compiled.set_clonk_names(definition.resource_group.as_ref().and_then(|group| {
-                ["ClonkNamesUS.txt", "ClonkNames.txt"]
-                    .iter()
-                    .find_map(|name| group.load_entry_string(name).ok())
-                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            }));
+            compiled.set_clonk_names(load_definition_clonk_names(definition));
             compiled.set_movement_profile(definition.movement);
             compiled.set_category(definition.category);
             compiled.set_value(
@@ -3392,9 +3474,11 @@ impl Scenario {
                     match group.open_child(parent) {
                         Ok(def_group) => match ResourceDefinitionData::load(&def_group) {
                             Ok(resource) => {
+                                let components = ComponentGroups::local(&def_group);
                                 base_definition = Some(scenario_definition_from_resource(
                                     resource,
                                     Some(def_group),
+                                    Some(components),
                                 ));
                             }
                             Err(ResourceDefinitionError::DefCoreMissing) => {}
@@ -3441,6 +3525,7 @@ impl Scenario {
                     rank_names: None,
                     rank_symbol_count: None,
                     resource_group: None,
+                    resource_components: None,
                     components: Vec::new(),
                     line_connect: 0,
                     vertices: Vec::new(),
@@ -6478,7 +6563,7 @@ fn try_read_group_file_case_insensitive(
 }
 
 fn load_loader_scenario_title<S: AsRef<str>>(
-    group: &Group,
+    components: &ComponentGroups,
     languages: &[S],
 ) -> Result<Option<String>, ScenarioError> {
     let candidates = languages
@@ -6486,15 +6571,10 @@ fn load_loader_scenario_title<S: AsRef<str>>(
         .map(|language| format!("Title{}.txt", language.as_ref()))
         .chain(std::iter::once("Title.txt".to_string()));
     for candidate in candidates {
-        let Some(bytes) = try_read_group_file_case_insensitive(group, &candidate)? else {
+        let Some(component) = components.read(&candidate)? else {
             continue;
         };
-        // C4ComponentHost retries the next language/filename candidate when
-        // C4Group::LoadEntryString rejects a present zero-byte entry.
-        if bytes.is_empty() {
-            continue;
-        }
-        let source = decode_legacy_script_text(&bytes);
+        let source = decode_legacy_script_text(&component.bytes);
         let source = source.split_once('\0').map_or(source.as_str(), |(prefix, _)| prefix);
         for language in languages {
             let needle = format!("{}:", language.as_ref());
@@ -7089,6 +7169,7 @@ fn parse_legacy_bool(value: &str) -> Option<bool> {
 
 fn load_legacy_scenario_script<S: AsRef<str>>(
     group: &Group,
+    components: &ComponentGroups,
     languages: &[S],
 ) -> Result<Option<ScenarioScriptSource>, ScenarioError> {
     const SCRIPT_CANDIDATES: [&str; 1] = ["Script.c"];
@@ -7098,7 +7179,7 @@ fn load_legacy_scenario_script<S: AsRef<str>>(
         }
         let bytes = group.read_file(candidate)?;
         let source = lc_script::c4_string_from_bytes(&bytes);
-        let source = localize_script_source(group, &source, languages)?;
+        let source = localize_script_source_with_components(components, &source, languages)?;
         return Ok(Some(ScenarioScriptSource {
             name: candidate.to_string(),
             source,
@@ -7113,7 +7194,7 @@ fn load_legacy_scenario_script<S: AsRef<str>>(
 /// source and replacement values remain in their original byte encoding
 /// (C4Teams.cpp:614-655; C4LangStringTable.cpp:33-148).
 fn localize_legacy_team_source<S: AsRef<str>>(
-    group: &Group,
+    components: &ComponentGroups,
     source: &[u8],
     languages: &[S],
 ) -> Result<Vec<u8>, GroupError> {
@@ -7123,14 +7204,9 @@ fn localize_legacy_team_source<S: AsRef<str>>(
             .iter()
             .map(|language| format!("StringTbl{}.txt", language.as_ref())),
     ) {
-        match group.load_entry_string(&candidate) {
-            Ok(bytes) => {
-                table = Some(bytes);
-                break;
-            }
-            Err(GroupError::EntryNotFound(_) | GroupError::EmptyEntry(_)) => {}
-            Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        if let Some(component) = components.read(candidate)? {
+            table = Some(component.bytes);
+            break;
         }
     }
     let Some(table) = table else {
@@ -7195,6 +7271,7 @@ fn localize_legacy_team_source<S: AsRef<str>>(
 
 fn load_initial_network_teams<S: AsRef<str>>(
     group: &Group,
+    components: &ComponentGroups,
     languages: &[S],
 ) -> Result<(Vec<TeamInfo>, Option<LoadedLegacyTeamMetadata>), ScenarioError> {
     if !group.exists("Teams.txt") {
@@ -7207,7 +7284,7 @@ fn load_initial_network_teams<S: AsRef<str>>(
         // C4Teams.cpp:619-647).
         return Ok((Vec::new(), None));
     }
-    let source = localize_legacy_team_source(group, &source, languages)?;
+    let source = localize_legacy_team_source(components, &source, languages)?;
     let source = bytes_as_latin1_string(&source);
     let loaded = parse_legacy_team_metadata_source(&source)?;
     let teams = team_infos_from_initial_network_metadata(&loaded.metadata);
@@ -7556,6 +7633,7 @@ fn parse_team_bool(value: &str) -> Option<bool> {
 
 fn load_legacy_teams<S: AsRef<str>>(
     group: &Group,
+    components: &ComponentGroups,
     languages: &[S],
     core: &LegacyScenarioCore,
 ) -> Result<(Vec<TeamInfo>, ScenarioLobbyTeams), ScenarioError> {
@@ -7568,7 +7646,7 @@ fn load_legacy_teams<S: AsRef<str>>(
         // projection must take the same scenario-derived branch as runtime.
         return Ok((Vec::new(), derive_legacy_teams_default(core)));
     }
-    let source = localize_legacy_team_source(group, &source, languages)?;
+    let source = localize_legacy_team_source(components, &source, languages)?;
     // C4Group::LoadEntryString and C4LangStringTable::ReplaceStrings keep
     // Teams.txt as native bytes. Parse the decoded projection only for the
     // existing lobby/configuration semantics, then replace every C4 string
@@ -8465,9 +8543,21 @@ fn decode_legacy_escaped_string(raw: &str) -> String {
     String::from_utf8_lossy(&output).into_owned()
 }
 
-/// Collects the scripts of a System.c4g group in the group's existing entry
-/// order, matching C4Group::FindNextEntry (C4Game.cpp:3348-3355).
+/// Collects and localizes the scripts of a System.c4g group in the group's
+/// existing entry order, matching C4Group::FindNextEntry and the shared
+/// C4LangStringTable passed to every host (C4Game.cpp:2777-2791,3346-3355).
 pub fn load_system_scripts(group: &Group) -> Result<Vec<(String, String)>, ScenarioError> {
+    load_system_scripts_with_components(group, &ComponentGroups::local(group), &["US", "DE"])
+}
+
+/// Pack-aware System.c4g script loader. `components` must represent the
+/// System group itself; script files remain local while its StringTbl is
+/// selected through C4ComponentHost::LoadEx's local-plus-pack group set.
+pub fn load_system_scripts_with_components<S: AsRef<str>>(
+    group: &Group,
+    components: &ComponentGroups,
+    languages: &[S],
+) -> Result<Vec<(String, String)>, ScenarioError> {
     let mut sources = Vec::new();
     for entry in group.entries()? {
         if entry.is_directory {
@@ -8478,7 +8568,9 @@ pub fn load_system_scripts(group: &Group) -> Result<Vec<(String, String)>, Scena
             continue;
         }
         let bytes = group.read_file(&entry.relative_path)?;
-        sources.push((name, lc_script::c4_string_from_bytes(&bytes)));
+        let source = lc_script::c4_string_from_bytes(&bytes);
+        let source = localize_script_source_with_components(components, &source, languages)?;
+        sources.push((name, source));
     }
     Ok(sources)
 }
@@ -8486,11 +8578,19 @@ pub fn load_system_scripts(group: &Group) -> Result<Vec<(String, String)>, Scena
 /// The scenario's own System.c4g scripts, empty when the group has none
 /// (C4Game::LoadScenarioScripts opens C4CFN_System as a child and loads
 /// every C4CFN_ScriptFiles entry, C4Game.cpp:3317-3343).
-fn load_scenario_system_scripts(group: &Group) -> Result<Vec<(String, String)>, ScenarioError> {
+fn load_scenario_system_scripts<S: AsRef<str>>(
+    group: &Group,
+    language_packs: &LanguagePacks,
+    scenario_origin: Option<&str>,
+    languages: &[S],
+) -> Result<Vec<(String, String)>, ScenarioError> {
     group
         .open_child(Path::new("System.c4g"))
         .ok()
-        .map(|system| load_system_scripts(&system))
+        .map(|system| {
+            let components = language_packs.component_groups(&system, Some(group), scenario_origin);
+            load_system_scripts_with_components(&system, &components, languages)
+        })
         .unwrap_or_else(|| Ok(Vec::new()))
 }
 
@@ -11985,6 +12085,9 @@ fn collect_definitions_from_group<S: AsRef<str>>(
     load_system_groups: bool,
     skip_ids: &HashSet<String>,
     languages: &[S],
+    language_packs: &LanguagePacks,
+    scenario: &Group,
+    scenario_origin: Option<&str>,
     output: &mut Vec<CollectedDefinition>,
 ) -> Result<(), ScenarioError> {
     let mut primary_definition = false;
@@ -12010,15 +12113,26 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                     "skipping definition with invalid C4ID"
                 );
             } else if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
-                match ResourceDefinitionData::load_with_core_and_languages(
-                    group, core, languages,
+                let components =
+                    language_packs.component_groups(group, Some(scenario), scenario_origin);
+                match ResourceDefinitionData::load_with_core_and_languages_and_components(
+                    group,
+                    core,
+                    languages,
+                    &components,
                 ) {
                     Ok(resource) => {
                         primary_definition = true;
-                        let mut definition =
-                            scenario_definition_from_resource(resource, Some(group.clone()));
-                        definition.script =
-                            localize_script_source(group, &definition.script, languages)?;
+                        let mut definition = scenario_definition_from_resource(
+                            resource,
+                            Some(group.clone()),
+                            Some(components.clone()),
+                        );
+                        definition.script = localize_script_source_with_components(
+                            &components,
+                            &definition.script,
+                            languages,
+                        )?;
                         output.push(CollectedDefinition::Definition(definition));
                     }
                     Err(error) if is_rejected_definition_error(&error) => {
@@ -12043,7 +12157,16 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         };
         // The recursive call omits fLoadSysGroups in C++, so its default true
         // applies even when only the scenario root suppressed System loading.
-        collect_definitions_from_group(&child, true, skip_ids, languages, output)?;
+        collect_definitions_from_group(
+            &child,
+            true,
+            skip_ids,
+            languages,
+            language_packs,
+            scenario,
+            scenario_origin,
+            output,
+        )?;
     }
 
     // A non-primary definition root loads its System.c4g only AFTER all child
@@ -12051,7 +12174,11 @@ fn collect_definitions_from_group<S: AsRef<str>>(
     // their own System group, as does the scenario-file InitDefs pass.
     if !primary_definition && load_system_groups {
         if let Ok(system) = group.open_child(Path::new("System.c4g")) {
-            if let Ok(sources) = load_system_scripts(&system) {
+            let components =
+                language_packs.component_groups(&system, Some(scenario), scenario_origin);
+            if let Ok(sources) =
+                load_system_scripts_with_components(&system, &components, languages)
+            {
                 output.push(CollectedDefinition::SystemScripts(sources));
             }
         }
@@ -12081,6 +12208,7 @@ fn warn_rejected_definition(group: &Group, error: &ResourceDefinitionError) {
 fn scenario_definition_from_resource(
     resource: ResourceDefinitionData,
     source_group: Option<Group>,
+    source_components: Option<ComponentGroups>,
 ) -> ScenarioDefinition {
     let description = resource.description().map(str::to_owned);
     let ResourceDefinitionData {
@@ -12129,6 +12257,7 @@ fn scenario_definition_from_resource(
         rank_names,
         rank_symbol_count,
         resource_group: source_group,
+        resource_components: source_components,
         components: core
             .components
             .into_iter()
@@ -12142,6 +12271,38 @@ fn scenario_definition_from_resource(
         shape: core.shape,
         core: Some(full_core),
     }
+}
+
+/// C4Def first gates ClonkNames loading on a local
+/// `FindEntry("ClonkNames*.txt")`, then performs the selected component's
+/// `LoadEx` search across the local group and language packs
+/// (C4Def.cpp:642-655). Keep that seemingly redundant local marker gate:
+/// a pack-only ClonkNames component must not create an owned name list.
+fn load_definition_clonk_names(definition: &ScenarioDefinition) -> Option<String> {
+    let local = definition.resource_group.as_ref()?;
+    let has_local_marker = local.entries().ok()?.into_iter().any(|entry| {
+        if entry.is_directory || entry.relative_path.components().count() != 1 {
+            return false;
+        }
+        let name = entry
+            .relative_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        name.starts_with("clonknames") && name.ends_with(".txt")
+    });
+    if !has_local_marker {
+        return None;
+    }
+
+    let components = definition.resource_components.as_ref()?;
+    for candidate in ["ClonkNamesUS.txt", "ClonkNames.txt"] {
+        if let Ok(Some(component)) = components.read(candidate) {
+            return Some(String::from_utf8_lossy(&component.bytes).into_owned());
+        }
+    }
+    None
 }
 
 fn convert_action_map(map: &ResourceActionMap) -> DefinitionActions {
@@ -13976,7 +14137,9 @@ RandomTeamCount=2
             .expect("write localized string table");
 
         let group = Group::open(dir.path()).expect("open group");
-        let (teams, loaded) = load_initial_network_teams(&group, &["US"]).expect("load Teams.txt");
+        let (teams, loaded) =
+            load_initial_network_teams(&group, &ComponentGroups::local(&group), &["US"])
+                .expect("load Teams.txt");
         let metadata = loaded.expect("Teams.txt metadata").metadata;
 
         assert_eq!(lc_script::c4_string_bytes(&teams[0].name), [0xdc; 30]);
@@ -14261,14 +14424,16 @@ RandomTeamCount=2
         std::fs::write(dir.path().join("Teams.txt"), []).expect("write empty Teams.txt");
         let group = Group::open(dir.path()).expect("open group");
         let (_, loaded) =
-            load_initial_network_teams(&group, &["US"]).expect("load empty Teams.txt");
+            load_initial_network_teams(&group, &ComponentGroups::local(&group), &["US"])
+                .expect("load empty Teams.txt");
         assert!(loaded.is_none());
 
         let core = parse_legacy_scenario_text("[Game]\nStructNeedEnergy=0\n")
             .expect("default cooperative scenario")
             .core;
         let (_, lobby_teams) =
-            load_legacy_teams(&group, &["US"], &core).expect("load lobby team metadata");
+            load_legacy_teams(&group, &ComponentGroups::local(&group), &["US"], &core)
+                .expect("load lobby team metadata");
         assert_eq!(
             lobby_teams.source(),
             ScenarioTeamsSource::DerivedScenarioDefault
@@ -16647,6 +16812,7 @@ global func Step(state, frame, random)
                 rank_names: None,
                 rank_symbol_count: None,
                 resource_group: None,
+                resource_components: None,
                 components: Vec::new(),
                 line_connect: 0,
                 vertices: Vec::new(),
@@ -16774,6 +16940,7 @@ global func Step(state, frame, random)
                 rank_names: None,
                 rank_symbol_count: None,
                 resource_group: None,
+                resource_components: None,
                 components: Vec::new(),
                 line_connect: 0,
                 vertices: Vec::new(),
@@ -16959,6 +17126,29 @@ global func Step(state, frame, random)
             } else {
                 Ok(groups)
             }
+        }
+    }
+
+    struct LanguagePackResolver {
+        filesystem: FileSystemResolver,
+        language_packs: LanguagePacks,
+    }
+
+    impl LegacyDefinitionResolver for LanguagePackResolver {
+        fn resolve_definition_groups(
+            &self,
+            scenario: &Group,
+            identifier: &str,
+        ) -> Result<Vec<Group>, ScenarioError> {
+            self.filesystem
+                .resolve_definition_groups(scenario, identifier)
+        }
+
+        fn resolve_language_packs(
+            &self,
+            _scenario: &Group,
+        ) -> Result<LanguagePacks, ScenarioError> {
+            Ok(self.language_packs.clone())
         }
     }
 
@@ -17314,6 +17504,317 @@ global func Step(state, frame, random)
                 .call_object_function(index, "Label", Vec::new())
                 .expect("Label runs"),
             lc_script::Value::String("Reloaded %dx {{%i}}.".to_string())
+        );
+    }
+
+    #[test]
+    fn definition_string_table_loads_from_language_pack() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_definition_localization_fixture(
+            dir.path(),
+            "#strict\nfunc PackLabel() { return \"$PackLabel$\"; }\n",
+            "",
+        );
+        std::fs::remove_file(dir.path().join("Defs.c4d/Good.c4d/StringTblUS.txt"))
+            .expect("keep definition string table pack-only");
+
+        let language_container = dir.path().join("Language.c4g");
+        let pack_definition = language_container.join("Finnish.c4g/Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&pack_definition).expect("pack definition path");
+        std::fs::write(
+            pack_definition.join("StringTblUS.txt"),
+            "PackLabel=Packed value\n",
+        )
+        .expect("pack-only definition string table");
+        let resolver = LanguagePackResolver {
+            filesystem: FileSystemResolver {
+                roots: vec![dir.path().to_path_buf()],
+            },
+            language_packs: LanguagePacks::discover(
+                std::slice::from_ref(&language_container),
+                &[dir.path().to_path_buf()],
+            ),
+        };
+
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("scenario loads from pack-localized definition");
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("pack-localized definition compiles");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GOOD"))
+            .expect("GOOD spawns");
+        let index = engine.find_object_index(id).expect("GOOD object index");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "PackLabel", Vec::new())
+                .expect("PackLabel runs"),
+            lc_script::Value::String("Packed value".to_string())
+        );
+    }
+
+    #[test]
+    fn scenario_script_string_table_loads_from_language_pack() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static scenario_pack_value;\n\
+             global func Initialize() { scenario_pack_value = \"$ScenarioPack$\"; }\n",
+        );
+        let language_container = dir.path().join("Language.c4g");
+        let pack_scenario = language_container.join("Finnish.c4g/Resilience.c4s");
+        std::fs::create_dir_all(&pack_scenario).expect("pack scenario path");
+        std::fs::write(
+            pack_scenario.join("StringTblUS.txt"),
+            "ScenarioPack=localized scenario\n",
+        )
+        .expect("pack-only scenario string table");
+        let resolver = LanguagePackResolver {
+            filesystem: FileSystemResolver {
+                roots: vec![dir.path().to_path_buf()],
+            },
+            language_packs: LanguagePacks::discover(
+                std::slice::from_ref(&language_container),
+                &[dir.path().to_path_buf()],
+            ),
+        };
+
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("scenario loads from pack-localized Script.c");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("scenario_pack_value")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String(
+                "localized scenario".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn definition_clonk_names_cross_load_only_after_local_marker() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let definition_dir = dir.path().join("Defs.c4d/Good.c4d");
+        let language_container = dir.path().join("Language.c4g");
+        let pack_definition = language_container.join("Finnish.c4g/Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&pack_definition).expect("pack definition path");
+        std::fs::write(
+            pack_definition.join("ClonkNamesUS.txt"),
+            "Pack One\nPack Two\n",
+        )
+        .expect("pack ClonkNames component");
+        let packs = LanguagePacks::discover(
+            std::slice::from_ref(&language_container),
+            &[dir.path().to_path_buf()],
+        );
+        let load = || {
+            Scenario::load_from_path_with(
+                &scenario_dir,
+                &LanguagePackResolver {
+                    filesystem: FileSystemResolver {
+                        roots: vec![dir.path().to_path_buf()],
+                    },
+                    language_packs: packs.clone(),
+                },
+            )
+            .expect("scenario loads")
+        };
+
+        let mut without_marker = Engine::with_seed(0);
+        load()
+            .apply(&mut without_marker)
+            .expect("pack-only ClonkNames scenario applies");
+        assert_eq!(
+            without_marker
+                .definitions
+                .get(&DefinitionId::from("GOOD"))
+                .and_then(|definition| definition.clonk_names()),
+            None,
+            "C4Def's local ClonkNames*.txt marker gate rejects a pack-only list"
+        );
+
+        std::fs::write(
+            definition_dir.join("ClonkNamesDE.txt"),
+            "local marker for an unselected language\n",
+        )
+        .expect("local ClonkNames marker");
+        let mut with_marker = Engine::with_seed(0);
+        load()
+            .apply(&mut with_marker)
+            .expect("marker-enabled ClonkNames scenario applies");
+        assert_eq!(
+            with_marker
+                .definitions
+                .get(&DefinitionId::from("GOOD"))
+                .and_then(|definition| definition.clonk_names()),
+            Some("Pack One\nPack Two\n")
+        );
+    }
+
+    #[test]
+    fn system_script_string_table_keeps_candidate_major_pack_priority() {
+        let dir = tempdir().expect("tempdir");
+        let install = dir.path().join("install");
+        let system_path = install.join("System.c4g");
+        std::fs::create_dir_all(&system_path).expect("local System.c4g");
+        std::fs::write(
+            system_path.join("Probe.c"),
+            "global func SystemPackLabel() { return \"$Label$\"; }\n",
+        )
+        .expect("system script");
+        std::fs::write(system_path.join("StringTblUS.txt"), "Label=Local later\n")
+            .expect("local localized table");
+
+        let language_container = install.join("Language.c4g");
+        let pack_system = language_container.join("Finnish.c4g/System.c4g");
+        std::fs::create_dir_all(&pack_system).expect("pack System.c4g");
+        std::fs::write(pack_system.join("StringTbl.txt"), "Label=Pack first\n")
+            .expect("pack unsuffixed table");
+
+        let system = Group::open(&system_path).expect("open local System.c4g");
+        let packs = LanguagePacks::discover(
+            std::slice::from_ref(&language_container),
+            std::slice::from_ref(&install),
+        );
+        let components = packs.component_groups(&system, None, None);
+        let scripts = load_system_scripts_with_components(&system, &components, &["US"])
+            .expect("load localized System scripts");
+        assert_eq!(scripts.len(), 1);
+        assert!(scripts[0].1.contains("return \"Pack first\""));
+        assert!(!scripts[0].1.contains("Local later"));
+        assert!(!scripts[0].1.contains("$Label$"));
+    }
+
+    #[test]
+    fn scenario_and_definition_system_scripts_cross_load_pack_tables() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static def_system_value, scenario_system_value;\n\
+             global func Initialize() {\n\
+               def_system_value = DefSystemValue();\n\
+               scenario_system_value = ScenarioSystemValue();\n\
+             }\n",
+        );
+        let definition_system = dir.path().join("Defs.c4d/System.c4g");
+        std::fs::create_dir_all(&definition_system).expect("definition System.c4g");
+        std::fs::write(
+            definition_system.join("DefSystem.c"),
+            "global func DefSystemValue() { return \"$DefValue$\"; }\n",
+        )
+        .expect("definition System script");
+        let scenario_system = scenario_dir.join("System.c4g");
+        std::fs::create_dir_all(&scenario_system).expect("scenario System.c4g");
+        std::fs::write(
+            scenario_system.join("ScenarioSystem.c"),
+            "global func ScenarioSystemValue() { return \"$ScenarioValue$\"; }\n",
+        )
+        .expect("scenario System script");
+
+        let language_container = dir.path().join("Language.c4g");
+        let pack_definition_system = language_container.join("Finnish.c4g/Defs.c4d/System.c4g");
+        std::fs::create_dir_all(&pack_definition_system).expect("pack definition System path");
+        std::fs::write(
+            pack_definition_system.join("StringTblUS.txt"),
+            "DefValue=definition pack\n",
+        )
+        .expect("definition System pack table");
+        let pack_scenario_system = language_container.join("Finnish.c4g/Resilience.c4s/System.c4g");
+        std::fs::create_dir_all(&pack_scenario_system).expect("pack scenario System path");
+        std::fs::write(
+            pack_scenario_system.join("StringTblUS.txt"),
+            "ScenarioValue=scenario pack\n",
+        )
+        .expect("scenario System pack table");
+
+        let resolver = LanguagePackResolver {
+            filesystem: FileSystemResolver {
+                roots: vec![dir.path().to_path_buf()],
+            },
+            language_packs: LanguagePacks::discover(
+                std::slice::from_ref(&language_container),
+                &[dir.path().to_path_buf()],
+            ),
+        };
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("scenario loads with pack-localized System scripts");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("def_system_value")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String("definition pack".to_string()))
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("scenario_system_value")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String("scenario pack".to_string()))
+        );
+    }
+
+    #[test]
+    fn network_loader_threads_language_packs_to_authoritative_definitions() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_definition_localization_fixture(
+            dir.path(),
+            "#strict\nfunc NetworkPackLabel() { return \"$NetworkLabel$\"; }\n",
+            "",
+        );
+        std::fs::remove_file(dir.path().join("Defs.c4d/Good.c4d/StringTblUS.txt"))
+            .expect("keep network definition table pack-only");
+        let language_container = dir.path().join("Language.c4g");
+        let pack_definition = language_container.join("Finnish.c4g/Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&pack_definition).expect("pack definition path");
+        std::fs::write(
+            pack_definition.join("StringTblUS.txt"),
+            "NetworkLabel=network pack\n",
+        )
+        .expect("pack-only network definition table");
+        let packs = LanguagePacks::discover(
+            std::slice::from_ref(&language_container),
+            &[dir.path().to_path_buf()],
+        );
+        let definitions =
+            [Group::open(dir.path().join("Defs.c4d")).expect("authoritative definition group")];
+
+        let scenario = Scenario::load_network_from_path_with_languages_and_seed_and_packs(
+            &scenario_dir,
+            &definitions,
+            &[],
+            &[],
+            &["US"],
+            0,
+            &packs,
+        )
+        .expect("network scenario loads with local language packs");
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("network scenario applies");
+        let id = engine
+            .spawn_object(SpawnConfig::new("GOOD"))
+            .expect("GOOD spawns");
+        let index = engine.find_object_index(id).expect("GOOD object index");
+        assert_eq!(
+            engine
+                .call_object_function(index, "NetworkPackLabel", Vec::new())
+                .expect("NetworkPackLabel runs"),
+            lc_script::Value::String("network pack".to_string())
         );
     }
 
@@ -20466,12 +20967,16 @@ public func ActualizePhase(pClonk)
         write_definition(&root.join("Hud.c4d"), "3HUD");
 
         let group = Group::open(&root).expect("definition root opens");
+        let language_packs = LanguagePacks::default();
         let mut collected = Vec::new();
         collect_definitions_from_group(
             &group,
             false,
             &HashSet::new(),
             &["US"],
+            &language_packs,
+            &group,
+            None,
             &mut collected,
         )
         .expect("invalid IDs skip without aborting the definition tree");

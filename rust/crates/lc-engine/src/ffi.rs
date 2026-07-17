@@ -2067,6 +2067,7 @@ pub extern "C" fn lc_engine_runtime_free(handle: *mut RuntimeHandle) {
 /// 184-213).
 struct RuntimeDefinitionResolver {
     roots: Vec<PathBuf>,
+    language_packs: lc_resources::LanguagePacks,
 }
 
 impl crate::scenario::LegacyDefinitionResolver for RuntimeDefinitionResolver {
@@ -2123,6 +2124,33 @@ impl crate::scenario::LegacyDefinitionResolver for RuntimeDefinitionResolver {
         }
         Ok(groups)
     }
+
+    fn resolve_language_packs(
+        &self,
+        _scenario: &lc_resources::Group,
+    ) -> Result<lc_resources::LanguagePacks, crate::ScenarioError> {
+        Ok(self.language_packs.clone())
+    }
+}
+
+fn runtime_language_packs(install_root: &std::path::Path) -> lc_resources::LanguagePacks {
+    let planet = install_root.join("planet");
+    lc_resources::LanguagePacks::discover(
+        &[planet.join("Language.c4g")],
+        &[
+            install_root.join("content"),
+            planet,
+            install_root.to_path_buf(),
+        ],
+    )
+}
+
+fn load_runtime_system_scripts(
+    group: &lc_resources::Group,
+    language_packs: &lc_resources::LanguagePacks,
+) -> Result<Vec<(String, String)>, crate::ScenarioError> {
+    let components = language_packs.component_groups(group, None, None);
+    crate::scenario::load_system_scripts_with_components(group, &components, &["US", "DE"])
 }
 
 fn load_scenario_into_runtime(
@@ -2136,7 +2164,18 @@ fn load_scenario_into_runtime(
         .map(std::path::Path::to_path_buf)
         .collect::<Vec<_>>();
     roots.reverse();
-    let resolver = RuntimeDefinitionResolver { roots };
+    let install_root = path
+        .ancestors()
+        .find(|ancestor| ancestor.join("planet/System.c4g").exists())
+        .map(std::path::Path::to_path_buf);
+    let language_packs = install_root
+        .as_deref()
+        .map(runtime_language_packs)
+        .unwrap_or_default();
+    let resolver = RuntimeDefinitionResolver {
+        roots,
+        language_packs: language_packs.clone(),
+    };
     let scenario = Scenario::load_from_path_with_seed(path, &resolver, seed)
         .map_err(|error| format!("failed to load scenario: {error}"))?;
     runtime.engine = Engine::with_seed(seed);
@@ -2188,12 +2227,9 @@ fn load_scenario_into_runtime(
             runtime.engine.configure_materials_from_library(&merged);
         }
     }
-    if let Some(planet_root) = path
-        .ancestors()
-        .find(|ancestor| ancestor.join("planet/System.c4g").exists())
-    {
-        if let Ok(group) = lc_resources::Group::open(planet_root.join("planet/System.c4g")) {
-            if let Ok(sources) = crate::scenario::load_system_scripts(&group) {
+    if let Some(install_root) = install_root {
+        if let Ok(group) = lc_resources::Group::open(install_root.join("planet/System.c4g")) {
+            if let Ok(sources) = load_runtime_system_scripts(&group, &language_packs) {
                 runtime.engine.install_global_scripts(&sources);
             }
             // Game.Names: the standard clonk names live next to the
@@ -3249,6 +3285,87 @@ mod tests {
     };
     use serde_json::Value;
     use std::{ffi::CString, ptr};
+
+    #[test]
+    fn runtime_cross_loads_language_pack_tables_for_all_script_scopes() {
+        let install = tempfile::tempdir().expect("temporary FFI install");
+        let content = install.path().join("content");
+        let definition = content.join("Defs.c4d/Good.c4d");
+        let scenario = content.join("Probe.c4s");
+        let system = install.path().join("planet/System.c4g");
+        std::fs::create_dir_all(&definition).expect("definition directory");
+        std::fs::create_dir_all(&scenario).expect("scenario directory");
+        std::fs::create_dir_all(&system).expect("System.c4g directory");
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\n",
+        )
+        .expect("definition core");
+        std::fs::write(
+            definition.join("Script.c"),
+            "global func FfiDefinitionPackValue() { return \"$DefinitionValue$\"; }\n",
+        )
+        .expect("definition script");
+        std::fs::write(
+            scenario.join("Scenario.txt"),
+            "[Head]\nTitle=Probe\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("scenario core");
+        std::fs::write(
+            scenario.join("Script.c"),
+            "static ffi_scenario_value, ffi_definition_value, ffi_system_value;\n\
+             global func Initialize() {\n\
+               ffi_scenario_value = \"$ScenarioValue$\";\n\
+               ffi_definition_value = FfiDefinitionPackValue();\n\
+               ffi_system_value = FfiSystemPackValue();\n\
+             }\n",
+        )
+        .expect("scenario script");
+        std::fs::write(
+            system.join("Probe.c"),
+            "global func FfiSystemPackValue() { return \"$SystemValue$\"; }\n",
+        )
+        .expect("system script");
+
+        let language = install.path().join("planet/Language.c4g/Finnish.c4g");
+        let pack_definition = language.join("Defs.c4d/Good.c4d");
+        let pack_scenario = language.join("Probe.c4s");
+        let pack_system = language.join("System.c4g");
+        std::fs::create_dir_all(&pack_definition).expect("pack definition path");
+        std::fs::create_dir_all(&pack_scenario).expect("pack scenario path");
+        std::fs::create_dir_all(&pack_system).expect("pack system path");
+        std::fs::write(
+            pack_definition.join("StringTblUS.txt"),
+            "DefinitionValue=definition pack\n",
+        )
+        .expect("definition pack table");
+        std::fs::write(
+            pack_scenario.join("StringTblUS.txt"),
+            "ScenarioValue=scenario pack\n",
+        )
+        .expect("scenario pack table");
+        std::fs::write(
+            pack_system.join("StringTblUS.txt"),
+            "SystemValue=system pack\n",
+        )
+        .expect("system pack table");
+
+        let mut runtime = RuntimeHandle::new();
+        load_scenario_into_runtime(&mut runtime, &scenario, 7)
+            .expect("FFI scenario loads with language packs");
+        let globals = runtime.engine.script_globals.borrow();
+        for (name, expected) in [
+            ("ffi_scenario_value", "scenario pack"),
+            ("ffi_definition_value", "definition pack"),
+            ("ffi_system_value", "system pack"),
+        ] {
+            assert_eq!(
+                globals.get(name).map(|cell| cell.borrow().clone()),
+                Some(lc_script::Value::String(expected.to_string())),
+                "{name} must use its mirrored pack StringTblUS.txt"
+            );
+        }
+    }
 
     unsafe fn call_make_snapshot_with_io(
         frame: u64,

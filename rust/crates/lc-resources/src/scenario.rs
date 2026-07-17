@@ -1,4 +1,4 @@
-use crate::{Group, GroupError};
+use crate::{ComponentGroups, Group, GroupError, LanguagePacks};
 use image::{load_from_memory, ImageError};
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -162,7 +162,15 @@ pub fn discover_with_languages(
     root: impl AsRef<Path>,
     languages: &[String],
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
-    discover_many_with_languages([root.as_ref()], languages)
+    discover_with_languages_and_packs(root, languages, &LanguagePacks::default())
+}
+
+pub fn discover_with_languages_and_packs(
+    root: impl AsRef<Path>,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    discover_many_with_languages_and_packs([root.as_ref()], languages, language_packs)
 }
 
 pub fn discover_many<I, P>(roots: I) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
@@ -181,10 +189,23 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    discover_many_with_languages_and_packs(roots, languages, &LanguagePacks::default())
+}
+
+pub fn discover_many_with_languages_and_packs<I, P>(
+    roots: I,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
     let mut entries = Vec::new();
     for root in roots {
         let root_path = root.as_ref();
-        let mut discovered = collect_from_path(root_path, "", languages)?;
+        let mut discovered =
+            collect_from_path(root_path, "", languages, language_packs)?;
         entries.append(&mut discovered);
     }
     sort_entries(&mut entries);
@@ -195,6 +216,7 @@ fn collect_from_directory(
     path: &Path,
     parent_identifier: &str,
     languages: &[String],
+    language_packs: &LanguagePacks,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let mut entries: Vec<fs::DirEntry> = fs::read_dir(path)
         .map_err(|source| ScenarioDiscoveryError::ReadDirectory {
@@ -245,13 +267,23 @@ fn collect_from_directory(
                 path: entry.path(),
                 source: err,
             })?;
-            result.push(build_scenario_entry(&group, identifier, languages)?);
+            result.push(build_scenario_entry(
+                &group,
+                identifier,
+                languages,
+                language_packs,
+            )?);
         } else if is_folder_filename(name) {
             let group = Group::open(entry.path()).map_err(|err| ScenarioDiscoveryError::Group {
                 path: entry.path(),
                 source: err,
             })?;
-            result.push(build_folder_entry(&group, identifier, languages)?);
+            result.push(build_folder_entry(
+                &group,
+                identifier,
+                languages,
+                language_packs,
+            )?);
         } else if file_type.is_dir()
             && Path::new(name).extension().is_none()
             && dir_contains_scenarios(&entry.path())
@@ -260,7 +292,12 @@ fn collect_from_directory(
                 path: entry.path(),
                 source: err,
             })?;
-            result.push(build_folder_entry(&group, identifier, languages)?);
+            result.push(build_folder_entry(
+                &group,
+                identifier,
+                languages,
+                language_packs,
+            )?);
         }
     }
     sort_entries(&mut result);
@@ -295,15 +332,16 @@ fn collect_from_path(
     path: &Path,
     parent_identifier: &str,
     languages: &[String],
+    language_packs: &LanguagePacks,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     if path.is_dir() {
-        return collect_from_directory(path, parent_identifier, languages);
+        return collect_from_directory(path, parent_identifier, languages, language_packs);
     }
     if path.is_file() {
         if !is_scenario_filename_os(path) && !is_folder_filename_os(path) {
             return Ok(Vec::new());
         }
-        return collect_from_group_file(path, parent_identifier, languages);
+        return collect_from_group_file(path, parent_identifier, languages, language_packs);
     }
     Ok(Vec::new())
 }
@@ -312,6 +350,7 @@ fn collect_children_from_group(
     group: &Group,
     parent_identifier: &str,
     languages: &[String],
+    language_packs: &LanguagePacks,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let mut entries = group
         .entries()
@@ -353,12 +392,22 @@ fn collect_children_from_group(
             let child_group = group
                 .open_child(&entry.relative_path)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
-            result.push(build_scenario_entry(&child_group, identifier, languages)?);
+            result.push(build_scenario_entry(
+                &child_group,
+                identifier,
+                languages,
+                language_packs,
+            )?);
         } else if is_folder_filename(name) {
             let child_group = group
                 .open_child(&entry.relative_path)
                 .map_err(|err| group_error(&group.root().join(&entry.relative_path), err))?;
-            result.push(build_folder_entry(&child_group, identifier, languages)?);
+            result.push(build_folder_entry(
+                &child_group,
+                identifier,
+                languages,
+                language_packs,
+            )?);
         }
     }
     sort_entries(&mut result);
@@ -369,6 +418,7 @@ fn collect_from_group_file(
     path: &Path,
     parent_identifier: &str,
     languages: &[String],
+    language_packs: &LanguagePacks,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
     let name_os = match path.file_name() {
         Some(name) => name,
@@ -388,9 +438,9 @@ fn collect_from_group_file(
     })?;
     let identifier = join_identifier(parent_identifier, name);
     let entry = if is_scenario_filename(name) {
-        build_scenario_entry(&group, identifier, languages)?
+        build_scenario_entry(&group, identifier, languages, language_packs)?
     } else {
-        build_folder_entry(&group, identifier, languages)?
+        build_folder_entry(&group, identifier, languages, language_packs)?
     };
     Ok(vec![entry])
 }
@@ -680,16 +730,21 @@ fn build_scenario_entry(
     group: &Group,
     identifier: String,
     languages: &[String],
+    language_packs: &LanguagePacks,
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
     let fallback = fallback_title_for_path(group.root());
     let manifest = scenario_manifest_info(group)?;
     let legacy = legacy_core_info(group)?;
+    // Startup-list entries keep their parsed C4Scenario separate from the
+    // process-global Game.C4S consulted by C4Language::GetPackGroups. The
+    // entry's own Origin therefore does not remap its Title/Desc lookup.
+    let components = language_packs.component_groups(group, None, None);
     // Name precedence mirrors C4ScenarioListLoader::Entry::Load
     // (C4StartupScenSelDlg.cpp:477-515): the language-resolved Title.txt wins,
     // then the Scenario.txt [Head] Title fallback (Scenario::LoadCustom,
     // :712-714), then the filename. The Scenario.json manifest is a Rust-port
     // extension slotted between Title.txt and the legacy core.
-    let mut title = title_from_title_files(group, languages)?;
+    let mut title = title_from_title_files(group, &components, languages)?;
 
     if title.is_none() {
         title = manifest
@@ -719,7 +774,7 @@ fn build_scenario_entry(
         .map(|desc| desc.trim())
         .filter(|desc| !desc.is_empty())
         .map(|desc| desc.to_string())
-        .or_else(|| description_from_desc_files(group, languages))
+        .or_else(|| description_from_desc_files(&components, languages))
         .or_else(|| {
             legacy
                 .as_ref()
@@ -766,9 +821,11 @@ fn build_folder_entry(
     group: &Group,
     identifier: String,
     languages: &[String],
+    language_packs: &LanguagePacks,
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
     let fallback = fallback_title_for_path(group.root());
-    let mut title = title_from_title_files(group, languages)?;
+    let components = language_packs.component_groups(group, None, None);
+    let mut title = title_from_title_files(group, &components, languages)?;
     let folder_info = folder_core_info(group)?;
     if title.is_none() {
         if let Some(info) = folder_info.as_ref().and_then(|info| info.title.clone()) {
@@ -784,9 +841,9 @@ fn build_folder_entry(
     // .c4f folders (packed or unpacked) only search the "*.c4s"/"*.c4f"
     // masks (SubFolder::DoLoadContents, :973-1014).
     let children = if group.is_directory() && group.root().extension().is_none() {
-        collect_from_directory(group.root(), &identifier, languages)?
+        collect_from_directory(group.root(), &identifier, languages, language_packs)?
     } else {
-        collect_children_from_group(group, &identifier, languages)?
+        collect_children_from_group(group, &identifier, languages, language_packs)?
     };
     let folder_index = folder_info.and_then(|info| info.index);
 
@@ -794,7 +851,7 @@ fn build_folder_entry(
         identifier,
         path: group.root().to_path_buf(),
         title,
-        description: description_from_desc_files(group, languages),
+        description: description_from_desc_files(&components, languages),
         kind: ScenarioEntryKind::Folder,
         is_editable: group.is_directory(),
         is_playable: false,
@@ -816,13 +873,20 @@ fn build_folder_entry(
 /// (C4Components.h:74): the first nonempty `Desc<code>.rtf` loaded from the
 /// language sequence is converted from RTF to plain text
 /// (C4StartupScenSelDlg.cpp:523-531).
-fn description_from_desc_files(group: &Group, languages: &[String]) -> Option<String> {
-    languages
-        .iter()
-        .map(|code| format!("Desc{code}.rtf"))
-        .find_map(|candidate| group.load_entry_string(candidate).ok())
-        .map(|bytes| crate::rtf::rtf_to_plain_text(&bytes))
-        .filter(|text| !text.is_empty())
+fn description_from_desc_files(
+    components: &ComponentGroups,
+    languages: &[String],
+) -> Option<String> {
+    for candidate in languages.iter().map(|code| format!("Desc{code}.rtf")) {
+        if let Some(component) = components.read(candidate).ok().flatten() {
+            let text = crate::rtf::rtf_to_plain_text(&component.bytes);
+            if !text.is_empty() {
+                return Some(text);
+            }
+            return None;
+        }
+    }
+    None
 }
 
 /// `Version.txt` (C4CFN_Version, C4StartupScenSelDlg.cpp:554).
@@ -972,6 +1036,7 @@ fn scenario_manifest_info(
 /// "Title.txt" — is loaded, and the language string is looked up in it.
 fn title_from_title_files(
     group: &Group,
+    components: &ComponentGroups,
     languages: &[String],
 ) -> Result<Option<String>, ScenarioDiscoveryError> {
     let candidates = languages
@@ -979,15 +1044,13 @@ fn title_from_title_files(
         .map(|code| format!("Title{code}.txt"))
         .chain(std::iter::once("Title.txt".to_string()));
     for candidate in candidates {
-        let data = match group.load_entry_string(&candidate) {
-            Ok(data) => data,
-            Err(GroupError::EntryNotFound(_) | GroupError::EmptyEntry(_)) => continue,
-            Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(group_error(&group.root().join(&candidate), error));
-            }
+        let Some(component) = components
+            .read(&candidate)
+            .map_err(|err| group_error(&group.root().join(&candidate), err))?
+        else {
+            continue;
         };
-        let text = decode_legacy_text(&data);
+        let text = decode_legacy_text(&component.bytes);
         // Only the first found file is consulted (C4ComponentHost keeps a
         // single Data buffer); a failed language lookup falls back to the
         // caller's name chain, not to further title files
@@ -1525,6 +1588,77 @@ mod tests {
 
     fn langs(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| code.to_string()).collect()
+    }
+
+    #[test]
+    fn language_pack_title_is_used_but_same_candidate_local_title_wins() {
+        let temp = tempdir().unwrap();
+        let install = temp.path().join("install");
+        let scenarios = install.join("Scenarios");
+        let scenario = scenarios.join("Alpha.c4s");
+        fs::create_dir_all(&scenario).unwrap();
+        fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=Core title\n").unwrap();
+
+        let language_container = install.join("Language.c4g");
+        let packed_scenario =
+            language_container.join("Finnish.c4g/Scenarios/Alpha.c4s");
+        fs::create_dir_all(&packed_scenario).unwrap();
+        fs::write(packed_scenario.join("TitleFI.txt"), "FI:Pack title\n").unwrap();
+        let packs = LanguagePacks::discover(
+            std::slice::from_ref(&language_container),
+            std::slice::from_ref(&install),
+        );
+
+        let packed = discover_with_languages_and_packs(
+            &scenarios,
+            &langs(&["FI", "US"]),
+            &packs,
+        )
+        .expect("discover pack-localized scenario");
+        assert_eq!(packed[0].title, "Pack title");
+
+        fs::write(scenario.join("TitleFI.txt"), "FI:Local title\n").unwrap();
+        let local = discover_with_languages_and_packs(
+            &scenarios,
+            &langs(&["FI", "US"]),
+            &packs,
+        )
+        .expect("discover locally localized scenario");
+        assert_eq!(local[0].title, "Local title");
+    }
+
+    #[test]
+    fn startup_catalog_ignores_the_entrys_own_origin_for_pack_lookup() {
+        let temp = tempdir().unwrap();
+        let install = temp.path().join("install");
+        let scenarios = install.join("Scenarios");
+        let scenario = scenarios.join("Actual.c4s");
+        fs::create_dir_all(&scenario).unwrap();
+        fs::write(
+            scenario.join("Scenario.txt"),
+            "[Head]\nTitle=Core title\nOrigin=Scenarios\\Original.c4s\n",
+        )
+        .unwrap();
+
+        let language_container = install.join("Language.c4g");
+        let actual_scenario = language_container.join("Finnish.c4g/Scenarios/Actual.c4s");
+        let origin_scenario = language_container.join("Finnish.c4g/Scenarios/Original.c4s");
+        fs::create_dir_all(&actual_scenario).unwrap();
+        fs::create_dir_all(&origin_scenario).unwrap();
+        fs::write(actual_scenario.join("TitleFI.txt"), "FI:Actual title\n").unwrap();
+        fs::write(origin_scenario.join("TitleFI.txt"), "FI:Wrong Origin title\n").unwrap();
+        let packs = LanguagePacks::discover(
+            std::slice::from_ref(&language_container),
+            std::slice::from_ref(&install),
+        );
+
+        let entries = discover_with_languages_and_packs(
+            &scenarios,
+            &langs(&["FI", "US"]),
+            &packs,
+        )
+        .expect("discover scenario without applying its private Origin");
+        assert_eq!(entries[0].title, "Actual title");
     }
 
     // Entry::Load with fLoadEx (C4StartupScenSelDlg.cpp:520-531): the

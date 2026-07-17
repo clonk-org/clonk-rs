@@ -1,4 +1,7 @@
-use crate::{decode_legacy_script_text, GraphicsImage, Group, GroupError};
+use crate::{
+    decode_legacy_script_text, ComponentGroups, GraphicsImage, Group, GroupError,
+    LoadedComponent,
+};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -87,18 +90,44 @@ impl Definition {
         group: &Group,
         languages: &[S],
     ) -> Result<Self, DefinitionError> {
-        let core = DefCore::load(group)?;
-        Self::load_with_core_and_languages(group, core, languages)
+        Self::load_with_languages_and_components(
+            group,
+            languages,
+            &ComponentGroups::local(group),
+        )
     }
 
     /// Loads the remaining definition resources after the caller has already
     /// parsed `DefCore.txt` for ID filtering.
     pub fn load_with_core_and_languages<S: AsRef<str>>(
         group: &Group,
-        mut core: DefCore,
+        core: DefCore,
         languages: &[S],
     ) -> Result<Self, DefinitionError> {
-        if let Some(name) = load_definition_name(group, languages)? {
+        Self::load_with_core_and_languages_and_components(
+            group,
+            core,
+            languages,
+            &ComponentGroups::local(group),
+        )
+    }
+
+    pub fn load_with_languages_and_components<S: AsRef<str>>(
+        group: &Group,
+        languages: &[S],
+        components: &ComponentGroups,
+    ) -> Result<Self, DefinitionError> {
+        let core = DefCore::load(group)?;
+        Self::load_with_core_and_languages_and_components(group, core, languages, components)
+    }
+
+    pub fn load_with_core_and_languages_and_components<S: AsRef<str>>(
+        group: &Group,
+        mut core: DefCore,
+        languages: &[S],
+        components: &ComponentGroups,
+    ) -> Result<Self, DefinitionError> {
+        if let Some(name) = load_definition_name(components, languages)? {
             core.name = Some(name);
         }
 
@@ -107,7 +136,7 @@ impl Definition {
         let action_map = load_optional_entry_string(group, "ActMap.txt")?
             .map(|bytes| parse_act_map(&bytes))
             .transpose()?;
-        script.definition_description = load_definition_description(group)?;
+        script.definition_description = load_definition_description(components)?;
 
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner)?;
@@ -137,7 +166,11 @@ impl Definition {
             load_plain_image(group, "Rank.bmp")
         }
         .filter(|image| image.height() > 0 && image.width() / image.height() > 0);
-        let rank_name_table = load_rank_name_table(group, languages)?;
+        let rank_name_table = if has_local_rank_name_file(group)? {
+            load_rank_name_table(components, languages)?
+        } else {
+            None
+        };
         let rank_extension_count = rank_name_table
             .as_ref()
             .map_or(0, |table| table.extension_count);
@@ -179,14 +212,30 @@ impl Definition {
 /// US (`C4Language::LoadLanguage`, C4Language.cpp:250-263). Resource loading
 /// does not yet carry a locale, so selecting that hardcoded fallback keeps the
 /// retained description deterministic.
-fn load_definition_description(group: &Group) -> Result<Option<String>, DefinitionError> {
+fn load_definition_description(
+    components: &ComponentGroups,
+) -> Result<Option<String>, DefinitionError> {
     const DESCRIPTION: &str = "DescUS.txt";
-    let Some(bytes) = load_optional_entry_string(group, DESCRIPTION)? else {
+    let Some(component) = components.read(DESCRIPTION)? else {
         return Ok(None);
     };
 
-    let description = decode_legacy_script_text(&bytes).trim().to_string();
+    let description = decode_legacy_script_text(&component.bytes)
+        .trim()
+        .to_string();
     Ok((!description.is_empty()).then_some(description))
+}
+
+/// C4Def performs this local wildcard probe before RankSystem::LoadEx. A
+/// language pack may win candidate selection only after any local Rank*.txt
+/// marker has enabled rank loading at all.
+fn has_local_rank_name_file(group: &Group) -> Result<bool, DefinitionError> {
+    Ok(group.entries()?.into_iter().any(|entry| {
+        let name = entry.name_bytes;
+        name.len() >= b"Rank.txt".len()
+            && name[..4].eq_ignore_ascii_case(b"Rank")
+            && name[name.len() - 4..].eq_ignore_ascii_case(b".txt")
+    }))
 }
 
 /// `C4Def::Load`'s localized `C4CFN_DefNames = "Names{}.txt|Names.txt"`:
@@ -194,13 +243,13 @@ fn load_definition_description(group: &Group) -> Result<Option<String>, Definiti
 /// the first matching `XX:` line from that one component
 /// (`C4Def.cpp:635-639`; `C4ComponentHost.cpp:55-94,238-260`).
 fn load_definition_name<S: AsRef<str>>(
-    group: &Group,
+    components: &ComponentGroups,
     languages: &[S],
 ) -> Result<Option<String>, DefinitionError> {
-    let Some(bytes) = first_localized_component(group, "Names", languages)? else {
+    let Some(component) = first_localized_component(components, "Names", languages)? else {
         return Ok(None);
     };
-    let text = decode_legacy_script_text(&bytes);
+    let text = decode_legacy_script_text(&component.bytes);
     Ok(languages.iter().find_map(|language| {
         let needle = format!("{}:", language.as_ref());
         text.find(&needle).and_then(|position| {
@@ -213,21 +262,20 @@ fn load_definition_name<S: AsRef<str>>(
 }
 
 /// Selects `Stem{language}.txt|Stem.txt` with the same filename-first,
-/// language-sequence order as `C4ComponentHost::Load` (src/C4ComponentHost.cpp:
-/// 65-94). Language-pack cross-loading is intentionally outside the local
-/// group resource model.
+/// language-sequence and group-priority order as `C4ComponentHost::LoadEx`
+/// (src/C4ComponentHost.cpp:65-153).
 fn first_localized_component<S: AsRef<str>>(
-    group: &Group,
+    components: &ComponentGroups,
     stem: &str,
     languages: &[S],
-) -> Result<Option<Vec<u8>>, DefinitionError> {
+) -> Result<Option<LoadedComponent>, DefinitionError> {
     for candidate in languages
         .iter()
         .map(|language| format!("{stem}{}.txt", language.as_ref()))
         .chain(std::iter::once_with(|| format!("{stem}.txt")))
     {
-        if let Some(bytes) = load_optional_entry_string(group, candidate)? {
-            return Ok(Some(bytes));
+        if let Some(component) = components.read(candidate)? {
+            return Ok(Some(component));
         }
     }
     Ok(None)
@@ -260,13 +308,13 @@ struct RankNameTable {
 /// settings are retained by neither list, and a component without an ordinary
 /// name is rejected (src/C4RankSystem.cpp:96-211).
 fn load_rank_name_table<S: AsRef<str>>(
-    group: &Group,
+    components: &ComponentGroups,
     languages: &[S],
 ) -> Result<Option<RankNameTable>, DefinitionError> {
-    let Some(bytes) = first_localized_component(group, "Rank", languages)? else {
+    let Some(component) = first_localized_component(components, "Rank", languages)? else {
         return Ok(None);
     };
-    let text = decode_legacy_script_text(&bytes);
+    let text = decode_legacy_script_text(&component.bytes);
     let mut ordinary_names = Vec::new();
     let mut extensions = Vec::new();
     // The C++ loop only processes lines when it encounters CR or LF within
@@ -3751,6 +3799,52 @@ Entrance=1,2,,4
     }
 
     #[test]
+    fn language_pack_rank_names_require_a_local_rank_marker() {
+        // C4Def first probes its own group with FindEntry("Rank*.txt"). Only
+        // after that succeeds does RankSystem::LoadEx search language packs.
+        let temp = tempdir().expect("tempdir");
+        let content = temp.path().join("content");
+        let def_dir = content.join("Ranked.c4d");
+        fs::create_dir_all(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RANK\n")
+            .expect("DefCore");
+
+        let language_container = temp.path().join("Language.c4g");
+        let pack_def = language_container.join("Pack.c4g/Ranked.c4d");
+        fs::create_dir_all(&pack_def).expect("pack definition directory");
+        fs::write(pack_def.join("RankUS.txt"), b"Packed recruit\r\n")
+            .expect("pack rank names");
+
+        let packs = crate::LanguagePacks::discover(
+            std::slice::from_ref(&language_container),
+            std::slice::from_ref(&content),
+        );
+        let group = Group::open(&def_dir).expect("open definition");
+        let components = packs.component_groups(&group, None, None);
+
+        let without_marker = Definition::load_with_languages_and_components(
+            &group,
+            &["US", "DE"],
+            &components,
+        )
+        .expect("load definition without local marker");
+        assert_eq!(without_marker.rank_names, None);
+
+        fs::write(def_dir.join("RankDE.txt"), b"Lokaler Marker\r\n")
+            .expect("local rank marker");
+        let with_marker = Definition::load_with_languages_and_components(
+            &group,
+            &["US", "DE"],
+            &components,
+        )
+        .expect("load definition with local marker");
+        assert_eq!(
+            with_marker.rank_names,
+            Some(vec!["Packed recruit".to_string()])
+        );
+    }
+
+    #[test]
     fn custom_rank_names_expand_extensions_in_cpp_order() {
         let temp = tempdir().expect("tempdir");
         let def_dir = temp.path().join("ExpandedRanks.c4d");
@@ -4223,6 +4317,41 @@ HideHUDElements=Portrait|Bogus|Inventory
         let definition = Definition::load(&group).expect("load definition");
 
         assert_eq!(definition.description(), Some("A safe home base."));
+    }
+
+    #[test]
+    fn definition_loads_hardcoded_us_description_from_language_pack() {
+        // Locale selection remains the existing hardcoded US compatibility
+        // boundary, but C4Language::LoadComponentHost searches pack groups.
+        let temp = tempdir().expect("tempdir");
+        let content = temp.path().join("content");
+        let def_dir = content.join("Hut3.c4d");
+        fs::create_dir_all(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n")
+            .expect("DefCore");
+
+        let language_container = temp.path().join("Language.c4g");
+        let pack_def = language_container.join("Pack.c4g/Hut3.c4d");
+        fs::create_dir_all(&pack_def).expect("pack definition directory");
+        fs::write(pack_def.join("DescDE.txt"), b"Falsche Sprache")
+            .expect("German pack description");
+        fs::write(pack_def.join("DescUS.txt"), b"  Packed home base.\r\n")
+            .expect("US pack description");
+
+        let packs = crate::LanguagePacks::discover(
+            std::slice::from_ref(&language_container),
+            std::slice::from_ref(&content),
+        );
+        let group = Group::open(&def_dir).expect("open definition");
+        let components = packs.component_groups(&group, None, None);
+        let definition = Definition::load_with_languages_and_components(
+            &group,
+            &["DE", "US"],
+            &components,
+        )
+        .expect("load pack-described definition");
+
+        assert_eq!(definition.description(), Some("Packed home base."));
     }
 
     #[test]

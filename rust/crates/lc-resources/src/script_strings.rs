@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{Group, GroupError};
+use crate::{ComponentGroups, Group, GroupError};
 
 const C4_MAX_NAME: usize = 30;
 
@@ -26,7 +26,21 @@ pub fn localize_script_source<S: AsRef<str>>(
     source: &str,
     languages: &[S],
 ) -> Result<String, GroupError> {
-    let (table, table_path) = load_script_string_table(group, languages)?;
+    localize_script_source_with_components(
+        &ComponentGroups::local(group),
+        source,
+        languages,
+    )
+}
+
+/// Applies a script string table using the local group followed by the
+/// language-pack groups at the same logical path.
+pub fn localize_script_source_with_components<S: AsRef<str>>(
+    components: &ComponentGroups,
+    source: &str,
+    languages: &[S],
+) -> Result<String, GroupError> {
+    let (table, table_path) = load_script_string_table(components, languages)?;
     let entries = parse_string_table(&table);
     let source = lc_script::c4_string_bytes(source);
     Ok(lc_script::c4_string_from_bytes(&replace_localization_keys(
@@ -37,40 +51,36 @@ pub fn localize_script_source<S: AsRef<str>>(
 }
 
 fn load_script_string_table<S: AsRef<str>>(
-    group: &Group,
+    components: &ComponentGroups,
     languages: &[S],
 ) -> Result<(Vec<u8>, PathBuf), GroupError> {
-    let mut selected_name = None;
     let mut table = None;
+    let mut table_path = None;
     for candidate in std::iter::once("StringTbl.txt".to_string()).chain(
         languages
             .iter()
             .map(|language| format!("StringTbl{}.txt", language.as_ref())),
     ) {
-        if !group.exists(&candidate) {
+        let Some(component) = components.read(&candidate)? else {
             continue;
-        }
-        let bytes = match group.load_entry_string(&candidate) {
-            Ok(bytes) => bytes,
-            Err(GroupError::EmptyEntry(_)) => continue,
-            Err(error) => return Err(error),
         };
         // C4LangStringTable copies and scans this component as a native C
         // string; entries after the first NUL are not part of the table.
-        let bytes = bytes
+        let bytes = component
+            .bytes
             .split(|byte| *byte == 0)
             .next()
             .unwrap_or_default()
             .to_vec();
         table = Some(bytes);
-        selected_name = Some(candidate);
+        table_path = Some(component.path);
         break;
     }
 
-    let table_path = group
-        .root()
-        .join(selected_name.as_deref().unwrap_or("StringTbl.txt"));
-    Ok((table.unwrap_or_default(), table_path))
+    Ok((
+        table.unwrap_or_default(),
+        table_path.unwrap_or_else(|| PathBuf::from("StringTbl.txt")),
+    ))
 }
 
 fn parse_string_table(table: &[u8]) -> HashMap<&[u8], &[u8]> {
