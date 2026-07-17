@@ -11796,13 +11796,31 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         // scripts, ActMap, graphics, sounds, or localized auxiliary data.
         // Probe the ID first so malformed data in a skipped definition is
         // never observed.
-        let core = ResourceDefCore::load(group)?;
-        if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
-            let resource = ResourceDefinitionData::load_with_languages(group, languages)?;
-            primary_definition = true;
-            let mut definition = scenario_definition_from_resource(resource, Some(group.clone()));
-            definition.script = localize_script_source(group, &definition.script, languages)?;
-            output.push(CollectedDefinition::Definition(definition));
+        let core = match ResourceDefCore::load(group) {
+            Ok(core) => Some(core),
+            Err(error) if is_rejected_definition_error(&error) => {
+                warn_rejected_definition(group, &error);
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(core) = core {
+            if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
+                match ResourceDefinitionData::load_with_languages(group, languages) {
+                    Ok(resource) => {
+                        primary_definition = true;
+                        let mut definition =
+                            scenario_definition_from_resource(resource, Some(group.clone()));
+                        definition.script =
+                            localize_script_source(group, &definition.script, languages)?;
+                        output.push(CollectedDefinition::Definition(definition));
+                    }
+                    Err(error) if is_rejected_definition_error(&error) => {
+                        warn_rejected_definition(group, &error);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
     }
 
@@ -11833,6 +11851,24 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         }
     }
     Ok(())
+}
+
+fn is_rejected_definition_error(error: &ResourceDefinitionError) -> bool {
+    matches!(
+        error,
+        ResourceDefinitionError::MissingDefCoreField(_)
+            | ResourceDefinitionError::InvalidCategoryValue(_)
+            | ResourceDefinitionError::DefCoreParse(_)
+            | ResourceDefinitionError::ActMapParse(_)
+    )
+}
+
+fn warn_rejected_definition(group: &Group, error: &ResourceDefinitionError) {
+    tracing::warn!(
+        group = %group.root().display(),
+        error = %error,
+        "definition failed to load; skipping"
+    );
 }
 
 fn scenario_definition_from_resource(
@@ -12819,7 +12855,12 @@ mod tests {
     use super::*;
     use image::{ColorType, Rgba, RgbaImage, codecs::bmp::BmpEncoder};
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+    use tracing::field::{Field, Visit};
+    use tracing::{Level, subscriber};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
 
     const TEST_SCRIPT: &str = r#"
 global func Initialize(state, random)
@@ -16572,6 +16613,63 @@ global func Step(state, frame, random)
         roots: Vec<PathBuf>,
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct DefinitionWarning {
+        message: Option<String>,
+        group: Option<String>,
+        error: Option<String>,
+    }
+
+    #[derive(Clone)]
+    struct DefinitionWarningLayer {
+        warnings: Arc<Mutex<Vec<DefinitionWarning>>>,
+    }
+
+    impl<S> Layer<S> for DefinitionWarningLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != Level::WARN {
+                return;
+            }
+            let mut warning = DefinitionWarning::default();
+            event.record(&mut warning);
+            self.warnings.lock().unwrap().push(warning);
+        }
+    }
+
+    impl Visit for DefinitionWarning {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.record_value(field, format!("{value:?}").trim_matches('"'));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.record_value(field, value);
+        }
+    }
+
+    impl DefinitionWarning {
+        fn record_value(&mut self, field: &Field, value: &str) {
+            match field.name() {
+                "message" => self.message = Some(value.to_string()),
+                "group" => self.group = Some(value.to_string()),
+                "error" => self.error = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    fn capture_definition_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<DefinitionWarning>) {
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(DefinitionWarningLayer {
+            warnings: Arc::clone(&warnings),
+        });
+        let result = subscriber::with_default(subscriber, run);
+        let captured = warnings.lock().unwrap().clone();
+        (result, captured)
+    }
+
     fn load_legacy_landscape_body_for_test(
         group: &Group,
         manifest: &LegacyScenarioManifest,
@@ -16670,6 +16768,97 @@ global func Step(state, frame, random)
         .expect("write scenario core");
         std::fs::write(scenario_dir.join("Script.c"), scenario_script).expect("write script");
         scenario_dir
+    }
+
+    #[test]
+    fn missing_defcore_id_skips_only_parent_and_still_loads_its_child() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let broken = dir.path().join("Defs.c4d/Broken.c4d");
+        let child = broken.join("Child.c4d");
+        std::fs::create_dir_all(&child).expect("nested definition dir");
+        std::fs::write(
+            broken.join("DefCore.txt"),
+            "[DefCore]\nName=Broken\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write malformed parent defcore");
+        std::fs::write(
+            child.join("DefCore.txt"),
+            "[DefCore]\nid=CHLD\nName=Child\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write child defcore");
+        std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let (loaded, warnings) = capture_definition_warnings(|| {
+            Scenario::load_from_path_with(&scenario_dir, &resolver)
+        });
+        let scenario = loaded.expect("one malformed definition does not abort the scenario");
+        let mut ids = scenario
+            .definitions
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["CHLD", "GOOD"]);
+
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("definition failed to load; skipping")
+                && warning.group.as_deref() == Some(broken.to_string_lossy().as_ref())
+                && warning
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("id"))
+        }));
+    }
+
+    #[test]
+    fn malformed_actmap_skips_only_parent_warns_and_still_loads_its_child() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let broken = dir.path().join("Defs.c4d/BadAct.c4d");
+        let tail = broken.join("Tail.c4d");
+        std::fs::create_dir_all(&tail).expect("nested definition dir");
+        std::fs::write(
+            broken.join("DefCore.txt"),
+            "[DefCore]\nid=BACT\nName=Bad ActMap\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write parent defcore");
+        std::fs::write(broken.join("Script.c"), "// parent\n").expect("write parent script");
+        std::fs::write(broken.join("ActMap.txt"), "malformed action map\n")
+            .expect("write malformed action map");
+        std::fs::write(
+            tail.join("DefCore.txt"),
+            "[DefCore]\nid=TAIL\nName=Tail\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write nested defcore");
+        std::fs::write(tail.join("Script.c"), "// tail\n").expect("write nested script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let (loaded, warnings) = capture_definition_warnings(|| {
+            Scenario::load_from_path_with(&scenario_dir, &resolver)
+        });
+        let scenario = loaded.expect("one malformed ActMap does not abort the scenario");
+        let mut ids = scenario
+            .definitions
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["GOOD", "TAIL"]);
+
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("definition failed to load; skipping")
+                && warning.group.as_deref() == Some(broken.to_string_lossy().as_ref())
+                && warning
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("ActMap"))
+        }));
     }
 
     fn write_definition_localization_fixture(
