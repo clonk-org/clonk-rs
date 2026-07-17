@@ -682,6 +682,23 @@ impl DefCore {
         if core.category & C4D_SORT_LIMIT == 0 {
             core.category = (core.category & !C4D_SORT_LIMIT) | 1;
         }
+        // C4DefCore::Load replaces a missing or zero-sized Picture with the
+        // top-left shape-sized facet after compiling DefCore.txt. Shape
+        // offsets are deliberately ignored (C4Def.cpp:221-223).
+        if core
+            .picture
+            .is_none_or(|picture| picture.width == 0 || picture.height == 0)
+        {
+            let (width, height) = core
+                .shape
+                .map_or((0, 0), |shape| (shape.width, shape.height));
+            core.picture = Some(PictureRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            });
+        }
 
         Ok(core)
     }
@@ -3221,6 +3238,111 @@ Entrance=1,2,,4
             .expect("picture must retain owner-color mask");
         assert_eq!((mask.width, mask.height), (1, 1));
         assert_eq!(mask.pixels, vec![136]);
+    }
+
+    #[test]
+    fn def_core_load_defaults_missing_or_zero_picture_to_shape() {
+        let temp = tempdir().expect("tempdir");
+        let expected_default = PictureRect {
+            x: 0,
+            y: 0,
+            width: 42,
+            height: 48,
+        };
+        for (name, picture, expected) in [
+            ("missing", "", expected_default),
+            ("zero_width", "Picture=9,8,0,5\n", expected_default),
+            ("zero_height", "Picture=9,8,5,0\n", expected_default),
+            (
+                "explicit",
+                "Picture=3,4,5,6\n",
+                PictureRect {
+                    x: 3,
+                    y: 4,
+                    width: 5,
+                    height: 6,
+                },
+            ),
+        ] {
+            let directory = temp.path().join(format!("{name}.c4d"));
+            fs::create_dir(&directory).expect("definition directory");
+            fs::write(
+                directory.join("DefCore.txt"),
+                format!(
+                    "[DefCore]\nid=PICT\nWidth=42\nHeight=48\nOffset=-21,-24\n{picture}"
+                ),
+            )
+            .expect("DefCore");
+            let group = Group::open(&directory).expect("open definition");
+            let core = DefCore::load(&group).expect("load DefCore");
+            assert_eq!(core.picture, Some(expected), "{name}");
+        }
+    }
+
+    #[test]
+    fn defaulted_picture_crops_graphics_and_owner_mask_to_shape() {
+        for (name, picture) in [("missing", ""), ("zero", "Picture=0,0,0,0\n")] {
+            let temp = tempdir().expect("tempdir");
+            let directory = temp.path().join(format!("{name}.c4d"));
+            fs::create_dir(&directory).expect("definition directory");
+            fs::write(
+                directory.join("DefCore.txt"),
+                format!(
+                    "[DefCore]\nid=PICT\nWidth=2\nHeight=1\nOffset=-7,-8\nColorByOwner=1\n{picture}"
+                ),
+            )
+            .expect("DefCore");
+            image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 0, 0]))
+                .save(directory.join("Graphics.png"))
+                .expect("base png");
+            image::RgbaImage::from_pixel(4, 2, image::Rgba([136, 136, 136, 255]))
+                .save(directory.join("Overlay.png"))
+                .expect("overlay png");
+
+            let group = Group::open(&directory).expect("open definition");
+            let definition = Definition::load(&group).expect("load definition");
+            assert_eq!(
+                definition.core.picture,
+                Some(PictureRect {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                }),
+                "{name}"
+            );
+            let image = definition.picture_image.expect("picture crop");
+            assert_eq!((image.width(), image.height()), (2, 1), "{name}");
+            let mask = definition
+                .picture_color_by_owner_mask
+                .expect("picture owner mask");
+            assert_eq!((mask.width, mask.height), (2, 1), "{name}");
+            assert_eq!(mask.pixels, vec![136; 2], "{name}");
+        }
+    }
+
+    #[test]
+    fn shipped_knights_tent_picture_is_the_top_left_shape_cell() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../content/Knights.c4d/Camp.c4d/Tent.c4d");
+        let group = Group::open(&directory).expect("open shipped Tent.c4d");
+        let definition = Definition::load(&group).expect("load shipped Tent.c4d");
+
+        assert_eq!(
+            definition.core.picture,
+            Some(PictureRect {
+                x: 0,
+                y: 0,
+                width: 42,
+                height: 48,
+            })
+        );
+        let picture = definition.picture_image.expect("Tent picture crop");
+        assert_eq!((picture.width(), picture.height()), (42, 48));
+        let mask = definition
+            .picture_color_by_owner_mask
+            .expect("Tent picture owner mask");
+        assert_eq!((mask.width, mask.height), (42, 48));
     }
 
     #[test]

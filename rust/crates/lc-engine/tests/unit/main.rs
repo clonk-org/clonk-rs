@@ -55571,6 +55571,36 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
     }
 
     #[test]
+    fn definition_load_paths_receive_the_defaulted_shape_picture() -> Result<(), EngineError> {
+        // C4DefCore::Load resolves an absent Picture before either modern or
+        // legacy scenario code copies the core onto C4Def (C4Def.cpp:221-223).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("PictureDefault.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=PICT\nWidth=42\nHeight=48\nOffset=-21,-24\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let expected = DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 42,
+            height: 48,
+        };
+
+        let definition = Definition::from_resource(&resource)?;
+        assert_eq!(definition.picture(), Some(expected));
+
+        let mut legacy_definition = Definition::from_script("PICT", "Picture Default", "")?;
+        Engine::apply_resource_core(&mut legacy_definition, &resource.core);
+        assert_eq!(legacy_definition.picture(), Some(expected));
+        Ok(())
+    }
+
+    #[test]
     fn definition_from_resource_carries_top_face_like_cpp() -> Result<(), EngineError> {
         // C4DefCore::CompileFunc stores TopFace on C4Def (src/C4Def.cpp:306),
         // and C4Object::UpdateFace consumes that same target rect
