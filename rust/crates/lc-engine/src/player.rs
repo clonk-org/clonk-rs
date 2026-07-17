@@ -1903,6 +1903,14 @@ impl Player {
         self.view_cursor
     }
 
+    /// Raw `C4ControlMessage::Say` focus lookup: live `ViewTarget` first,
+    /// then `Cursor`. This deliberately ignores ViewMode and ViewCursor;
+    /// C++'s message control reads those two object pointers directly
+    /// (`src/C4Control.cpp:1141-1145`).
+    pub(crate) fn raw_view_target_or_cursor(&self) -> Option<ObjectId> {
+        self.view_target.or(self.cursor)
+    }
+
     pub(crate) fn resolved_view_object(&self) -> Option<ObjectId> {
         resolved_view_object(
             self.view_mode,

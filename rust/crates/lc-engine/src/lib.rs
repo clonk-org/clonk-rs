@@ -69,10 +69,10 @@ pub use control::{
     EmMoveObjectControlData,
     InitScenarioPlayerControlData,
     JoinPlayerControlData,
-    JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, NetworkResourceCore,
-    PlayerCommandControlData, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
-    PlayerSelectControlData, RemovePlayerControlData, ScriptControlData, ScriptStrictness,
-    SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
+    JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, MessageControlData,
+    NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
+    PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
+    ScriptStrictness, SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
     SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
@@ -84,6 +84,8 @@ pub use control::{
     COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
     C4MN_ADJUST_POSITION, EMDT_BRUSH, EMDT_FILL, EMDT_LINE, EMDT_RECT, EMDT_SET_MODE,
     EMMO_DUPLICATE, EMMO_ENTER, EMMO_EXIT, EMMO_MOVE, EMMO_REMOVE, EMMO_SCRIPT,
+    MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
+    MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
     NETWORK_RESOURCE_TYPE_NULL,
     PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE,
     PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
@@ -20934,6 +20936,113 @@ impl Engine {
         };
         self.execute_internal_script_at_scope(SCRIPT_SCOPE_GLOBAL, &source)?;
         Ok(true)
+    }
+
+    /// Execute the local presentation half of a `C4CMT_Say` message control.
+    /// The message uses the raw C++ `ViewTarget`-then-`Cursor` lookup rather
+    /// than the resolved viewport mode, and rechecks the packet's player
+    /// ownership before exposing any text (`src/C4Control.cpp:1075-1079,
+    /// 1139-1155`).
+    pub fn execute_message_control_say(&mut self, control: &MessageControlData) -> bool {
+        if control.message_type != MESSAGE_TYPE_SAY {
+            return false;
+        }
+
+        let Some((view_object, cursor, player_name, player_color)) = self
+            .player(control.player)
+            .filter(|player| player.at_client() == PlayerAtClient::new(control.by_client))
+            .and_then(|player| {
+                let view_object = player.raw_view_target_or_cursor()?;
+                let color = player
+                    .color()
+                    .map(|color| {
+                        u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+                    })
+                    .unwrap_or(0);
+                Some((
+                    view_object,
+                    player.cursor(),
+                    player.name().to_string(),
+                    color,
+                ))
+            })
+        else {
+            return false;
+        };
+
+        let Some(view_index) = self.find_object_index(view_object) else {
+            return false;
+        };
+        if self.objects[view_index].destroyed
+            || self.objects[view_index].state.status == ObjectStatus::Deleted
+        {
+            return false;
+        }
+
+        let cinematic = matches!(
+            self.scenario_values.get("Film", Some("Head"), 0),
+            Some(scenario::ScenarioValue::Int(2))
+        );
+        let raw_message = lc_script::c4_string_from_bytes(control.message.as_bytes());
+        let (text, color) = if cinematic {
+            let cursor_presentation = cursor.and_then(|cursor| {
+                let index = self.find_object_index(cursor)?;
+                let object = &self.objects[index];
+                if object.destroyed || object.state.status == ObjectStatus::Deleted {
+                    return None;
+                }
+                let name = object
+                    .state
+                    .custom_name
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .or_else(|| {
+                        self.crew_object_infos
+                            .get(&cursor)
+                            .map(|info| info.name.clone())
+                    })
+                    .or_else(|| {
+                        self.definitions
+                            .get(&object.definition_id)
+                            .map(|definition| definition.name().to_string())
+                    })
+                    .unwrap_or_else(|| object.definition_id.clone());
+                Some((name, object.state.color))
+            });
+            let (speaker, color) =
+                cursor_presentation.unwrap_or_else(|| (player_name, player_color));
+            (
+                format!("<{speaker}> {raw_message}"),
+                if color == 0 { 0xff } else { color },
+            )
+        } else {
+            (raw_message, player_color)
+        };
+
+        self.messages.add_message(MessageSpec {
+            kind: message::MessageKind::Target,
+            text,
+            target: Some(view_object),
+            player: None,
+            offset: Vector2::ZERO,
+            color: color | 0xff00_0000,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        });
+        true
+    }
+
+    /// `C4S.Head.Film == C4SFilm_Cinematic`, used while classifying outgoing
+    /// quote-prefixed Say messages before the private control is queued.
+    pub fn cinematic_film(&self) -> bool {
+        matches!(
+            self.scenario_values.get("Film", Some("Head"), 0),
+            Some(scenario::ScenarioValue::Int(2))
+        )
     }
 
     /// Execute one synchronized `CID_CustomCommand` packet. Player ownership
@@ -52865,6 +52974,90 @@ fn value_to_liquid_segments(
     }
 
     Ok(segments)
+}
+
+#[cfg(test)]
+mod control_message_say_regression {
+    use super::*;
+
+    fn say_engine() -> (Engine, ObjectId, ObjectId) {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("VIEW", "View object", "")
+                    .expect("view definition compiles"),
+            )
+            .expect("view definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("CURS", "Cursor object", "")
+                    .expect("cursor definition compiles"),
+            )
+            .expect("cursor definition registers");
+        let view = engine
+            .spawn_object(SpawnConfig::new("VIEW"))
+            .expect("view object spawns");
+        let cursor = engine
+            .spawn_object(
+                SpawnConfig::new("CURS")
+                    .with_custom_name("Speaker")
+                    .with_color(0),
+            )
+            .expect("cursor object spawns");
+        engine
+            .register_player(
+                PlayerConfig::new(3, "Alice").with_color(Some(RgbColor::new(0x12, 0x34, 0x56))),
+            )
+            .expect("player registers");
+        let player = engine.player_mut(3).expect("player exists");
+        player.set_at_client(PlayerAtClient::new(2));
+        player.set_cursor(Some(cursor));
+        player.set_view_target(Some(view));
+        (engine, view, cursor)
+    }
+
+    fn say(message: Vec<u8>, by_client: i32) -> MessageControlData {
+        MessageControlData {
+            message_type: MESSAGE_TYPE_SAY,
+            player: 3,
+            to_player: -1,
+            message: LegacyCString::from_bytes(message).expect("fixture is NUL-free"),
+            by_client,
+        }
+    }
+
+    #[test]
+    fn say_rechecks_owner_and_targets_raw_view_target_with_player_color() {
+        let (mut engine, view, _) = say_engine();
+        let raw = vec![b'h', b'i', 0x80];
+
+        assert!(!engine.execute_message_control_say(&say(raw.clone(), 7)));
+        assert!(engine.snapshot().hud.messages.is_empty());
+
+        assert!(engine.execute_message_control_say(&say(raw.clone(), 2)));
+        let messages = engine.snapshot().hud.messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::Target);
+        assert_eq!(messages[0].target, Some(view));
+        assert_eq!(
+            messages[0].lines,
+            vec![lc_script::c4_string_from_bytes(&raw)]
+        );
+        assert_eq!(messages[0].color, 0xff12_3456);
+    }
+
+    #[test]
+    fn cinematic_say_uses_cursor_name_and_zero_color_fallback() {
+        let (mut engine, view, _) = say_engine();
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_film_for_test(2));
+
+        assert!(engine.execute_message_control_say(&say(b"action".to_vec(), 2)));
+        let messages = engine.snapshot().hud.messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].target, Some(view));
+        assert_eq!(messages[0].lines, vec!["<Speaker> action"]);
+        assert_eq!(messages[0].color, 0xff00_00ff);
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,8 @@ use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     CommandKind, ControlButton, ControlCommand, ControlEvent,
     JoinPlayerControlData, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
-    MessageBoardAnswerControlData, PlayerSelectControlData, ScriptControlData, SyncCheckPacket,
+    MessageBoardAnswerControlData, MessageControlData, PlayerSelectControlData, ScriptControlData,
+    SyncCheckPacket,
     COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
     COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
     COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT,
@@ -68,13 +69,6 @@ impl ClientSettings {
 
 const HOST_CLIENT_ID: ClientId = 0;
 const NETWORK_TELEMETRY_CAPACITY: usize = 256;
-
-// Lobby chat intentionally has no transport-shaped placeholder here.
-// C4ControlMessage/CID_Message is a conditional control codec (private messages
-// add ToPlayer) whose safe execution also needs the authoritative player/team
-// roster to validate iPlayer ownership and recipient visibility. lc-engine has
-// no C4ControlMessage variant yet, so accepting opaque CID_Message bytes would
-// bypass the sender checks used for every supported direct control packet.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NetworkRole {
@@ -473,6 +467,16 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_messages(&mut self) -> Vec<MessageControlData> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitMessage(message) = command {
+                submitted.push(message);
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_player_info_updates(&mut self) -> Vec<lc_network::PlayerInfoUpdateRequest> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -815,6 +819,7 @@ pub enum NetworkControl {
     PlayerCommand(PlayerCommandControlData),
     PlayerSelect(PlayerSelectControlData),
     Script(ScriptControlData),
+    Message(MessageControlData),
     MessageBoardAnswer(MessageBoardAnswerControlData),
     CustomCommand(lc_engine::CustomCommandControlData),
     EmMoveObject(lc_engine::EmMoveObjectControlData),
@@ -861,6 +866,7 @@ enum NetworkCommand {
         tick: Tick,
         control: lc_engine::ControlPacket,
     },
+    SubmitMessage(MessageControlData),
     SubmitVote(lc_engine::VoteControlData),
     SubmitVoteEnd(lc_engine::VoteControlData),
     SubmitReadyCheck(lc_network::ReadyCheckPacket),
@@ -1094,6 +1100,17 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitMessageBoardAnswer { tick, answer })
             .map_err(|_| anyhow!("network worker is not accepting message-board answers"))
+    }
+
+    /// Submit one non-synchronized `CID_Message`. C++ always sends these as
+    /// `CDT_Private`, including non-private chat types; recipient visibility
+    /// is decided when the app executes the message control.
+    pub fn submit_message(&self, mut message: MessageControlData) -> Result<()> {
+        message.by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the message-control wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitMessage(message))
+            .map_err(|_| anyhow!("network worker is not accepting message controls"))
     }
 
     pub fn broadcast_lobby_countdown(
@@ -1887,6 +1904,14 @@ async fn run_host_worker(
                     NetworkCommand::SubmitInternalPlayerScript { tick, control } => {
                         frame_builder.record_control(tick, control, current_millis());
                     }
+                    NetworkCommand::SubmitMessage(message) => {
+                        let data = encode_control_entry_payload(
+                            &lc_engine::ControlPacket::Message(message),
+                        )?;
+                        host.submit_packet(ControlDelivery::Private, data)
+                            .await
+                            .map_err(|error| anyhow!("host message submission failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitVote(vote) => {
                         let data = encode_control_entry_payload(
                             &lc_engine::ControlPacket::Vote(vote),
@@ -2275,6 +2300,20 @@ async fn run_client_worker(
                     NetworkCommand::SubmitInternalPlayerScript { tick, control } => {
                         client_activation.refresh_frame(frame_tick_to_i32(tick));
                         frame_builder.record_control(tick, control, current_millis());
+                    }
+                    NetworkCommand::SubmitMessage(message) => {
+                        let data = encode_control_entry_payload(
+                            &lc_engine::ControlPacket::Message(message.clone()),
+                        )?;
+                        client.submit_packet(ControlDelivery::Private, data)
+                            .await
+                            .map_err(|error| anyhow!("client message submission failed: {error}"))?;
+                        // C4GameControlNetwork::DoInput executes a private
+                        // packet immediately for its sender as well as
+                        // broadcasting it to peers.
+                        let _ = event_tx.send(NetworkEvent::DirectControl(
+                            NetworkControl::Message(message),
+                        ));
                     }
                     NetworkCommand::SubmitVote(vote) => {
                         let data = encode_control_entry_payload(
@@ -2724,6 +2763,7 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::PlayerCommand(data) => Some(NetworkControl::PlayerCommand(data)),
         lc_engine::ControlPacket::PlayerSelect(data) => Some(NetworkControl::PlayerSelect(data)),
         lc_engine::ControlPacket::Script(data) => Some(NetworkControl::Script(data)),
+        lc_engine::ControlPacket::Message(data) => Some(NetworkControl::Message(data)),
         lc_engine::ControlPacket::MessageBoardAnswer(data) => {
             Some(NetworkControl::MessageBoardAnswer(data))
         }
@@ -2851,6 +2891,17 @@ fn current_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message_control(by_client: i32) -> MessageControlData {
+        MessageControlData {
+            message_type: lc_engine::MESSAGE_TYPE_PRIVATE,
+            player: 4,
+            to_player: 9,
+            message: lc_engine::LegacyCString::from_bytes(b"private hello".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client,
+        }
+    }
 
     fn sync_check(frame: i32) -> SyncCheckPacket {
         SyncCheckPacket {
@@ -3317,6 +3368,28 @@ mod tests {
                     ..join
                 },
             )]
+        );
+    }
+
+    #[test]
+    fn manager_stamps_message_author_for_non_ticked_private_submission() {
+        // C4MessageInput submits CID_Message through CDT_Private rather than
+        // appending it to Game.Input for a future synchronized control tick
+        // (src/C4MessageInput.cpp:423-426; src/C4GameControl.cpp:385-410).
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let message = message_control(99);
+
+        manager
+            .submit_message(message.clone())
+            .expect("client queues immediate message control");
+
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                by_client: 7,
+                ..message
+            }]
         );
     }
 
@@ -4646,6 +4719,32 @@ mod tests {
             panic!("expected one immediate PlayerInfo event");
         };
         assert_eq!(actual, info);
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn private_message_emits_an_immediate_control_event() {
+        // Despite the per-message Private subtype, C4MessageInput uses
+        // CDT_Private for every C4ControlMessage. HandleControlPkt executes
+        // that delivery immediately instead of entering SyncControl
+        // (src/C4MessageInput.cpp:423-426;
+        // src/C4GameControlNetwork.cpp:558-566).
+        let message = message_control(7);
+        let payload = lc_network::encode_control_entry_payload(&lc_engine::ControlPacket::Message(
+            message.clone(),
+        ))
+        .expect("encode private CID_Message payload");
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_direct_packet(lc_network::ControlDelivery::Private, payload, &event_tx)
+            .expect("handle private CID_Message");
+
+        assert_eq!(
+            event_rx.recv(),
+            Ok(NetworkEvent::DirectControl(NetworkControl::Message(
+                message
+            )))
+        );
         assert!(event_rx.try_recv().is_err());
     }
 

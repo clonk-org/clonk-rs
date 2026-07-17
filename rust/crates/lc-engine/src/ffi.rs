@@ -468,6 +468,10 @@ impl RuntimeHandle {
                         .execute_script_control(&data, ScriptControlPolicy::replay(false))
                         .map_err(|error| error.to_string())?;
                 }
+                ControlPacket::Message(_) => {
+                    // C4ControlMessage is non-synchronized presentation state;
+                    // replay simulation deliberately has no world-side effect.
+                }
                 ControlPacket::MessageBoardAnswer(data) => {
                     self.engine
                         .execute_message_board_answer_control(&data)
@@ -2320,6 +2324,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::EmDrawTool(_) => "EMDrawTool",
                         ControlPacket::EmDropDef(_) => "EMDropDef",
                         ControlPacket::Script(_) => "Script",
+                        ControlPacket::Message(_) => "Message",
                         ControlPacket::MessageBoardAnswer(_) => "MessageBoardAnswer",
                         ControlPacket::CustomCommand(_) => "CustomCommand",
                         ControlPacket::ActivateGameGoalMenu(_) => "ActivateGameGoalMenu",

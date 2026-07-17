@@ -9,6 +9,7 @@
 )]
 
 mod clonk_fonts;
+mod control_message;
 mod control_options;
 mod draw_commands;
 mod game_message;
@@ -49,6 +50,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use control_message::{mentions_nick, ControlMessageState};
 use control_options::format_key_label;
 use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
@@ -89,7 +91,9 @@ use lc_engine::{
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
     ScoreboardPresentationRequest, ScriptControlPolicy, SimulationSnapshot, SkyConfig, SpawnConfig,
-    SyncCheckPacket, TeamConfiguration, Vector2,
+    SyncCheckPacket, TeamConfiguration, Vector2, MessageControlData,
+    MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
+    MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
 };
 use lc_frontend::context_menu::{
     ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent, ContextMenuIcon,
@@ -97,8 +101,9 @@ use lc_frontend::context_menu::{
 };
 use lc_frontend::game_lobby::{
     GameLobby as ClassicGameLobby, LobbyAction as ClassicLobbyAction, LobbyChatClipboardShortcut,
-    LobbyChatEditKey, LobbyChatKeyModifiers, LobbyClientRow, LobbyClientStatus, LobbyControl,
-    LobbyGameOptionInput, LobbyLayout, LobbyResources, LobbyRole, LobbyRosterId, LobbyRosterLayout,
+    LobbyChatContextCommand, LobbyChatEditKey, LobbyChatEditView, LobbyChatKeyModifiers,
+    LobbyChatRequest, LobbyClientRow, LobbyClientStatus, LobbyControl, LobbyGameOptionInput,
+    LobbyLayout, LobbyLogLine, LobbyResources, LobbyRole, LobbyRosterId, LobbyRosterLayout,
     LobbyRosterRow, LobbySheet, LobbySound,
 };
 use lc_frontend::game_option_buttons::{
@@ -173,7 +178,7 @@ use winit::event::{
     VirtualKeyCode, WindowEvent,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Fullscreen, Window, WindowBuilder};
+use winit::window::{Fullscreen, UserAttentionType, Window, WindowBuilder};
 
 const PLAYER_OWNER: i32 = 1;
 const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -4620,6 +4625,10 @@ fn main() -> Result<()> {
                     }
                 }
 
+                if app.take_user_attention_request() {
+                    window.request_user_attention(Some(UserAttentionType::Informational));
+                }
+
                 if did_update
                     || (app.mode == AppMode::Running
                         && frame_schedule.refresh_interval
@@ -4777,6 +4786,7 @@ fn handle_window_event(
                 .context("failed to process cursor exit")?;
         }
         WindowEvent::Focused(false) => {
+            app.window_active = false;
             app.handle_focus_lost()
                 .context("failed to clear controls after focus loss")?;
         }
@@ -4833,6 +4843,7 @@ fn handle_window_event(
                 .context("failed to process touch input")?;
         }
         WindowEvent::Focused(true) => {
+            app.window_active = true;
             window.request_redraw();
         }
         _ => {}
@@ -5228,8 +5239,34 @@ impl AudioContext {
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
     ) -> Result<(), AudioError> {
+        self.try_start_sound(
+            name,
+            target,
+            volume,
+            looped,
+            multiple,
+            custom_falloff,
+            snapshot,
+            focus,
+            viewport_center,
+        )
+        .map(|_| ())
+    }
+
+    fn try_start_sound(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        multiple: bool,
+        custom_falloff: Option<i32>,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
+    ) -> Result<bool, AudioError> {
         if !self.options.sound_enabled {
-            return Ok(());
+            return Ok(false);
         }
         let key = SoundInstanceKey::new(name, target);
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
@@ -5241,12 +5278,12 @@ impl AudioContext {
                 .get(&key)
                 .is_some_and(|info| self.system.channel_is_playing(info.channel));
             if already_playing {
-                return Ok(());
+                return Ok(false);
             }
             self.active_channels.remove(&key);
         }
         let Some((handle, sample_key)) = self.ensure_sound_with_key(name)? else {
-            return Ok(());
+            return Ok(false);
         };
         // C4SoundSystem caps non-looping instances per resolved sample before
         // channel allocation (C4SoundSystem.cpp:337-338).
@@ -5261,7 +5298,7 @@ impl AudioContext {
                 .count()
                 >= MAX_SOUND_INSTANCES
         {
-            return Ok(());
+            return Ok(false);
         }
         // NewInstance rejects another instance of the resolved sample within
         // NearSoundRadius, including global/global pairs, even when FnSound's
@@ -5273,7 +5310,7 @@ impl AudioContext {
                 && sound_targets_are_near(info.target, target, snapshot)
         });
         if already_playing_near {
-            return Ok(());
+            return Ok(false);
         }
         let channel = self.system.play_sound(&handle, looped)?;
         let info = ChannelInfo {
@@ -5289,7 +5326,7 @@ impl AudioContext {
         self.system
             .channel_set_volume_and_pan(channel, mix_volume, pan);
         self.active_channels.insert(key, info);
-        Ok(())
+        Ok(true)
     }
 
     fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
@@ -6508,6 +6545,7 @@ fn resolve_scenario_fair_crew_parameters(
 struct ClassicHostLobbyState {
     controller: ClassicGameLobby,
     pointer: Option<GuiPoint>,
+    chat_history_index: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7183,6 +7221,11 @@ struct GameApp {
     /// `Config.Graphics` display toggles loaded at process startup and driven
     /// by the Display submenu (C4MainMenu.cpp:855-884).
     display_flags: DisplayFlags,
+    /// `Config.General.UseWhiteLobbyChat`, which is intentionally distinct
+    /// from the in-game white-chat display toggle.
+    white_lobby_chat: bool,
+    /// Prefix GUI log lines with C++'s markup-colored wall-clock timestamp.
+    show_log_timestamps: bool,
     /// Process-local `Config.Graphics.SmokeLevel`; object bubbles consult it
     /// only outside network/recording sync mode, while particles always do.
     graphics_smoke_level: i32,
@@ -7233,6 +7276,7 @@ struct GameApp {
     /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
     host_lobby_countdown: Option<HostLobbyCountdown>,
     lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
+    control_messages: ControlMessageState,
     league_votes: LeagueVoteState,
     startup_network_connection: Option<StartupNetworkConnection>,
     staged_network_host_scenario: Option<StagedNetworkHostScenario>,
@@ -7303,6 +7347,7 @@ struct GameApp {
     ingame_last_left_down: Option<Instant>,
     /// C4MouseControl::LeftDoubleIgnoreUp.
     ingame_ignore_left_up: bool,
+    window_active: bool,
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
@@ -7383,6 +7428,15 @@ struct GameApp {
     /// (fade-in + strlen delay + fade-out at Speed 1,
     /// src/C4MessageBoard.cpp:163-212).
     board_line: Option<(String, u64)>,
+    /// C4MessageBoard LogBuffer history (1000 lines / 30000 bytes). One-line
+    /// mode still presents the newest notification immediately.
+    board_log_history: VecDeque<String>,
+    /// C4MessageBoard backscroll: -1 is past the live tail, 0 is newest, and
+    /// positive values walk toward older physical log lines.
+    board_back_scroll: i32,
+    /// Process-global C4ChatInputDialog projection for ordinary game chat.
+    running_chat: Option<RunningChatState>,
+    message_input_history: VecDeque<String>,
     /// `C4Player::ShowStartup` for the local player: keyboard hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).
     show_startup_hint: bool,
@@ -8156,6 +8210,19 @@ enum ClassicObjectMenuBoundary {
 enum ClassicChatMode {
     All,
     Allies,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunningChatMode {
+    All,
+    Allies,
+    Say,
+}
+
+#[derive(Clone, Debug)]
+struct RunningChatState {
+    edit: LobbyChatEditView,
+    history_index: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9074,6 +9141,11 @@ struct NetworkLobbyLayout {
 #[derive(Clone, Debug)]
 struct NetworkLobbyState {
     participants: BTreeMap<ClientId, LobbyParticipantState>,
+    logs: Vec<LobbyLogLine>,
+    chat_edit: LobbyChatEditView,
+    chat_history_index: i32,
+    /// Active one-second `/sound` marker per sender. `true` is the muted icon.
+    client_sound_status: HashMap<ClientId, (bool, Instant)>,
     local_client_id: ClientId,
     is_host: bool,
     selected_identifier: Option<String>,
@@ -9087,13 +9159,28 @@ struct NetworkLobbyState {
     pointer: Option<GuiPoint>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum LobbyAction {
     ToggleReady,
     StartGame,
+    SubmitMessage(String),
+    ChatEdited,
 }
 
 const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MessageControlOutcome {
+    rejected: bool,
+    displayed: bool,
+    say_displayed: bool,
+    sound_attempted: bool,
+    sound_played: bool,
+    lobby_sound: bool,
+    attention_requested: bool,
+}
+
+const CONTROL_LOG_COLOR: u32 = 0x00af_afaf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HostLobbyCountdown {
@@ -9306,6 +9393,10 @@ impl NetworkLobbyState {
         }
         Self {
             participants,
+            logs: Vec::new(),
+            chat_edit: LobbyChatEditView::default(),
+            chat_history_index: -1,
+            client_sound_status: HashMap::new(),
             local_client_id,
             is_host,
             selected_identifier: None,
@@ -9444,6 +9535,7 @@ impl NetworkLobbyState {
             return;
         }
         self.participants.remove(&client_id);
+        self.client_sound_status.remove(&client_id);
         if !self.is_host && client_id == 0 {
             self.participants
                 .entry(0)
@@ -9487,12 +9579,28 @@ impl NetworkLobbyState {
             .unwrap_or(false)
     }
 
+    fn push_log(&mut self, line: LobbyLogLine) {
+        self.logs.push(line);
+    }
+
+    fn note_client_sound(&mut self, client_id: i32, muted: bool) {
+        if let Ok(client_id) = ClientId::try_from(client_id) {
+            self.client_sound_status
+                .insert(client_id, (muted, Instant::now()));
+        }
+    }
+
     fn render_classic(
         &mut self,
         surface: &mut Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
     ) -> Result<()> {
+        let now = Instant::now();
+        self.client_sound_status.retain(|_, (_, started)| {
+            now.checked_duration_since(*started)
+                .is_none_or(|elapsed| elapsed < Duration::from_secs(1))
+        });
         let role = if self.is_host {
             LobbyRole::Host
         } else {
@@ -9507,7 +9615,13 @@ impl NetworkLobbyState {
                     name: participant.name.clone(),
                     nick: String::new(),
                     color: [255, 255, 255, 255],
-                    status: if *client_id == 0 {
+                    status: if let Some((muted, _)) = self.client_sound_status.get(client_id) {
+                        if *muted {
+                            LobbyClientStatus::MutedSound
+                        } else {
+                            LobbyClientStatus::Sound
+                        }
+                    } else if *client_id == 0 {
                         LobbyClientStatus::Host
                     } else if matches!(participant.kind, ParticipantKind::Observer) {
                         LobbyClientStatus::Observer
@@ -9540,6 +9654,8 @@ impl NetworkLobbyState {
             DEFAULT_LOBBY_COUNTDOWN_SECONDS,
             rows,
         );
+        controller.set_logs(self.logs.clone());
+        controller.set_chat_edit_view(self.chat_edit.clone());
         if let Some(seconds) = self.countdown {
             let _ = controller.apply_countdown_packet(
                 lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(seconds),
@@ -9574,13 +9690,71 @@ impl NetworkLobbyState {
         )
     }
 
+    fn insert_chat_text(&mut self, text: &str) {
+        lobby_chat_insert_text(&mut self.chat_edit, text);
+    }
+
+    fn browse_chat_history(&mut self, older: bool, history: &VecDeque<String>) {
+        self.chat_history_index += if older { 1 } else { -1 };
+        let text = usize::try_from(self.chat_history_index)
+            .ok()
+            .and_then(|index| history.get(index))
+            .cloned();
+        match text {
+            Some(text) => {
+                self.chat_edit = LobbyChatEditView {
+                    caret: text.len(),
+                    selection: (!text.is_empty()).then_some((0, text.len())),
+                    text,
+                    cursor_visible: true,
+                    ..LobbyChatEditView::default()
+                };
+            }
+            None => {
+                self.chat_history_index = -1;
+                self.chat_edit = LobbyChatEditView::default();
+            }
+        }
+    }
+
+    fn take_chat_submission(&mut self) -> String {
+        let text = std::mem::take(&mut self.chat_edit.text);
+        self.chat_edit = LobbyChatEditView::default();
+        self.chat_history_index = -1;
+        text
+    }
+
     fn handle_key(&mut self, key: KeyCode, state: ElementState) -> Option<LobbyAction> {
         if state != ElementState::Pressed {
             return None;
         }
         match key {
-            KeyCode::Enter if self.is_host => Some(LobbyAction::StartGame),
-            KeyCode::Space | KeyCode::Enter => Some(LobbyAction::ToggleReady),
+            KeyCode::Enter => Some(LobbyAction::SubmitMessage(self.take_chat_submission())),
+            KeyCode::Up => {
+                // The app routes history so lobby and running dialogs share
+                // C4MessageInput's one process-local BackBuffer.
+                Some(LobbyAction::ChatEdited)
+            }
+            KeyCode::Down => {
+                Some(LobbyAction::ChatEdited)
+            }
+            KeyCode::Left => {
+                lobby_chat_apply_edit_key(
+                    &mut self.chat_edit,
+                    LobbyChatEditKey::Left,
+                    LobbyChatKeyModifiers::default(),
+                );
+                Some(LobbyAction::ChatEdited)
+            }
+            KeyCode::Right => {
+                lobby_chat_apply_edit_key(
+                    &mut self.chat_edit,
+                    LobbyChatEditKey::Right,
+                    LobbyChatKeyModifiers::default(),
+                );
+                Some(LobbyAction::ChatEdited)
+            }
+            KeyCode::Space => Some(LobbyAction::ChatEdited),
             _ => None,
         }
     }
@@ -12367,6 +12541,17 @@ fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
     flags
 }
 
+fn load_white_lobby_chat(paths: Option<&AppPaths>) -> bool {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("General"), "UseWhiteLobbyChat")
+                .map(parse_config_bool)
+        })
+        .unwrap_or(false)
+}
+
 fn load_graphics_smoke_level(paths: Option<&AppPaths>) -> i32 {
     paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
@@ -12602,18 +12787,22 @@ fn load_scenario_with_definition_load_and_startup_player_count(
 fn load_options_program_state(
     paths: Option<&AppPaths>,
 ) -> lc_frontend::startup_options_dlg::ProgramSheetState {
-    let show_log_timestamps = paths
+    let show_log_timestamps = load_show_log_timestamps(paths);
+    lc_frontend::startup_options_dlg::ProgramSheetState {
+        show_log_timestamps,
+        ..Default::default()
+    }
+}
+
+fn load_show_log_timestamps(paths: Option<&AppPaths>) -> bool {
+    paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
         .and_then(|config| {
             config
                 .get_in(Some("General"), "ShowLogTimestamps")
                 .map(parse_config_bool)
         })
-        .unwrap_or(false);
-    lc_frontend::startup_options_dlg::ProgramSheetState {
-        show_log_timestamps,
-        ..Default::default()
-    }
+        .unwrap_or(false)
 }
 
 fn load_options_sound_state(
@@ -12659,6 +12848,19 @@ fn lobby_ready_check_cooldown_from_config(config: Option<&Config>) -> LobbyReady
 fn load_lobby_ready_check_cooldown(paths: Option<&AppPaths>) -> LobbyReadyCheckCooldown {
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
     lobby_ready_check_cooldown_from_config(config.as_ref())
+}
+
+fn load_sound_command_cooldown(paths: Option<&AppPaths>) -> Duration {
+    let seconds = paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("Cooldowns"), "SoundCommand")
+                .and_then(|value| value.trim().parse::<i64>().ok())
+        })
+        .unwrap_or(0)
+        .max(0);
+    Duration::from_secs(seconds as u64)
 }
 
 fn build_network_host_preparation(
@@ -13518,6 +13720,317 @@ fn player_join_board_line(frame: u64, player_name: &str) -> (String, u64) {
     )
 }
 
+fn control_message_board_line(frame: u64, line: String) -> (String, u64) {
+    let raw_len = lc_script::c4_string_byte_len(&line);
+    let expires = frame.saturating_add(raw_len as u64).saturating_add(30);
+    (line, expires)
+}
+
+fn lobby_chat_selection(view: &LobbyChatEditView) -> Option<std::ops::Range<usize>> {
+    view.selection.and_then(|(anchor, caret)| {
+        let start = anchor.min(caret);
+        let end = anchor.max(caret);
+        (start != end).then_some(start..end)
+    })
+}
+
+fn lobby_chat_delete_selection(view: &mut LobbyChatEditView) -> bool {
+    let Some(range) = lobby_chat_selection(view) else {
+        return false;
+    };
+    let start = range.start;
+    view.text.replace_range(range, "");
+    view.caret = start;
+    view.selection = None;
+    true
+}
+
+fn lobby_chat_insert_text(view: &mut LobbyChatEditView, text: &str) {
+    const CPP_EDIT_MAX_BYTES: usize = 254;
+    lobby_chat_delete_selection(view);
+    let mut remaining = CPP_EDIT_MAX_BYTES.saturating_sub(lc_script::c4_string_byte_len(&view.text));
+    let mut sanitized = String::new();
+    for character in text.chars().filter(|character| !character.is_control()) {
+        let character = if character == '|' { '¦' } else { character };
+        let width = lc_script::c4_string_byte_len(&character.to_string());
+        if width > remaining {
+            break;
+        }
+        sanitized.push(character);
+        remaining -= width;
+    }
+    view.text.insert_str(view.caret, &sanitized);
+    view.caret += sanitized.len();
+    view.selection = None;
+    view.cursor_visible = true;
+}
+
+fn lobby_chat_previous_boundary(text: &str, at: usize) -> usize {
+    text[..at]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn lobby_chat_next_boundary(text: &str, at: usize) -> usize {
+    text[at..]
+        .chars()
+        .next()
+        .map(|character| at + character.len_utf8())
+        .unwrap_or(text.len())
+}
+
+fn lobby_chat_word_target(view: &LobbyChatEditView, direction: i32) -> usize {
+    let is_spacer = |character: char| {
+        character.is_ascii() && !character.is_ascii_alphanumeric() && character != '_'
+    };
+    if direction < 0 {
+        let mut cursor = view.caret;
+        let mut nonspace_found = false;
+        while cursor > 0 {
+            let previous = lobby_chat_previous_boundary(&view.text, cursor);
+            let character = view.text[previous..cursor]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if is_spacer(character) {
+                if nonspace_found {
+                    break;
+                }
+            } else {
+                nonspace_found = true;
+            }
+            cursor = previous;
+        }
+        cursor
+    } else {
+        let mut cursor = view.caret;
+        let mut space_found = false;
+        while cursor < view.text.len() {
+            let next = lobby_chat_next_boundary(&view.text, cursor);
+            let character = view.text[cursor..next]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if is_spacer(character) {
+                space_found = true;
+            } else if space_found {
+                break;
+            }
+            cursor = next;
+        }
+        cursor
+    }
+}
+
+fn lobby_chat_apply_edit_key(
+    view: &mut LobbyChatEditView,
+    key: LobbyChatEditKey,
+    modifiers: LobbyChatKeyModifiers,
+) {
+    let old_caret = view.caret;
+    let target = match key {
+        LobbyChatEditKey::Left => Some(if modifiers.control {
+            lobby_chat_word_target(view, -1)
+        } else {
+            lobby_chat_previous_boundary(&view.text, view.caret)
+        }),
+        LobbyChatEditKey::Right => Some(if modifiers.control {
+            lobby_chat_word_target(view, 1)
+        } else {
+            lobby_chat_next_boundary(&view.text, view.caret)
+        }),
+        LobbyChatEditKey::Home => Some(0),
+        LobbyChatEditKey::End => Some(view.text.len()),
+        LobbyChatEditKey::Backspace => {
+            if !lobby_chat_delete_selection(view) && !modifiers.shift && view.caret > 0 {
+                let start = if modifiers.control {
+                    lobby_chat_word_target(view, -1)
+                } else {
+                    lobby_chat_previous_boundary(&view.text, view.caret)
+                };
+                view.text.replace_range(start..view.caret, "");
+                view.caret = start;
+            }
+            view.selection = None;
+            None
+        }
+        LobbyChatEditKey::Delete => {
+            if !lobby_chat_delete_selection(view)
+                && !modifiers.shift
+                && view.caret < view.text.len()
+            {
+                let end = if modifiers.control {
+                    lobby_chat_word_target(view, 1)
+                } else {
+                    lobby_chat_next_boundary(&view.text, view.caret)
+                };
+                view.text.replace_range(view.caret..end, "");
+            }
+            view.selection = None;
+            None
+        }
+    };
+    if let Some(target) = target {
+        if modifiers.shift {
+            let anchor = view
+                .selection
+                .map(|(anchor, _)| anchor)
+                .unwrap_or(old_caret);
+            view.caret = target;
+            view.selection = (anchor != target).then_some((anchor, target));
+        } else {
+            view.caret = target;
+            view.selection = None;
+        }
+    }
+    view.cursor_visible = true;
+}
+
+fn legacy_message_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+fn legacy_prefix_no_case(value: &[u8], prefix: &[u8]) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+}
+
+fn is_team_message_syntax(text: &str) -> bool {
+    let raw = lc_script::c4_string_bytes(text);
+    raw.first() == Some(&b'^')
+        || legacy_prefix_no_case(&raw, b"team:")
+        || legacy_prefix_no_case(&raw, b"/team ")
+}
+
+fn parse_lobby_message_control(text: &str) -> Result<Option<MessageControlData>> {
+    const C4_MAX_MESSAGE: usize = 256;
+    let raw = lc_script::c4_string_bytes(text);
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let (message_type, mut message) = if raw[0] == b'^' {
+        (MESSAGE_TYPE_TEAM, &raw[1..])
+    } else if legacy_prefix_no_case(&raw, b"team:") {
+        (MESSAGE_TYPE_TEAM, &raw[5..])
+    } else if legacy_prefix_no_case(&raw, b"/team ") {
+        (MESSAGE_TYPE_TEAM, &raw[6..])
+    } else if legacy_prefix_no_case(&raw, b"/me ") {
+        (MESSAGE_TYPE_ME, &raw[4..])
+    } else if legacy_prefix_no_case(&raw, b"/sound ") {
+        (MESSAGE_TYPE_SOUND, &raw[7..])
+    } else if raw.eq_ignore_ascii_case(b"/alert") {
+        (MESSAGE_TYPE_ALERT, &raw[raw.len()..])
+    } else if legacy_prefix_no_case(&raw, b"/alert ") {
+        (MESSAGE_TYPE_ALERT, &raw[7..])
+    } else if raw[0] == b'/' {
+        anyhow::bail!("unsupported classic lobby chat command");
+    } else {
+        (MESSAGE_TYPE_NORMAL, raw.as_slice())
+    };
+    while message.first().copied().is_some_and(legacy_message_whitespace) {
+        message = &message[1..];
+    }
+    while message.last().copied().is_some_and(legacy_message_whitespace) {
+        message = &message[..message.len() - 1];
+    }
+    if message.is_empty() && message_type != MESSAGE_TYPE_ALERT {
+        return Ok(None);
+    }
+    let message = message[..message.len().min(C4_MAX_MESSAGE)].to_vec();
+    let message = lc_engine::LegacyCString::from_bytes(message)
+        .context("classic lobby chat contains an interior NUL")?;
+    Ok(Some(MessageControlData {
+        message_type,
+        player: -1,
+        to_player: -1,
+        message,
+        by_client: -1,
+    }))
+}
+
+fn parse_running_message_control(
+    text: &str,
+    player: i32,
+    cinematic: bool,
+    players: &SimulationSnapshot,
+) -> Result<Option<MessageControlData>> {
+    const C4_MAX_MESSAGE: usize = 256;
+    let raw = lc_script::c4_string_bytes(text);
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let mut to_player = -1;
+    let (message_type, mut message) = if raw[0] == b'^' {
+        (MESSAGE_TYPE_TEAM, raw[1..].to_vec())
+    } else if legacy_prefix_no_case(&raw, b"team:") {
+        (MESSAGE_TYPE_TEAM, raw[5..].to_vec())
+    } else if legacy_prefix_no_case(&raw, b"/team ") {
+        (MESSAGE_TYPE_TEAM, raw[6..].to_vec())
+    } else if legacy_prefix_no_case(&raw, b"/private ") {
+        let rest = &raw[9..];
+        let Some(space) = rest.iter().position(|byte| *byte == b' ') else {
+            return Ok(None);
+        };
+        let target_len = space.min(30);
+        let target = &rest[..target_len];
+        let Some(target_player) = players
+            .players
+            .iter()
+            .find(|candidate| lc_script::c4_string_bytes(&candidate.name) == target)
+        else {
+            return Ok(None);
+        };
+        to_player = target_player.id;
+        (MESSAGE_TYPE_PRIVATE, rest[target_len + 1..].to_vec())
+    } else if legacy_prefix_no_case(&raw, b"/me ") {
+        (MESSAGE_TYPE_ME, raw[4..].to_vec())
+    } else if legacy_prefix_no_case(&raw, b"/sound ") {
+        (MESSAGE_TYPE_SOUND, raw[7..].to_vec())
+    } else if raw.eq_ignore_ascii_case(b"/alert") {
+        (MESSAGE_TYPE_ALERT, Vec::new())
+    } else if legacy_prefix_no_case(&raw, b"/alert ") {
+        (MESSAGE_TYPE_ALERT, raw[7..].to_vec())
+    } else if raw[0] == b'"' {
+        let mut message = raw;
+        if message.last() != Some(&b'"') {
+            message.push(b'"');
+        }
+        (MESSAGE_TYPE_SAY, message)
+    } else if raw[0] == b'/' {
+        anyhow::bail!("unsupported classic game chat command");
+    } else {
+        (MESSAGE_TYPE_NORMAL, raw)
+    };
+
+    while message.first().copied().is_some_and(legacy_message_whitespace) {
+        message.remove(0);
+    }
+    while message.last().copied().is_some_and(legacy_message_whitespace) {
+        message.pop();
+    }
+    if cinematic && message_type == MESSAGE_TYPE_SAY && message.len() >= 2 {
+        message.remove(0);
+        message.pop();
+    }
+    if message.is_empty() && message_type != MESSAGE_TYPE_ALERT {
+        return Ok(None);
+    }
+    message.truncate(C4_MAX_MESSAGE);
+    let message = lc_engine::LegacyCString::from_bytes(message)
+        .context("classic game chat contains an interior NUL")?;
+    Ok(Some(MessageControlData {
+        message_type,
+        player,
+        to_player,
+        message,
+        by_client: -1,
+    }))
+}
+
 fn build_game_over_dialog(
     snapshot: &SimulationSnapshot,
     local_owner: i32,
@@ -13832,6 +14345,10 @@ impl GameApp {
         );
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
+        let control_messages = ControlMessageState::new(
+            load_sound_command_cooldown(paths),
+            audio_options.mute_sound_command,
+        );
         let audio = match AudioContext::try_new(audio_options) {
             Ok(ctx) => Some(ctx),
             Err(err) => {
@@ -13917,6 +14434,8 @@ impl GameApp {
             ingame_menu_gfx: None,
             script_menu_presentation: None,
             display_flags: load_display_flags(paths),
+            white_lobby_chat: load_white_lobby_chat(paths),
+            show_log_timestamps: load_show_log_timestamps(paths),
             graphics_smoke_level,
             mouse_control: true,
             mouse_control_allowed: true,
@@ -13947,6 +14466,7 @@ impl GameApp {
             classic_host_lobby: None,
             host_lobby_countdown: None,
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
+            control_messages,
             league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
             staged_network_host_scenario: None,
@@ -13993,6 +14513,7 @@ impl GameApp {
             ingame_dragged_objects: Vec::new(),
             ingame_last_left_down: None,
             ingame_ignore_left_up: false,
+            window_active: true,
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
@@ -14027,6 +14548,10 @@ impl GameApp {
             definition_selector_last_click: None,
             plrsel_last_click: None,
             board_line: None,
+            board_log_history: VecDeque::new(),
+            board_back_scroll: -1,
+            running_chat: None,
+            message_input_history: VecDeque::new(),
             show_startup_hint: false,
             debug_hud: std::env::var("LC_APP_HUD_DEBUG")
                 .map(|v| v == "1")
@@ -14754,6 +15279,13 @@ impl GameApp {
             // those come from the KEY_Any key binding on physical key-down.
             return Ok(());
         }
+        if let Some(chat) = self.running_chat.as_mut() {
+            if !character.is_control() {
+                let mut encoded = [0_u8; 4];
+                lobby_chat_insert_text(&mut chat.edit, character.encode_utf8(&mut encoded));
+            }
+            return Ok(());
+        }
         if self.mode != AppMode::Menu || character.is_control() {
             return Ok(());
         }
@@ -14766,6 +15298,15 @@ impl GameApp {
                 .map(|lobby| lobby.controller.text_input(text))
                 .unwrap_or_default();
             return self.process_classic_lobby_actions(actions);
+        }
+        if self.startup_view == StartupView::NetworkLobby {
+            let mut encoded = [0_u8; 4];
+            let text = character.encode_utf8(&mut encoded);
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby.insert_chat_text(text);
+                self.mark_menu_dirty();
+            }
+            return Ok(());
         }
         if self.startup_view == StartupView::ScenarioBrowser && self.menu_state.search_focused() {
             let mut encoded = [0_u8; 4];
@@ -16288,6 +16829,14 @@ impl GameApp {
             };
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers == ModifiersState::SHIFT
+            && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down)
+        {
+            if state == ElementState::Pressed {
+                self.scroll_message_board(key == VirtualKeyCode::Up);
+            }
+            return Ok(RuntimeGlobalKeyOutcome::Handled);
+        }
         let unavailable_flash_producer = match key {
             VirtualKeyCode::F5 if c4_modifiers == ModifiersState::CTRL => {
                 Some(RuntimeFlashProducerBoundary::DebugMode)
@@ -16430,6 +16979,18 @@ impl GameApp {
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.guard_runtime_key_dispatch(key)?;
+        if self.running_chat.is_some() {
+            let modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            if modifiers.ctrl() {
+                self.handle_engine_key(key, state)?;
+                return Ok(());
+            }
+            if key == VirtualKeyCode::Tab && modifiers.is_empty() {
+                self.handle_running_chat_key(key, state);
+                return Ok(());
+            }
+        }
         if self.handle_frontend_global_key(key, state)? {
             return Ok(());
         }
@@ -16531,6 +17092,9 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.handle_running_chat_key(key, state) {
+            return Ok(());
+        }
         if state == ElementState::Pressed {
             match key {
                 VirtualKeyCode::F5 if matches!(self.mode, AppMode::Running) => {
@@ -16559,6 +17123,9 @@ impl GameApp {
 
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_key(key, state);
+        }
+        if self.handle_network_lobby_chat_key(key, state)? {
+            return Ok(());
         }
 
         match self.mode {
@@ -19351,6 +19918,598 @@ impl GameApp {
             .map_err(|error| error.to_string())
     }
 
+    fn control_message_has_lobby(&self) -> bool {
+        self.classic_host_lobby.is_some()
+            || (self.startup_view == StartupView::NetworkLobby && self.network_lobby.is_some())
+    }
+
+    fn control_message_lobby_chat_color(&self, client_id: i32) -> u32 {
+        if self.control_clients.is_activated(client_id) {
+            let hide_assigned_team_color = self.control_message_has_lobby()
+                && self.engine.team_distribution() == 4
+                && self.engine.team_colors();
+            let teams = self.engine.teams();
+            self.control_player_infos
+                .first_user_lobby_color(client_id, hide_assigned_team_color, |team_id| {
+                    teams.iter().any(|team| team.id == team_id)
+                })
+                .unwrap_or(0x00ff_ffff)
+        } else {
+            0x00ff_ffff
+        }
+    }
+
+    fn append_control_message_log(
+        &mut self,
+        line: String,
+        color: u32,
+        lobby_sender: Option<i32>,
+    ) {
+        tracing::info!(message = %line, "network message");
+        let line = self.timestamp_log_line(line);
+        let color = lobby_sender
+            .map(|client_id| {
+                if self.control_message_has_lobby() && !self.control_clients.contains(client_id) {
+                    self.network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                        .unwrap_or(0)
+                } else {
+                    client_id
+                }
+            })
+            .map(|client_id| self.control_message_lobby_chat_color(client_id))
+            .unwrap_or(color);
+        let rgba = [
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+            0xff,
+        ];
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.push_log(LobbyLogLine {
+                text: line,
+                color: rgba,
+            });
+            return;
+        }
+        if self.startup_view == StartupView::NetworkLobby {
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby.push_log(LobbyLogLine {
+                    text: line,
+                    color: rgba,
+                });
+                return;
+            }
+        }
+        self.enqueue_control_message_board_line(line);
+    }
+
+    fn timestamp_log_line(&self, line: String) -> String {
+        if self.show_log_timestamps {
+            format!("{} {line}", lc_core::chrono_util::current_timestamp(true))
+        } else {
+            line
+        }
+    }
+
+    /// The native `/mute` and `/unmute` commands are process-local policy,
+    /// not controls. Command names are case-sensitive in ProcessCommand and
+    /// client names are matched exactly.
+    fn process_control_message_local_command(&mut self, text: &str) -> bool {
+        let raw = lc_script::c4_string_bytes(text);
+        let Some(command) = raw.strip_prefix(b"/") else {
+            return false;
+        };
+        let (name, parameter) = command
+            .iter()
+            .position(|byte| *byte == b' ')
+            .map_or((command, &[][..]), |space| {
+                (&command[..space], &command[space + 1..])
+            });
+        let muted = match name {
+            b"mute" => true,
+            b"unmute" => false,
+            _ => return false,
+        };
+        if let Some(client_id) = self
+            .control_clients
+            .snapshot()
+            .into_iter()
+            .find(|client| client.name.as_bytes() == parameter)
+            .map(|client| client.client_id)
+        {
+            self.control_messages.set_muted(client_id, muted);
+        }
+        true
+    }
+
+    fn start_running_chat(&mut self, mode: RunningChatMode) {
+        let text = match mode {
+            RunningChatMode::All => String::new(),
+            RunningChatMode::Allies => "/team ".to_string(),
+            RunningChatMode::Say => "\"".to_string(),
+        };
+        self.running_chat = Some(RunningChatState {
+            edit: LobbyChatEditView {
+                caret: text.len(),
+                text,
+                cursor_visible: true,
+                ..LobbyChatEditView::default()
+            },
+            history_index: -1,
+        });
+    }
+
+    fn browse_running_chat_history(&mut self, older: bool) {
+        let Some(chat) = self.running_chat.as_mut() else {
+            return;
+        };
+        chat.history_index += if older { 1 } else { -1 };
+        let text = usize::try_from(chat.history_index)
+            .ok()
+            .and_then(|index| self.message_input_history.get(index))
+            .cloned();
+        match text {
+            Some(text) => {
+                chat.edit = LobbyChatEditView {
+                    caret: text.len(),
+                    selection: (!text.is_empty()).then_some((0, text.len())),
+                    text,
+                    cursor_visible: true,
+                    ..LobbyChatEditView::default()
+                };
+            }
+            None => {
+                chat.history_index = -1;
+                chat.edit = LobbyChatEditView::default();
+            }
+        }
+    }
+
+    fn store_message_input_history(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(position) = self
+            .message_input_history
+            .iter()
+            .position(|previous| previous == text)
+        {
+            self.message_input_history.remove(position);
+        }
+        self.message_input_history.push_front(text.to_string());
+        self.message_input_history.truncate(20);
+    }
+
+    fn complete_running_chat_nick(&mut self) {
+        let Some(chat) = self.running_chat.as_mut() else {
+            return;
+        };
+        let before_cursor = &chat.edit.text[..chat.edit.caret];
+        let start = before_cursor
+            .char_indices()
+            .rev()
+            .find(|(_, character)| {
+                character.is_ascii()
+                    && !character.is_ascii_alphanumeric()
+                    && *character != '_'
+            })
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        let incomplete = lc_script::c4_string_bytes(&before_cursor[start..]);
+        if incomplete.is_empty() {
+            return;
+        }
+        let suffix = self.snapshot.players.iter().find_map(|player| {
+            let name = lc_script::c4_string_bytes(&player.name);
+            name.get(..incomplete.len())
+                .filter(|prefix| prefix.eq_ignore_ascii_case(&incomplete))
+                .map(|_| lc_script::c4_string_from_bytes(&name[incomplete.len()..]))
+        });
+        if let Some(suffix) = suffix {
+            lobby_chat_insert_text(&mut chat.edit, &suffix);
+        }
+    }
+
+    fn submit_running_chat(&mut self) {
+        let Some(chat) = self.running_chat.take() else {
+            return;
+        };
+        let text = chat.edit.text;
+        self.store_message_input_history(&text);
+        if self.process_control_message_local_command(&text) {
+            return;
+        }
+        let player = self
+            .snapshot
+            .hud
+            .local_players
+            .first()
+            .copied()
+            .unwrap_or(-1);
+        let control = match parse_running_message_control(
+            &text,
+            player,
+            self.engine.cinematic_film(),
+            &self.snapshot,
+        ) {
+            Ok(control) => control,
+            Err(error) => {
+                tracing::warn!(%error, "classic game chat command is not implemented");
+                self.append_control_message_log(
+                    "Unknown command.".to_string(),
+                    CONTROL_LOG_COLOR,
+                    None,
+                );
+                return;
+            }
+        };
+        let Some(mut control) = control else {
+            return;
+        };
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network.submit_message(control) {
+                tracing::error!(%error, "failed to submit classic game message");
+            }
+        } else {
+            control.by_client = 0;
+            self.execute_message_control(control);
+        }
+    }
+
+    fn handle_running_chat_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        if !matches!(self.mode, AppMode::Running) {
+            return false;
+        }
+        if self.running_chat.is_none() {
+            let modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            let mode = match (key, modifiers) {
+                (VirtualKeyCode::Return | VirtualKeyCode::F2, modifiers)
+                    if modifiers.is_empty() =>
+                {
+                    Some(RunningChatMode::All)
+                }
+                (VirtualKeyCode::Return, ModifiersState::SHIFT) => {
+                    Some(RunningChatMode::Allies)
+                }
+                (VirtualKeyCode::Return, ModifiersState::ALT) => Some(RunningChatMode::Say),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                if state == ElementState::Pressed {
+                    self.start_running_chat(mode);
+                }
+                return true;
+            }
+            return false;
+        }
+        if state == ElementState::Released {
+            return true;
+        }
+        match key {
+            VirtualKeyCode::Escape | VirtualKeyCode::F2 => self.running_chat = None,
+            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => self.submit_running_chat(),
+            VirtualKeyCode::Tab => self.complete_running_chat_nick(),
+            VirtualKeyCode::Up => self.browse_running_chat_history(true),
+            VirtualKeyCode::Down => self.browse_running_chat_history(false),
+            VirtualKeyCode::Back => {
+                let empty = self
+                    .running_chat
+                    .as_ref()
+                    .is_none_or(|chat| chat.edit.text.is_empty());
+                if empty {
+                    self.running_chat = None;
+                } else if let Some(chat) = self.running_chat.as_mut() {
+                    lobby_chat_apply_edit_key(
+                        &mut chat.edit,
+                        LobbyChatEditKey::Backspace,
+                        LobbyChatKeyModifiers {
+                            shift: self.keyboard_modifiers.shift(),
+                            control: self.keyboard_modifiers.ctrl(),
+                        },
+                    );
+                }
+            }
+            key => {
+                let operation = match key {
+                    VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
+                    VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
+                    VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
+                    VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
+                    VirtualKeyCode::End => Some(LobbyChatEditKey::End),
+                    _ => None,
+                };
+                if let (Some(operation), Some(chat)) = (operation, self.running_chat.as_mut()) {
+                    lobby_chat_apply_edit_key(
+                        &mut chat.edit,
+                        operation,
+                        LobbyChatKeyModifiers {
+                            shift: self.keyboard_modifiers.shift(),
+                            control: self.keyboard_modifiers.ctrl(),
+                        },
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    fn note_control_message_sound(&mut self, client_id: i32, muted: bool) {
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.note_client_sound(client_id, muted);
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.note_client_sound(client_id, muted);
+        }
+    }
+
+    fn request_control_message_attention(&mut self) -> bool {
+        if self.window_active {
+            return false;
+        }
+        self.control_messages.request_user_attention();
+        true
+    }
+
+    fn control_message_mentions_local_nick(&self, control: &MessageControlData) -> bool {
+        let local_client = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        if local_client == control.by_client {
+            return false;
+        }
+        self.control_clients
+            .state(local_client)
+            .is_some_and(|client| mentions_nick(control.message.as_bytes(), client.nick.as_bytes()))
+    }
+
+    fn play_control_message_sound(&mut self, name: &str) -> bool {
+        let fallback_center = {
+            let surface = self.graphics.surface();
+            Vector2::new((surface.width() as i32) / 2, (surface.height() as i32) / 2)
+        };
+        let viewport_center = self
+            .focus_snapshot
+            .as_ref()
+            .map(|object| object.position)
+            .unwrap_or(fallback_center);
+        let Some(audio) = self.audio.as_mut() else {
+            return false;
+        };
+        for candidate in [name.to_string(), format!("{name}.ogg"), format!("{name}.mp3")] {
+            match audio.try_start_sound(
+                &candidate,
+                None,
+                100,
+                false,
+                true,
+                None,
+                &self.snapshot,
+                self.focus_snapshot.as_ref(),
+                viewport_center,
+            ) {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(sound = %candidate, %error, "failed to play control message sound");
+                }
+            }
+        }
+        false
+    }
+
+    fn execute_message_control(&mut self, control: MessageControlData) -> MessageControlOutcome {
+        self.execute_message_control_with_sound_at(control, Instant::now(), |app, name| {
+            app.play_control_message_sound(name)
+        })
+    }
+
+    fn execute_message_control_with_sound_at<F>(
+        &mut self,
+        control: MessageControlData,
+        now: Instant,
+        mut play_sound: F,
+    ) -> MessageControlOutcome
+    where
+        F: FnMut(&mut Self, &str) -> bool,
+    {
+        let mut outcome = MessageControlOutcome::default();
+        let sender = (control.player >= 0)
+            .then(|| self.engine.player(control.player))
+            .flatten()
+            .map(|player| {
+                let color = player.color().map_or(0, |color| {
+                    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+                });
+                (
+                    player.id(),
+                    player.at_client().get(),
+                    c4_presentation_text(player.name()),
+                    color,
+                )
+            });
+        if sender
+            .as_ref()
+            .is_some_and(|(_, at_client, _, _)| *at_client != control.by_client)
+        {
+            outcome.rejected = true;
+            return outcome;
+        }
+
+        let message = legacy_presentation_text(control.message.as_bytes());
+        let mut check_alert = false;
+        match control.message_type {
+            MESSAGE_TYPE_NORMAL | MESSAGE_TYPE_ME => {
+                let (line, color) = match sender.as_ref() {
+                    Some((_, _, name, color)) => {
+                        let line = match (control.message_type, self.display_flags.white_chat) {
+                            (MESSAGE_TYPE_NORMAL, true) => {
+                                format!("<c {color:x}><{name}></c> {message}")
+                            }
+                            (MESSAGE_TYPE_NORMAL, false) => {
+                                format!("<c {color:x}><{name}> {message}")
+                            }
+                            (MESSAGE_TYPE_ME, true) => {
+                                format!("<c {color:x}> * {name}</c> {message}")
+                            }
+                            (MESSAGE_TYPE_ME, false) => {
+                                format!("<c {color:x}> * {name} {message}")
+                            }
+                            _ => unreachable!(),
+                        };
+                        (line, *color)
+                    }
+                    None => {
+                        let nick = self
+                            .control_clients
+                            .state(control.by_client)
+                            .map(|client| legacy_presentation_text(client.nick.as_bytes()))
+                            .unwrap_or_else(|| "???".to_string());
+                        let white = self.control_message_has_lobby() && self.white_lobby_chat;
+                        let line = match (control.message_type, white) {
+                            (MESSAGE_TYPE_NORMAL, true) => {
+                                format!("<{nick}> <c ffffff>{message}")
+                            }
+                            (MESSAGE_TYPE_NORMAL, false) => format!("<{nick}> {message}"),
+                            (MESSAGE_TYPE_ME, true) => {
+                                format!(" * {nick} <c ffffff>{message}")
+                            }
+                            (MESSAGE_TYPE_ME, false) => format!(" * {nick} {message}"),
+                            _ => unreachable!(),
+                        };
+                        (line, 0x00ff_ffff)
+                    }
+                };
+                self.append_control_message_log(line, color, Some(control.by_client));
+                outcome.displayed = true;
+                check_alert = true;
+            }
+            MESSAGE_TYPE_SAY => {
+                outcome.say_displayed = self.engine.execute_message_control_say(&control);
+            }
+            MESSAGE_TYPE_TEAM => {
+                if let Some((sender_id, _, name, color)) = sender.as_ref() {
+                    let local_players = self.engine.snapshot().hud.local_players;
+                    let visible = local_players.iter().any(|local_id| {
+                        self.engine.player(*local_id).is_some_and(|local| {
+                            !local.is_hostile_towards(*sender_id)
+                                && self
+                                    .engine
+                                    .player(*sender_id)
+                                    .is_some_and(|sender| !sender.is_hostile_towards(*local_id))
+                        })
+                    });
+                    if visible {
+                        let line = if self.display_flags.white_chat {
+                            format!("<c {color:x}>{{{name}}}</c> {message}")
+                        } else {
+                            format!("<c {color:x}>{{{name}}} {message}")
+                        };
+                        self.append_control_message_log(line, CONTROL_LOG_COLOR, None);
+                        outcome.displayed = true;
+                    }
+                    check_alert = true;
+                } else if self.control_message_has_lobby() {
+                    let local_client = self
+                        .network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                        .unwrap_or(0);
+                    if !self
+                        .control_player_infos
+                        .has_same_team_players(control.by_client, local_client)
+                    {
+                        return outcome;
+                    }
+                    let nick = self
+                        .control_clients
+                        .state(control.by_client)
+                        .map(|client| legacy_presentation_text(client.nick.as_bytes()))
+                        .unwrap_or_else(|| "???".to_string());
+                    let line = if self.white_lobby_chat {
+                        format!("{{{nick}}} <c ffffff>{message}")
+                    } else {
+                        format!("{{{nick}}} {message}")
+                    };
+                    self.append_control_message_log(
+                        line,
+                        0x00ff_ffff,
+                        Some(control.by_client),
+                    );
+                    outcome.displayed = true;
+                    check_alert = true;
+                } else {
+                    check_alert = true;
+                }
+            }
+            MESSAGE_TYPE_PRIVATE => {
+                let Some((_, _, name, color)) = sender.as_ref() else {
+                    return outcome;
+                };
+                let visible = self
+                    .engine
+                    .snapshot()
+                    .hud
+                    .local_players
+                    .contains(&control.to_player);
+                if visible {
+                    let line = if self.display_flags.white_chat {
+                        format!("<c {color:x}>[{name}]</c> {message}")
+                    } else {
+                        format!("<c {color:x}>[{name}] {message}")
+                    };
+                    self.append_control_message_log(line, CONTROL_LOG_COLOR, None);
+                    outcome.displayed = true;
+                }
+                check_alert = true;
+            }
+            MESSAGE_TYPE_SOUND => {
+                if self.control_clients.state(control.by_client).is_none()
+                    || !self.control_messages.try_allow_sound_at(now)
+                {
+                    return outcome;
+                }
+                let muted = self.control_messages.is_muted(control.by_client);
+                if !muted {
+                    outcome.sound_attempted = true;
+                    outcome.sound_played = play_sound(self, &message);
+                }
+                if muted || outcome.sound_played {
+                    if self.control_message_has_lobby() {
+                        self.note_control_message_sound(control.by_client, muted);
+                        outcome.lobby_sound = true;
+                    }
+                }
+            }
+            MESSAGE_TYPE_ALERT => {
+                outcome.attention_requested = self.request_control_message_attention();
+            }
+            MESSAGE_TYPE_SYSTEM => {
+                if control.by_client == 0 {
+                    self.append_control_message_log(
+                        format!("Network: {message}"),
+                        CONTROL_LOG_COLOR,
+                        None,
+                    );
+                    outcome.displayed = true;
+                }
+            }
+            _ => {}
+        }
+
+        if check_alert && self.control_message_mentions_local_nick(&control) {
+            outcome.attention_requested = self.request_control_message_attention();
+        }
+        outcome
+    }
+
     fn process_network_events(&mut self) -> Result<(), EngineError> {
         let events = self
             .network
@@ -19374,6 +20533,10 @@ impl GameApp {
                     continue;
                 }
                 if self.classic_host_lobby_active() {
+                    if let NetworkEvent::DirectControl(NetworkControl::Message(control)) = &event {
+                        self.execute_message_control(control.clone());
+                        continue;
+                    }
                     let boundary = match &event {
                         NetworkEvent::PeerConnected { client_id: 0, .. } => None,
                         NetworkEvent::JoinData(_) => Some("join data"),
@@ -19626,6 +20789,9 @@ impl GameApp {
                         }
                         NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
                         NetworkControl::Set(set) => self.execute_control_set(set),
+                        NetworkControl::Message(message) => {
+                            self.execute_message_control(message);
+                        }
                         control => {
                             tracing::warn!(?control, "ignoring unsupported direct control");
                         }
@@ -23481,6 +24647,7 @@ impl GameApp {
             ClassicHostLobbyState {
                 controller,
                 pointer: None,
+                chat_history_index: -1,
             },
             options,
         ))
@@ -24584,7 +25751,10 @@ impl GameApp {
                         ClassicStartupSubscreen::Options(sheet),
                     ));
                 }
-                OptionsDlgAction::ShowLogTimestampsChanged(_) => self.play_ui_sound("ArrowHit"),
+                OptionsDlgAction::ShowLogTimestampsChanged(enabled) => {
+                    self.show_log_timestamps = enabled;
+                    self.play_ui_sound("ArrowHit");
+                }
                 OptionsDlgAction::Sound(action) => match action {
                     SoundSheetAction::GuiSound(sound) | SoundSheetAction::TestSound(sound) => {
                         self.play_options_sound(sound);
@@ -24958,6 +26128,109 @@ impl GameApp {
         Ok(())
     }
 
+    fn handle_network_lobby_chat_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.startup_view != StartupView::NetworkLobby
+            || self.classic_host_lobby_active()
+            || self.network_lobby.is_none()
+        {
+            return Ok(false);
+        }
+        let modifiers = LobbyChatKeyModifiers {
+            shift: self.keyboard_modifiers.shift(),
+            control: self.keyboard_modifiers.ctrl(),
+        };
+        let clipboard = modifiers.control.then(|| match key {
+            VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
+            VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
+            VirtualKeyCode::V => Some(LobbyChatClipboardShortcut::Paste),
+            VirtualKeyCode::A => Some(LobbyChatClipboardShortcut::SelectAll),
+            _ => None,
+        });
+        let edit = match key {
+            VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
+            VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
+            VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
+            VirtualKeyCode::End => Some(LobbyChatEditKey::End),
+            VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
+            VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
+            _ => None,
+        };
+        let recognized = clipboard.flatten().is_some()
+            || edit.is_some()
+            || matches!(
+                key,
+                VirtualKeyCode::Return
+                    | VirtualKeyCode::NumpadEnter
+                    | VirtualKeyCode::Up
+                    | VirtualKeyCode::Down
+            );
+        if !recognized {
+            return Ok(false);
+        }
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        if let Some(shortcut) = clipboard.flatten() {
+            let Some(lobby) = self.network_lobby.as_mut() else {
+                return Ok(true);
+            };
+            match shortcut {
+                LobbyChatClipboardShortcut::Copy | LobbyChatClipboardShortcut::Cut => {
+                    if let Some(range) = lobby_chat_selection(&lobby.chat_edit) {
+                        let selected = lobby.chat_edit.text[range].to_string();
+                        let copied = arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.set_text(selected))
+                            .is_ok();
+                        if copied && shortcut == LobbyChatClipboardShortcut::Cut {
+                            lobby_chat_delete_selection(&mut lobby.chat_edit);
+                        }
+                    }
+                }
+                LobbyChatClipboardShortcut::Paste => {
+                    if let Ok(text) =
+                        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+                    {
+                        lobby_chat_insert_text(&mut lobby.chat_edit, &text);
+                    }
+                }
+                LobbyChatClipboardShortcut::SelectAll => {
+                    lobby.chat_edit.caret = lobby.chat_edit.text.len();
+                    lobby.chat_edit.selection = (!lobby.chat_edit.text.is_empty())
+                        .then_some((0, lobby.chat_edit.caret));
+                }
+            }
+            return Ok(true);
+        }
+        if let Some(edit) = edit {
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby_chat_apply_edit_key(&mut lobby.chat_edit, edit, modifiers);
+            }
+            return Ok(true);
+        }
+        match key {
+            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => {
+                let text = self
+                    .network_lobby
+                    .as_mut()
+                    .map(NetworkLobbyState::take_chat_submission)
+                    .unwrap_or_default();
+                self.process_lobby_action(LobbyAction::SubmitMessage(text))?;
+            }
+            VirtualKeyCode::Up | VirtualKeyCode::Down => {
+                let history = self.message_input_history.clone();
+                if let Some(lobby) = self.network_lobby.as_mut() {
+                    lobby.browse_chat_history(key == VirtualKeyCode::Up, &history);
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
@@ -25002,6 +26275,42 @@ impl GameApp {
                 }
             }
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
+            LobbyAction::SubmitMessage(text) => {
+                self.store_message_input_history(&text);
+                if self.process_control_message_local_command(&text) {
+                    return Ok(());
+                }
+                if is_team_message_syntax(&text) && self.engine.team_distribution() == 4 {
+                    self.append_control_message_log(
+                        "Can't send team message: Teams not known.".to_string(),
+                        CONTROL_LOG_COLOR,
+                        None,
+                    );
+                    return Ok(());
+                }
+                let control = match parse_lobby_message_control(&text) {
+                    Ok(control) => control,
+                    Err(error) => {
+                        tracing::warn!(%error, "classic lobby chat command is not implemented");
+                        self.append_control_message_log(
+                            "Unknown command.".to_string(),
+                            0x00ff_1f1f,
+                            None,
+                        );
+                        return Ok(());
+                    }
+                };
+                if let Some(control) = control {
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_message(control))
+                    {
+                        tracing::error!(%error, "failed to submit classic lobby message");
+                    }
+                }
+            }
+            LobbyAction::ChatEdited => {}
         }
         Ok(())
     }
@@ -25332,8 +26641,8 @@ impl GameApp {
                         ClassicGameLobbyChild::TeamSelection(player_id),
                     ));
                 }
-                ClassicLobbyAction::Chat(_request) => {
-                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Chat));
+                ClassicLobbyAction::Chat(request) => {
+                    self.process_classic_lobby_chat_request(request)?;
                 }
                 ClassicLobbyAction::CountdownChanged(_)
                 | ClassicLobbyAction::NotifyUserIfInactive
@@ -25345,6 +26654,169 @@ impl GameApp {
             }
         }
         self.play_classic_lobby_sounds();
+        Ok(())
+    }
+
+    fn process_classic_lobby_chat_request(
+        &mut self,
+        request: LobbyChatRequest,
+    ) -> Result<(), EngineError> {
+        let current_view = || {
+            self.classic_host_lobby
+                .as_ref()
+                .map(|lobby| lobby.controller.chat_edit_view().clone())
+                .unwrap_or_default()
+        };
+        let install_view = |app: &mut Self, view: LobbyChatEditView| {
+            if let Some(lobby) = app.classic_host_lobby.as_mut() {
+                lobby.controller.set_chat_edit_view(view);
+            }
+        };
+        match request {
+            LobbyChatRequest::FocusInput => {
+                let mut view = current_view();
+                view.caret = view.text.len();
+                view.selection = (!view.text.is_empty()).then_some((0, view.caret));
+                view.cursor_visible = true;
+                install_view(self, view);
+            }
+            LobbyChatRequest::InsertText(text) => {
+                let mut view = current_view();
+                lobby_chat_insert_text(&mut view, &text);
+                install_view(self, view);
+            }
+            LobbyChatRequest::RefocusAndInsert(text) => {
+                let mut view = current_view();
+                view.caret = view.text.len();
+                view.selection = (!view.text.is_empty()).then_some((0, view.caret));
+                lobby_chat_insert_text(&mut view, &text);
+                install_view(self, view);
+            }
+            LobbyChatRequest::EditKey { key, modifiers } => {
+                let mut view = current_view();
+                lobby_chat_apply_edit_key(&mut view, key, modifiers);
+                install_view(self, view);
+            }
+            LobbyChatRequest::Clipboard { shortcut } => {
+                let mut view = current_view();
+                match shortcut {
+                    LobbyChatClipboardShortcut::Copy | LobbyChatClipboardShortcut::Cut => {
+                        if let Some(range) = lobby_chat_selection(&view) {
+                            let selected = view.text[range].to_string();
+                            let copied = arboard::Clipboard::new()
+                                .and_then(|mut clipboard| clipboard.set_text(selected))
+                                .is_ok();
+                            if copied && shortcut == LobbyChatClipboardShortcut::Cut {
+                                lobby_chat_delete_selection(&mut view);
+                            }
+                        }
+                    }
+                    LobbyChatClipboardShortcut::Paste => {
+                        if let Ok(text) =
+                            arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+                        {
+                            lobby_chat_insert_text(&mut view, &text);
+                        }
+                    }
+                    LobbyChatClipboardShortcut::SelectAll => {
+                        view.caret = view.text.len();
+                        view.selection = (!view.text.is_empty()).then_some((0, view.caret));
+                    }
+                }
+                view.cursor_visible = true;
+                install_view(self, view);
+            }
+            LobbyChatRequest::ContextCommand(command) => {
+                let shortcut = match command {
+                    LobbyChatContextCommand::Cut => Some(LobbyChatClipboardShortcut::Cut),
+                    LobbyChatContextCommand::Copy => Some(LobbyChatClipboardShortcut::Copy),
+                    LobbyChatContextCommand::Paste => Some(LobbyChatClipboardShortcut::Paste),
+                    LobbyChatContextCommand::SelectAll => {
+                        Some(LobbyChatClipboardShortcut::SelectAll)
+                    }
+                    LobbyChatContextCommand::Clear => None,
+                };
+                if let Some(shortcut) = shortcut {
+                    return self.process_classic_lobby_chat_request(
+                        LobbyChatRequest::Clipboard { shortcut },
+                    );
+                }
+                let mut view = current_view();
+                lobby_chat_delete_selection(&mut view);
+                install_view(self, view);
+            }
+            LobbyChatRequest::Submit(text) => {
+                self.store_message_input_history(&text);
+                if let Some(lobby) = self.classic_host_lobby.as_mut() {
+                    lobby.chat_history_index = -1;
+                    lobby.controller.set_chat_draft("");
+                }
+                if self.process_control_message_local_command(&text) {
+                    return Ok(());
+                }
+                if is_team_message_syntax(&text) && self.engine.team_distribution() == 4 {
+                    self.append_control_message_log(
+                        "Can't send team message: Teams not known.".to_string(),
+                        CONTROL_LOG_COLOR,
+                        None,
+                    );
+                    return Ok(());
+                }
+                let control = parse_lobby_message_control(&text).map_err(|error| {
+                    tracing::warn!(%error, "classic lobby chat command is not implemented");
+                    classic_game_lobby_child_error(ClassicGameLobbyChild::Chat)
+                })?;
+                if let Some(control) = control {
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_message(control))
+                    {
+                        tracing::error!(%error, "failed to submit classic lobby message");
+                    }
+                }
+            }
+            LobbyChatRequest::History { older } => {
+                let Some(lobby) = self.classic_host_lobby.as_mut() else {
+                    return Ok(());
+                };
+                lobby.chat_history_index += if older { 1 } else { -1 };
+                let text = usize::try_from(lobby.chat_history_index)
+                    .ok()
+                    .and_then(|index| self.message_input_history.get(index))
+                    .cloned();
+                match text {
+                    Some(text) => {
+                        lobby.controller.set_chat_draft(text.clone());
+                        lobby.controller.set_chat_edit_view(LobbyChatEditView {
+                            caret: text.len(),
+                            selection: (!text.is_empty()).then_some((0, text.len())),
+                            text,
+                            cursor_visible: true,
+                            ..LobbyChatEditView::default()
+                        });
+                    }
+                    None => {
+                        lobby.chat_history_index = -1;
+                        lobby.controller.set_chat_draft("");
+                    }
+                }
+            }
+            LobbyChatRequest::PointerDown(_)
+            | LobbyChatRequest::PointerMove(_)
+            | LobbyChatRequest::PointerUp(_)
+            | LobbyChatRequest::PointerDoubleClick(_)
+            | LobbyChatRequest::PointerMiddleDown(_)
+            | LobbyChatRequest::TouchCancel
+            | LobbyChatRequest::OpenContextMenu { .. } => {
+                // The controller already owns focus/capture. Text mutation is
+                // handled by keyboard/clipboard actions above; retaining the
+                // request is safe until the recursive context menu is wired.
+            }
+            LobbyChatRequest::OpenExternalDialog => {
+                return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Chat));
+            }
+        }
         Ok(())
     }
 
@@ -26005,6 +27477,8 @@ impl GameApp {
 
     fn show_main_menu(&mut self) {
         self.active_global_gui_overrides.clear();
+        self.running_chat = None;
+        self.message_input_history.clear();
         self.close_context_menu_silently();
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
@@ -26025,6 +27499,7 @@ impl GameApp {
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
         if self.startup_view == StartupView::NetworkLobby {
+            self.control_messages.clear_clients();
             self.network_lobby = None;
             self.classic_host_lobby = None;
             self.staged_network_host_scenario = None;
@@ -26106,6 +27581,10 @@ impl GameApp {
         } else {
             false
         }
+    }
+
+    fn take_user_attention_request(&mut self) -> bool {
+        self.control_messages.take_user_attention_request()
     }
 
     fn remove_runtime_players_at_client(&mut self, client_id: i32, disconnected: bool) {
@@ -26245,6 +27724,7 @@ impl GameApp {
         }
         self.network = None;
         self.network_mode = None;
+        self.control_messages.clear_clients();
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
@@ -26833,6 +28313,10 @@ impl GameApp {
                     .engine
                     .execute_message_board_answer_control(&data)
                     .map(|_| ()),
+                NetworkControl::Message(message) => {
+                    self.execute_message_control(message);
+                    Ok(())
+                }
                 NetworkControl::CustomCommand(data) => {
                     let game_running = matches!(self.mode, AppMode::Running);
                     self.engine
@@ -26909,6 +28393,7 @@ impl GameApp {
                             self.remove_runtime_players_at_client(remove.client_id, true);
                         }
                         if self.control_clients.apply_remove(&remove) {
+                            self.control_messages.remove_client(remove.client_id);
                             self.control_player_infos.on_client_part(remove.client_id);
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
@@ -27440,6 +28925,7 @@ impl GameApp {
         self.poll_startup_game_search();
         self.poll_startup_network_connection();
         self.process_network_events()?;
+        self.expire_message_board_line();
         if !matches!(self.mode, AppMode::Menu) {
             // Whatever happens while loading or in-game (game over, return
             // to menu) must not replay a stale pre-game menu frame; dropping
@@ -30433,10 +31919,54 @@ impl GameApp {
     /// The message board's current log line, dropped once its C++ fade
     /// window has passed (src/C4MessageBoard.cpp:163-212).
     fn message_board_line(&self) -> Option<String> {
-        self.board_line
+        if let Some(chat) = self.running_chat.as_ref() {
+            return Some(format!("Chat: {}¦", chat.edit.text));
+        }
+        if self.board_back_scroll < 0 {
+            return None;
+        }
+        let offset = usize::try_from(self.board_back_scroll).ok()?;
+        self.board_log_history
+            .len()
+            .checked_sub(offset.saturating_add(1))
+            .and_then(|index| self.board_log_history.get(index))
+            .cloned()
+    }
+
+    fn expire_message_board_line(&mut self) {
+        let frame = self.engine.frame();
+        if self
+            .board_line
             .as_ref()
-            .filter(|(_, expires)| self.snapshot.frame < *expires)
-            .map(|(line, _)| line.clone())
+            .is_some_and(|(_, expires)| frame >= *expires)
+        {
+            self.board_line = None;
+            self.board_back_scroll = -1;
+        }
+    }
+
+    fn enqueue_control_message_board_line(&mut self, line: String) {
+        self.board_log_history.push_back(line.clone());
+        while self.board_log_history.len() > 1000
+            || self
+                .board_log_history
+                .iter()
+                .map(|line| line.len().saturating_add(1))
+                .sum::<usize>()
+                > 30_000
+        {
+            self.board_log_history.pop_front();
+        }
+        self.board_back_scroll = 0;
+        self.board_line = Some(control_message_board_line(self.engine.frame(), line));
+    }
+
+    fn scroll_message_board(&mut self, older: bool) {
+        if older {
+            self.board_back_scroll = self.board_back_scroll.saturating_add(1);
+        } else if self.board_back_scroll > -1 {
+            self.board_back_scroll -= 1;
+        }
     }
 
     fn draw_classic_game_messages(
@@ -32932,13 +34462,21 @@ impl GameApp {
         // (C4PlayerList.cpp:281, LanguageUS.txt:1222); one-line message
         // board timing = fade-in + strlen delay + fade-out at line height
         // 15 / Speed 1 (C4MessageBoard.cpp:163-212).
-        self.board_line = self
+        self.running_chat = None;
+        self.board_log_history.clear();
+        self.board_line = None;
+        self.board_back_scroll = -1;
+        let join_line = self
             .engine
             .snapshot()
             .players
             .iter()
             .find(|state| state.id == self.local_owner)
-            .map(|state| player_join_board_line(self.engine.frame(), &state.name));
+            .map(|state| player_join_board_line(self.engine.frame(), &state.name).0);
+        if let Some(line) = join_line {
+            let line = self.timestamp_log_line(line);
+            self.enqueue_control_message_board_line(line);
+        }
     }
 
     fn apply_focus_selection(&mut self) {
@@ -45889,6 +47427,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 })],
             ),
             pointer: None,
+            chat_history_index: -1,
         });
         app.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::LobbyHost, GameOptionValues::default());
@@ -46356,10 +47895,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 "TeamSelection",
             ),
             (
-                ClassicLobbyAction::Chat(lc_frontend::game_lobby::LobbyChatRequest::FocusInput),
-                "Chat",
-            ),
-            (
                 ClassicLobbyAction::GameOptions(LobbyGameOptionInput::Hotkey('P')),
                 "Password/Comment dialog",
             ),
@@ -46381,6 +47916,110 @@ public func Grant(password) { return GainMissionAccess(password); }
             LobbySheet::Players,
         )])
         .expect("already-visible Players sheet is a safe no-op");
+    }
+
+    #[test]
+    fn classic_lobby_chat_edits_parses_and_submits_private_delivery_controls() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+            LobbyChatRequest::InsertText("/me hello".to_string()),
+        )])
+        .expect("edit lobby chat");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby remains")
+                .controller
+                .chat_edit_view()
+                .text,
+            "/me hello"
+        );
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+            LobbyChatRequest::Submit("/me hello".to_string()),
+        )])
+        .expect("submit lobby chat");
+
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_ME,
+                player: -1,
+                to_player: -1,
+                message: lc_engine::LegacyCString::from_bytes(b"hello".to_vec())
+                    .expect("fixture is NUL-free"),
+                by_client: 0,
+            }]
+        );
+        assert!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby remains")
+                .controller
+                .chat_edit_view()
+                .text
+                .is_empty()
+        );
+
+        assert!(app.engine.set_team_distribution(4));
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+            LobbyChatRequest::Submit("^surprise".to_string()),
+        )])
+        .expect("hidden random teams reject team chat without closing the lobby");
+        assert!(commands.take_submitted_messages().is_empty());
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby remains")
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Can't send team message: Teams not known.")
+        );
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+            LobbyChatRequest::Submit("^".to_string()),
+        )])
+        .expect("empty hidden-team syntax rejects before payload trimming");
+        assert!(commands.take_submitted_messages().is_empty());
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby remains")
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Can't send team message: Teams not known.")
+        );
+
+        let alert = parse_lobby_message_control(" /alert ")
+            .expect("parse")
+            .expect("ordinary leading space keeps this a normal message");
+        assert_eq!(alert.message_type, MESSAGE_TYPE_NORMAL);
+        let alert = parse_lobby_message_control("/alert")
+            .expect("parse alert")
+            .expect("empty alert is still submitted");
+        assert_eq!(alert.message_type, MESSAGE_TYPE_ALERT);
+        assert!(alert.message.is_empty());
+
+        app.control_clients
+            .replace_snapshot([message_client(7, b"Remote")]);
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+            LobbyChatRequest::Submit("/mute Remote".to_string()),
+        )])
+        .expect("mute is a local classic message command");
+        assert!(app.control_messages.is_muted(7));
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+            LobbyChatRequest::Submit("/unmute Remote".to_string()),
+        )])
+        .expect("unmute is a local classic message command");
+        assert!(!app.control_messages.is_muted(7));
+        assert!(commands.take_submitted_messages().is_empty());
     }
 
     #[test]
@@ -46484,7 +48123,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn classic_host_lobby_chat_keyboard_routes_are_typed_fail_fast() {
+    fn classic_host_lobby_chat_keyboard_routes_edit_locally() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated lobby key user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -46500,17 +48139,22 @@ public func Grant(password) { return GainMissionAccess(password); }
         ] {
             app.handle_modifiers_changed(modifiers)
                 .expect("set keyboard modifiers");
-            let error = app
-                .handle_key(key, ElementState::Pressed)
-                .expect_err("unsupported chat child must propagate from real key input");
-            assert!(error.to_string().contains("Chat"), "unexpected {error}");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("classic chat keyboard action is handled");
         }
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("set keyboard modifiers");
-        let error = app
-            .handle_text_input('x')
-            .expect_err("unsupported chat insertion must propagate from text input");
-        assert!(error.to_string().contains("Chat"), "unexpected {error}");
+        app.handle_text_input('x')
+            .expect("classic chat text input is handled");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .chat_edit_view()
+                .text,
+            "x"
+        );
 
         for _ in 0..10 {
             if app
@@ -46537,6 +48181,77 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(
             error.to_string().contains("RosterContext"),
             "unexpected {error}"
+        );
+    }
+
+    #[test]
+    fn generic_client_lobby_chat_submits_private_delivery_message_controls() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+
+        for character in "hello".chars() {
+            app.handle_text_input(character).expect("type client chat");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit client chat");
+
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_NORMAL,
+                player: -1,
+                to_player: -1,
+                message: lc_engine::LegacyCString::from_bytes(b"hello".to_vec())
+                    .expect("fixture is NUL-free"),
+                by_client: 7,
+            }]
+        );
+        assert!(app
+            .network_lobby
+            .as_ref()
+            .expect("client lobby remains")
+            .chat_edit
+            .text
+            .is_empty());
+
+        for character in "ab".chars() {
+            app.handle_text_input(character).expect("type editable client chat");
+        }
+        app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+            .expect("client chat backspace");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("client lobby remains")
+                .chat_edit
+                .text,
+            "a"
+        );
+        app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("shared lobby history");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("client lobby remains")
+                .chat_edit
+                .text,
+            "hello"
+        );
+        app.mode = AppMode::Running;
+        app.start_running_chat(RunningChatMode::All);
+        app.browse_running_chat_history(true);
+        assert_eq!(
+            app.running_chat
+                .as_ref()
+                .expect("running chat opens")
+                .edit
+                .text,
+            "hello",
+            "C4MessageInput history survives the lobby-to-game transition"
         );
     }
 
@@ -53028,6 +54743,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 music_enabled: true,
                 menu_music_enabled: false,
                 menu_sound_enabled: true,
+                mute_sound_command: false,
                 sound_volume: 0.27,
                 music_volume: 0.83,
             },
@@ -55205,6 +56921,449 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    fn message_control(
+        message_type: u8,
+        player: i32,
+        to_player: i32,
+        message: &[u8],
+        by_client: i32,
+    ) -> MessageControlData {
+        MessageControlData {
+            message_type,
+            player,
+            to_player,
+            message: lc_engine::LegacyCString::from_bytes(message.to_vec())
+                .expect("message fixture is NUL-free"),
+            by_client,
+        }
+    }
+
+    fn message_client(client_id: i32, nick: &[u8]) -> lc_engine::ClientCoreControlData {
+        lc_engine::ClientCoreControlData {
+            client_id,
+            activated: true,
+            observer: false,
+            name: lc_engine::LegacyCString::from_bytes(nick.to_vec())
+                .expect("client name fixture is NUL-free"),
+            nick: lc_engine::LegacyCString::from_bytes(nick.to_vec())
+                .expect("client nick fixture is NUL-free"),
+            lobby_ready: false,
+        }
+    }
+
+    fn install_message_fixture(app: &mut GameApp) {
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Ali"),
+            message_client(7, b"Remote"),
+            message_client(8, b"Other"),
+        ]);
+        app.engine
+            .register_player(
+                PlayerConfig::new(7, "Sender").with_color(Some(RgbColor::new(0x12, 0x34, 0x56))),
+            )
+            .expect("message sender registers");
+        app.engine
+            .player_mut(7)
+            .expect("message sender exists")
+            .set_at_client(lc_engine::PlayerAtClient::new(7));
+        app.engine.set_local_players([app.local_owner]);
+        app.board_line = None;
+        app.board_log_history.clear();
+        app.board_back_scroll = -1;
+    }
+
+    #[test]
+    fn lobby_message_keeps_markup_timestamp_and_first_player_chat_color() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        app.white_lobby_chat = true;
+        app.show_log_timestamps = false;
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Local"),
+            message_client(7, b"Remote"),
+        ]);
+        app.control_player_infos.apply(lc_engine::PlayerInfoControlData {
+            client_id: 7,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                player_type: lc_engine::PLAYER_INFO_TYPE_USER,
+                team: 4,
+                color: 0x0012_3456,
+                original_color: 0x0065_4321,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert!(
+            app.execute_message_control(message_control(
+                MESSAGE_TYPE_NORMAL,
+                -1,
+                -1,
+                b"hello",
+                7,
+            ))
+            .displayed
+        );
+        let line = &app
+            .classic_host_lobby
+            .as_ref()
+            .expect("lobby remains")
+            .controller
+            .logs()[0];
+        assert_eq!(line.text, "<Remote> <c ffffff>hello");
+        assert_eq!(line.color, [0x12, 0x34, 0x56, 0xff]);
+
+        assert!(app.engine.set_team_distribution(4));
+        app.engine.set_team_colors(true);
+        app.execute_message_control(message_control(
+            MESSAGE_TYPE_NORMAL,
+            -1,
+            -1,
+            b"hidden team color",
+            7,
+        ));
+        let line = &app
+            .classic_host_lobby
+            .as_ref()
+            .expect("lobby remains")
+            .controller
+            .logs()[1];
+        assert_eq!(line.color, [0x12, 0x34, 0x56, 0xff]);
+
+        app.engine
+            .set_teams(vec![lc_engine::TeamInfo::new(4, "Existing", 0x00f4_0000)]);
+        app.execute_message_control(message_control(
+            MESSAGE_TYPE_NORMAL,
+            -1,
+            -1,
+            b"existing hidden team color",
+            7,
+        ));
+        let line = &app
+            .classic_host_lobby
+            .as_ref()
+            .expect("lobby remains")
+            .controller
+            .logs()[2];
+        assert_eq!(line.color, [0x65, 0x43, 0x21, 0xff]);
+
+        app.show_log_timestamps = true;
+        app.execute_message_control(message_control(
+            MESSAGE_TYPE_SYSTEM,
+            -1,
+            -1,
+            b"notice",
+            0,
+        ));
+        let line = &app
+            .classic_host_lobby
+            .as_ref()
+            .expect("lobby remains")
+            .controller
+            .logs()[3];
+        assert!(line.text.starts_with("<c 909090>["));
+        assert!(line.text.ends_with("</c> Network: notice"));
+        assert_eq!(line.color, [0xaf, 0xaf, 0xaf, 0xff]);
+    }
+
+    #[test]
+    fn message_control_authenticates_players_and_applies_running_visibility() {
+        let mut app = new_running_sandbox_app();
+        install_message_fixture(&mut app);
+
+        let spoofed =
+            app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"spoofed", 8));
+        assert!(spoofed.rejected);
+        assert!(app.board_line.is_none());
+
+        let normal =
+            app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"hello", 7));
+        assert!(normal.displayed);
+        assert_eq!(
+            app.board_line.as_ref().map(|line| line.0.as_str()),
+            Some("<c 123456><Sender> hello")
+        );
+
+        let queued = app.execute_message_control(message_control(
+            MESSAGE_TYPE_NORMAL,
+            7,
+            -1,
+            b"second",
+            7,
+        ));
+        assert!(queued.displayed);
+        assert_eq!(
+            app.board_line.as_ref().map(|line| line.0.as_str()),
+            Some("<c 123456><Sender> second")
+        );
+        assert_eq!(
+            app.board_log_history
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "<c 123456><Sender> hello",
+                "<c 123456><Sender> second"
+            ]
+        );
+        app.scroll_message_board(true);
+        assert_eq!(
+            app.message_board_line().as_deref(),
+            Some("<c 123456><Sender> hello")
+        );
+        app.scroll_message_board(false);
+        assert_eq!(
+            app.message_board_line().as_deref(),
+            Some("<c 123456><Sender> second")
+        );
+        app.board_line.as_mut().expect("active line").1 = app.engine.frame();
+        app.expire_message_board_line();
+        assert!(app.board_line.is_none());
+
+        app.board_line = None;
+        app.board_log_history.clear();
+        let missing_player = app.execute_message_control(message_control(
+            MESSAGE_TYPE_NORMAL,
+            999,
+            -1,
+            b"client message",
+            7,
+        ));
+        assert!(missing_player.displayed);
+        assert_eq!(
+            app.board_line.as_ref().map(|line| line.0.as_str()),
+            Some("<Remote> client message")
+        );
+
+        app.board_line = None;
+        app.engine
+            .set_hostility(7, app.local_owner, true)
+            .expect("sender hostility sets");
+        let hostile_team =
+            app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"hidden", 7));
+        assert!(!hostile_team.displayed);
+        assert!(app.board_line.is_none());
+        app.engine
+            .set_hostility(7, app.local_owner, false)
+            .expect("sender hostility clears");
+        assert!(
+            app.execute_message_control(message_control(MESSAGE_TYPE_TEAM, 7, -1, b"allied", 7,))
+                .displayed
+        );
+
+        app.board_line = None;
+        assert!(
+            app.execute_message_control(message_control(
+                MESSAGE_TYPE_PRIVATE,
+                7,
+                app.local_owner,
+                b"local",
+                7,
+            ))
+            .displayed
+        );
+        app.board_line = None;
+        assert!(
+            !app.execute_message_control(message_control(
+                MESSAGE_TYPE_PRIVATE,
+                7,
+                99,
+                b"hidden",
+                7,
+            ))
+            .displayed
+        );
+        assert!(app.board_line.is_none());
+    }
+
+    #[test]
+    fn running_chat_classifies_private_and_say_and_submits_normal_controls() {
+        let mut app = new_running_sandbox_app();
+        install_message_fixture(&mut app);
+        app.snapshot = app.engine.snapshot();
+
+        let private = parse_running_message_control(
+            "/private Sender secret",
+            app.local_owner,
+            false,
+            &app.snapshot,
+        )
+        .expect("parse private")
+        .expect("private message");
+        assert_eq!(private.message_type, MESSAGE_TYPE_PRIVATE);
+        assert_eq!(private.to_player, 7);
+        assert_eq!(private.message.as_bytes(), b"secret");
+
+        let say = parse_running_message_control(
+            "\"hello",
+            app.local_owner,
+            false,
+            &app.snapshot,
+        )
+        .expect("parse say")
+        .expect("say message");
+        assert_eq!(say.message_type, MESSAGE_TYPE_SAY);
+        assert_eq!(say.message.as_bytes(), b"\"hello\"");
+
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("open running chat");
+        for character in "hello".chars() {
+            app.handle_text_input(character).expect("type running chat");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit running chat");
+        assert!(app.running_chat.is_none());
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_NORMAL,
+                player: app.local_owner,
+                to_player: -1,
+                message: lc_engine::LegacyCString::from_bytes(b"hello".to_vec())
+                    .expect("fixture is NUL-free"),
+                by_client: 0,
+            }]
+        );
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("reopen running chat");
+        for character in "Sen".chars() {
+            app.handle_text_input(character).expect("type nick prefix");
+        }
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("complete nick before scoreboard routing");
+        assert_eq!(
+            app.running_chat
+                .as_ref()
+                .expect("chat remains open")
+                .edit
+                .text,
+            "Sender"
+        );
+        let sound_enabled = app
+            .audio
+            .as_ref()
+            .expect("sandbox audio context")
+            .options
+            .sound_enabled;
+        app.keyboard_modifiers = ModifiersState::CTRL;
+        app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("control-modified chat key forwards to player controls");
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .expect("sandbox audio context")
+                .options
+                .sound_enabled,
+            sound_enabled
+        );
+        app.keyboard_modifiers = ModifiersState::empty();
+    }
+
+    #[test]
+    fn message_control_sound_uses_global_cooldown_before_per_client_mute() {
+        let mut app = new_running_sandbox_app();
+        install_message_fixture(&mut app);
+        app.control_messages = ControlMessageState::new(Duration::from_secs(5), false);
+        let start = Instant::now();
+        let mut attempts = 0;
+
+        let first = app.execute_message_control_with_sound_at(
+            message_control(MESSAGE_TYPE_SOUND, -1, -1, b"Ping", 7),
+            start,
+            |_, name| {
+                attempts += 1;
+                assert_eq!(name, "Ping");
+                true
+            },
+        );
+        assert!(first.sound_attempted && first.sound_played);
+
+        let other_sender = app.execute_message_control_with_sound_at(
+            message_control(MESSAGE_TYPE_SOUND, -1, -1, b"Ping", 8),
+            start + Duration::from_secs(4),
+            |_, _| {
+                attempts += 1;
+                true
+            },
+        );
+        assert!(!other_sender.sound_attempted);
+
+        app.control_messages.set_muted(8, true);
+        let muted = app.execute_message_control_with_sound_at(
+            message_control(MESSAGE_TYPE_SOUND, -1, -1, b"Ping", 8),
+            start + Duration::from_secs(5),
+            |_, _| {
+                attempts += 1;
+                true
+            },
+        );
+        assert!(!muted.sound_attempted);
+        app.control_messages.set_muted(8, false);
+        let consumed = app.execute_message_control_with_sound_at(
+            message_control(MESSAGE_TYPE_SOUND, -1, -1, b"Ping", 7),
+            start + Duration::from_secs(6),
+            |_, _| {
+                attempts += 1;
+                true
+            },
+        );
+        assert!(!consumed.sound_attempted);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn message_control_host_system_and_inactive_attention_match_cpp() {
+        let mut app = new_running_sandbox_app();
+        install_message_fixture(&mut app);
+        app.window_active = false;
+
+        assert!(
+            !app.execute_message_control(message_control(
+                MESSAGE_TYPE_SYSTEM,
+                -1,
+                -1,
+                b"forged",
+                7,
+            ))
+            .displayed
+        );
+        assert!(
+            app.execute_message_control(message_control(
+                MESSAGE_TYPE_SYSTEM,
+                -1,
+                -1,
+                b"host notice",
+                0,
+            ))
+            .displayed
+        );
+        assert!(!app.take_user_attention_request());
+
+        let alert =
+            app.execute_message_control(message_control(MESSAGE_TYPE_ALERT, -1, -1, b"", 7));
+        assert!(alert.attention_requested);
+        assert!(app.take_user_attention_request());
+
+        let mention =
+            app.execute_message_control(message_control(MESSAGE_TYPE_NORMAL, 7, -1, b"hi aLi!", 7));
+        assert!(mention.attention_requested);
+        assert!(app.take_user_attention_request());
+
+        let rejected_first_match = app.execute_message_control(message_control(
+            MESSAGE_TYPE_NORMAL,
+            7,
+            -1,
+            b"Malice, Ali!",
+            7,
+        ));
+        assert!(!rejected_first_match.attention_requested);
+        assert!(!app.take_user_attention_request());
     }
 
     #[test]

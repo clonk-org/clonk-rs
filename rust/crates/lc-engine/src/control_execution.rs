@@ -1184,6 +1184,67 @@ impl ControlPlayerInfoRegistry {
             .any(|client| client.client_id == client_id)
     }
 
+    /// `C4PlayerInfoList::HasSameTeamPlayers`: compare every non-removed
+    /// player row for two clients and accept the first equal team ID.
+    pub fn has_same_team_players(&self, first_client: i32, second_client: i32) -> bool {
+        let Some(first) = self
+            .clients
+            .iter()
+            .find(|client| client.client_id == first_client)
+        else {
+            return false;
+        };
+        let Some(second) = self
+            .clients
+            .iter()
+            .find(|client| client.client_id == second_client)
+        else {
+            return false;
+        };
+        first.players.iter().any(|first_player| {
+            first_player.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                && second.players.iter().any(|second_player| {
+                    second_player.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                        && second_player.team == first_player.team
+                })
+        })
+    }
+
+    /// Color used by `C4Network2Players::GetClientChatColor`: the first user
+    /// player row owned by an activated client (the activation check remains
+    /// app-owned alongside the client registry).
+    pub fn first_user_color(&self, client_id: i32) -> Option<u32> {
+        self.first_user_lobby_color(client_id, false, |_| false)
+    }
+
+    /// `C4PlayerInfo::GetLobbyColor` hides an unjoined player's assigned team
+    /// color while RandomInvisible surprise teams are active, but only when
+    /// that assigned team still exists in `C4TeamList`.
+    pub fn first_user_lobby_color(
+        &self,
+        client_id: i32,
+        random_invisible_team_colors: bool,
+        team_exists: impl FnOnce(i32) -> bool,
+    ) -> Option<u32> {
+        self.clients
+            .iter()
+            .find(|client| client.client_id == client_id)?
+            .players
+            .iter()
+            .find(|player| player.player_type == PLAYER_INFO_TYPE_USER)
+            .map(|player| {
+                if random_invisible_team_colors
+                    && team_exists(player.team)
+                    && player.flags & PLAYER_INFO_FLAG_JOINED == 0
+                    && player.savegame_player == 0
+                {
+                    player.original_color
+                } else {
+                    player.color
+                }
+            })
+    }
+
     /// Clone the complete live PlayerInfo packets for a
     /// game-parameter/reference snapshot, including packet flags, rows, and
     /// the allocation high-water mark.
@@ -2609,6 +2670,61 @@ mod tests {
 
         assert_eq!(teams.teams[0].player_ids, vec![5, 2, 5, 3]);
         assert_eq!(teams.teams[1].player_ids, vec![6, 1]);
+    }
+
+    #[test]
+    fn lobby_same_team_check_uses_non_removed_player_info_rows() {
+        let info = |id, team, flags| ControlPlayerInfoEntry {
+            id,
+            team,
+            flags,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 7,
+            players: vec![info(1, 0, PLAYER_INFO_FLAG_REMOVED), info(2, 3, 0)],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 9,
+            players: vec![info(3, 0, 0), info(4, 3, 0)],
+            ..Default::default()
+        });
+
+        assert!(registry.has_same_team_players(7, 9));
+        assert!(!registry.has_same_team_players(7, 8));
+
+        registry.apply(PlayerInfoControlData {
+            client_id: 9,
+            players: vec![info(4, 3, PLAYER_INFO_FLAG_REMOVED)],
+            ..Default::default()
+        });
+        assert!(!registry.has_same_team_players(7, 9));
+    }
+
+    #[test]
+    fn random_invisible_lobby_color_requires_the_assigned_team_to_exist() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 7,
+            players: vec![ControlPlayerInfoEntry {
+                team: 4,
+                color: 0x0012_3456,
+                original_color: 0x0065_4321,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            registry.first_user_lobby_color(7, true, |team| team == 5),
+            Some(0x0012_3456)
+        );
+        assert_eq!(
+            registry.first_user_lobby_color(7, true, |team| team == 4),
+            Some(0x0065_4321)
+        );
     }
 
     #[test]

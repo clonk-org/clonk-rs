@@ -53,6 +53,9 @@ pub enum ControlPacket {
     PlayerControl(PlayerControlData),
     /// Mouse/object command (`CID_PlrCommand`, C4Control.cpp:405-439).
     PlayerCommand(PlayerCommandControlData),
+    /// Non-synchronized chat, sound, alert, or system message
+    /// (`CID_Message`, C4Control.cpp:1071-1260).
+    Message(MessageControlData),
     /// Synchronized editor object manipulation (`CID_EMMoveObj`,
     /// C4Control.cpp:865-992).
     EmMoveObject(EmMoveObjectControlData),
@@ -105,6 +108,20 @@ pub enum ControlPacket {
 
 pub const CLIENT_UPDATE_ACTIVATE: u8 = 0;
 pub const CLIENT_UPDATE_SET_OBSERVER: u8 = 1;
+
+/// Raw `C4ControlMessageType` values serialized by `C4ControlMessage`.
+///
+/// The C++ compiler casts the enum through `uint8_t` without validation, so
+/// message types remain raw bytes and unknown values survive codec and replay
+/// round trips (`src/C4Control.cpp:1252-1259`).
+pub const MESSAGE_TYPE_NORMAL: u8 = 0;
+pub const MESSAGE_TYPE_ME: u8 = 1;
+pub const MESSAGE_TYPE_SAY: u8 = 2;
+pub const MESSAGE_TYPE_TEAM: u8 = 3;
+pub const MESSAGE_TYPE_PRIVATE: u8 = 4;
+pub const MESSAGE_TYPE_SOUND: u8 = 5;
+pub const MESSAGE_TYPE_ALERT: u8 = 6;
+pub const MESSAGE_TYPE_SYSTEM: u8 = 10;
 
 /// Raw `C4ControlVoteType` values serialized by `C4ControlVote`.
 ///
@@ -357,6 +374,32 @@ pub struct PlayerCommandControlData {
     pub data: i32,
     pub add_mode: i32,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlMessage` (`CID_Message`).
+///
+/// `ToPlayer` is present on the C++ wire only for raw message type
+/// [`MESSAGE_TYPE_PRIVATE`]. Message bytes remain NUL-free legacy bytes so
+/// controls round-trip without requiring UTF-8 (`src/C4Control.cpp:1252-1259`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageControlData {
+    pub message_type: u8,
+    pub player: i32,
+    pub to_player: i32,
+    pub message: LegacyCString,
+    pub by_client: i32,
+}
+
+impl Default for MessageControlData {
+    fn default() -> Self {
+        Self {
+            message_type: MESSAGE_TYPE_NORMAL,
+            player: -1,
+            to_player: -1,
+            message: LegacyCString::default(),
+            by_client: -1,
+        }
+    }
 }
 
 /// Raw `C4ControlEMObjectAction` values serialized by
@@ -1203,6 +1246,7 @@ impl RawPacket {
         const CID_PLR_SELECT: u8 = 0xA0;
         const CID_PLR_CONTROL: u8 = 0xA1;
         const CID_PLR_COMMAND: u8 = 0xA2;
+        const CID_MESSAGE: u8 = 0xA3;
         const CID_EM_MOVE_OBJECT: u8 = 0xB0;
         const CID_EM_DRAW_TOOL: u8 = 0xB1;
         const CID_EM_DROP_DEF: u8 = 0xB2;
@@ -1890,6 +1934,57 @@ impl RawPacket {
                     by_client,
                 },
             )));
+        }
+
+        if id == CID_MESSAGE {
+            // C4ControlMessage::CompileFunc writes a raw uint8 Type, packed
+            // Player, a type-conditional packed ToPlayer, Message, then the
+            // inherited packed ByClient. Unknown raw types are accepted by
+            // C++ and, like every non-private type, omit ToPlayer.
+            let message_type = match self.fields.get("Type") {
+                None => MESSAGE_TYPE_NORMAL,
+                Some(raw) => {
+                    let parsed = raw
+                        .strip_prefix("0x")
+                        .or_else(|| raw.strip_prefix("0X"))
+                        .map_or_else(|| raw.parse::<i128>(), |hex| {
+                            u128::from_str_radix(hex, 16)
+                                .map(|value| value.min(i128::MAX as u128) as i128)
+                        });
+                    parsed
+                        .map(|value| {
+                            if value < 0 {
+                                u8::MAX
+                            } else {
+                                value.min(i128::from(u8::MAX)) as u8
+                            }
+                        })
+                        .map_err(|_| ControlParseError::InvalidIntegerField {
+                            field: "Type".to_string(),
+                            value: raw.clone(),
+                        })?
+                }
+            };
+            let player = parse_int_field_or(&self.fields, "Player", -1)?;
+            let to_player = if message_type == MESSAGE_TYPE_PRIVATE {
+                parse_int_field_or(&self.fields, "ToPlayer", -1)?
+            } else {
+                -1
+            };
+            let message = self.fields.get("Message").cloned().unwrap_or_default();
+            let message = LegacyCString::from_bytes(legacy_string_bytes(&message)).ok_or(
+                ControlParseError::InteriorNulString {
+                    field: "Message".to_string(),
+                },
+            )?;
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
+            return Ok(Some(ControlPacket::Message(MessageControlData {
+                message_type,
+                player,
+                to_player,
+                message,
+                by_client,
+            })));
         }
 
         Ok(Some(ControlPacket::Unknown {
@@ -3213,6 +3308,109 @@ ID=\"HUT2\"\n";
                 add_mode: 5,
                 by_client: 7,
             })]
+        );
+    }
+
+    #[test]
+    fn message_model_uses_cpp_raw_types_and_safe_defaults() {
+        assert_eq!(
+            [
+                MESSAGE_TYPE_NORMAL,
+                MESSAGE_TYPE_ME,
+                MESSAGE_TYPE_SAY,
+                MESSAGE_TYPE_TEAM,
+                MESSAGE_TYPE_PRIVATE,
+                MESSAGE_TYPE_SOUND,
+                MESSAGE_TYPE_ALERT,
+                MESSAGE_TYPE_SYSTEM,
+            ],
+            [0, 1, 2, 3, 4, 5, 6, 10]
+        );
+        assert_eq!(
+            MessageControlData::default(),
+            MessageControlData {
+                message_type: MESSAGE_TYPE_NORMAL,
+                player: -1,
+                to_player: -1,
+                message: LegacyCString::default(),
+                by_client: -1,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_message_private_unknown_and_conditional_defaults() {
+        // C4ControlMessage::CompileFunc includes ToPlayer only for raw type 4.
+        // A non-private field is deliberately malformed: C++ never consumes
+        // it, so it must not affect alignment or the safe -1 Rust default.
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=163\n\
+    [Message]\n\
+      Type=0x04\n\
+      Player=3\n\
+      ToPlayer=9\n\
+      Message=\"\\200\\377private\"\n\
+      ByClient=2\n\
+  [IDPacket]\n\
+    ID=163\n\
+    [Message]\n\
+      ToPlayer=not-consumed\n\
+  [IDPacket]\n\
+    ID=163\n\
+    [Message]\n\
+      Type=9\n\
+      Player=7\n\
+      ToPlayer=also-not-consumed\n\
+      Message=unknown\n\
+      ByClient=8\n\
+  [IDPacket]\n\
+    ID=163\n\
+    [Message]\n\
+      Type=999\n\
+      Message=clamped\n\
+  [IDPacket]\n\
+    ID=163\n\
+    [Message]\n\
+      Type=-1\n\
+      Message=negative-clamped\n";
+
+        assert_eq!(
+            parse_control_ini(input).expect("parse message controls"),
+            vec![
+                ControlPacket::Message(MessageControlData {
+                    message_type: MESSAGE_TYPE_PRIVATE,
+                    player: 3,
+                    to_player: 9,
+                    message: LegacyCString::from_bytes(
+                        [0x80, 0xff].into_iter().chain(*b"private").collect(),
+                    )
+                    .expect("fixture is NUL-free"),
+                    by_client: 2,
+                }),
+                ControlPacket::Message(MessageControlData::default()),
+                ControlPacket::Message(MessageControlData {
+                    message_type: 9,
+                    player: 7,
+                    to_player: -1,
+                    message: LegacyCString::from_bytes(b"unknown".to_vec())
+                        .expect("fixture is NUL-free"),
+                    by_client: 8,
+                }),
+                ControlPacket::Message(MessageControlData {
+                    message_type: u8::MAX,
+                    message: LegacyCString::from_bytes(b"clamped".to_vec())
+                        .expect("fixture is NUL-free"),
+                    ..Default::default()
+                }),
+                ControlPacket::Message(MessageControlData {
+                    message_type: u8::MAX,
+                    message: LegacyCString::from_bytes(b"negative-clamped".to_vec())
+                        .expect("fixture is NUL-free"),
+                    ..Default::default()
+                }),
+            ]
         );
     }
 

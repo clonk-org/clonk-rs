@@ -9,11 +9,12 @@ use lc_engine::{
     EmDropDefControlData,
     InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
-    NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
+    MessageControlData, NetworkResourceCore, PlayerCommandControlData, PlayerControlData,
+    PlayerInfoControlData,
     PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
     ScriptStrictness, SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket,
     SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
-    EMMO_SCRIPT,
+    EMMO_SCRIPT, MESSAGE_TYPE_PRIVATE,
     CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -43,6 +44,7 @@ const CID_REMOVE_PLR: u8 = 0x80 | 0x12;
 const CID_PLR_SELECT: u8 = 0x80 | 0x20;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_PLR_COMMAND: u8 = 0x80 | 0x22;
+const CID_MESSAGE: u8 = 0x80 | 0x23;
 const CID_EM_MOVE_OBJECT: u8 = 0x80 | 0x30;
 const CID_EM_DRAW_TOOL: u8 = 0x80 | 0x31;
 const CID_EM_DROP_DEF: u8 = 0x80 | 0x32;
@@ -660,6 +662,7 @@ fn decode_control(
         CID_PLR_SELECT => decode_player_select(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_PLR_COMMAND => decode_player_command(reader),
+        CID_MESSAGE => decode_message(reader),
         CID_EM_MOVE_OBJECT => decode_em_move_object(reader),
         CID_EM_DRAW_TOOL => decode_em_draw_tool(reader),
         CID_EM_DROP_DEF => decode_em_drop_def(reader),
@@ -1041,6 +1044,25 @@ fn decode_player_command(
         data: reader.read_raw_i32()?,
         add_mode: reader.read_int32()?,
         by_client: reader.read_int32()?,
+    }))
+}
+
+fn decode_message(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    let message_type = reader.read_u8()?;
+    let player = reader.read_int32()?;
+    let to_player = if message_type == MESSAGE_TYPE_PRIVATE {
+        reader.read_int32()?
+    } else {
+        -1
+    };
+    let message = reader.read_c_string()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::Message(MessageControlData {
+        message_type,
+        player,
+        to_player,
+        message,
+        by_client,
     }))
 }
 
@@ -1684,6 +1706,17 @@ fn encode_player_command(buffer: &mut Vec<u8>, data: &PlayerCommandControlData) 
     append_int32(buffer, data.by_client);
 }
 
+fn encode_message(buffer: &mut Vec<u8>, data: &MessageControlData) {
+    buffer.push(CID_MESSAGE);
+    buffer.push(data.message_type);
+    append_int32(buffer, data.player);
+    if data.message_type == MESSAGE_TYPE_PRIVATE {
+        append_int32(buffer, data.to_player);
+    }
+    append_c_string(buffer, &data.message);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_em_move_object(
     buffer: &mut Vec<u8>,
     data: &EmMoveObjectControlData,
@@ -1935,6 +1968,10 @@ fn encode_control(
         }
         EngineControlPacket::PlayerCommand(data) => {
             encode_player_command(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::Message(data) => {
+            encode_message(buffer, data);
             Ok(())
         }
         EngineControlPacket::EmMoveObject(data) => encode_em_move_object(buffer, data),
@@ -2515,6 +2552,115 @@ mod tests {
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
         assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+    }
+
+    #[test]
+    fn message_entries_match_cpp_conditional_packed_layout() {
+        // C4ControlMessage writes raw uint8 Type, packed Player, and only for
+        // Private writes packed ToPlayer, followed by Message and ByClient
+        // (src/C4Control.cpp:1252-1260,53-57).
+        let normal = EngineControlPacket::Message(MessageControlData {
+            message_type: lc_engine::MESSAGE_TYPE_NORMAL,
+            player: -4,
+            to_player: -1,
+            message: LegacyCString::from_bytes(b"hi\x80".to_vec()).expect("fixture is NUL-free"),
+            by_client: 130,
+        });
+        let normal_bytes = [0xa3, 0x00, 0xfc, b'h', b'i', 0x80, 0x00, 0x82, 0x01];
+        assert_eq!(
+            decode_control_entry_payload(&normal_bytes),
+            Ok(normal.clone())
+        );
+        assert_eq!(
+            encode_control_entry_payload(&normal),
+            Ok(normal_bytes.to_vec())
+        );
+
+        let private = EngineControlPacket::Message(MessageControlData {
+            message_type: MESSAGE_TYPE_PRIVATE,
+            player: 130,
+            to_player: -4,
+            message: LegacyCString::from_bytes(b"secret".to_vec()).expect("fixture is NUL-free"),
+            by_client: 7,
+        });
+        let private_bytes = [
+            0xa3, 0x04, 0x82, 0x01, 0xfc, b's', b'e', b'c', b'r', b'e', b't', 0x00, 0x07,
+        ];
+        assert_eq!(
+            decode_control_entry_payload(&private_bytes),
+            Ok(private.clone())
+        );
+        assert_eq!(
+            encode_control_entry_payload(&private),
+            Ok(private_bytes.to_vec())
+        );
+    }
+
+    #[test]
+    fn message_unknown_raw_type_roundtrips_and_keeps_following_control_aligned() {
+        // The binary enum is adapted through uint8_t without range
+        // validation. Unknown types have the non-Private layout and survive
+        // forwarding unchanged.
+        let message = EngineControlPacket::Message(MessageControlData {
+            message_type: 0x7f,
+            player: 3,
+            to_player: -1,
+            message: LegacyCString::from_bytes(vec![0xfe, 0x81]).expect("fixture is NUL-free"),
+            by_client: 4,
+        });
+        let message_bytes = [0xa3, 0x7f, 0x03, 0xfe, 0x81, 0x00, 0x04];
+        assert_eq!(
+            decode_control_entry_payload(&message_bytes),
+            Ok(message.clone())
+        );
+        assert_eq!(
+            encode_control_entry_payload(&message),
+            Ok(message_bytes.to_vec())
+        );
+
+        let following = EngineControlPacket::PlayerControl(PlayerControlData {
+            player: 5,
+            command: 6,
+            data: 7,
+            by_client: 4,
+        });
+        let frame = LegacyControlFrame {
+            client_id: 4,
+            tick: 9,
+            timestamp_ms: 0,
+            controls: vec![message, following],
+        };
+        let encoded = encode_control_payload(&frame).expect("mixed control list encodes");
+        assert_eq!(
+            decode_control_payload(&encoded)
+                .expect("unknown message type leaves the following control aligned")
+                .controls,
+            frame.controls
+        );
+    }
+
+    #[test]
+    fn message_rejects_truncated_fields_and_trailing_data() {
+        for encoded in [
+            &[0xa3][..],
+            &[0xa3, 0x00][..],
+            &[0xa3, 0x04, 0x00][..],
+            &[0xa3, 0x04, 0x00, 0x00][..],
+            &[0xa3, 0x04, 0x00, 0x00, b'x'][..],
+            &[0xa3, 0x04, 0x00, 0x00, 0x00][..],
+        ] {
+            assert_eq!(
+                decode_control_entry_payload(encoded),
+                Err(LegacyControlError::UnexpectedEof),
+                "unexpected result for {encoded:02x?}"
+            );
+        }
+
+        let with_trailing_byte = [0xa3, 0x00, 0x00, b'x', 0x00, 0x00, 0xaa];
+        assert_eq!(
+            decode_control_entry_payload(&with_trailing_byte),
+            Err(LegacyControlError::TrailingData)
+        );
     }
 
     #[test]
@@ -3182,9 +3328,9 @@ mod tests {
             .len()
             .checked_sub(1)
             .expect("payload includes terminator");
-        // CID_PlrCommand (0xa2) is supported; CID_Message (0xa3) remains the
-        // next genuinely unsupported legacy control entry.
-        payload.insert(insert_at, CID_PLR_COMMAND + 1);
+        // CID_Message (0xa3) is supported; 0xa4 is the next genuinely
+        // unsupported legacy control entry.
+        payload.insert(insert_at, CID_MESSAGE + 1);
         let error = decode_control_payload(&payload).unwrap_err();
         assert!(matches!(error, LegacyControlError::UnsupportedPacket(_)));
     }

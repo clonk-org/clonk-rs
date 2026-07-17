@@ -16,6 +16,8 @@ pub struct AudioOptions {
     pub music_enabled: bool,
     pub menu_music_enabled: bool,
     pub menu_sound_enabled: bool,
+    /// Initial process-local mute state for every client's `/sound` command.
+    pub mute_sound_command: bool,
     pub sound_volume: f32,
     pub music_volume: f32,
 }
@@ -28,6 +30,7 @@ impl Default for AudioOptions {
             music_enabled: true,
             menu_music_enabled: true,
             menu_sound_enabled: true,
+            mute_sound_command: false,
             sound_volume: 1.0,
             music_volume: 1.0,
         }
@@ -78,6 +81,12 @@ impl AudioOptions {
         if let Some(raw) = config.get_in(Some("Sound"), "MenuSound") {
             if let Some(parsed) = parse_bool(raw) {
                 self.menu_sound_enabled = parsed;
+            }
+        }
+
+        if let Some(raw) = config.get_in(Some("Sound"), "MuteSoundCommand") {
+            if let Some(parsed) = parse_bool(raw) {
+                self.mute_sound_command = parsed;
             }
         }
 
@@ -222,6 +231,15 @@ mod tests {
     }
 
     #[test]
+    fn audio_options_load_sound_command_mute_without_owning_its_persistence() {
+        let mut config = Config::new();
+        config.set_in(Some("Sound"), "MuteSoundCommand", "true");
+        let mut options = AudioOptions::default();
+        options.apply_config(&config);
+        assert!(options.mute_sound_command);
+    }
+
+    #[test]
     fn audio_options_sound_sheet_percent_accessors_clamp_and_round() {
         let mut options = AudioOptions::default();
         options.set_music_volume_percent(-1);
@@ -247,6 +265,7 @@ mod tests {
             music_enabled: true,
             menu_music_enabled: false,
             menu_sound_enabled: true,
+            mute_sound_command: true,
             sound_volume: 0.27,
             music_volume: 0.83,
         };
@@ -260,6 +279,11 @@ mod tests {
         assert_eq!(config.get_in(Some("Sound"), "MusicVolume"), Some("83"));
         assert_eq!(config.get_in(Some("Sound"), "SoundVolume"), Some("27"));
         assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("37"));
+        assert_eq!(
+            config.get_in(Some("Sound"), "MuteSoundCommand"),
+            None,
+            "the startup sound sheet does not own the /sound mute setting"
+        );
         assert_eq!(
             config.get_in(Some("Sound"), "VendorExtension"),
             Some("keep-me")

@@ -3264,6 +3264,7 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
             lc_engine::ControlPacket::MessageBoardAnswer(answer) => {
                 ("CID_MessageBoardAnswer", answer.by_client)
             }
+            lc_engine::ControlPacket::Message(message) => ("CID_Message", message.by_client),
             lc_engine::ControlPacket::CustomCommand(command) => {
                 ("CID_CustomCommand", command.by_client)
             }
@@ -3536,6 +3537,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::PlayerCommand(data) => data.by_client,
         lc_engine::ControlPacket::Script(data) => data.by_client,
         lc_engine::ControlPacket::MessageBoardAnswer(data) => data.by_client,
+        lc_engine::ControlPacket::Message(data) => data.by_client,
         lc_engine::ControlPacket::CustomCommand(data) => data.by_client,
         lc_engine::ControlPacket::EmMoveObject(data) => data.by_client,
         lc_engine::ControlPacket::EmDrawTool(data) => data.by_client,
@@ -7227,6 +7229,28 @@ mod tests {
         );
         let error = authenticated_single_control(&payload, 8)
             .expect_err("reject spoofed message-board answer author");
+        assert!(error.contains("claimed author 7"));
+        assert!(error.contains("authenticated author is 8"));
+    }
+
+    #[test]
+    fn single_message_control_authenticates_embedded_author() {
+        let control = EngineControlPacket::Message(lc_engine::MessageControlData {
+            message_type: lc_engine::MESSAGE_TYPE_PRIVATE,
+            player: 3,
+            to_player: 5,
+            message: lc_engine::LegacyCString::from_bytes(b"secret".to_vec())
+                .expect("fixture is NUL-free"),
+            by_client: 7,
+        });
+        let payload = encode_control_entry_payload(&control).expect("encode CID_Message");
+
+        assert_eq!(
+            authenticated_single_control(&payload, 7).expect("matching author"),
+            control
+        );
+        let error =
+            authenticated_single_control(&payload, 8).expect_err("reject spoofed message author");
         assert!(error.contains("claimed author 7"));
         assert!(error.contains("authenticated author is 8"));
     }

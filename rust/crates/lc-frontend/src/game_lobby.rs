@@ -6,6 +6,7 @@
 //! only classic GUI furniture and refuses incomplete or substituted resources.
 //! Sheets and dialogs outside this bounded slice are emitted as typed requests.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
@@ -35,6 +36,7 @@ const DEFAULT_ROW_SPACING: i32 = 1;
 const PLAYER_ROW_INDENT: i32 = 3;
 const ICON_LABEL_SPACING: i32 = 2;
 const READY_COOLDOWN: Duration = Duration::from_secs(2);
+const SOUND_ICON_SHOW_TIME: Duration = Duration::from_secs(1);
 const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 
 const STANDARD_ICON_WIDTH: u32 = 240;
@@ -1088,6 +1090,7 @@ pub struct GameLobby {
     league_mode: bool,
     countdown: LobbyCountdownState,
     rows: Vec<LobbyRosterRow>,
+    client_sound_status: HashMap<i32, (bool, Instant)>,
     logs: Vec<LobbyLogLine>,
     chat_edit: LobbyChatEditView,
     chat_scroll: i32,
@@ -1141,6 +1144,7 @@ impl GameLobby {
             league_mode: false,
             countdown: LobbyCountdownState::None,
             rows,
+            client_sound_status: HashMap::new(),
             logs: Vec::new(),
             chat_edit: LobbyChatEditView::default(),
             chat_scroll: 0,
@@ -1324,6 +1328,43 @@ impl GameLobby {
         self.chat_follow_bottom = true;
     }
 
+    pub fn logs(&self) -> &[LobbyLogLine] {
+        &self.logs
+    }
+
+    /// `C4GameLobby::MainDlg::OnClientSound`: expose an accepted `/sound`
+    /// command on the sender row, distinguishing the configured mute icon.
+    pub fn note_client_sound(&mut self, client_id: i32, muted: bool) {
+        self.note_client_sound_at(client_id, muted, Instant::now());
+    }
+
+    fn note_client_sound_at(&mut self, client_id: i32, muted: bool, now: Instant) {
+        if self
+            .rows
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == client_id))
+        {
+            self.client_sound_status.insert(client_id, (muted, now));
+        }
+    }
+
+    fn client_status_at(&self, client: &LobbyClientRow, now: Instant) -> LobbyClientStatus {
+        self.client_sound_status
+            .get(&client.id)
+            .filter(|(_, started)| {
+                now.checked_duration_since(*started)
+                    .is_none_or(|elapsed| elapsed < SOUND_ICON_SHOW_TIME)
+            })
+            .map(|(muted, _)| {
+                if *muted {
+                    LobbyClientStatus::MutedSound
+                } else {
+                    LobbyClientStatus::Sound
+                }
+            })
+            .unwrap_or(client.status)
+    }
+
     pub fn take_sounds(&mut self) -> Vec<LobbySound> {
         std::mem::take(&mut self.sounds)
     }
@@ -1444,13 +1485,13 @@ impl GameLobby {
                 .filter(|paragraph| !paragraph.is_empty())
             {
                 let text = break_message(font, paragraph, layout.chat_log_client.w.max(1));
-                for (physical_index, physical) in text
-                    .split('\n')
+                for (physical_index, physical) in lobby_markup_lines(&text)
+                    .into_iter()
                     .filter(|physical| !physical.is_empty())
                     .enumerate()
                 {
                     wrapped.push(WrappedLobbyLogLine {
-                        text: physical.to_string(),
+                        text: physical,
                         color: line.color,
                         new_paragraph: physical_index == 0,
                     });
@@ -3074,6 +3115,11 @@ impl GameLobby {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        let now = Instant::now();
+        self.client_sound_status.retain(|_, (_, started)| {
+            now.checked_duration_since(*started)
+                .is_none_or(|elapsed| elapsed < SOUND_ICON_SHOW_TIME)
+        });
         resources.validate()?;
         let layout = self.layout(
             i32::try_from(surface.width()).unwrap_or(i32::MAX),
@@ -3396,7 +3442,7 @@ impl GameLobby {
             row.icon,
             layout.roster_client,
             &resources.icons,
-            client.status.icon_phase(),
+            self.client_status_at(client, Instant::now()).icon_phase(),
             gamma,
         );
         let label_x = row.rect.x + row.rect.h + ICON_LABEL_SPACING;
@@ -4078,6 +4124,73 @@ fn valid_boundary_at_or_before(text: &str, mut position: usize) -> usize {
     position
 }
 
+/// `CStdFont::BreakMessage(..., fCheckMarkup=true)` closes active markup at
+/// an inserted wrap and reopens it on the continuation line. Lobby rows draw
+/// physical lines independently, so retain that state explicitly.
+fn lobby_markup_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut open: Vec<(String, String)> = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.starts_with('\n') {
+            for (name, _) in open.iter().rev() {
+                line.push_str("</");
+                line.push_str(name);
+                line.push('>');
+            }
+            lines.push(std::mem::take(&mut line));
+            for (_, markup) in &open {
+                line.push_str(markup);
+            }
+            rest = &rest[1..];
+            continue;
+        }
+        if rest.starts_with('<') {
+            if let Some(end) = rest.find('>') {
+                let raw = &rest[..=end];
+                let contents = &rest[1..end];
+                let opening = if contents == "i" {
+                    Some("i")
+                } else if let Some(color) = contents.strip_prefix("c ") {
+                    (color.len() <= 8
+                        && color
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+                    .then_some("c")
+                } else {
+                    None
+                };
+                let closing = match contents {
+                    "/i" => Some("i"),
+                    "/c" => Some("c"),
+                    _ => None,
+                };
+                if let Some(name) = opening {
+                    line.push_str(raw);
+                    open.push((name.to_string(), raw.to_string()));
+                    rest = &rest[end + 1..];
+                    continue;
+                }
+                if closing.is_some_and(|name| {
+                    open.last()
+                        .is_some_and(|(open_name, _)| open_name == name)
+                }) {
+                    line.push_str(raw);
+                    open.pop();
+                    rest = &rest[end + 1..];
+                    continue;
+                }
+            }
+        }
+        let character = rest.chars().next().expect("non-empty markup text");
+        line.push(character);
+        rest = &rest[character.len_utf8()..];
+    }
+    lines.push(line);
+    lines
+}
+
 fn scrollbar_max_pin(rect: IntRect) -> i32 {
     (rect.h - 3 * SCROLLBAR_EXTENT).max(0)
 }
@@ -4248,6 +4361,54 @@ mod tests {
             icon: LobbyRosterIcon::Standard(7),
             can_add_player,
         })
+    }
+
+    #[test]
+    fn client_sound_icon_expires_to_the_underlying_roster_status_after_one_second() {
+        let start = Instant::now();
+        let mut lobby = lobby(LobbyRole::Host, vec![client(1, true), client(7, false)]);
+        let remote = match lobby.rows()[1].clone() {
+            LobbyRosterRow::Client(client) => client,
+            _ => unreachable!(),
+        };
+
+        lobby.note_client_sound_at(7, true, start);
+        assert_eq!(
+            lobby.client_status_at(&remote, start + Duration::from_millis(999)),
+            LobbyClientStatus::MutedSound
+        );
+        assert_eq!(
+            lobby.client_status_at(&remote, start + Duration::from_secs(1)),
+            LobbyClientStatus::Client
+        );
+
+        lobby.note_client_sound_at(7, false, start + Duration::from_secs(2));
+        assert_eq!(
+            lobby.client_status_at(&remote, start + Duration::from_secs(2)),
+            LobbyClientStatus::Sound
+        );
+    }
+
+    #[test]
+    fn independently_drawn_wrapped_lobby_lines_close_and_reopen_markup() {
+        assert_eq!(
+            lobby_markup_lines("<c 123456>sender <i>long\ncontinuation</i></c>"),
+            vec![
+                "<c 123456>sender <i>long</i></c>",
+                "<c 123456><i>continuation</i></c>",
+            ]
+        );
+        assert_eq!(
+            lobby_markup_lines("<c RED>literal\ncontinuation"),
+            vec!["<c RED>literal", "continuation"]
+        );
+        assert_eq!(
+            lobby_markup_lines("<c ff><i>x</c>\ny"),
+            vec![
+                "<c ff><i>x</c></i></c>",
+                "<c ff><i>y",
+            ]
+        );
     }
 
     #[test]

@@ -1680,7 +1680,7 @@ pub(crate) fn draw_message_board_with_gamma(
         // iMsgY = cgo.Y + (iMsg + iLines-1)*iLineHgt + Fader with the
         // current message at iMsg = -1, iLines = 2, Fader = 0
         // (src/C4MessageBoard.cpp:271-303).
-        font.draw_with_gamma(
+        font.draw_markup_with_gamma(
             surface,
             0,
             y,
