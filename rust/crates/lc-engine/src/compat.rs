@@ -7010,6 +7010,22 @@ fn get_system_time(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(value))
 }
 
+/// FnGetTime (C4Script.cpp:4647-4652): expose the process-local
+/// `timeGetTime()` clock only in local, non-recording control mode. A missing
+/// host context corresponds to C4GameControl::CM_None and is synchronized.
+fn get_time(_args: &[Value]) -> Result<Value, RuntimeError> {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        if context.world.control_sync_mode {
+            return Ok(Value::Nil);
+        }
+        Ok(Value::Int(lc_core::chrono_util::time_get_time() as i32))
+    })
+}
+
 /// The active object of the executing call (`cthr->Obj`).
 fn active_object_id() -> Option<ObjectId> {
     HOST_CONTEXT.with(|cell| {
@@ -13974,6 +13990,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetGameSpeed", set_game_speed);
     script.register_host_function("SetPreSend", set_pre_send);
     script.register_host_function("FrameCounter", frame_counter);
+    script.register_host_function("GetTime", get_time);
     script.register_host_function("GetSystemTime", get_system_time);
     script.register_host_function("LandscapeWidth", landscape_width);
     script.register_host_function("LandscapeHeight", landscape_height);
@@ -47547,6 +47564,7 @@ mod tests {
         "GetTeamName",
         "GetTemperature",
         "GetTexture",
+        "GetTime",
         "GetType",
         "GetUnusedOverlayID",
         "GetValue",
@@ -61132,6 +61150,58 @@ func Missing() { return ComponentAll(nil, WOOD); }
         engine.set_control_host(false);
         engine.set_replay_control(true);
         assert!(engine.host_world_context().control_sync_mode);
+    }
+
+    #[test]
+    fn get_time_returns_process_milliseconds_only_outside_control_sync_mode() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script("#strict 3\nfunc Probe() { return GetTime(); }")
+            .expect("GetTime probe compiles");
+
+        assert_eq!(
+            script.call("Probe", &[]).expect("CM_None probe executes"),
+            Value::Nil,
+            "a missing game context matches C4GameControl::CM_None"
+        );
+
+        let query = |engine: &crate::Engine| {
+            let (result, _) = with_effect_context(
+                None,
+                &[],
+                engine.host_world_context(),
+                1,
+                || {
+                    Ok::<_, RuntimeError>(
+                        script.call("Probe", &[]).expect("GetTime probe executes"),
+                    )
+                },
+            );
+            result.expect("GetTime host context succeeds")
+        };
+
+        let mut engine = crate::Engine::new();
+        let Value::Int(first) = query(&engine) else {
+            panic!("local GetTime must return an integer");
+        };
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let Value::Int(second) = query(&engine) else {
+            panic!("local GetTime must keep returning an integer");
+        };
+        assert!(
+            second >= first,
+            "adjacent local millisecond samples may be equal but not decrease"
+        );
+
+        engine.set_network_control_mode(true);
+        assert_eq!(query(&engine), Value::Nil, "network control is synced");
+        engine.set_network_control_mode(false);
+        engine.set_recording_active(true);
+        assert_eq!(query(&engine), Value::Nil, "recording is synced");
+        engine.set_recording_active(false);
+        engine.set_replay_control(true);
+        assert_eq!(query(&engine), Value::Nil, "replay control is synced");
     }
 
     #[test]

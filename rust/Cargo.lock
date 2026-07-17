@@ -2110,6 +2110,7 @@ dependencies = [
  "criterion",
  "image",
  "indexmap 2.11.4",
+ "lc-core",
  "lc-engine-core",
  "lc-resources",
  "lc-script",
