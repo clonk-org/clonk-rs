@@ -140,9 +140,9 @@ use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{ClientId, ParticipantKind, Tick};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
-    DefCore as ResourceDefCore, DefinitionError as ResourceDefinitionError, GraphicsError,
-    GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks,
-    ResourceDefinition as ResourceDefinitionData, load_endeavour_font,
+    DefCore as ResourceDefCore, DefinitionError as ResourceDefinitionError, FontCatalog, FontRole,
+    GraphicsError, GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks,
+    ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData, load_endeavour_font,
     scenario as resource_scenario,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
@@ -459,6 +459,7 @@ impl From<String> for ScenarioActivationError {
 struct ScenarioLoadingState {
     scenario: FrontendScenario,
     refreshed_resources: Option<LoaderResources>,
+    refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     refreshed_global_gui_overrides: Option<HashMap<&'static str, String>>,
     refresh_requested: bool,
     receiver: Receiver<ScenarioLoadingEvent>,
@@ -476,6 +477,7 @@ impl ScenarioLoadingState {
     ) -> Self {
         Self {
             refreshed_resources: Some(refreshed_resources),
+            refreshed_tooltip_font: None,
             refreshed_global_gui_overrides: Some(refreshed_global_gui_overrides),
             refresh_requested: false,
             scenario,
@@ -503,6 +505,7 @@ impl ScenarioLoadingState {
         Self {
             scenario,
             refreshed_resources: None,
+            refreshed_tooltip_font: None,
             refreshed_global_gui_overrides: None,
             refresh_requested: false,
             receiver,
@@ -539,7 +542,9 @@ impl BootLoadingState {
 
 struct ClassicLoaderSetup {
     screen: LoaderScreen,
+    initial_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     refreshed_resources: LoaderResources,
+    refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     refreshed_global_gui_overrides: HashMap<&'static str, String>,
     scenario_title: Option<String>,
 }
@@ -1224,53 +1229,169 @@ fn decode_selected_loader(source: &SelectedLoaderSource) -> Result<ImageData> {
     Ok(ImageData::new(width, height, rgba.into_raw()))
 }
 
-fn validate_classic_loader_font(
-    paths: &AppPaths,
-    scenario_font: Option<&str>,
-    registrations: &[LoaderGroupRegistration],
-) -> Result<()> {
+#[derive(Clone)]
+struct ClassicFontBundle {
+    fonts: Arc<lc_frontend::ClonkFontSet>,
+    tooltip: Arc<lc_graphics::clonk_font::ClonkFont>,
+}
+
+fn classic_font_request(paths: &AppPaths, scenario_font: Option<&str>) -> Result<(String, i32)> {
     let config = load_classic_loader_config(paths)?;
     let configured_name = config
         .as_ref()
         .map(|config| classic_loader_bounded_config_value(config, "FontName"))
         .transpose()?
         .flatten()
-        .filter(|name| !name.is_empty())
         .unwrap_or("Endeavour");
     let configured_size = config
         .as_ref()
         .and_then(|config| classic_loader_config_value(config, "FontSize"))
         .and_then(|size| size.trim().parse::<i32>().ok())
         .unwrap_or(14);
-    let language_charset = config
-        .as_ref()
-        .map(|config| classic_loader_bounded_config_value(config, "LanguageCharset"))
-        .transpose()?
-        .flatten()
-        .unwrap_or("");
     let effective_name = scenario_font
         .filter(|font| !font.is_empty())
         .unwrap_or(configured_name);
-    anyhow::ensure!(
-        effective_name == "Endeavour" && configured_size == 14 && language_charset.is_empty(),
-        "classic loader font `{effective_name}` at size {configured_size} with charset `{language_charset}` cannot be represented by the installed Endeavour-14 atlas"
-    );
+    Ok((effective_name.to_string(), configured_size))
+}
+
+fn load_classic_font_catalog(
+    paths: &AppPaths,
+    registrations: &[LoaderGroupRegistration],
+) -> Result<FontCatalog> {
+    let system = Group::open(paths.system_group_path()).with_context(|| {
+        format!(
+            "cannot open classic system font group {}",
+            paths.system_group_path().display()
+        )
+    })?;
+    let mut catalog = FontCatalog::default();
+    catalog
+        .load_group(&system)
+        .context("failed to load classic system font resources")?;
     for registration in registrations {
-        for entry in registration.group.entries()? {
-            let filename = entry.relative_path.to_str().with_context(|| {
-                format!(
-                    "classic font entry in {} is not UTF-8",
-                    registration.group.root().display()
-                )
-            })?;
-            anyhow::ensure!(
-                !is_classic_font_resource_name(filename),
-                "classic loader font resource override `{filename}` in {} is not resolved",
+        catalog.load_group(&registration.group).with_context(|| {
+            format!(
+                "failed to load classic font resources from {}",
                 registration.group.root().display()
-            );
+            )
+        })?;
+    }
+    Ok(catalog)
+}
+
+fn classic_startup_font_is_canonical(paths: &AppPaths) -> bool {
+    let Ok((request, size)) = classic_font_request(paths, None) else {
+        return false;
+    };
+    if request != "Endeavour" || size != 14 {
+        return false;
+    }
+    let Ok(registrations) = startup_loader_registrations(paths) else {
+        return false;
+    };
+    if !registrations.is_empty() {
+        return false;
+    }
+    load_classic_font_catalog(paths, &registrations).is_ok_and(|catalog| {
+        !catalog
+            .definitions()
+            .iter()
+            .any(|font| font.name == request)
+    })
+}
+
+fn build_classic_font_spec(
+    spec: ResolvedFontSpec,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+    shadow: bool,
+) -> Result<lc_graphics::clonk_font::ClonkFont> {
+    match spec {
+        ResolvedFontSpec::Vector {
+            face,
+            bytes,
+            size,
+            weight,
+        } => {
+            let bytes = match bytes {
+                Some(bytes) => bytes,
+                None => Arc::from(
+                    fs::read(&face)
+                        .with_context(|| format!("classic font face `{face}` is unavailable"))?
+                        .into_boxed_slice(),
+                ),
+            };
+            let size = u32::try_from(size)
+                .ok()
+                .filter(|size| *size > 0)
+                .with_context(|| format!("classic font `{face}` has invalid size {size}"))?;
+            lc_frontend::clonk_fonts::build_vector_font(&bytes, size, weight, shadow)
+                .with_context(|| format!("failed to initialize classic vector font `{face}`"))
+        }
+        ResolvedFontSpec::Bitmap { filename, indent } => {
+            let image = load_classic_bitmap_font_image(&filename, registrations, graphics)?;
+            lc_frontend::clonk_fonts::build_prerendered_font(
+                image.width(),
+                image.height(),
+                image.pixels(),
+                indent,
+            )
+            .with_context(|| format!("failed to initialize classic bitmap font `{filename}`"))
         }
     }
-    Ok(())
+}
+
+fn resolve_classic_font_bundle(
+    paths: &AppPaths,
+    scenario_font: Option<&str>,
+    catalog_registrations: &[LoaderGroupRegistration],
+    graphics_registrations: &[LoaderGroupRegistration],
+) -> Result<ClassicFontBundle> {
+    let (request, base_size) = classic_font_request(paths, scenario_font)?;
+    let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
+    let graphics = main_graphics_group(paths)?;
+    let build = |role, apply_definition, shadow| {
+        let spec = catalog
+            .resolve(&request, base_size, role, apply_definition)
+            .with_context(|| {
+                format!(
+                    "classic font `{request}` has no {} mapping",
+                    match role {
+                        FontRole::Log => "LogFont",
+                        FontRole::MainSmall => "SmallFont",
+                        FontRole::Main => "Font",
+                        FontRole::Caption => "CaptionFont",
+                        FontRole::Title => "TitleFont",
+                    }
+                )
+            })?;
+        build_classic_font_spec(spec, graphics_registrations, &graphics, shadow)
+    };
+    let text = build(FontRole::Main, true, true)?;
+    // C4GraphicsResource never requests C4FT_MainSmall. Populate the Rust
+    // compatibility slot at the derived raw size when possible, but never
+    // make a valid logical FontDef alias depend on a same-named vector face.
+    let main_small = build(FontRole::MainSmall, false, true).unwrap_or_else(|_| text.clone());
+    let fonts = lc_frontend::ClonkFontSet {
+        title: build(FontRole::Title, true, true)?,
+        caption: build(FontRole::Caption, true, true)?,
+        text,
+        main_small,
+        mini: build(FontRole::Log, true, true)?,
+    };
+    let tooltip = build(FontRole::Main, false, false)?;
+    Ok(ClassicFontBundle {
+        fonts: Arc::new(fonts),
+        tooltip: Arc::new(tooltip),
+    })
+}
+
+fn validate_classic_loader_font(
+    paths: &AppPaths,
+    scenario_font: Option<&str>,
+    registrations: &[LoaderGroupRegistration],
+) -> Result<()> {
+    resolve_classic_font_bundle(paths, scenario_font, registrations, registrations).map(drop)
 }
 
 fn validate_representable_system_font_defs(paths: &AppPaths) -> Result<()> {
@@ -1457,6 +1578,35 @@ fn select_named_graphics_image_source(
     })
 }
 
+fn load_classic_bitmap_font_image(
+    filename: &str,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> Result<ImageData> {
+    let mut candidates = loader_graphics_registrations(registrations)?;
+    candidates.push(LoaderGroupRegistration {
+        priority: 0,
+        registration_order: 0,
+        group: graphics.clone(),
+    });
+    candidates.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.registration_order.cmp(&right.registration_order))
+    });
+    for candidate in candidates {
+        if let Some(path) = find_classic_named_entry(&candidate.group, filename)? {
+            return decode_selected_loader(&SelectedLoaderSource {
+                group: candidate.group,
+                filename: path,
+            })
+            .with_context(|| format!("failed to decode classic bitmap font `{filename}`"));
+        }
+    }
+    anyhow::bail!("classic bitmap font `{filename}` is unavailable")
+}
+
 fn find_classic_named_entry(group: &Group, filename: &str) -> Result<Option<PathBuf>> {
     for entry in group.entries()? {
         let candidate = entry.relative_path.to_str().with_context(|| {
@@ -1595,23 +1745,10 @@ fn definition_graphics_source_registrations(
 }
 
 fn validate_loader_graphics_font_sources(registrations: &[LoaderGroupRegistration]) -> Result<()> {
-    for registration in loader_graphics_registrations(registrations)? {
-        for entry in registration.group.entries()? {
-            let filename = entry.relative_path.to_str().with_context(|| {
-                format!(
-                    "classic graphics entry in {} is not UTF-8",
-                    registration.group.root().display()
-                )
-            })?;
-            anyhow::ensure!(
-                !is_classic_font_resource_name(filename),
-                "classic loader font file `{}` is supplied by non-global Graphics group {}",
-                filename,
-                registration.group.root().display()
-            );
-        }
-    }
-    Ok(())
+    // Graphics.c4g children are registered with C4GSCnt_Graphics only.
+    // Fonts.txt/vector files present there are ignored by C++, while bitmap
+    // files remain eligible when an active FontDef names them exactly.
+    loader_graphics_registrations(registrations).map(drop)
 }
 
 fn main_graphics_group(paths: &AppPaths) -> Result<Group> {
@@ -2413,7 +2550,9 @@ fn build_startup_loader(paths: &AppPaths, assets: &FrontendAssets) -> Result<Cla
     )?;
     Ok(ClassicLoaderSetup {
         screen,
+        initial_tooltip_font: None,
         refreshed_resources: resources,
+        refreshed_tooltip_font: None,
         refreshed_global_gui_overrides: HashMap::new(),
         scenario_title: None,
     })
@@ -2435,7 +2574,6 @@ fn build_scenario_loader(
     let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
     let graphics = main_graphics_group(paths)?;
     let registrations = classic_loader_registrations(scenario, &scenario_group, &head, paths)?;
-    validate_classic_loader_font(paths, Some(head.font()), &registrations)?;
     validate_loader_graphics_font_sources(&registrations)?;
     let tier = highest_loader_tier(&registrations)?;
     let selected =
@@ -2449,11 +2587,19 @@ fn build_scenario_loader(
         LoaderSelection::scenario(head.loader().configured_specification(), selected_filename)?;
     let background = decode_selected_loader(&selected)?;
 
-    // InitLoaderScreen starts with the already-live startup GUI resources.
-    // GraphicsResource::Init later reloads GUIProgress from the scenario
-    // group set; retain both resource states and switch on the worker event.
+    // C4LoaderScreen::Init reinitializes the process-global fonts after the
+    // scenario/parent/origin groups have been registered, but before any
+    // definition roots exist. GUIProgress remains the already-live startup
+    // sheet until the later full GraphicsResource::Init.
     let startup_registrations = startup_loader_registrations(paths)?;
-    let initial_resources = classic_loader_resources(assets, &startup_registrations, &graphics)?;
+    let startup_resources = classic_loader_resources(assets, &startup_registrations, &graphics)?;
+    let initial_font_bundle =
+        resolve_classic_font_bundle(paths, Some(head.font()), &registrations, &registrations)?;
+    let initial_resources = LoaderResources::from_gui_state(
+        initial_font_bundle.fonts.clone(),
+        startup_resources.gui_progress().clone(),
+    )?;
+    let initial_tooltip_font = Some(initial_font_bundle.tooltip.clone());
     let first_definition_order = registrations
         .iter()
         .map(|registration| registration.registration_order)
@@ -2470,20 +2616,37 @@ fn build_scenario_loader(
     )?);
     let mut refreshed_global_gui_overrides =
         classic_global_gui_runtime_overrides(&refreshed_registrations, &graphics);
-    if let Err(error) =
-        validate_classic_loader_font(paths, Some(head.font()), &refreshed_registrations)
-            .and_then(|()| validate_loader_graphics_font_sources(&refreshed_registrations))
-    {
-        let detail = error.to_string();
-        for name in CLASSIC_GLOBAL_GUI_FONTS {
-            refreshed_global_gui_overrides.insert(name, detail.clone());
+    let refreshed_font_bundle = resolve_classic_font_bundle(
+        paths,
+        Some(head.font()),
+        &registrations,
+        &refreshed_registrations,
+    );
+    let refreshed_font_bundle = match refreshed_font_bundle.and_then(|bundle| {
+        validate_loader_graphics_font_sources(&refreshed_registrations)?;
+        Ok(bundle)
+    }) {
+        Ok(bundle) => Some(bundle),
+        Err(error) => {
+            let detail = error.to_string();
+            for name in CLASSIC_GLOBAL_GUI_FONTS {
+                refreshed_global_gui_overrides.insert(name, detail.clone());
+            }
+            None
         }
-    }
-    // InitLoaderScreen keeps the already-live startup C4GUI bundle. The
-    // complete GUI resource reload occurs only after the worker's
-    // RefreshResources event; runtime overrides are refused there before
-    // this cloned base progress sheet can replace or draw anything.
-    let refreshed_resources = initial_resources.clone();
+    };
+    // The complete GUI resource reload occurs only after the worker's
+    // RefreshResources event. Definition Graphics groups may replace bitmap
+    // font images then, but cannot make a definition-only image available to
+    // the pre-definition loader initialization above.
+    let refreshed_resources = match refreshed_font_bundle.as_ref() {
+        Some(bundle) => LoaderResources::from_gui_state(
+            bundle.fonts.clone(),
+            initial_resources.gui_progress().clone(),
+        )?,
+        None => initial_resources.clone(),
+    };
+    let refreshed_tooltip_font = refreshed_font_bundle.map(|bundle| bundle.tooltip);
     let screen = LoaderScreen::new(
         selection,
         background,
@@ -2492,7 +2655,9 @@ fn build_scenario_loader(
     )?;
     Ok(ClassicLoaderSetup {
         screen,
+        initial_tooltip_font,
         refreshed_resources,
+        refreshed_tooltip_font,
         refreshed_global_gui_overrides,
         scenario_title: Some(head.scenario_title().to_string()),
     })
@@ -2735,8 +2900,10 @@ struct FrontendAssets {
     about_background: Option<ImageData>,
     /// CStdFont-faithful GUI fonts for pixel-parity startup text.
     clonk_fonts: Option<Arc<lc_frontend::ClonkFontSet>>,
+    startup_clonk_fonts: Option<Arc<lc_frontend::ClonkFontSet>>,
     /// Independent process-global shadowless Main-14 `FontTooltip`.
     global_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
+    startup_global_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     logo: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
     /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
@@ -2771,8 +2938,11 @@ struct FrontendAssets {
 impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
         let font = Self::load_font(paths);
-        let clonk_fonts = Self::load_clonk_fonts(paths);
-        let global_tooltip_font = Self::load_global_tooltip_font(paths);
+        let classic_fonts = Self::load_classic_fonts(paths);
+        let clonk_fonts = classic_fonts.as_ref().map(|bundle| bundle.fonts.clone());
+        let startup_clonk_fonts = clonk_fonts.clone();
+        let global_tooltip_font = classic_fonts.as_ref().map(|bundle| bundle.tooltip.clone());
+        let startup_global_tooltip_font = global_tooltip_font.clone();
         let book_fonts = Self::load_book_fonts(paths);
         let options_book_fonts = Self::load_options_book_fonts(paths);
         let plrsel_book_fonts = Self::load_plrsel_book_fonts(paths);
@@ -2871,14 +3041,7 @@ impl FrontendAssets {
             })();
             match source_setup {
                 Ok((graphics, registrations, graphics_registrations)) => {
-                    if let Err(error) = validate_representable_system_font_defs(paths) {
-                        let detail = error.to_string();
-                        for name in ["FontRegular", "FontTitle", "FontCaption", "FontTiny"] {
-                            global_gui_font_failures.insert(name, detail.clone());
-                        }
-                    }
-                    if let Err(error) = validate_unique_endeavour_font_source(paths)
-                        .and_then(|()| validate_classic_loader_font(paths, None, &registrations))
+                    if let Err(error) = validate_classic_loader_font(paths, None, &registrations)
                         .and_then(|()| validate_loader_graphics_font_sources(&registrations))
                     {
                         let detail = error.to_string();
@@ -2927,7 +3090,9 @@ impl FrontendAssets {
         Self {
             font,
             clonk_fonts,
+            startup_clonk_fonts,
             global_tooltip_font,
+            startup_global_tooltip_font,
             menu_background,
             scenario_browser_background,
             options_background,
@@ -3019,31 +3184,21 @@ impl FrontendAssets {
         });
     }
 
-    /// Builds the CStdFont-faithful GUI fonts (FreeType + baked shadows) used
-    /// for pixel-parity startup text; falls back to None on any failure.
-    fn load_clonk_fonts(paths: Option<&AppPaths>) -> Option<Arc<lc_frontend::ClonkFontSet>> {
+    /// Resolves the configured startup RX face, Fonts.txt mappings and
+    /// vector/bitmap resources into the live C4GUI font bundle.
+    fn load_classic_fonts(paths: Option<&AppPaths>) -> Option<ClassicFontBundle> {
         let paths = paths?;
-        let group = Group::open(paths.system_group_path()).ok()?;
-        let resource = load_endeavour_font(&group).ok()?;
-        match clonk_fonts::build_font_set(resource.bytes()) {
-            Ok(set) => Some(Arc::new(set)),
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to build CStdFont-faithful fonts");
-                None
-            }
-        }
-    }
-
-    fn load_global_tooltip_font(
-        paths: Option<&AppPaths>,
-    ) -> Option<Arc<lc_graphics::clonk_font::ClonkFont>> {
-        let paths = paths?;
-        let group = Group::open(paths.system_group_path()).ok()?;
-        let resource = load_endeavour_font(&group).ok()?;
-        match clonk_fonts::build_tooltip_font(resource.bytes()) {
-            Ok(font) => Some(Arc::new(font)),
+        let registrations = match startup_loader_registrations(paths) {
+            Ok(registrations) => registrations,
             Err(error) => {
-                tracing::warn!(%error, "failed to build shadowless global tooltip font");
+                tracing::warn!(%error, "failed to inspect startup font groups");
+                return None;
+            }
+        };
+        match resolve_classic_font_bundle(paths, None, &registrations, &registrations) {
+            Ok(bundle) => Some(bundle),
+            Err(error) => {
+                tracing::warn!(%error, "failed to resolve configured classic fonts");
                 None
             }
         }
@@ -6613,7 +6768,9 @@ struct StagedNetworkHostScenario {
     /// It is moved into `GameApp::loader_screen` while the worker starts and
     /// remains the transparent lobby's backdrop.
     loader_screen: Option<LoaderScreen>,
+    loader_initial_tooltip_font: Arc<lc_graphics::clonk_font::ClonkFont>,
     loader_refreshed_resources: LoaderResources,
+    loader_refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     /// Retained until the unported lobby Start handoff reaches the real
     /// GraphicsResource refresh. The visible lobby still uses startup GUI.
     pending_global_gui_overrides: HashMap<&'static str, String>,
@@ -14800,6 +14957,14 @@ impl GameApp {
             self.native_startup_fonts = None;
             return;
         };
+        if self
+            .app_paths
+            .as_ref()
+            .is_none_or(|paths| !classic_startup_font_is_canonical(paths))
+        {
+            self.native_startup_fonts = None;
+            return;
+        }
         let fonts = (|| -> Result<_> {
             let group = Group::open(path)?;
             let resource = load_endeavour_font(&group)?;
@@ -24682,6 +24847,18 @@ impl GameApp {
             purpose,
         });
         if purpose == StartupNetworkPurpose::StagedHost {
+            let initial_fonts = self
+                .staged_network_host_scenario
+                .as_ref()
+                .and_then(|staged| staged.loader_screen.as_ref())
+                .map(|loader| loader.resources().fonts().clone());
+            let initial_tooltip = self
+                .staged_network_host_scenario
+                .as_ref()
+                .map(|staged| staged.loader_initial_tooltip_font.clone());
+            if let (Some(fonts), Some(tooltip)) = (initial_fonts, initial_tooltip) {
+                self.install_active_classic_fonts(fonts, tooltip);
+            }
             // C4Game opens the scenario and installs its loader before
             // InitNetworkHost. Show that exact full loader while the socket
             // worker starts; the lobby later retains only its background.
@@ -24961,6 +25138,7 @@ impl GameApp {
                                         self.control_clients = initial_control_clients(None, None);
                                         self.startup_view = StartupView::NetworkGame;
                                         self.mode = AppMode::Menu;
+                                        self.restore_startup_fonts();
                                         return;
                                     }
                                 }
@@ -24989,6 +25167,7 @@ impl GameApp {
                             self.control_clients = initial_control_clients(None, None);
                             self.startup_view = StartupView::NetworkGame;
                             self.mode = AppMode::Menu;
+                            self.restore_startup_fonts();
                             return;
                         }
                     }
@@ -25044,6 +25223,7 @@ impl GameApp {
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
                             self.menu_frame_cache = None;
+                            self.restore_startup_fonts();
                             return;
                         }
                     }
@@ -25162,6 +25342,7 @@ impl GameApp {
             }
         }
         if purpose == Some(StartupNetworkPurpose::StagedHost) {
+            self.restore_startup_fonts();
             self.classic_host_lobby = None;
             self.staged_network_host_scenario = None;
             self.loader_screen = None;
@@ -27718,6 +27899,7 @@ impl GameApp {
     }
 
     fn show_main_menu(&mut self) {
+        self.restore_startup_fonts();
         self.active_global_gui_overrides.clear();
         self.running_chat = None;
         self.message_input_history.clear();
@@ -29678,13 +29860,28 @@ impl GameApp {
             return Ok(());
         };
         let resources = state.refreshed_resources.take();
+        let tooltip_font = state.refreshed_tooltip_font.take();
         let overrides = state
             .refreshed_global_gui_overrides
             .take()
             .unwrap_or_default();
         state.refresh_requested = false;
-        if let (Some(resources), Some(loader)) = (resources, self.loader_screen.as_mut()) {
-            loader.replace_resources(resources);
+        if let Some(resources) = resources {
+            let fonts = resources.fonts().clone();
+            let assets = Arc::make_mut(&mut self.assets);
+            assets.clonk_fonts = Some(fonts.clone());
+            if let Some(tooltip_font) = tooltip_font {
+                assets.global_tooltip_font = Some(tooltip_font);
+            }
+            self.graphics.set_clonk_fonts(Some(fonts.clone()));
+            self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
+            // The scale-native cache is built from the fixed Endeavour-14
+            // recipe. Never overlay those stale glyphs on a refreshed font.
+            self.native_startup_fonts = None;
+            self.mark_menu_dirty();
+            if let Some(loader) = self.loader_screen.as_mut() {
+                loader.replace_resources(resources);
+            }
         }
         self.active_global_gui_overrides = overrides;
         Ok(())
@@ -29754,6 +29951,7 @@ impl GameApp {
                         self.status_text = message;
                         self.loading_state = None;
                         self.mode = AppMode::Menu;
+                        self.restore_startup_fonts();
                         self.ensure_menu_music();
                     } else if prepared_go {
                         // C4Game::InitGameFinal calls CheckStatusReached only
@@ -29802,6 +30000,7 @@ impl GameApp {
                     self.status_text = message;
                     self.loading_state = None;
                     self.mode = AppMode::Menu;
+                    self.restore_startup_fonts();
                     self.ensure_menu_music();
                 }
             }
@@ -32869,6 +33068,42 @@ impl GameApp {
         Ok(path)
     }
 
+    fn install_active_classic_fonts(
+        &mut self,
+        fonts: Arc<lc_frontend::ClonkFontSet>,
+        tooltip: Arc<lc_graphics::clonk_font::ClonkFont>,
+    ) {
+        let assets = Arc::make_mut(&mut self.assets);
+        assets.clonk_fonts = Some(fonts.clone());
+        assets.global_tooltip_font = Some(tooltip);
+        self.graphics.set_clonk_fonts(Some(fonts.clone()));
+        self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
+        // The scale-native cache is tied to the startup/configured bundle;
+        // a scenario Head.Font may select an entirely different face.
+        self.native_startup_fonts = None;
+        self.mark_menu_dirty();
+    }
+
+    fn restore_startup_fonts(&mut self) {
+        let fonts = self.assets.startup_clonk_fonts.clone();
+        let tooltip = self.assets.startup_global_tooltip_font.clone();
+        {
+            let assets = Arc::make_mut(&mut self.assets);
+            assets.clonk_fonts = fonts.clone();
+            assets.global_tooltip_font = tooltip;
+        }
+        self.graphics.set_clonk_fonts(fonts.clone());
+        self.main_menu_state.menu.set_clonk_fonts(fonts);
+        self.native_startup_fonts = None;
+        if let Some(config) = self.loader_render_config {
+            self.configure_native_startup_fonts(
+                config.application_scale() as f32,
+                config.point_filtering(),
+            );
+        }
+        self.mark_menu_dirty();
+    }
+
     fn return_to_menu(&mut self) {
         self.active_global_gui_overrides.clear();
         self.close_context_menu_silently();
@@ -33254,10 +33489,11 @@ impl GameApp {
                         detail: format!("scenario loader backdrop is unavailable: {error}"),
                     })
                 })?;
-        retain_selected_scenario_title(
-            &mut frontend,
-            loader_setup.scenario_title.as_deref(),
-        );
+        let loader_initial_tooltip_font = loader_setup
+            .initial_tooltip_font
+            .clone()
+            .context("scenario loader did not provide its pre-definition tooltip font")?;
+        retain_selected_scenario_title(&mut frontend, loader_setup.scenario_title.as_deref());
         let (fair_crew, fair_crew_strength) =
             resolve_scenario_fair_crew_parameters(metadata, &options);
         let lobby = ClassicHostLobbyProjection {
@@ -33275,7 +33511,9 @@ impl GameApp {
             definition_load,
             scenario,
             loader_screen: Some(loader_setup.screen),
+            loader_initial_tooltip_font,
             loader_refreshed_resources: loader_setup.refreshed_resources,
+            loader_refreshed_tooltip_font: loader_setup.refreshed_tooltip_font,
             pending_global_gui_overrides: loader_setup.refreshed_global_gui_overrides,
             options,
             lobby,
@@ -33354,10 +33592,13 @@ impl GameApp {
         // the same pack-aware Title component used by the selected loader.
         // Retain that exact result instead of re-reading a local-only
         // `Title.txt` after the worker finishes.
-        retain_selected_scenario_title(
-            &mut scenario,
-            loader_setup.scenario_title.as_deref(),
-        );
+        retain_selected_scenario_title(&mut scenario, loader_setup.scenario_title.as_deref());
+        let initial_fonts = loader_setup.screen.resources().fonts().clone();
+        let initial_tooltip_font = loader_setup
+            .initial_tooltip_font
+            .clone()
+            .expect("scenario loader resolves a pre-definition tooltip font");
+        self.install_active_classic_fonts(initial_fonts, initial_tooltip_font);
         self.loader_screen = Some(loader_setup.screen);
         self.loader_error = None;
 
@@ -33445,6 +33686,7 @@ impl GameApp {
             loader_setup.refreshed_global_gui_overrides,
             receiver,
         );
+        loading_state.refreshed_tooltip_font = loader_setup.refreshed_tooltip_font;
         loading_state.offline_startup_players = offline_startup_players;
         self.loading_state = Some(loading_state);
         self.mode = AppMode::Loading;
@@ -34089,6 +34331,7 @@ impl GameApp {
         let graphics = main_graphics_group(paths)?;
         let mut registrations =
             classic_loader_registrations(frontend, &scenario_group, &head, paths)?;
+        let font_catalog_registrations = registrations.clone();
         let mut font_failure =
             validate_classic_loader_font(paths, Some(head.font()), &registrations)
                 .and_then(|()| validate_loader_graphics_font_sources(&registrations))
@@ -34118,8 +34361,14 @@ impl GameApp {
             paths,
             first_definition_order,
         )?);
-        if let Err(error) = validate_classic_loader_font(paths, Some(head.font()), &registrations)
-            .and_then(|()| validate_loader_graphics_font_sources(&registrations))
+        if let Err(error) = resolve_classic_font_bundle(
+            paths,
+            Some(head.font()),
+            &font_catalog_registrations,
+            &registrations,
+        )
+        .map(drop)
+        .and_then(|()| validate_loader_graphics_font_sources(&registrations))
         {
             font_failure = Some(error.to_string());
         }
@@ -34132,22 +34381,92 @@ impl GameApp {
         Ok(overrides)
     }
 
+    fn loaded_game_classic_font_bundle(
+        &self,
+        frontend: &FrontendScenario,
+        definition_load: Option<&ScenarioDefinitionLoad>,
+    ) -> Result<ClassicFontBundle> {
+        let paths = self
+            .app_paths
+            .as_ref()
+            .context("application paths are unavailable for saved-game font resolution")?;
+        let path = frontend
+            .path
+            .as_deref()
+            .context("saved scenario has no path for font resolution")?;
+        let scenario_group = open_group_path_for_folder_map(path)
+            .with_context(|| format!("failed to open saved scenario at {}", path.display()))?;
+        let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
+        let catalog_registrations =
+            classic_loader_registrations(frontend, &scenario_group, &head, paths)?;
+        let mut graphics_registrations = catalog_registrations.clone();
+        let fallback_definition_load;
+        let definition_load = match definition_load {
+            Some(definition_load) => definition_load,
+            None => {
+                fallback_definition_load = ScenarioDefinitionLoad::Seed {
+                    modules: Vec::new(),
+                    definition_root: None,
+                };
+                &fallback_definition_load
+            }
+        };
+        let first_definition_order = graphics_registrations
+            .iter()
+            .map(|registration| registration.registration_order)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        graphics_registrations.extend(definition_graphics_source_registrations(
+            &head,
+            &scenario_group,
+            definition_load,
+            paths,
+            first_definition_order,
+        )?);
+        resolve_classic_font_bundle(
+            paths,
+            Some(head.font()),
+            &catalog_registrations,
+            &graphics_registrations,
+        )
+    }
+
     fn apply_loaded_game(&mut self, save: SavedGameFile) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         let scenario_info = save.scenario.clone();
         let frontend = scenario_info.to_frontend();
         let saved_definition_load = save.definition_load.clone();
 
-        let loaded_overrides = if scenario_info.sandbox {
-            HashMap::new()
+        let (loaded_overrides, loaded_fonts) = if scenario_info.sandbox {
+            (HashMap::new(), None)
         } else {
-            self.loaded_game_global_gui_overrides(&frontend, saved_definition_load.as_ref())?
+            (
+                self.loaded_game_global_gui_overrides(&frontend, saved_definition_load.as_ref())?,
+                Some(
+                    self.loaded_game_classic_font_bundle(
+                        &frontend,
+                        saved_definition_load.as_ref(),
+                    )?,
+                ),
+            )
         };
         self.assets
             .require_classic_global_gui_bootstrap_resources(&loaded_overrides)
             .map_err(report_classic_parity_boundary)
             .map_err(anyhow::Error::new)?;
         self.active_global_gui_overrides = loaded_overrides;
+        if let Some(bundle) = loaded_fonts {
+            let assets = Arc::make_mut(&mut self.assets);
+            assets.clonk_fonts = Some(bundle.fonts.clone());
+            assets.global_tooltip_font = Some(bundle.tooltip);
+            self.graphics.set_clonk_fonts(Some(bundle.fonts.clone()));
+            self.main_menu_state
+                .menu
+                .set_clonk_fonts(Some(bundle.fonts));
+            self.native_startup_fonts = None;
+            self.mark_menu_dirty();
+        }
 
         // C4Player runtime objects are recreated from their linked
         // C4PlayerInfo entries. Keep process-local input assignments keyed by
@@ -53948,15 +54267,126 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn root_general_font_override_cannot_be_ignored_by_loader() {
-        let root = tempdir().expect("root loader font fixture");
-        let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
-        fs::create_dir_all(paths.config_dir()).expect("config directory");
-        fs::write(paths.config_file(), "FontName=Arial\n").expect("root font config");
+    fn general_font_size_sixteen_builds_the_cpp_derived_app_bundle() {
+        let _lock = env_lock().lock();
+        let root = tempdir().expect("configured font fixture");
+        install_global_gui_and_loader_test_root(root.path());
+        let user = root.path().join("user");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("configured font paths");
+        paths.ensure_user_dirs().expect("configured font user dirs");
+        fs::write(
+            paths.config_file(),
+            "[General]\nFontName=Endeavour\nFontSize=16\n",
+        )
+        .expect("configured font values");
 
-        let error = validate_classic_loader_font(&paths, None, &[])
-            .expect_err("unsupported root font override must fail closed");
-        assert!(error.to_string().contains("Arial"));
+        let bundle = resolve_classic_font_bundle(&paths, None, &[], &[])
+            .expect("configured font bundle resolves");
+        assert_eq!(bundle.fonts.mini.line_height, 20); // 16*12/14 = 13px
+        assert_eq!(bundle.fonts.main_small.line_height, 22); // 16*13/14 = 14px
+        assert_eq!(bundle.fonts.text.line_height, 25); // 16px
+        assert_eq!(bundle.fonts.caption.line_height, 28); // 16*16/14 = 18px
+        assert_eq!(bundle.fonts.title.line_height, 39); // 16*22/14 = 25px
+        assert_eq!(bundle.tooltip.line_height, 25);
+        assert_eq!(bundle.tooltip.h_space, 0);
+    }
+
+    #[test]
+    fn scenario_head_font_installs_the_pre_definition_size_twenty_loader_bundle() {
+        let _lock = env_lock().lock();
+        let root = tempdir().expect("scenario font fixture");
+        install_global_gui_and_loader_test_root(root.path());
+        let scenario_path = root.path().join("content/FontScenario.c4s");
+        fs::create_dir_all(&scenario_path).expect("scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Font scenario\nLoader=LoaderFont.png\nFont=SomeFace,20\n",
+        )
+        .expect("scenario head font");
+        write_preview_png(
+            &scenario_path.join("LoaderFont.png"),
+            [0x12, 0x34, 0x56, 0xff],
+        );
+        fs::copy(
+            root.path().join("planet/System.c4g/Endeavour.ttf"),
+            scenario_path.join("SomeFace.ttf"),
+        )
+        .expect("scenario vector face");
+        let user = root.path().join("user");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_CONTENT_DIR", Some(root.path().join("content").as_path())),
+            ("LC_USER_DATA_DIR", Some(user.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("scenario font paths");
+        paths.ensure_user_dirs().expect("scenario font user dirs");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("deterministic loader language");
+        let assets = FrontendAssets::load(Some(&paths));
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "FontScenario.c4s".to_string();
+        scenario.title = "Font scenario".to_string();
+        scenario.kind = ScenarioKind::Scenario;
+        scenario.path = Some(scenario_path.clone());
+        let definition_load = ScenarioDefinitionLoad::Seed {
+            modules: Vec::new(),
+            definition_root: None,
+        };
+
+        let setup = build_scenario_loader(&scenario, &definition_load, &paths, &assets)
+            .expect("Head.Font scenario loader resolves");
+        let fonts = setup.screen.resources().fonts();
+        for (name, line_height) in [
+            ("Log", fonts.mini.line_height),
+            ("MainSmall", fonts.main_small.line_height),
+            ("Main", fonts.text.line_height),
+            ("Caption", fonts.caption.line_height),
+            ("Title", fonts.title.line_height),
+        ] {
+            assert_eq!(line_height, 31, "explicit ,20 must override {name} size");
+        }
+        let tooltip = setup
+            .initial_tooltip_font
+            .as_deref()
+            .expect("pre-definition tooltip font");
+        assert_eq!(tooltip.line_height, 31);
+        assert_eq!(tooltip.h_space, 0);
+
+        // A definition root is not registered until the later full resource
+        // refresh. It cannot rescue a face missing during InitLoaderScreen.
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Font scenario\nLoader=LoaderFont.png\nFont=DefinitionOnly,20\n",
+        )
+        .expect("definition-only Head.Font");
+        let definition_root = tempdir().expect("definition font root");
+        let objects = definition_root.path().join("Objects.c4d");
+        fs::create_dir_all(&objects).expect("definition module");
+        fs::copy(
+            root.path().join("planet/System.c4g/Endeavour.ttf"),
+            objects.join("DefinitionOnly.ttf"),
+        )
+        .expect("definition-only vector face");
+        let error = build_scenario_loader(
+            &scenario,
+            &ScenarioDefinitionLoad::Fixed {
+                modules: vec!["Objects.c4d".to_string()],
+                definition_root: Some(definition_root.path().to_path_buf()),
+            },
+            &paths,
+            &assets,
+        )
+        .err()
+        .expect("pre-definition missing face must fail");
+        assert!(
+            error.to_string().contains("DefinitionOnly"),
+            "unexpected pre-definition font error: {error:#}"
+        );
     }
 
     #[test]
@@ -54260,7 +54690,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn real_app_constructor_and_system_font_sources_fail_closed_in_global_order() {
+    fn real_app_constructor_and_system_font_sources_follow_global_order() {
         let _lock = env_lock().lock();
 
         let missing = tempdir().expect("missing initial global sheet fixture");
@@ -54297,7 +54727,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         install_global_gui_test_root(active_mapping.path(), None);
         fs::write(
             active_mapping.path().join("planet/System.c4g/Fonts.txt"),
-            "[Font]\nName=Endeavour\nSize=14\n",
+            "[Font]\nName=Endeavour\nSize=14\nLogFont=Endeavour,12\nSmallFont=Endeavour,13\nFont=Endeavour,14\nCaptionFont=Endeavour,16\nTitleFont=Endeavour,22\n",
         )
         .expect("write active Fonts.txt mapping");
         {
@@ -54309,22 +54739,14 @@ public func Grant(password) { return GainMissionAccess(password); }
             ]);
             let paths = AppPaths::discover().expect("active Fonts.txt paths");
             let assets = FrontendAssets::load(Some(&paths));
-            let error = assets
+            assets
                 .require_classic_global_gui_bootstrap_resources(&HashMap::new())
-                .expect_err("active RX font mappings are not represented");
-            let ClassicParityBoundary::GlobalGuiBootstrapResources { issues } = error else {
-                panic!("wrong active Fonts.txt boundary")
-            };
-            assert_eq!(
-                issues
-                    .iter()
-                    .map(|issue| issue.resource)
-                    .collect::<Vec<_>>(),
-                vec!["FontRegular", "FontTitle", "FontCaption", "FontTiny"]
-            );
-            assert!(issues
-                .iter()
-                .all(|issue| matches!(&issue.defect, ClassicGuiBootstrapDefect::Malformed { .. })));
+                .expect("active RX font mappings resolve");
+            let fonts = assets.clonk_fonts.as_deref().expect("mapped GUI fonts");
+            assert_eq!(fonts.mini.line_height, 18);
+            assert_eq!(fonts.text.line_height, 22);
+            assert_eq!(fonts.caption.line_height, 25);
+            assert_eq!(fonts.title.line_height, 34);
         }
 
         let ambiguous = tempdir().expect("ambiguous Endeavour fixture");
@@ -54343,24 +54765,14 @@ public func Grant(password) { return GainMissionAccess(password); }
             ]);
             let paths = AppPaths::discover().expect("ambiguous font paths");
             let assets = FrontendAssets::load(Some(&paths));
-            let error = assets
+            assets
                 .require_classic_global_gui_bootstrap_resources(&HashMap::new())
-                .expect_err("ambiguous Endeavour sources are not representable");
-            let ClassicParityBoundary::GlobalGuiBootstrapResources { issues } = error else {
-                panic!("wrong ambiguous font boundary")
-            };
-            assert_eq!(
-                issues
-                    .iter()
-                    .map(|issue| issue.resource)
-                    .collect::<Vec<_>>(),
-                CLASSIC_GLOBAL_GUI_FONTS.to_vec()
-            );
+                .expect("later matching vector source wins like C++");
         }
     }
 
     #[test]
-    fn definition_root_font_override_is_latched_for_loader_and_saved_target_before_mutation() {
+    fn definition_root_vector_font_files_are_ignored_by_loader_and_saved_target() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated definition-font user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -54383,14 +54795,14 @@ public func Grant(password) { return GainMissionAccess(password); }
             modules: vec!["Objects.c4d".to_string()],
             definition_root: Some(definition_root.path().to_path_buf()),
         };
-        let mut app = new_menu_app_with_paths(320, 200, &paths);
+        let app = new_menu_app_with_paths(320, 200, &paths);
 
         let setup = build_scenario_loader(&frontend, &definition_load, &paths, app.assets.as_ref())
-            .expect("loader setup retains typed runtime overrides");
+            .expect("definition-root vector font is ignored");
         for name in CLASSIC_GLOBAL_GUI_FONTS {
             assert!(
-                setup.refreshed_global_gui_overrides.contains_key(name),
-                "loader refresh missed definition-root {name}"
+                !setup.refreshed_global_gui_overrides.contains_key(name),
+                "definition-root vector file incorrectly overrode loader {name}"
             );
         }
 
@@ -54399,57 +54811,13 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("resolve saved-game target GUI groups");
         for name in CLASSIC_GLOBAL_GUI_FONTS {
             assert!(
-                overrides.contains_key(name),
-                "saved target missed definition-root {name}"
+                !overrides.contains_key(name),
+                "definition-root vector file incorrectly overrode saved target {name}"
             );
         }
-        let expected = app
-            .assets
+        app.assets
             .require_classic_global_gui_bootstrap_resources(&overrides)
-            .expect_err("saved target font override is refused");
-
-        app.start_sandbox_scenario(FrontendScenario::fallback())
-            .expect("start source world for saved-target test");
-        let save = SavedGameFile {
-            version: SAVE_FILE_VERSION,
-            saved_at_seconds: 0,
-            scenario: SavedScenarioInfo::from_frontend(
-                &frontend,
-                "Saved target",
-                DEFAULT_GROUND_HEIGHT,
-            ),
-            definition_load: Some(definition_load),
-            focus_id: app.focus_id,
-            user_label: Some("Saved target".to_string()),
-            runtime_music_enabled: Some(app.runtime_music_enabled),
-            engine_state: app.engine.capture_state(),
-        };
-        let save_path = user_data.path().join("target-override.lcsave");
-        fs::write(
-            &save_path,
-            serde_json::to_vec_pretty(&save).expect("serialize target override save"),
-        )
-        .expect("write target override save");
-        app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
-        app.save_browser_return_to_menu = true;
-        app.status_text = "retained status".to_string();
-        let before = runtime_global_ui_snapshot(&app);
-        let last_save_before = app.last_save_path.clone();
-        let error = app
-            .execute_save_browser_action(SaveBrowserAction::Load {
-                entry: SaveEntry {
-                    display_name: "Saved target".to_string(),
-                    scenario_title: "A Clonk".to_string(),
-                    saved_at_seconds: 0,
-                    saved_label: "Saved target".to_string(),
-                    path: save_path,
-                    thumbnail: None,
-                },
-            })
-            .expect_err("saved target boundary must propagate through the browser");
-        assert_engine_parity_boundary(error, expected);
-        assert_eq!(runtime_global_ui_snapshot(&app), before);
-        assert_eq!(app.last_save_path, last_save_before);
+            .expect("definition-root vector file does not poison global GUI resources");
     }
 
     #[test]
@@ -64682,6 +65050,7 @@ protected func InputCallback(string answer, int player)
         app.loading_state = Some(ScenarioLoadingState {
             scenario: FrontendScenario::fallback(),
             refreshed_resources: None,
+            refreshed_tooltip_font: None,
             refreshed_global_gui_overrides: None,
             refresh_requested: false,
             receiver,

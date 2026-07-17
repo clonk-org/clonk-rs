@@ -19,7 +19,10 @@ pub use definition::{
     Definition as ResourceDefinition, DefinitionError, DefinitionScript, DefinitionScriptFile,
     PhysicalInfo, PictureRect, C4_MAX_PHYSICAL,
 };
-pub use font::{load_endeavour_font, load_ttf, FontResource, FontResourceError};
+pub use font::{
+    load_endeavour_font, load_font_definitions, load_ttf, select_font_definition, FontCatalog,
+    FontDefinition, FontResource, FontResourceError, FontRole, ResolvedFontSpec,
+};
 pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
 pub use group::{Group, GroupEntry, GroupError};
 pub use group_writer::{c4group_file_crc, MutableGroup, MutableGroupChildMut, MutableGroupError};

@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
-use freetype::Library;
+use freetype::{Library, Matrix, Vector};
 use lc_graphics::clonk_font::{
     compose_glyph_cell, line_height_for, scaled_font_image_width, ClonkFont, FontImageProvider,
     FontImageRef, GlyphCell, TextAlign,
@@ -480,6 +480,7 @@ fn loaded_glyph_cell(
     face: &freetype::Face,
     cell_height: usize,
     ascent_px: i64,
+    shadow: bool,
 ) -> Option<GlyphCell> {
     let slot = face.glyph();
     let bitmap = slot.bitmap();
@@ -501,10 +502,25 @@ fn loaded_glyph_cell(
     // width = max(advance, bearing+width) + shadow (StdFont.cpp:218).
     let advance_px = (slot.advance().x >> 6) as i32;
     let bearing = slot.bitmap_left().max(0);
-    let cell_w = (advance_px.max(bearing + cov_w as i32) + 1).max(1) as usize;
+    let shadow_size = i32::from(shadow);
+    let cell_w = (advance_px.max(bearing + cov_w as i32) + shadow_size).max(1) as usize;
     let at_x = bearing as usize;
     let at_y = (ascent_px - i64::from(slot.bitmap_top())).max(0) as usize;
-    let pixels = compose_glyph_cell(&cov, cov_w, cov_h, cell_w, cell_height, at_x, at_y);
+    let pixels = if shadow {
+        compose_glyph_cell(&cov, cov_w, cov_h, cell_w, cell_height, at_x, at_y)
+    } else {
+        let mut pixels = vec![Color::transparent(); cell_w.saturating_mul(cell_height)];
+        for y in 0..cov_h {
+            for x in 0..cov_w {
+                let (target_x, target_y) = (at_x + x, at_y + y);
+                if target_x < cell_w && target_y < cell_height {
+                    pixels[target_y * cell_w + target_x] =
+                        Color::new(255, 255, 255, cov[y * cov_w + x]);
+                }
+            }
+        }
+        pixels
+    };
     Some(GlyphCell {
         width: cell_w as i32,
         pixels,
@@ -512,7 +528,21 @@ fn loaded_glyph_cell(
 }
 
 /// Rasterizes one ClonkFont at `px_height` from `face`.
-fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
+fn build_font(
+    face: &freetype::Face,
+    px_height: u32,
+    weight: u32,
+    shadow: bool,
+) -> Result<ClonkFont> {
+    let boldness = i64::from(weight) - 400;
+    let mut matrix = Matrix {
+        xx: ((1_i64 << 16) + boldness * (1_i64 << 16) / 400) as _,
+        xy: 0,
+        yx: 0,
+        yy: 1 << 16,
+    };
+    let mut delta = Vector { x: 0, y: 0 };
+    face.set_transform(&mut matrix, &mut delta);
     face.set_pixel_sizes(px_height, px_height)
         .context("FT_Set_Pixel_Sizes failed")?;
 
@@ -520,12 +550,14 @@ fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
     let units_per_em = i32::from(raw.units_per_EM);
     let (ascender, descender) = (i32::from(raw.ascender), i32::from(raw.descender));
     let line_height = line_height_for(ascender, descender, units_per_em, px_height);
-    // iGfxLineHgt = iLineHgt + 1 for the shadow row (StdFont.cpp:352).
-    let cell_height = (line_height + 1) as usize;
+    // iGfxLineHgt includes one extra row only for a scale-one shadow.
+    let cell_height = (line_height + i32::from(shadow)) as usize;
     // Baseline offset inside the cell (StdFont.cpp:221).
     let ascent_px = i64::from(px_height) * i64::from(ascender) / i64::from(units_per_em);
 
     let mut font = ClonkFont::new(line_height);
+    font.cell_height = cell_height as i32;
+    font.h_space = if shadow { -1 } else { 0 };
     for ch in classic_font_characters(face) {
         if face
             .load_char(ch as usize, LoadFlag::RENDER | LoadFlag::NO_HINTING)
@@ -534,7 +566,7 @@ fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
             // C++ skips characters the font cannot render (StdFont.cpp:203-208).
             continue;
         }
-        if let Some(cell) = loaded_glyph_cell(face, cell_height, ascent_px) {
+        if let Some(cell) = loaded_glyph_cell(face, cell_height, ascent_px, shadow) {
             font.add_glyph(ch, cell);
         }
     }
@@ -544,7 +576,7 @@ fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
     let missing_glyph = face
         .load_glyph(0, LoadFlag::RENDER | LoadFlag::NO_HINTING)
         .ok()
-        .and_then(|_| loaded_glyph_cell(face, cell_height, ascent_px));
+        .and_then(|_| loaded_glyph_cell(face, cell_height, ascent_px, shadow));
     if let Some(cell) = missing_glyph {
         font.set_missing_glyph(cell);
     }
@@ -728,20 +760,39 @@ fn build_native_font(
     })
 }
 
-/// Builds the five GUI fonts from a TTF, sized from the base size 14 like
-/// `C4Fonts.cpp:280-288` (Log 12, MainSmall 13, Main 14, Caption 16, Title 22).
-pub fn build_font_set(ttf_bytes: &[u8]) -> Result<ClonkFontSet> {
+/// Builds one vector CStdFont with the requested FreeType height, weight and
+/// shadow mode (`C4FontLoader::InitFont`, C4Fonts.cpp:158-173).
+pub fn build_vector_font(
+    ttf_bytes: &[u8],
+    px_height: u32,
+    weight: u32,
+    shadow: bool,
+) -> Result<ClonkFont> {
+    let library = Library::init().context("FreeType init failed")?;
+    let face = library
+        .new_memory_face(ttf_bytes.to_vec(), 0)
+        .context("failed to load font face")?;
+    build_font(&face, px_height, weight, shadow)
+}
+
+/// Builds the five GUI fonts from a TTF at a configurable RX base size.
+pub fn build_font_set_at_size(ttf_bytes: &[u8], base_size: u32) -> Result<ClonkFontSet> {
     let library = Library::init().context("FreeType init failed")?;
     let face = library
         .new_memory_face(ttf_bytes.to_vec(), 0)
         .context("failed to load font face")?;
     Ok(ClonkFontSet {
-        title: build_font(&face, 22)?,
-        caption: build_font(&face, 16)?,
-        text: build_font(&face, 14)?,
-        main_small: build_font(&face, 13)?,
-        mini: build_font(&face, 12)?,
+        title: build_font(&face, base_size.saturating_mul(22) / 14, 400, true)?,
+        caption: build_font(&face, base_size.saturating_mul(16) / 14, 400, true)?,
+        text: build_font(&face, base_size, 400, true)?,
+        main_small: build_font(&face, base_size.saturating_mul(13) / 14, 400, true)?,
+        mini: build_font(&face, base_size.saturating_mul(12) / 14, 400, true)?,
     })
+}
+
+/// Builds the default Endeavour-14 GUI set.
+pub fn build_font_set(ttf_bytes: &[u8]) -> Result<ClonkFontSet> {
+    build_font_set_at_size(ttf_bytes, 14)
 }
 
 /// Builds `C4GraphicsResource::FontTooltip`: the Main-14 RX face initialized
@@ -749,11 +800,96 @@ pub fn build_font_set(ttf_bytes: &[u8]) -> Result<ClonkFontSet> {
 /// It is deliberately not borrowed from the startup book-font bundle because
 /// the process-global GUI resource owns a separate `CStdFont` instance.
 pub fn build_tooltip_font(ttf_bytes: &[u8]) -> Result<ClonkFont> {
-    let library = Library::init().context("FreeType init failed")?;
-    let face = library
-        .new_memory_face(ttf_bytes.to_vec(), 0)
-        .context("failed to load font face")?;
-    crate::startup_scensel::build_shadowless_font(&face, 14)
+    build_vector_font(ttf_bytes, 14, 400, false)
+}
+
+/// Builds a prerendered byte-slot font from a decoded PNG/BMP surface.
+pub fn build_prerendered_font(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    indent: i32,
+) -> Result<ClonkFont> {
+    anyhow::ensure!(width > 0 && height > 0, "bitmap font surface is empty");
+    let expected_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("bitmap font dimensions overflow")?;
+    anyhow::ensure!(
+        rgba.len() == expected_len,
+        "bitmap font RGBA plane has the wrong size"
+    );
+    let pixel = |x: u32, y: u32| {
+        let index = (y as usize * width as usize + x as usize) * 4;
+        [
+            rgba[index],
+            rgba[index + 1],
+            rgba[index + 2],
+            rgba[index + 3],
+        ]
+    };
+    let delimiter = |color: [u8; 4]| {
+        // C++ compares `ClrDw2W` values. Its surface alpha is inverted, so
+        // an opaque decoded RGBA pixel contributes a zero alpha nibble and
+        // transparent lookalikes do not count as delimiter colors.
+        let rgba4 = (color[0] >> 4, color[1] >> 4, color[2] >> 4, color[3] >> 4);
+        match rgba4 {
+            (0xf, 0x0, 0x0, 0xf) | (0xf, 0xf, 0x0, 0xf) | (0xf, 0x0, 0xf, 0xf) => Some(false),
+            (0x0, 0xf, 0x0, 0xf) => Some(true),
+            _ => None,
+        }
+    };
+    let mut gfx_line_height = 1;
+    while gfx_line_height < height && delimiter(pixel(0, gfx_line_height)).is_none() {
+        gfx_line_height += 1;
+    }
+    let mut font = ClonkFont::new(gfx_line_height as i32 - indent);
+    font.cell_height = gfx_line_height as i32;
+    font.h_space = -indent;
+
+    let (mut x, mut y) = (0_u32, 0_u32);
+    for byte in b' '..=u8::MAX {
+        let start = x;
+        let mut line_break = false;
+        while x < width {
+            if let Some(is_line_break) = delimiter(pixel(x, y)) {
+                line_break = is_line_break;
+                break;
+            }
+            x += 1;
+        }
+        let glyph_width = x - start;
+        let mut pixels = Vec::with_capacity(glyph_width as usize * gfx_line_height as usize);
+        for cell_y in 0..gfx_line_height {
+            for cell_x in 0..glyph_width {
+                let [r, g, b, a] = pixel(start + cell_x, y + cell_y);
+                pixels.push(Color::new(r, g, b, a));
+            }
+        }
+        if let Some(character) = cp1252_to_char(byte) {
+            font.add_glyph(
+                character,
+                GlyphCell {
+                    width: glyph_width as i32,
+                    pixels,
+                },
+            );
+        }
+        x += 1;
+        if x >= width || line_break {
+            y = y.saturating_add(gfx_line_height).saturating_add(1);
+            x = 0;
+            if y.saturating_add(gfx_line_height) > height {
+                break;
+            }
+        }
+    }
+    Ok(font)
 }
 
 /// Build the five GUI fonts the way C++ does when `Graphics.Scale` is an
@@ -844,6 +980,59 @@ mod tests {
             fonts.text.measure("\u{1f642}", false).0 > 0,
             "FT_Load_Char resolves an unmapped scalar through glyph index zero"
         );
+    }
+
+    #[test]
+    fn base_size_sixteen_uses_cpp_integer_derived_sizes() {
+        let fonts = build_font_set_at_size(&endeavour_bytes(), 16).expect("build size-16 fonts");
+        assert_eq!(fonts.mini.line_height, 20); // 13px
+        assert_eq!(fonts.main_small.line_height, 22); // 14px
+        assert_eq!(fonts.text.line_height, 25); // 16px
+        assert_eq!(fonts.caption.line_height, 28); // 18px
+        assert_eq!(fonts.title.line_height, 39); // 25px
+    }
+
+    #[test]
+    fn weight_seven_hundred_applies_the_freetype_width_transform() {
+        let bytes = endeavour_bytes();
+        let regular = build_vector_font(&bytes, 14, 400, true).expect("regular font");
+        let bold = build_vector_font(&bytes, 14, 700, true).expect("weighted font");
+        assert!(bold.measure("MMMM", false).0 > regular.measure("MMMM", false).0);
+    }
+
+    #[test]
+    fn prerendered_font_scans_delimiters_rows_and_indent() {
+        // Two 2x2 cells separated by red, then green to end the row. The
+        // delimiter at x=0,y=2 establishes iGfxLineHgt=2.
+        let (width, height) = (6, 5);
+        let mut rgba = vec![0_u8; width * height * 4];
+        let mut put = |x: usize, y: usize, color: [u8; 4]| {
+            let index = (y * width + x) * 4;
+            rgba[index..index + 4].copy_from_slice(&color);
+        };
+        for y in 0..2 {
+            for x in [0, 1, 3, 4] {
+                put(x, y, [255, 255, 255, 255]);
+            }
+            put(2, y, [255, 0, 0, 255]);
+            put(5, y, [0, 255, 0, 255]);
+        }
+        put(0, 2, [255, 0, 0, 255]);
+        let font =
+            build_prerendered_font(width as u32, height as u32, &rgba, 1).expect("bitmap font");
+        assert_eq!(font.line_height, 1);
+        assert_eq!(font.cell_height, 2);
+        assert_eq!(font.h_space, -1);
+        assert_eq!(font.glyph(' ').expect("space").width, 2);
+        assert_eq!(font.glyph('!').expect("bang").width, 2);
+
+        // ClrDw2W includes the (inverted) alpha nibble. A transparent red
+        // pixel therefore belongs to glyph data rather than ending a cell.
+        let mut transparent_delimiter = rgba;
+        transparent_delimiter[(2 * width + 0) * 4 + 3] = 0;
+        let font = build_prerendered_font(width as u32, height as u32, &transparent_delimiter, 1)
+            .expect("transparent red is not a delimiter");
+        assert_eq!(font.cell_height, height as i32);
     }
 
     #[test]

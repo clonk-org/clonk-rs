@@ -2,6 +2,7 @@
 //! dialog render tests can rasterize real fonts); integration tests against
 //! the real Endeavour.ttf stay here.
 
+#[allow(unused_imports)]
 pub use lc_frontend::clonk_fonts::{build_font_set, build_tooltip_font};
 
 #[cfg(test)]
