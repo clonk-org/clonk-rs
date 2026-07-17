@@ -8676,11 +8676,8 @@ fn load_legacy_landscape_body(
         .unwrap_or(false);
     let mut map_rng = legacy_map_creation_rng(random_seed);
 
-    let read_optional = |name: &str| match group.read_file(name) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(GroupError::EntryNotFound(_)) => Ok(None),
-        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(ScenarioError::Resources(error)),
+    let read_optional = |name: &str| {
+        try_read_group_file_case_insensitive(group, name).map_err(ScenarioError::Resources)
     };
 
     // ExactLandscape: Landscape.bmp IS the landscape — C++ reads it
@@ -8691,7 +8688,10 @@ fn load_legacy_landscape_body(
     let (map_bytes, map_zoom_override) = if exact_landscape {
         // C4Landscape::Load requires C4CFN_Landscape. Exact mode never falls
         // back to Map.bmp (C4Landscape.cpp:1520-1524).
-        (Some(group.read_file("Landscape.bmp")?), Some(1))
+        (
+            Some(read_group_file_case_insensitive(group, "Landscape.bmp")?),
+            Some(1),
+        )
     } else {
         // Static map: Map.bmp, with Landscape.bmp accepted as the map for
         // downwards compatibility (C4Landscape.cpp:593-601) — most CR
@@ -13054,6 +13054,55 @@ RandomTeamCount=2
         let group = Group::open(directory.path()).expect("scenario group");
         let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
         assert_eq!(head.loader().configured_specification(), "LoaderMixed*");
+    }
+
+    #[test]
+    fn legacy_landscape_entries_match_case_insensitively_in_directory_and_packed_groups() {
+        let directory = tempdir().expect("scenario directory");
+        let entries: [(&str, &[u8]); 3] = [
+            ("mAp.BmP", b"map"),
+            ("lAnDsCaPe.BmP", b"landscape"),
+            ("landscape.txt", b"script"),
+        ];
+        for (name, bytes) in entries {
+            std::fs::write(directory.path().join(name), bytes).expect("directory entry");
+        }
+        let directory_group = Group::open(directory.path()).expect("directory group");
+
+        let mut mutable = lc_resources::MutableGroup::new("Case.c4s");
+        for (name, bytes) in entries {
+            mutable
+                .add_file(name, bytes.to_vec())
+                .expect("packed entry");
+        }
+        let packed_group = Group::from_memory(
+            PathBuf::from("Case.c4s"),
+            mutable.pack().expect("packed group image"),
+        )
+        .expect("packed group");
+
+        for (query, expected) in [
+            ("Map.bmp", b"map".as_slice()),
+            ("Landscape.bmp", b"landscape".as_slice()),
+            ("Landscape.txt", b"script".as_slice()),
+        ] {
+            for group in [&directory_group, &packed_group] {
+                assert_eq!(
+                    try_read_group_file_case_insensitive(group, query)
+                        .expect("entry lookup")
+                        .as_deref(),
+                    Some(expected),
+                    "{query} resolves identically"
+                );
+            }
+        }
+        for group in [&directory_group, &packed_group] {
+            assert_eq!(
+                try_read_group_file_case_insensitive(group, "Missing.map")
+                    .expect("missing lookup"),
+                None
+            );
+        }
     }
 
     #[test]
@@ -22875,10 +22924,10 @@ public func ActualizePhase(pClonk)
         let scenario_dir = dir.path().join("KeepCreator.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
-            scenario_dir.join("Landscape.txt"),
+            scenario_dir.join("landscape.txt"),
             "overlay Named { seed = 7; }; map Test { seed = 11; };",
         )
-        .expect("write Landscape.txt");
+        .expect("write lowercase landscape.txt");
         let group = Group::open(&scenario_dir).expect("scenario group opens");
         let manifest = parse_legacy_scenario_text(
             "[Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=5\nKeepMapCreator=1\n",
@@ -22905,6 +22954,47 @@ public func ActualizePhase(pClonk)
         let encoded = serde_json::to_string(&landscape).expect("landscape serializes");
         let restored: Landscape = serde_json::from_str(&encoded).expect("landscape restores");
         assert_eq!(restored, landscape, "creator and texmap survive saves");
+    }
+
+    #[test]
+    fn shipped_lowercase_landscape_txt_uses_the_s2_creator() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        if !repository.join("content").is_dir() {
+            return;
+        }
+
+        for relative in [
+            "content/Worlds.c4f/FoggyCliffs.c4s",
+            "content/Fantasy.c4f/Crystalvalley.c4s",
+        ] {
+            let group = Group::open(repository.join(relative)).expect("shipped scenario group");
+            let mut manifest = parse_legacy_scenario_manifest(&group).expect("scenario core");
+            // Creator retention is only a diagnostic here: the basic-map
+            // fallback cannot populate this state. Keep the render small
+            // while exercising the shipped S2 source and loader gate.
+            manifest.core.landscape.keep_map_creator = true;
+            manifest.core.landscape.map_width = LegacyC4SVal::new(64, 0, 64, 250);
+            manifest.core.landscape.map_height = LegacyC4SVal::new(40, 0, 40, 250);
+            let mut classifier = MapPixelClassifier::from_slots(
+                [0; 128],
+                vec![None; 128],
+                vec![None; 128],
+                vec![None; 128],
+            );
+
+            let landscape =
+                load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 1)
+                    .expect("shipped landscape loads")
+                    .expect("shipped landscape exists");
+            assert!(
+                landscape
+                    .raster_state()
+                    .expect("dynamic landscape retains raster state")
+                    .map_creator()
+                    .is_some(),
+                "{relative} must traverse create_s2_map_with_state"
+            );
+        }
     }
 
     #[test]
@@ -23026,10 +23116,10 @@ public func ActualizePhase(pClonk)
             0, 0x85, 0, 0, // the same texmap slot with IFT set
         ];
         std::fs::write(
-            scenario_dir.join("Landscape.bmp"),
+            scenario_dir.join("lAnDsCaPe.BmP"),
             encode_indexed_bmp(&[&[0, 0, 0, 0], &[0, 5, 0, 0], &[0, 0x85, 0, 0]]),
         )
-        .expect("write exact landscape");
+        .expect("write mixed-case exact landscape");
 
         let group = Group::open(&scenario_dir).expect("scenario group opens");
         let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nMapZoom=7\n")
@@ -23172,7 +23262,7 @@ public func ActualizePhase(pClonk)
                 .encode(&raw, 4, 4, ColorType::Rgba8)
                 .expect("encode map bmp");
         }
-        std::fs::write(scenario_dir.join("Map.bmp"), encoded).expect("write map");
+        std::fs::write(scenario_dir.join("mAp.BmP"), encoded).expect("write mixed-case map");
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
