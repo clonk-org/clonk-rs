@@ -83,7 +83,7 @@ struct Parser<'a> {
     out: Vec<u8>,
 }
 
-struct ParserError;
+struct ParserError(&'static str);
 
 impl<'a> Parser<'a> {
     fn state(&mut self) -> &mut PropertyState {
@@ -102,7 +102,7 @@ impl<'a> Parser<'a> {
         let mut param: i32 = 0;
         let mut has_param = false;
         let Some(&first) = self.data.get(self.pos) else {
-            return Err(ParserError); // AssertNoEOF
+            return Err(ParserError("Unexpected end of file")); // AssertNoEOF
         };
         self.pos += 1;
         if !first.is_ascii_alphabetic() {
@@ -205,7 +205,7 @@ impl<'a> Parser<'a> {
             b'0'..=b'9' => c - b'0',
             b'a'..=b'f' => c - b'a' + 10,
             b'A'..=b'F' => c - b'A' + 10,
-            _ => return Err(ParserError),
+            _ => return Err(ParserError("Invalid hex character")),
         };
         let state = self.state();
         state.hex_byte = (state.hex_byte << 4) | digit;
@@ -238,7 +238,7 @@ impl<'a> Parser<'a> {
                 }
                 b'}' => {
                     if self.stack.len() < 2 {
-                        return Err(ParserError); // too many brackets closed
+                        return Err(ParserError("Too many brackets closed"));
                     }
                     self.stack.pop();
                     self.state().state = ParseState::Normal;
@@ -254,7 +254,7 @@ impl<'a> Parser<'a> {
         }
         // all states must be closed in the end
         if self.stack.len() > 1 {
-            return Err(ParserError);
+            return Err(ParserError("Block not closed"));
         }
         Ok(())
     }
@@ -276,7 +276,7 @@ pub fn rtf_to_plain_text(data: &[u8]) -> String {
     };
     match parser.run() {
         Ok(()) => crate::scenario::decode_legacy_text(&parser.out),
-        Err(ParserError) => "Invalid RTF file".to_string(),
+        Err(ParserError(detail)) => format!("Invalid RTF file: {detail}"),
     }
 }
 
@@ -309,7 +309,34 @@ mod tests {
     }
 
     #[test]
-    fn unbalanced_braces_report_invalid_file() {
-        assert_eq!(rtf_to_plain_text(br"{\rtf1 text"), "Invalid RTF file");
+    fn unclosed_block_reports_parser_detail() {
+        assert_eq!(
+            rtf_to_plain_text(br"{\rtf1 text"),
+            "Invalid RTF file: Block not closed"
+        );
+    }
+
+    #[test]
+    fn excess_closing_brace_reports_parser_detail() {
+        assert_eq!(
+            rtf_to_plain_text(b"}"),
+            "Invalid RTF file: Too many brackets closed"
+        );
+    }
+
+    #[test]
+    fn invalid_hex_escape_reports_parser_detail() {
+        assert_eq!(
+            rtf_to_plain_text(br"{\rtf1 \'g0}"),
+            "Invalid RTF file: Invalid hex character"
+        );
+    }
+
+    #[test]
+    fn backslash_at_eof_reports_parser_detail() {
+        assert_eq!(
+            rtf_to_plain_text(b"\\"),
+            "Invalid RTF file: Unexpected end of file"
+        );
     }
 }
