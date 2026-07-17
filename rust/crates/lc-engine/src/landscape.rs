@@ -2511,15 +2511,20 @@ impl Landscape {
     /// Resolve the grid's Pix2Mat table once the engine materials exist
     /// (UpdatePixMaps, C4Landscape.cpp:2832-2839).
     /// C4Landscape::DigFreePix (C4Landscape.cpp:936-944) on the pixel
-    /// grid: returns the material at the pixel (C++ returns it even when
-    /// nothing clears); clears only DigFree materials. `None` when no
-    /// grid exists — callers keep the column-model fallback.
+    /// grid: resolves the pixel through GetPix's open/closed-border rules,
+    /// returns its material (C++ returns it even when nothing clears), and
+    /// clears only DigFree materials. `None` when no grid exists — callers
+    /// keep the column-model fallback.
     pub fn dig_free_pix(&mut self, x: i32, y: i32, materials: &MaterialSet) -> Option<MaterialId> {
         self.pixels.as_ref()?;
-        let material_id = self
-            .pixels
-            .as_ref()
-            .and_then(|grid| grid.material_id_at(x, y));
+        let material_id = match self.border_pixel(x, y) {
+            Some(BorderPixel::Sky) => None,
+            Some(BorderPixel::Vehicle) => self.vehicle_material,
+            None => self
+                .pixels
+                .as_ref()
+                .and_then(|grid| grid.material_id_at(x, y)),
+        };
         if let Some(id) = material_id {
             if materials
                 .get_by_id(id)
@@ -9366,6 +9371,67 @@ func TransactionThenRaw()
         let vehicle = materials.id_of("Vehicle").expect("vehicle exists");
         let earth = materials.id_of("Earth").expect("earth exists");
         (materials, vehicle, earth)
+    }
+
+    #[test]
+    fn dig_free_pix_uses_get_pix_border_material() {
+        let (materials, vehicle, _earth) = vehicle_earth_materials();
+        let grid = PixelGrid::new(
+            3,
+            2,
+            vec![0; 6],
+            vec![0],
+            vec![None],
+            vec![None],
+        );
+        let mut landscape = Landscape::new(3, vec![0; 3]).expect("landscape builds");
+        landscape.set_world_height(2);
+        landscape.set_pixel_grid(grid);
+        landscape.set_vehicle_material(Some(vehicle));
+        let before: Vec<_> = (0..2)
+            .flat_map(|y| (0..3).map(move |x| (x, y)))
+            .map(|(x, y)| landscape.pixel_grid().unwrap().byte_at(x, y))
+            .collect();
+
+        assert_eq!(landscape.dig_free_pix(1, 2, &materials), Some(vehicle));
+        assert_eq!(landscape.dig_free_pix(-1, 0, &materials), Some(vehicle));
+        assert_eq!(landscape.dig_free_pix(1, -1, &materials), None);
+
+        landscape.set_border_open(3, 3, true, true);
+        assert_eq!(landscape.dig_free_pix(1, 2, &materials), None);
+        assert_eq!(landscape.dig_free_pix(-1, 2, &materials), None);
+        let after: Vec<_> = (0..2)
+            .flat_map(|y| (0..3).map(move |x| (x, y)))
+            .map(|(x, y)| landscape.pixel_grid().unwrap().byte_at(x, y))
+            .collect();
+        assert_eq!(after, before, "border probes never write raster pixels");
+    }
+
+    #[test]
+    fn dig_free_pix_keeps_exact_in_bounds_pix2mat_lookup() {
+        let (materials, _vehicle, earth) = vehicle_earth_materials();
+        let grid = PixelGrid::new(
+            1,
+            1,
+            vec![1],
+            vec![0, 100],
+            vec![None, None],
+            vec![None, None],
+        );
+        let mut landscape = Landscape::flat_with_material(1, 0, Some(earth));
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(grid);
+
+        assert_eq!(
+            landscape.material_at(0, 0),
+            Some(earth),
+            "the general lookup may use the column approximation"
+        );
+        assert_eq!(
+            landscape.dig_free_pix(0, 0, &materials),
+            None,
+            "DigFreePix must keep the unresolved Pix2Mat result"
+        );
     }
 
     #[test]

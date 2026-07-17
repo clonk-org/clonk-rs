@@ -54333,6 +54333,86 @@ mod dig_out_material_cast_tick5_regression {
     use crate::landscape::PixelGrid;
 
     #[test]
+    fn dig_free_circle_closed_bottom_credits_vehicle_without_side_effects() {
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            Friction=100
+            "#,
+        )
+        .expect("material fixture parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let vehicle = materials.id_of("Vehicle").expect("Vehicle exists");
+
+        let grid = PixelGrid::new(
+            9,
+            5,
+            vec![0; 45],
+            vec![0],
+            vec![None],
+            vec![None],
+        );
+        let mut landscape = Landscape::new(9, vec![0; 9]).expect("landscape builds");
+        landscape.set_world_height(5);
+        landscape.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(
+                Definition::from_script("DGRR", "Digger", "#strict\n")
+                    .expect("digger compiles"),
+            )
+            .expect("digger registers");
+        let digger = engine
+            .spawn_object(SpawnConfig::new("DGRR"))
+            .expect("digger spawns");
+        let before: Vec<_> = (0..5)
+            .flat_map(|y| (0..9).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                engine
+                    .landscape
+                    .as_ref()
+                    .unwrap()
+                    .pixel_grid()
+                    .unwrap()
+                    .byte_at(x, y)
+            })
+            .collect();
+
+        engine.frame = 1;
+        engine.apply_landscape_operations(vec![LandscapeOperation::DigCircle {
+            center: Vector2::new(4, 4),
+            radius: 3,
+            requested: false,
+            by_object: Some(digger),
+        }]);
+
+        // The main-loop rows at y=5 and y=6 are past the closed bottom.
+        // Each has line width two, so C++ credits 4 + 4 Vehicle probes.
+        let digger_index = engine.find_object_index(digger).expect("digger survives");
+        assert_eq!(engine.objects[digger_index].material_content(vehicle), 8);
+        let after: Vec<_> = (0..5)
+            .flat_map(|y| (0..9).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                engine
+                    .landscape
+                    .as_ref()
+                    .unwrap()
+                    .pixel_grid()
+                    .unwrap()
+                    .byte_at(x, y)
+            })
+            .collect();
+        assert_eq!(after, before, "closed-border probes clear no pixels");
+        assert_eq!(engine.pxs_system.count(), 0);
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+    }
+
+    #[test]
     fn dig_out_material_cast_waits_for_tick5_and_retains_contents() {
         // C4Landscape::DigFreeRect always accumulates pixels, but calls
         // C4Object::DigOutMaterialCast only on !Tick5 (C4Landscape.cpp:986-996).
