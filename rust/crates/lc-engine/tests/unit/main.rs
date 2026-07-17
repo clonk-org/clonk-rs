@@ -7091,7 +7091,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     }
 
     #[test]
-    fn pxs_pos_script_writeback_refreshes_material_physics_for_same_tick() {
+    fn pxs_pos_system_global_script_writeback_refreshes_material_physics_for_same_tick() {
         let (mut engine, _source, target) = pxs_pos_material_refresh_engine(
             r#"
             [Reaction]
@@ -7103,10 +7103,10 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             "#,
             true,
         );
-        engine
-            .install_scenario_script(
-                "Scenario",
-                &format!(
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/PxsPosReaction.c".to_string(),
+                format!(
                     r#"
                     global func RewritePxsMat(&x, &y, lsx, lsy, &xdir, &ydir, &pxs_mat, ls_mat, event) {{
                         if (event == 0) {{ pxs_mat = {}; }}
@@ -7115,8 +7115,10 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                     "#,
                     target.index()
                 ),
-            )
-            .expect("scenario script installs");
+            )]),
+            1,
+            "System.c4g PxsPos callback installs without a scenario host"
+        );
         let mut mirror = engine.rng.clone();
         let random_x = mirror.random(1200);
         let random_y = mirror.random(1200);
@@ -7420,7 +7422,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     }
 
     #[test]
-    fn script_reaction_calls_scenario_function_and_kills_on_truthy_return() {
+    fn script_reaction_calls_system_global_function_and_kills_on_truthy_return() {
         // mrfScript (C4Material.cpp:800-835): the function gets the 9-int
         // parameter set — X, Y, LSPosX, LSPosY, fixtoi(XDir,100),
         // fixtoi(YDir,100), PxsMat, LsMat, Event — and a truthy return
@@ -7475,9 +7477,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // flag computed from the parameters so the call is observable both
         // ways (kill for goo's column, survive elsewhere is not reachable
         // in this fixture — the unresolvable arm covers the no-op path).
-        engine
-            .install_scenario_script(
-                "Scenario",
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/MaterialReaction.c".to_string(),
                 r#"
                 global func GooHitsEarth(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {
                     // meePXSMove = 1; falling straight down: xdir 0, ydir 100
@@ -7487,9 +7489,18 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
                     if (ls_mat < 0) { return 0; }
                     return 1;
                 }
-                "#,
+                "#
+                .to_string(),
+            )]),
+            1,
+            "System.c4g reaction script installs without a scenario host"
+        );
+        engine
+            .install_scenario_script(
+                "Scenario",
+                "func NoSuchFunction() { return 1; }",
             )
-            .expect("scenario script installs");
+            .expect("ordinary scenario-local shadow installs");
 
         let mirror = engine.rng.clone();
         assert!(engine.pxs_system.create(
@@ -7507,9 +7518,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         );
         assert_eq!(engine.rng, mirror, "no synced draws on this path");
 
-        // Unresolvable ScriptFunc: null pScriptFunc → reaction is a no-op;
-        // the PXS keeps moving per the normal step rules (snapped/stopped by
-        // the contact handling, but alive).
+        // An ordinary scenario-local function is not owned by
+        // Game.ScriptEngine, so GetSFuncWarn cannot resolve it: null
+        // pScriptFunc leaves the PXS alive.
         assert!(engine.pxs_system.create(
             ooze,
             math::itofix(2),

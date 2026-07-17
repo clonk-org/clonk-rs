@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_mover_runs_mass_move_script_reaction_like_cpp() {
+    fn blocked_mover_runs_system_global_mass_move_script_reaction_like_cpp() {
         // mrfScript on meeMassMove (C4MassMover.cpp:126-132 +
         // C4Material.cpp:800-835): the reaction script runs at the
         // corrosion-check position with xdir=ydir=0 and pfPosChanged=null —
@@ -1022,11 +1022,11 @@ mod tests {
             vec![crate::LiquidSegment::with_material(4, 4, Some(goo))],
         );
         let mut engine = engine_with(materials, landscape);
-        engine
-            .install_scenario_script(
-                "Scenario",
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/GooReaction.c".to_string(),
                 r#"
-                global func GooEats(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {
+                func IsBlockedGoo(xdir, ydir, ls_mat, event) {
                     // meeMassMove = 2; dirs are Fix0; the landscape side is
                     // a real material
                     if (event != 2) { return 0; }
@@ -1035,9 +1035,17 @@ mod tests {
                     if (ls_mat < 0) { return 0; }
                     return 1;
                 }
-                "#,
-            )
-            .expect("scenario installs");
+                global func GooEats(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {
+                    // A Game.ScriptEngine SFunc retains its declaring
+                    // System.c4g host for ordinary local-helper lookup.
+                    return IsBlockedGoo(xdir, ydir, ls_mat, event);
+                }
+                "#
+                .to_string(),
+            )]),
+            1,
+            "System.c4g reaction installs without any scenario script"
+        );
         assert!(engine.mass_mover_create(1, 4, false));
 
         let had_goo = engine

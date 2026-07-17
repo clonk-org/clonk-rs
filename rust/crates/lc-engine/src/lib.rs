@@ -49831,8 +49831,9 @@ impl Engine {
     }
 
     /// Runs a `Type=Script` material reaction function (mrfScript,
-    /// C4Material.cpp:800-835). C++ resolves the function on the global
-    /// script engine; the scenario script stands in (PORT_STATUS). Returns
+    /// C4Material.cpp:800-835). C++ resolves and retains an SFunc from
+    /// Game.ScriptEngine, so only linked `global func` entries qualify and
+    /// execution must keep the declaring host's local-helper scope. Returns
     /// the raw return value, `None` when the function is unresolvable
     /// (null `pScriptFunc` → the reaction is a no-op) — script ERRORS return
     /// `Some(Value::Nil)` semantics via the fail-safe exec.
@@ -49843,32 +49844,31 @@ impl Engine {
     ) -> Option<(Value, Vec<Value>)> {
         if function.is_empty()
             || !self
-                .scenario_script
-                .as_ref()
-                .map(|script| script.has_function(function))
-                .unwrap_or(false)
+                .global_script_functions
+                .as_deref()
+                .is_some_and(|functions| functions.contains_key(function))
         {
             return None;
         }
         let world = self.host_world_context();
+        let (script, resolution) = world.resolve_engine_global_script(function)?;
         let rng = self.rng.clone();
-        let scenario_script = self.scenario_script.as_ref()?;
         let (value, finals, batch, audio_state, rng, script_error) =
-            ScenarioScript::call_value_for_script(
-            &scenario_script.name,
-            &scenario_script.script,
-            None,
-            function,
-            args,
-            world,
-            rng,
-            self.frame,
-            &self.global_effects.clone(),
-            self.physics,
-            self.environment,
-            self.audio_registry.clone(),
-            self.game_over_triggered,
-        );
+            ScenarioScript::execute_value_for_script(
+                "Game.ScriptEngine",
+                None,
+                function,
+                args,
+                world,
+                rng,
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+                || script.call_pinned_with_ref_args(&resolution.function, true, args),
+            );
         self.rng = rng;
         self.audio_registry = audio_state;
         if let Err(error) = self.apply_scenario_batch(batch) {
