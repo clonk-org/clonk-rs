@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -129,7 +129,7 @@ impl Group {
     pub fn read_file<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
         match &self.kind {
             GroupKind::Directory(root) => {
-                let full_path = root.join(relative.as_ref());
+                let full_path = resolve_directory_entry(root, relative.as_ref())?;
                 Ok(fs::read(full_path)?)
             }
             GroupKind::Packed(packed) => {
@@ -145,7 +145,7 @@ impl Group {
     pub fn read_entry_bytes<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
         match &self.kind {
             GroupKind::Directory(root) => {
-                let full_path = root.join(relative.as_ref());
+                let full_path = resolve_directory_entry(root, relative.as_ref())?;
                 if full_path.is_dir() {
                     return Err(GroupError::InvalidGroup(format!(
                         "entry '{}' is an unpacked directory",
@@ -195,7 +195,7 @@ impl Group {
 
     pub fn exists<P: AsRef<Path>>(&self, relative: P) -> bool {
         match &self.kind {
-            GroupKind::Directory(root) => root.join(relative.as_ref()).exists(),
+            GroupKind::Directory(root) => resolve_directory_entry(root, relative.as_ref()).is_ok(),
             GroupKind::Packed(packed) => {
                 let relative = normalize_path(relative.as_ref());
                 packed.index.contains_key(&case_fold_group_path(&relative))
@@ -247,7 +247,7 @@ impl Group {
     pub fn open_child<P: AsRef<Path>>(&self, relative: P) -> Result<Self, GroupError> {
         let relative = normalize_path(relative.as_ref());
         match &self.kind {
-            GroupKind::Directory(root) => Self::open(root.join(&relative)),
+            GroupKind::Directory(root) => Self::open(resolve_directory_entry(root, &relative)?),
             GroupKind::Packed(packed) => packed.open_child(&relative),
         }
     }
@@ -738,6 +738,51 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
     Ok(entries)
 }
 
+/// Resolves a folder-backed group entry using the same observable name scan
+/// as C4Group's `GRPF_Folder` search: native directory order, ignored entries
+/// removed, and ASCII-case-insensitive matching against the actual basename.
+///
+/// Rust callers may pass a nested convenience path, so resolve each group
+/// level separately. Reject non-relative components instead of allowing a
+/// path to escape the group root.
+fn resolve_directory_entry(root: &Path, relative: &Path) -> Result<PathBuf, GroupError> {
+    let missing = || GroupError::EntryNotFound(relative.to_path_buf());
+    let mut current = root.to_path_buf();
+    let mut resolved_any = false;
+
+    for component in relative.components() {
+        let Component::Normal(requested) = component else {
+            return Err(missing());
+        };
+        let requested = requested.as_encoded_bytes();
+        let entries = fs::read_dir(&current).map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) {
+                missing()
+            } else {
+                GroupError::Io(error)
+            }
+        })?;
+        let mut matched = None;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.as_encoded_bytes();
+            if name.eq_ignore_ascii_case(requested) && !ignored_group_entry_bytes(name) {
+                matched = Some(entry);
+                break;
+            }
+        }
+        let entry = matched.ok_or_else(&missing)?;
+        current = entry.path();
+        resolved_any = true;
+    }
+
+    resolved_any.then_some(current).ok_or_else(missing)
+}
+
 fn ignored_group_entry_bytes(name: &[u8]) -> bool {
     (name.first() == Some(&b'.') && name != b".legacyclonk")
         || name.eq_ignore_ascii_case(b"cvs")
@@ -1037,6 +1082,103 @@ mod tests {
 
         let data = group.read_file("sub/file.txt").unwrap();
         assert_eq!(data, b"hello");
+    }
+
+    #[test]
+    fn directory_group_lookup_is_ascii_case_insensitive() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("teams.txt"), b"teams").unwrap();
+        fs::create_dir(dir.path().join("material.c4g")).unwrap();
+        fs::write(
+            dir.path().join("material.c4g/texmap.txt"),
+            b"1=Earth-Rough\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_directory_entry(dir.path(), Path::new("TEAMS.TXT")).unwrap();
+        assert_eq!(
+            resolved.strip_prefix(dir.path()).unwrap(),
+            Path::new("teams.txt")
+        );
+
+        let group = Group::open(dir.path()).unwrap();
+        assert!(group.exists("TeAmS.TxT"));
+        assert_eq!(group.read_file("Teams.Txt").unwrap(), b"teams");
+        let material = group.open_child("MaTeRiAl.C4G").unwrap();
+        assert!(material.exists("TEXMAP.TXT"));
+        assert_eq!(
+            material.read_file("TexMap.Txt").unwrap(),
+            b"1=Earth-Rough\n"
+        );
+    }
+
+    #[test]
+    fn directory_group_lookups_hide_cpp_ignored_entries() {
+        let dir = tempdir().unwrap();
+        for name in ["cVs", "thumbs.DB", ".secret"] {
+            fs::write(dir.path().join(name), name.as_bytes()).unwrap();
+        }
+        fs::create_dir(dir.path().join(".hidden.c4g")).unwrap();
+        fs::write(dir.path().join(".hidden.c4g/inside.txt"), b"hidden").unwrap();
+        fs::write(dir.path().join(".legacyclonk"), b"visible").unwrap();
+
+        let group = Group::open(dir.path()).unwrap();
+        assert_eq!(
+            group
+                .entries()
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.relative_path)
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from(".legacyclonk")]
+        );
+        for query in ["CVS", "Thumbs.db", ".secret"] {
+            assert!(!group.exists(query));
+            assert!(matches!(
+                group.read_file(query),
+                Err(GroupError::EntryNotFound(path)) if path == Path::new(query)
+            ));
+        }
+        assert!(!group.exists(".HIDDEN.C4G"));
+        assert!(matches!(
+            group.open_child(".hidden.c4g"),
+            Err(GroupError::EntryNotFound(path)) if path == Path::new(".hidden.c4g")
+        ));
+
+        // The exemption is case-sensitive on the physical basename. Lookup
+        // remains case-insensitive, so an uppercase query still finds the
+        // actual lowercase `.legacyclonk` entry.
+        assert!(group.exists(".LEGACYCLONK"));
+        assert_eq!(group.read_file(".LegacyClonk").unwrap(), b"visible");
+    }
+
+    #[test]
+    fn directory_and_packed_groups_have_identical_lookup_results() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("teams.txt"), b"teams").unwrap();
+        fs::create_dir(dir.path().join("material.c4g")).unwrap();
+        fs::write(dir.path().join("material.c4g/texmap.txt"), b"texmap").unwrap();
+
+        let directory = Group::open(dir.path()).unwrap();
+        let packed_bytes = MutableGroup::from_group(&directory)
+            .unwrap()
+            .pack()
+            .unwrap();
+        let packed = Group::from_memory(PathBuf::from("same.c4s"), packed_bytes).unwrap();
+
+        for group in [&directory, &packed] {
+            assert!(group.exists("TEAMS.TXT"));
+            assert_eq!(group.read_file("Teams.Txt").unwrap(), b"teams");
+            assert!(!group.exists("missing.txt"));
+            assert!(matches!(
+                group.read_file("missing.txt"),
+                Err(GroupError::EntryNotFound(path)) if path == Path::new("missing.txt")
+            ));
+
+            let material = group.open_child("MATERIAL.C4G").unwrap();
+            assert!(material.exists("TEXMAP.TXT"));
+            assert_eq!(material.read_file("TexMap.Txt").unwrap(), b"texmap");
+        }
     }
 
     #[test]
