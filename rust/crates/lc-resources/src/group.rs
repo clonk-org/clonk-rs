@@ -268,6 +268,28 @@ impl Group {
 
     pub fn open_child<P: AsRef<Path>>(&self, relative: P) -> Result<Self, GroupError> {
         let relative = normalize_path(relative.as_ref());
+        if relative.as_os_str().as_encoded_bytes().contains(&b'*') {
+            return Err(GroupError::InvalidGroup(
+                "OpenAsChild: No wildcards allowed".to_string(),
+            ));
+        }
+
+        let missing = || GroupError::EntryNotFound(relative.clone());
+        let mut components = relative.components();
+        let Some(Component::Normal(first)) = components.next() else {
+            return Err(missing());
+        };
+        let mut child = self.open_direct_child(Path::new(first))?;
+        for component in components {
+            let Component::Normal(name) = component else {
+                return Err(missing());
+            };
+            child = child.open_direct_child(Path::new(name))?;
+        }
+        Ok(child)
+    }
+
+    fn open_direct_child(&self, relative: &Path) -> Result<Self, GroupError> {
         match &self.kind {
             GroupKind::Directory(root) => {
                 let path = resolve_directory_entry(root, &relative)?;
@@ -1617,6 +1639,53 @@ mod tests {
         );
         assert_eq!(group.read_file(" report .txt ").unwrap(), b"data");
         assert!(!group.exists("report .txt"));
+    }
+
+    #[test]
+    fn packed_open_child_walks_successive_packed_components() {
+        let leaf = packed_group_image_with_entry("marker.txt", false, b"nested");
+        let intermediate = packed_group_image_with_entry("B.c4d", true, &leaf);
+        let outer = packed_group_image_with_entry("A.c4d", true, &intermediate);
+        let group =
+            Group::from_memory(PathBuf::from("outer.c4g"), outer).expect("valid outer group");
+
+        let child = group
+            .open_child("a.C4D/B.C4d")
+            .expect("multi-component packed child path");
+        assert_eq!(child.read_file("marker.txt").unwrap(), b"nested");
+    }
+
+    #[test]
+    fn directory_open_child_walks_through_a_packed_file() {
+        let dir = tempdir().unwrap();
+        let leaf = packed_group_image_with_entry("marker.txt", false, b"nested");
+        let packed = packed_group_image_with_entry("B.c4d", true, &leaf);
+        fs::write(dir.path().join("A.c4d"), packed).unwrap();
+        let group = Group::open(dir.path()).unwrap();
+
+        let child = group
+            .open_child("a.C4D/B.C4d")
+            .expect("directory-to-packed child path");
+        assert_eq!(child.read_file("marker.txt").unwrap(), b"nested");
+    }
+
+    #[test]
+    fn open_child_rejects_wildcards_before_lookup() {
+        let dir = tempdir().unwrap();
+        let directory = Group::open(dir.path()).unwrap();
+        let packed = Group::from_memory(PathBuf::from("empty.c4g"), packed_group_image())
+            .expect("valid empty packed group");
+
+        for group in [&directory, &packed] {
+            let error = group
+                .open_child("missing/child*.c4d")
+                .expect_err("C4Group forbids wildcard child names");
+            assert!(matches!(
+                error,
+                GroupError::InvalidGroup(message)
+                    if message == "OpenAsChild: No wildcards allowed"
+            ));
+        }
     }
 
     #[test]
