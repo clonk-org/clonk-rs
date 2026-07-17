@@ -241,6 +241,7 @@ impl ReplayCrewInfoV1 {
             id: self.id.clone(),
             name: self.name.clone(),
             death_message: String::new(),
+            core: Default::default(),
             rank: self.rank,
             rank_name: "Clonk".to_string(),
             experience: self.experience,

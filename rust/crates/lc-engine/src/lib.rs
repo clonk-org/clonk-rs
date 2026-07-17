@@ -1935,6 +1935,74 @@ fn default_crew_rank_name() -> String {
     "Clonk".to_string()
 }
 
+fn default_crew_type_name() -> String {
+    "Clonk".to_string()
+}
+
+fn bounded_c4_string(value: &str, max_len: usize) -> String {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes.truncate(max_len);
+    lc_script::c4_string_from_bytes(&bytes)
+}
+
+pub(crate) fn bounded_crew_type_name(name: &str) -> String {
+    bounded_c4_string(name, 30)
+}
+
+pub(crate) fn bounded_loaded_crew_type_name(name: &str) -> String {
+    bounded_c4_string(name, 31)
+}
+
+pub(crate) fn bounded_crew_portrait_file(name: &str) -> String {
+    bounded_c4_string(name, 36)
+}
+
+fn default_crew_participation() -> i32 {
+    1
+}
+
+fn is_default_crew_type_name(value: &String) -> bool {
+    value == "Clonk"
+}
+
+fn is_default_crew_participation(value: &i32) -> bool {
+    *value == 1
+}
+
+/// C4ObjectInfoCore fields that are independent of the live portrait
+/// graphics and the ordinary rank/experience counters. These values are
+/// persisted verbatim when an info is loaded; `UpdateCustomRanks` refreshes
+/// the next-rank pair only when a new info is created or a crew file is
+/// saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrewInfoCoreFields {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub portrait_file: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next_rank_name: String,
+    #[serde(
+        default = "default_crew_type_name",
+        skip_serializing_if = "is_default_crew_type_name"
+    )]
+    pub type_name: String,
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub next_rank_exp: i32,
+}
+
+impl Default for CrewInfoCoreFields {
+    fn default() -> Self {
+        Self {
+            portrait_file: String::new(),
+            next_rank_name: String::new(),
+            type_name: default_crew_type_name(),
+            next_rank_exp: 0,
+        }
+    }
+}
+
 /// One resolved C4ObjectInfo portrait. Definition-backed portraits retain
 /// their source ID; owned/custom graphics deliberately do not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1986,12 +2054,23 @@ pub struct CrewObjectInfo {
         skip_serializing_if = "String::is_empty"
     )]
     pub death_message: String,
+    /// Persisted `PortraitFile`, `NextRankName`, `TypeName`, and
+    /// `NextRankExp` values from C4ObjectInfoCore.
+    #[serde(default, flatten)]
+    pub core: CrewInfoCoreFields,
     pub rank: i32,
     /// Stored `C4ObjectInfoCore::sRankName`. Silent over-table promotions
     /// retain the preceding name (C4InfoCore.cpp:428-435).
     #[serde(default = "default_crew_rank_name")]
     pub rank_name: String,
     pub experience: i32,
+    /// Persisted C4ObjectInfoCore participation flag. This is independent
+    /// of live crew-list membership.
+    #[serde(
+        default = "default_crew_participation",
+        skip_serializing_if = "is_default_crew_participation"
+    )]
+    pub participation: i32,
     /// Persistent C4ObjectInfoCore participation-round tally.
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     pub rounds: i32,
@@ -7636,6 +7715,48 @@ pub(crate) fn crew_rank_experience(rank: i32) -> i32 {
         return 0;
     }
     ((rank as f64).powf(1.5) * 1000.0) as i32
+}
+
+/// `C4ObjectInfoCore::UpdateCustomRanks`' finite-table projection. `None`
+/// means the definition has no custom rank system and therefore stores the
+/// zero tag; an exhausted custom table stores `EXP_NoPromotion` (-1).
+pub(crate) fn custom_next_rank_info(
+    rank_names: Option<&[String]>,
+    rank_base: Option<i32>,
+    rank: i32,
+) -> (String, i32) {
+    let Some(rank_names) = rank_names else {
+        return (String::new(), 0);
+    };
+    let Some(next_rank) = rank.checked_add(1).and_then(|rank| usize::try_from(rank).ok()) else {
+        return (String::new(), -1);
+    };
+    let Some(next_name) = rank_names.get(next_rank).filter(|name| !name.is_empty()) else {
+        return (String::new(), -1);
+    };
+    let rank_base = rank_base.filter(|base| *base != 0).unwrap_or(1_000);
+    let experience = ((next_rank as f64).powf(1.5) * f64::from(rank_base)) as i32;
+    (next_name.clone(), experience)
+}
+
+/// Refresh the current custom rank name and stored next-rank fields. Callers
+/// deliberately invoke this only at C++'s creation/save seams, never on load
+/// or promotion.
+fn update_custom_rank_fields(
+    rank_name: &mut String,
+    core: &mut CrewInfoCoreFields,
+    rank: i32,
+    rank_names: Option<&[String]>,
+    rank_base: Option<i32>,
+) {
+    if let Some(current_name) = rank_names
+        .and_then(|names| usize::try_from(rank).ok().and_then(|rank| names.get(rank)))
+        .filter(|name| !name.is_empty())
+    {
+        rank_name.clone_from(current_name);
+    }
+    (core.next_rank_name, core.next_rank_exp) =
+        custom_next_rank_info(rank_names, rank_base, rank);
 }
 
 /// The state-changing half of `C4Object::DoExperience`
@@ -19495,9 +19616,11 @@ impl Engine {
                 definition_id: definition_id.clone(),
                 name: info.name.clone(),
                 death_message: info.death_message.clone(),
+                core: info.core.clone(),
                 rank: info.rank,
                 rank_name: info.rank_name.clone(),
                 experience: info.experience,
+                participation: info.participation,
                 rounds: info.rounds,
                 death_count: info.death_count,
                 total_playing_time: info.total_playing_time,
@@ -19707,14 +19830,18 @@ impl Engine {
             None => "Clonk".to_string(),
         };
 
-        let rank_name = self
-            .definitions
-            .get(id)
-            .and_then(Definition::rank_names)
-            .and_then(|names| names.first())
-            .cloned()
-            .or_else(|| compat::default_rank_name(0).map(str::to_owned))
-            .unwrap_or_else(default_crew_rank_name);
+        let mut core = CrewInfoCoreFields {
+            type_name: bounded_crew_type_name(definition.name()),
+            ..CrewInfoCoreFields::default()
+        };
+        let mut rank_name = default_crew_rank_name();
+        update_custom_rank_fields(
+            &mut rank_name,
+            &mut core,
+            0,
+            definition.rank_names(),
+            definition.rank_base(),
+        );
         let roster = self.crew_rosters.entry(number).or_default();
         // MakeValidName (C4ObjectInfoList.cpp:93-101): number duplicates
         // from 2, overwriting the tail to stay within C4MaxName.
@@ -19737,6 +19864,7 @@ impl Engine {
             id: id.to_string(),
             name,
             death_message: String::new(),
+            core,
             rank: 0,
             rank_name,
             experience: 0,
@@ -31276,7 +31404,9 @@ impl Engine {
             };
             if let Some(info) = Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id) {
                 info.death_message = entry.death_message.clone();
+                info.core = entry.core.clone();
                 info.rank_name = entry.rank_name.clone();
+                info.participation = entry.participation;
                 info.rounds = entry.rounds;
                 info.total_playing_time = entry.total_playing_time;
                 info.birthday = entry.birthday;
@@ -33586,9 +33716,11 @@ impl Engine {
                         definition_id: DefinitionId::from(entry.id.as_str()),
                         name: entry.name.clone(),
                         death_message: entry.death_message.clone(),
+                        core: entry.core.clone(),
                         rank: entry.rank,
                         rank_name: entry.rank_name.clone(),
                         experience: entry.experience,
+                        participation: entry.participation,
                         rounds: entry.rounds,
                         death_count: entry.death_count,
                         total_playing_time: entry.total_playing_time,
@@ -34002,9 +34134,11 @@ impl Engine {
                             info.definition_id = DefinitionId::from(entry.id.as_str());
                             info.name = entry.name.clone();
                             info.death_message = entry.death_message.clone();
+                            info.core = entry.core.clone();
                             info.rank = entry.rank;
                             info.rank_name = entry.rank_name.clone();
                             info.experience = entry.experience;
+                            info.participation = entry.participation;
                             info.rounds = entry.rounds;
                             info.death_count = entry.death_count;
                             info.total_playing_time = entry.total_playing_time;
@@ -43126,6 +43260,79 @@ impl Engine {
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
     }
 
+    /// `C4ObjectInfoCore::Save(..., pDefs)` refreshes custom-rank fields
+    /// immediately before every local crew-file write. The app-owned file
+    /// callback is still disconnected, but this synchronous mutation is
+    /// observable through the live info pointer and belongs at the same seam.
+    fn refresh_crew_custom_ranks_for_save(&mut self) {
+        let eligible_players = self
+            .players
+            .iter()
+            .filter_map(|(&player_id, player)| {
+                if matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                ) || player.is_script_player()
+                {
+                    return None;
+                }
+                let remote = self
+                    .local_players
+                    .as_ref()
+                    .is_some_and(|local| !local.contains(&player_id));
+                let remote_save_blocked = remote
+                    && (self.league_game
+                        || self.max_players.is_some_and(|max_players| max_players <= 0));
+                (!remote_save_blocked).then_some(player_id)
+            })
+            .collect::<HashSet<_>>();
+        let mut saved_entries = HashSet::new();
+        for player_id in &eligible_players {
+            let Some(roster) = self.crew_rosters.get_mut(player_id) else {
+                continue;
+            };
+            for (roster_index, info) in roster.iter_mut().enumerate() {
+                let definition = self
+                    .definitions
+                    .get(&DefinitionId::from(info.id.as_str()));
+                if definition.is_some_and(|definition| definition.temporary_crew != 0) {
+                    continue;
+                }
+                saved_entries.insert((*player_id, roster_index));
+                if let Some(definition) = definition {
+                    update_custom_rank_fields(
+                        &mut info.rank_name,
+                        &mut info.core,
+                        info.rank,
+                        definition.rank_names(),
+                        definition.rank_base(),
+                    );
+                }
+            }
+        }
+
+        let linked = self
+            .crew_info_links
+            .iter()
+            .filter_map(|(&object_id, &link)| {
+                if !saved_entries.contains(&(link.player_id, link.roster_index)) {
+                    return None;
+                }
+                self.crew_rosters
+                    .get(&link.player_id)
+                    .and_then(|roster| roster.get(link.roster_index))
+                    .map(|entry| (object_id, entry.rank_name.clone(), entry.core.clone()))
+            })
+            .collect::<Vec<_>>();
+        let live_infos = Rc::make_mut(&mut self.crew_object_infos);
+        for (object_id, rank_name, core) in linked {
+            if let Some(info) = live_infos.get_mut(&object_id) {
+                info.rank_name = rank_name;
+                info.core = core;
+            }
+        }
+    }
+
     /// `C4Game::Synchronize` (`C4Game.cpp:3682-3715`). This deliberately
     /// does not perform `SyncClearance`; `C4ControlSynchronize::Execute`
     /// invokes clearance only when its `SyncClear` flag is set, and does so
@@ -43157,7 +43364,8 @@ impl Engine {
         // control stream is not a replay. Player files are application-owned
         // in the Rust port, so keep this gap explicit until that callback is
         // routed through the app layer.
-        if save_player_files {
+        if save_player_files && !self.replay_control {
+            self.refresh_crew_custom_ranks_for_save();
             tracing::warn!(
                 "network synchronization requested local player-file persistence; app callback is not yet connected"
             );

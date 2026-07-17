@@ -7,7 +7,10 @@ use lc_resources::{Group, PhysicalInfo};
 use serde::{Deserialize, Serialize};
 
 use crate::scenario::ScenarioError;
-use crate::{CrewPermanentPortrait, CrewPortrait, CrewPortraitState, DefinitionId};
+use crate::{
+    CrewInfoCoreFields, CrewPermanentPortrait, CrewPortrait, CrewPortraitState, DefinitionId,
+    bounded_crew_portrait_file, bounded_loaded_crew_type_name,
+};
 
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
@@ -40,6 +43,9 @@ pub struct CrewInfo {
         skip_serializing_if = "String::is_empty"
     )]
     pub death_message: String,
+    /// Remaining persisted scalar C4ObjectInfoCore fields.
+    #[serde(default, flatten)]
+    pub core: CrewInfoCoreFields,
     /// `Rank` (default 0).
     pub rank: i32,
     /// Persisted `C4ObjectInfoCore::sRankName` (`RankName`, default "Clonk").
@@ -143,8 +149,10 @@ impl CrewInfo {
         }
         let physical = crate::promotion_updated_physical(physical, rank, None);
         let id = entry("ObjectInfo", "id").unwrap_or_default();
-        let portrait_file = entry("ObjectInfo", "PortraitFile").unwrap_or_default();
-        let portraits = loaded_portrait_state(&id, &portrait_file, has_custom_portrait);
+        let mut portrait_file = entry("ObjectInfo", "PortraitFile")
+            .map(|name| bounded_crew_portrait_file(&name))
+            .unwrap_or_default();
+        let portraits = loaded_portrait_state(&id, &mut portrait_file, has_custom_portrait);
         let death_message = entry("ObjectInfo", "DeathMessage")
             .map(normalize_death_message)
             .unwrap_or_default();
@@ -152,6 +160,14 @@ impl CrewInfo {
             id,
             name: entry("ObjectInfo", "Name").unwrap_or_else(|| "Clonk".to_string()),
             death_message,
+            core: CrewInfoCoreFields {
+                portrait_file,
+                next_rank_name: entry("ObjectInfo", "NextRankName").unwrap_or_default(),
+                type_name: entry("ObjectInfo", "TypeName")
+                    .map(|name| bounded_loaded_crew_type_name(&name))
+                    .unwrap_or_else(|| "Clonk".to_string()),
+                next_rank_exp: int("ObjectInfo", "NextRankExp", 0),
+            },
             rank,
             rank_name: entry("ObjectInfo", "RankName").unwrap_or_else(default_crew_rank_name),
             experience: int("ObjectInfo", "Experience", 0),
@@ -189,7 +205,7 @@ fn normalize_death_message(value: String) -> String {
 
 fn loaded_portrait_state(
     own_definition: &str,
-    portrait_file: &str,
+    portrait_file: &mut String,
     has_custom_portrait: bool,
 ) -> CrewPortraitState {
     let custom = || CrewPortrait {
@@ -207,6 +223,7 @@ fn loaded_portrait_state(
         }
         // C4ObjectInfo::Load clears a stale `custom` spec when neither the
         // old BMP nor PNG payload can be loaded.
+        portrait_file.clear();
         return CrewPortraitState::default();
     }
     if portrait_file.is_empty() && has_custom_portrait {
@@ -214,6 +231,7 @@ fn loaded_portrait_state(
         // writes "custom" into PortraitFile, but does not create
         // pCustomPortrait. Permanent GetPortrait therefore evaluates that
         // string with the info's own definition ID.
+        *portrait_file = "custom".to_string();
         return CrewPortraitState {
             current: Some(custom()),
             fallback: Some(CrewPortrait {
@@ -614,7 +632,7 @@ mod tests {
         std::fs::create_dir_all(&first).expect("info dir");
         std::fs::write(
             first.join("ObjectInfo.txt"),
-            "[ObjectInfo]\nid=COWB\nName=Wipf\nDeathMessage=@Gone // but remembered  \nPortraitFile=TRPR::Captain\nRank=2\nRankName=Lieutenant\nExperience=900\nRounds=6\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+            "[ObjectInfo]\nid=COWB\nName=Wipf\nDeathMessage=@Gone // but remembered  \nPortraitFile=TRPR::Captain\nRank=2\nRankName=Lieutenant\nNextRankName=Captain\nTypeName=Cowboy\nParticipation=1\nExperience=900\nNextRankExp=5196\nRounds=6\nDeathCount=7\nTotalPlayingTime=17999\nBirthday=123\nAge=7\n\n[Physical]\nWalk=80000\n",
         )
         .expect("write info");
 
@@ -653,6 +671,10 @@ mod tests {
         assert_eq!(wipf.death_message, " Gone // but remembered  ");
         assert_eq!(wipf.rank, 2);
         assert_eq!(wipf.rank_name, "Lieutenant");
+        assert_eq!(wipf.core.portrait_file, "TRPR::Captain");
+        assert_eq!(wipf.core.next_rank_name, "Captain");
+        assert_eq!(wipf.core.type_name, "Cowboy");
+        assert_eq!(wipf.core.next_rank_exp, 5_196);
         assert_eq!(wipf.experience, 900);
         assert_eq!(wipf.rounds, 6);
         assert_eq!(wipf.physical.walk, 80_000);
@@ -691,6 +713,7 @@ mod tests {
         assert_eq!(zorro.id, "TRPR");
         assert_eq!(zorro.rank, 0, "Rank defaults to 0");
         assert_eq!(zorro.rank_name, "Clonk", "RankName defaults to Clonk");
+        assert_eq!(zorro.core, CrewInfoCoreFields::default());
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
@@ -765,6 +788,7 @@ mod tests {
         assert_eq!(valid_fallback.source, None);
         assert_eq!(valid_fallback.name, "custom");
         assert_eq!(valid.portraits.current.as_ref(), Some(valid_fallback));
+        assert_eq!(valid.core.portrait_file, "custom");
 
         let embedded = player
             .crew
@@ -784,6 +808,7 @@ mod tests {
             .expect("synthesized PortraitFile fallback exists");
         assert_eq!(fallback.source.as_ref().map(DefinitionId::as_str), Some("CLNK"));
         assert_eq!(fallback.name, "custom");
+        assert_eq!(embedded.core.portrait_file, "custom");
 
         for name in ["Broken custom", "Corrupt PNG", "Mismatched overlay"] {
             let info = player
@@ -792,6 +817,7 @@ mod tests {
                 .find(|info| info.name == name)
                 .expect("invalid custom crew parsed");
             assert_eq!(info.portraits, CrewPortraitState::default());
+            assert!(info.core.portrait_file.is_empty());
         }
     }
 

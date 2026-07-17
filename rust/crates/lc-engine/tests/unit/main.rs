@@ -2127,6 +2127,7 @@ func Ejection(object item)
                 id: "DCRW".to_string(),
                 name: "Veteran".to_string(),
                 death_message: String::new(),
+                core: Default::default(),
                 rank: 0,
                 rank_name: "Clonk".to_string(),
                 experience: 0,
@@ -2229,6 +2230,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
             id: "DCRW".to_string(),
             name: name.to_string(),
             death_message: String::new(),
+            core: Default::default(),
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience: 0,
@@ -17661,6 +17663,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                     id: "CREW".to_string(),
                     name: "Rookie".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 998,
@@ -19122,6 +19125,7 @@ public func RemoveCaptain(int player)
                     id: "CREW".to_string(),
                     name: "Runner-up".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 1,
                     rank_name: "Ensign".to_string(),
                     experience: 1_000,
@@ -19143,6 +19147,7 @@ public func RemoveCaptain(int player)
                     id: "CREW".to_string(),
                     name: "Captain".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 5,
                     rank_name: "Lieutenant Colonel".to_string(),
                     experience: 5_000,
@@ -30133,6 +30138,7 @@ public func TrainTemporaryScale()
                     id: "TRNR".to_string(),
                     name: "Trainee".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -30358,6 +30364,7 @@ public func TrainTemporaryScale()
                     id: "CLNK".to_string(),
                     name: "Trained".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 2,
                     rank_name: "Lieutenant".to_string(),
                     experience: 3_000,
@@ -30457,6 +30464,7 @@ public func TrainTemporaryScale()
                     id: "OLDP".to_string(),
                     name: "Fair".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -30577,6 +30585,7 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
                     id: "RANK".to_string(),
                     name: "Ranked".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Recruit".to_string(),
                     experience: 0,
@@ -31603,6 +31612,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                 id: "BDAY".to_string(),
                 name: "Rookie".to_string(),
                 death_message: String::new(),
+                core: Default::default(),
                 rank: 0,
                 rank_name: "Clonk".to_string(),
                 experience: 0,
@@ -34376,6 +34386,7 @@ global func InitializePlayer(int player)
                 id: id.to_string(),
                 name: name.to_string(),
                 death_message: String::new(),
+                core: Default::default(),
                 rank,
                 rank_name: match rank {
                     5 => "Lieutenant Colonel",
@@ -34741,6 +34752,7 @@ func ControlUpSingle()
             id: "CRNW".to_string(),
             name: "Existing".to_string(),
             death_message: String::new(),
+            core: Default::default(),
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience: 0,
@@ -45403,6 +45415,7 @@ func RemoveAndRecruit(object target) {
                         id: "CREW".to_string(),
                         name: "First pointer".to_string(),
                         death_message: String::new(),
+                        core: Default::default(),
                         rank: 4,
                         rank_name: "Major".to_string(),
                         experience: 900,
@@ -45424,6 +45437,7 @@ func RemoveAndRecruit(object target) {
                         id: "CREW".to_string(),
                         name: "Second pointer".to_string(),
                         death_message: String::new(),
+                        core: Default::default(),
                         rank: 4,
                         rank_name: "Major".to_string(),
                         experience: 900,
@@ -45650,6 +45664,7 @@ func RemoveAndRecruit(object target) {
                     id: "HZCK".to_string(),
                     name: "Rookie".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -45709,6 +45724,333 @@ func RemoveAndRecruit(object target) {
         assert_eq!(persisted.rank, 0);
     }
 
+    fn shipped_clonk_rank_names() -> Vec<String> {
+        let base = [
+            "Clonk",
+            "Ensign",
+            "Lieutenant",
+            "Captain",
+            "Major",
+            "Lieutenant Colonel",
+            "Colonel",
+            "Brigade General",
+            "Major General",
+            "Lieutenant General",
+            "General",
+            "Midshipman",
+            "Commander",
+            "Commodore",
+            "Rear-Admiral",
+            "Vice-Admiral",
+            "Admiral",
+            "Fleet Admiral",
+            "Counsellor of State",
+            "Secretary of State",
+            "Chancellor",
+            "Vice President",
+            "President",
+            "Premier",
+        ];
+        let mut expanded = base.iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
+        for extension in [
+            "%s First Class",
+            "%s Second Degree",
+            "%s Without Equal",
+            "Sublime %s",
+            "Exalted %s",
+        ] {
+            expanded.extend(base.iter().map(|name| extension.replace("%s", name)));
+        }
+        expanded
+    }
+
+    fn rank_join_config(crew: Vec<player_file::CrewInfo>) -> JoinPlayerConfig {
+        JoinPlayerConfig {
+            name: "Rank owner".to_string(),
+            player_info_id: 1,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew,
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        }
+    }
+
+    #[test]
+    fn object_info_core_reflects_fresh_custom_progression_and_all_scalar_fields() {
+        let script = r#"#strict 2
+func ReadCore()
+{
+    return [GetObjectInfoCoreVal("id", "ObjectInfo"),
+            GetObjectInfoCoreVal("Name", "ObjectInfo"),
+            GetObjectInfoCoreVal("DeathMessage", "ObjectInfo"),
+            GetObjectInfoCoreVal("PortraitFile", "ObjectInfo"),
+            GetObjectInfoCoreVal("Rank", "ObjectInfo"),
+            GetObjectInfoCoreVal("RankName", "ObjectInfo"),
+            GetObjectInfoCoreVal("NextRankName", "ObjectInfo"),
+            GetObjectInfoCoreVal("TypeName", "ObjectInfo"),
+            GetObjectInfoCoreVal("Participation", "ObjectInfo"),
+            GetObjectInfoCoreVal("Experience", "ObjectInfo"),
+            GetObjectInfoCoreVal("NextRankExp", "ObjectInfo"),
+            GetObjectInfoCoreVal("Rounds", "ObjectInfo"),
+            GetObjectInfoCoreVal("DeathCount", "ObjectInfo"),
+            GetObjectInfoCoreVal("Birthday", "ObjectInfo"),
+            GetObjectInfoCoreVal("TotalPlayingTime", "ObjectInfo"),
+            GetObjectInfoCoreVal("Age", "ObjectInfo"),
+            GetObjectInfoCoreVal("ExtraData", "ObjectInfo"),
+            GetObjectInfoCoreVal("Energy", "Physical"),
+            GetObjectInfoCoreVal("Rounds", "ObjectInfo", 0, 1)];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut custom = Definition::from_script("CLNK", "Clonk Type", script)
+            .expect("custom-rank reflection fixture compiles");
+        custom.set_crew_member(true);
+        custom.set_rank_system(Some(shipped_clonk_rank_names()), Some(1_000));
+        engine.register_definition(custom).expect("custom crew registers");
+        let mut plain = Definition::from_script("NONE", "Plain Type", script)
+            .expect("plain-rank reflection fixture compiles");
+        plain.set_crew_member(true);
+        engine.register_definition(plain).expect("plain crew registers");
+        let mut half = Definition::from_script(
+            "HALF",
+            "123456789012345678901234567890X",
+            script,
+        )
+            .expect("custom-base reflection fixture compiles");
+        half.set_crew_member(true);
+        half.set_rank_system(
+            Some(vec!["Recruit".to_string(), "Veteran".to_string()]),
+            Some(500),
+        );
+        engine.register_definition(half).expect("half-base crew registers");
+
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![
+            ("CLNK".to_string(), 1),
+            ("NONE".to_string(), 1),
+            ("HALF".to_string(), 1),
+        ];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(rank_join_config(Vec::new()))
+            .expect("fresh infos are created");
+
+        let crew = engine.player(0).expect("rank owner exists").crew().to_vec();
+        let read = |engine: &mut Engine, definition: &str| {
+            let object = *crew
+                .iter()
+                .find(|object| {
+                    engine
+                        .crew_object_info(**object)
+                        .is_some_and(|info| info.definition_id.as_str() == definition)
+                })
+                .expect("requested crew object exists");
+            let index = engine.find_object_index(object).expect("crew object remains live");
+            engine
+                .call_object_function(index, "ReadCore", Vec::new())
+                .expect("core reflection succeeds")
+        };
+
+        assert_eq!(
+            read(&mut engine, "CLNK"),
+            Value::Array(vec![
+                Value::C4Id("CLNK".to_string()),
+                Value::String("Clonk".to_string()),
+                Value::String(String::new()),
+                Value::String(String::new()),
+                Value::Int(0),
+                Value::String("Clonk".to_string()),
+                Value::String("Ensign".to_string()),
+                Value::String("Clonk Type".to_string()),
+                Value::Int(1),
+                Value::Int(0),
+                Value::Int(1_000),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(50_000),
+                Value::Nil,
+            ])
+        );
+        let Value::Array(plain) = read(&mut engine, "NONE") else {
+            panic!("plain info reflection must return an array");
+        };
+        assert_eq!(plain[6], Value::String(String::new()));
+        assert_eq!(plain[7], Value::String("Plain Type".to_string()));
+        assert_eq!(plain[10], Value::Int(0));
+        let Value::Array(half) = read(&mut engine, "HALF") else {
+            panic!("half-base info reflection must return an array");
+        };
+        assert_eq!(half[6], Value::String("Veteran".to_string()));
+        assert_eq!(
+            half[7],
+            Value::String("123456789012345678901234567890".to_string())
+        );
+        assert_eq!(half[10], Value::Int(500));
+    }
+
+    #[test]
+    fn custom_progression_refreshes_on_save_and_exhausts_at_true_shipped_boundary() {
+        let rank_names = shipped_clonk_rank_names();
+        assert_eq!(rank_names.len(), 144, "24 base names times six tiers");
+        assert_eq!(rank_names[137], "Exalted Fleet Admiral");
+        assert_eq!(rank_names[143], "Exalted Premier");
+
+        let script = r#"#strict 2
+func ReadNext()
+{
+    return [GetObjectInfoCoreVal("RankName", "ObjectInfo"),
+            GetObjectInfoCoreVal("NextRankName", "ObjectInfo"),
+            GetObjectInfoCoreVal("NextRankExp", "ObjectInfo")];
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut definition = Definition::from_script("CLNK", "Clonk", script)
+            .expect("save-refresh fixture compiles");
+        definition.set_crew_member(true);
+        definition.set_rank_system(Some(rank_names), Some(1_000));
+        engine
+            .register_definition(definition)
+            .expect("save-refresh crew registers");
+        let loaded = |name: &str, rank: i32, experience: i32| player_file::CrewInfo {
+            id: "CLNK".to_string(),
+            name: name.to_string(),
+            death_message: String::new(),
+            core: CrewInfoCoreFields {
+                next_rank_name: "stale next".to_string(),
+                next_rank_exp: 777,
+                ..CrewInfoCoreFields::default()
+            },
+            rank,
+            rank_name: "stale current".to_string(),
+            experience,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: Default::default(),
+        };
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CLNK".to_string(), 2)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(rank_join_config(vec![
+                loaded("Rank 137", 137, 1),
+                loaded("Rank 143", 143, 2),
+            ]))
+            .expect("loaded rank infos join");
+
+        let crew = engine.player(0).expect("rank owner exists").crew().to_vec();
+        let by_rank = |engine: &Engine, rank: i32| {
+            *crew
+                .iter()
+                .find(|object| engine.crew_object_info(**object).is_some_and(|info| info.rank == rank))
+                .expect("requested rank remains live")
+        };
+        for rank in [137, 143] {
+            let object = by_rank(&engine, rank);
+            let index = engine.find_object_index(object).expect("ranked crew remains live");
+            let Value::Array(before) = engine
+                .call_object_function(index, "ReadNext", Vec::new())
+                .expect("loaded fields reflect")
+            else {
+                panic!("rank reflection must return an array");
+            };
+            assert_eq!(before[1], Value::String("stale next".to_string()));
+            assert_eq!(before[2], Value::Int(777), "load must not recompute progression");
+        }
+
+        engine
+            .set_player_status(0, PlayerStatus::Eliminated)
+            .expect("rank owner status changes");
+        engine
+            .execute_synchronize_control(true, false)
+            .expect("eliminated-player synchronization completes");
+        assert_eq!(
+            engine
+                .crew_object_info(by_rank(&engine, 143))
+                .expect("last-rank info remains live")
+                .core
+                .next_rank_exp,
+            777,
+            "eliminated players are not synchronized to local files"
+        );
+        engine
+            .set_player_status(0, PlayerStatus::Active)
+            .expect("rank owner reactivates for replay probe");
+        engine.set_replay_control(true);
+        engine
+            .execute_synchronize_control(true, false)
+            .expect("replay synchronization completes");
+        assert_eq!(
+            engine
+                .crew_object_info(by_rank(&engine, 143))
+                .expect("last-rank info remains live")
+                .core
+                .next_rank_exp,
+            777,
+            "C++ suppresses local crew-file saves during replay"
+        );
+        engine.set_replay_control(false);
+        engine
+            .execute_synchronize_control(true, false)
+            .expect("save synchronization completes");
+
+        let rank_137 = by_rank(&engine, 137);
+        let rank_137_index = engine.find_object_index(rank_137).expect("rank 137 remains live");
+        assert_eq!(
+            engine
+                .call_object_function(rank_137_index, "ReadNext", Vec::new())
+                .expect("rank 137 reflects refreshed progression"),
+            Value::Array(vec![
+                Value::String("Exalted Fleet Admiral".to_string()),
+                Value::String("Exalted Counsellor of State".to_string()),
+                Value::Int(1_621_132),
+            ]),
+            "the ticket's old rank-137 exhaustion boundary was based on 23, not 24, base names"
+        );
+        let rank_143 = by_rank(&engine, 143);
+        let rank_143_index = engine.find_object_index(rank_143).expect("rank 143 remains live");
+        assert_eq!(
+            engine
+                .call_object_function(rank_143_index, "ReadNext", Vec::new())
+                .expect("last rank reflects exhaustion"),
+            Value::Array(vec![
+                Value::String("Exalted Premier".to_string()),
+                Value::String(String::new()),
+                Value::Int(-1),
+            ])
+        );
+
+        let state = engine.capture_state();
+        for object in [rank_137, rank_143] {
+            let link = state.crew_info_links[&object];
+            let roster = &state.crew_info_rosters[&link.player_id][link.roster_index];
+            let live = state.crew_object_infos.get(&object).expect("live info persists");
+            assert_eq!(roster.core, live.core, "save refresh mirrors the shared C++ pointer");
+        }
+    }
+
     #[test]
     fn do_crew_exp_promotes_once_updates_same_call_and_persists() {
         let script = r#"#strict 2
@@ -45757,6 +46099,7 @@ func AwardSelf(int amount) {
                     id: "CREW".to_string(),
                     name: "Rookie".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -46351,6 +46694,7 @@ func RemoveAndGrabSelf() {
                     id: "DONR".to_string(),
                     name: "Veteran Ada".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 4,
                     rank_name: "Major".to_string(),
                     experience: 8_000,

@@ -31,8 +31,8 @@ use crate::{
     ActionLibrary, ActionProcedure, ActionState, ActionUpdate, AudioCommand, C4D_BORDER_BOTTOM,
     C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT, CNAT_BOTTOM,
     CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, ChangeDefContentsSort,
-    CommandDirection, CrewInfoLink, CrewObjectInfo, CrewPermanentPortrait, CrewPortrait,
-    CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DefinitionId, DefinitionRect,
+    CommandDirection, CrewInfoCoreFields, CrewInfoLink, CrewObjectInfo, CrewPermanentPortrait,
+    CrewPortrait, CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DefinitionId, DefinitionRect,
     Direction, DrawTransform, EnvironmentSettings, FULL_CON, FloatVector2, GraphicsOverlayMode,
     FilmViewRequest, Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
@@ -20436,11 +20436,42 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                                 .map(|metadata| metadata.name.clone())
                                 .unwrap_or_else(|| "Clonk".to_string()),
                             death_message: String::new(),
+                            core: {
+                                let definition_id = DefinitionId::from(definition);
+                                let (next_rank_name, next_rank_exp) =
+                                    crate::custom_next_rank_info(
+                                        context
+                                            .world
+                                            .definition_rank_names
+                                            .get(&definition_id)
+                                            .map(Vec::as_slice),
+                                        context.world.definition_rank_base(definition),
+                                        rank,
+                                    );
+                                CrewInfoCoreFields {
+                                    next_rank_name,
+                                    next_rank_exp,
+                                    type_name: context
+                                        .definition_metadata(definition)
+                                        .map(|metadata| crate::bounded_crew_type_name(&metadata.name))
+                                        .unwrap_or_else(|| "Clonk".to_string()),
+                                    ..CrewInfoCoreFields::default()
+                                }
+                            },
                             rank,
-                            rank_name: default_rank_name(rank)
-                                .unwrap_or("Clonk")
-                                .to_string(),
+                            rank_name: context
+                                .world
+                                .definition_rank_names
+                                .get(&DefinitionId::from(definition))
+                                .and_then(|names| {
+                                    usize::try_from(rank).ok().and_then(|rank| names.get(rank))
+                                })
+                                .filter(|name| !name.is_empty())
+                                .cloned()
+                                .or_else(|| default_rank_name(rank).map(str::to_owned))
+                                .unwrap_or_else(|| "Clonk".to_string()),
                             experience: 0,
+                            participation: 1,
                             rounds: 0,
                             death_count: 0,
                             total_playing_time: 0,
@@ -20730,9 +20761,11 @@ fn recruit_or_create_crew_info(
             definition_id: DefinitionId::from(entry.id.as_str()),
             name: entry.name.clone(),
             death_message: entry.death_message.clone(),
+            core: entry.core.clone(),
             rank: entry.rank,
             rank_name: entry.rank_name.clone(),
             experience: entry.experience,
+            participation: entry.participation,
             rounds: entry.rounds,
             death_count: entry.death_count,
             total_playing_time: entry.total_playing_time,
@@ -20779,14 +20812,32 @@ fn recruit_or_create_crew_info(
         .definition_metadata(definition_id)
         .map(|metadata| crate::crew_info_physical(metadata.physical, 0))
         .unwrap_or_default();
-    let rank_name = context
+    let definition_id_key = DefinitionId::from(definition_id);
+    let rank_names = context
         .world
         .definition_rank_names
-        .get(&DefinitionId::from(definition_id))
+        .get(&definition_id_key);
+    let mut rank_name = "Clonk".to_string();
+    let mut core = CrewInfoCoreFields {
+        type_name: context
+            .definition_metadata(definition_id)
+            .map(|metadata| crate::bounded_crew_type_name(&metadata.name))
+            .unwrap_or_else(|| "Clonk".to_string()),
+        ..CrewInfoCoreFields::default()
+    };
+    let (next_rank_name, next_rank_exp) = crate::custom_next_rank_info(
+        rank_names.map(Vec::as_slice),
+        context.world.definition_rank_base(definition_id),
+        0,
+    );
+    core.next_rank_name = next_rank_name;
+    core.next_rank_exp = next_rank_exp;
+    if let Some(current_name) = rank_names
         .and_then(|names| names.first())
-        .cloned()
-        .or_else(|| default_rank_name(0).map(str::to_owned))
-        .unwrap_or_else(|| "Clonk".to_string());
+        .filter(|name| !name.is_empty())
+    {
+        rank_name.clone_from(current_name);
+    }
     let (link, entry) = {
         let mut state = context.world.crew_info_state.borrow_mut();
         {
@@ -20819,6 +20870,7 @@ fn recruit_or_create_crew_info(
             id: definition_id.to_string(),
             name,
             death_message: String::new(),
+            core,
             rank: 0,
             rank_name,
             experience: 0,
@@ -20844,9 +20896,11 @@ fn recruit_or_create_crew_info(
         definition_id: DefinitionId::from(entry.id.as_str()),
         name: entry.name.clone(),
         death_message: entry.death_message.clone(),
+        core: entry.core.clone(),
         rank: entry.rank,
         rank_name: entry.rank_name.clone(),
         experience: entry.experience,
+        participation: entry.participation,
         rounds: entry.rounds,
         death_count: entry.death_count,
         total_playing_time: entry.total_playing_time,
@@ -39212,13 +39266,14 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(entry) = parse_optional_string(args.first(), "GetObjectInfoCoreVal", "entry")? else {
         return Ok(Value::Nil);
     };
-    let section = parse_optional_string(args.get(1), "GetObjectInfoCoreVal", "section")?;
+    let section = parse_optional_string(args.get(1), "GetObjectInfoCoreVal", "section")?
+        .filter(|section| !section.is_empty());
     let target = parse_object_reference_argument(
         args.get(2).unwrap_or(&Value::Nil),
         "GetObjectInfoCoreVal",
         "target",
     )?;
-    let _entry_number = value_to_i32(
+    let entry_number = value_to_i32(
         args.get(3).unwrap_or(&Value::Nil),
         "GetObjectInfoCoreVal",
         "entry number",
@@ -39233,6 +39288,24 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(target) = target else {
             return Ok(Value::Nil);
         };
+        let physical = context
+            .object_scope(target)
+            .and_then(|scope| scope.info_physical)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .and_then(|object| object.full_state().and_then(|state| state.info_physical))
+            })
+            .or_else(|| {
+                let link = context.world.crew_info_link(target)?;
+                context
+                    .world
+                    .crew_info_state
+                    .borrow()
+                    .entries
+                    .get(&link)
+                    .map(|entry| entry.physical)
+            });
         let info = match context.object_scope(target) {
             Some(scope) => scope.info_core(),
             None => context.world.crew_infos.get(&target),
@@ -39240,26 +39313,67 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(info) = info else {
             return Ok(Value::Nil);
         };
-        if section
-            .as_deref()
-            .is_some_and(|section| section != "ObjectInfo")
-        {
+        if section.as_deref().is_none_or(|section| section == "Physical") {
+            if entry_number == 0 {
+                if let Some(value) = physical.and_then(|physical| match entry.as_str() {
+                    "Energy" => Some(physical.energy),
+                    "Breath" => Some(physical.breath),
+                    "Walk" => Some(physical.walk),
+                    "Jump" => Some(physical.jump),
+                    "Scale" => Some(physical.scale),
+                    "Hangle" => Some(physical.hangle),
+                    "Dig" => Some(physical.dig),
+                    "Swim" => Some(physical.swim),
+                    "Throw" => Some(physical.throw),
+                    "Push" => Some(physical.push),
+                    "Fight" => Some(physical.fight),
+                    "Magic" => Some(physical.magic),
+                    "Float" => Some(physical.float),
+                    "CanScale" => Some(physical.can_scale),
+                    "CanHangle" => Some(physical.can_hangle),
+                    "CanDig" => Some(physical.can_dig),
+                    "CanConstruct" => Some(physical.can_construct),
+                    "CanChop" => Some(physical.can_chop),
+                    "CanFly" => Some(physical.can_fly),
+                    "CorrosionResist" => Some(physical.corrosion_resist),
+                    "BreatheWater" => Some(physical.breathe_water),
+                    _ => None,
+                }) {
+                    return Ok(Value::Int(value));
+                }
+            }
+            if section.as_deref() == Some("Physical") {
+                return Ok(Value::Nil);
+            }
+        }
+        if section.as_deref().is_some_and(|section| section != "ObjectInfo") {
             tracing::debug!(?section, %entry, "GetObjectInfoCoreVal section not modeled; nil");
             return Ok(Value::Nil);
         }
+        if entry_number != 0 {
+            return Ok(Value::Nil);
+        }
         Ok(match entry.as_str() {
+            "id" if info.definition_id.as_str().is_empty() => Value::Nil,
             "id" => Value::C4Id(info.definition_id.as_str().to_string()),
             "Name" => Value::String(info.name.clone()),
             "DeathMessage" => Value::String(
                 active_death_message(&info.death_message).unwrap_or_default(),
             ),
+            "PortraitFile" => Value::String(info.core.portrait_file.clone()),
             "Rank" => Value::Int(info.rank),
             "RankName" => Value::String(info.rank_name.clone()),
+            "NextRankName" => Value::String(info.core.next_rank_name.clone()),
+            "TypeName" => Value::String(info.core.type_name.clone()),
+            "Participation" => Value::Int(info.participation),
             "Experience" => Value::Int(info.experience),
+            "NextRankExp" => Value::Int(info.core.next_rank_exp),
+            "Rounds" => Value::Int(info.rounds),
             "DeathCount" => Value::Int(info.death_count),
             "Birthday" => Value::Int(info.birthday),
             "TotalPlayingTime" => Value::Int(info.total_playing_time),
             "Age" => Value::Int(info.age),
+            "ExtraData" => Value::Int(i32::try_from(info.extra_data.len()).unwrap_or(i32::MAX)),
             other => {
                 tracing::debug!(entry = other, "GetObjectInfoCoreVal entry not modeled; nil");
                 Value::Nil
@@ -52760,6 +52874,7 @@ func RenameInfo(object target, string name, bool make_valid)
             id: "CREW".to_string(),
             name: name.to_string(),
             death_message: String::new(),
+            core: Default::default(),
             rank: 0,
             rank_name: "Clonk".to_string(),
             experience,
@@ -53161,9 +53276,11 @@ func Trigger(object pOther)
                     definition_id: DefinitionId::from("TEST"),
                     name: "Roster Clonk".to_string(),
                     death_message: death_message.to_string(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
+                    participation: 1,
                     rounds: 0,
                     death_count: 0,
                     total_playing_time: 0,
@@ -53213,6 +53330,7 @@ func Announce()
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
                     death_message: "Remember me // exactly  ".to_string(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -60770,6 +60888,7 @@ func Probe(object crew, object info_less)
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,
@@ -60907,6 +61026,7 @@ func Transfer(object donor, object recipient)
                     id: "CREW".to_string(),
                     name: "Ada".to_string(),
                     death_message: String::new(),
+                    core: Default::default(),
                     rank: 0,
                     rank_name: "Clonk".to_string(),
                     experience: 0,

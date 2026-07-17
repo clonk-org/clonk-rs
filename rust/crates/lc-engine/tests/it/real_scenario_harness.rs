@@ -4563,6 +4563,7 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             id: "KNIG".to_owned(),
             name: name.to_owned(),
             death_message: String::new(),
+            core: Default::default(),
             rank: 5,
             rank_name: "Lieutenant Colonel".to_owned(),
             experience: 0,

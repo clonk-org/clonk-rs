@@ -41511,6 +41511,7 @@ mod tests {
                 pref_control_style: true,
                 pref_auto_context_menu: true,
                 crew: vec![lc_engine::player_file::CrewInfo {
+                    core: Default::default(),
                     id: "CLNK".to_string(),
                     name: "Clonk".to_string(),
                     death_message: String::new(),
@@ -59478,6 +59479,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         state.crew_object_infos.insert(
             crew,
             lc_engine::CrewObjectInfo {
+                core: Default::default(),
                 definition_id,
                 name: raw_name,
                 death_message: String::new(),
@@ -59489,6 +59491,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 total_playing_time: 0,
                 birthday: 0,
                 age: 0,
+                participation: 0,
                 in_action_time: 0,
                 extra_data: Vec::new(),
                 portraits: Default::default(),
@@ -66096,6 +66099,7 @@ protected func InputCallback(string answer, int player)
                 pref_color: 0,
                 pref_position: 0,
                 crew: vec![lc_engine::player_file::CrewInfo {
+                    core: Default::default(),
                     id: "FCRW".to_string(),
                     name: "Henry".to_string(),
                     death_message: String::new(),
