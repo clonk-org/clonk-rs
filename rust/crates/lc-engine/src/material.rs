@@ -948,7 +948,7 @@ impl MaterialSet {
         rng: &mut LcgRng,
         instability_probes: &mut Vec<(i32, i32)>,
     ) -> MaterialReactionExecution {
-        let landscape_material = landscape.material_at(landscape_x, landscape_y);
+        let landscape_material = landscape.border_material_at(landscape_x, landscape_y);
         let reaction = self.reaction_for_event(
             Some(pxs_material),
             landscape_material,

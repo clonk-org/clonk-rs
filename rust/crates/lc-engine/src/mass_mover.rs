@@ -518,6 +518,7 @@ mod tests {
         let oil = materials.id_of("Oil").expect("oil material");
         let lava = materials.id_of("Lava").expect("lava material");
         let mut landscape = Landscape::flat_with_material(3, 5, Some(lava));
+        landscape.set_world_height(6);
         landscape.set_default_liquid_material(Some(oil));
         landscape.set_liquid_column(
             1,
@@ -532,6 +533,53 @@ mod tests {
             .expect("FLAM definition registers");
         assert!(engine.mass_mover_create(1, 4, false));
         (engine, oil)
+    }
+
+    fn bottom_border_reaction_engine(bottom_open: bool) -> (Engine, MaterialId) {
+        let materials = materials(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Instable=1
+            MaxSlide=0
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Vehicle
+            ExecMask=4
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Sky
+            ExecMask=4
+            ConvertMat=Goo
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+
+            [Material Rock]
+            Name=Rock
+            Density=100
+            "#,
+        );
+        let goo = materials.id_of("Goo").expect("goo material");
+        let mut bytes = vec![2; 9];
+        bytes[2 * 3 + 1] = 1;
+        let grid = crate::landscape::PixelGrid::new(
+            3,
+            3,
+            bytes,
+            vec![0, 25, 100],
+            vec![None, Some("Goo".into()), Some("Rock".into())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(3, vec![3; 3]).expect("landscape builds");
+        landscape.set_world_height(3);
+        landscape.set_border_open(0, 0, true, bottom_open);
+        landscape.set_pixel_grid(grid);
+        (engine_with(materials, landscape), goo)
     }
 
     #[test]
@@ -855,6 +903,113 @@ mod tests {
     }
 
     #[test]
+    fn bottom_border_mass_move_selects_vehicle_when_closed_and_sky_when_open() {
+        let (mut closed, goo) = bottom_border_reaction_engine(false);
+        assert!(closed.mass_mover_create(1, 2, false));
+        closed.tick_mass_movers();
+        assert_eq!(
+            closed
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(1, 2)),
+            None,
+            "the closed-bottom Vehicle/Poof reaction consumes the mover"
+        );
+        assert_eq!(
+            closed.pxs_system.count(),
+            0,
+            "Vehicle selects Poof, not the Sky conversion"
+        );
+
+        let (mut open, open_goo) = bottom_border_reaction_engine(true);
+        assert_eq!(open_goo, goo);
+        assert_eq!(
+            open
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.border_material_at(1, 3)),
+            None,
+            "the open bottom answers sky"
+        );
+        assert_eq!(
+            open.execute_mass_move_reaction(goo, 1, 2, 1, 3),
+            crate::material::MaterialReactionExecution::Converted(goo),
+            "the open-bottom neighbor matched TargetSpec=Sky"
+        );
+    }
+
+    #[test]
+    fn left_wall_mass_move_script_receives_vehicle_material_index() {
+        let materials = materials(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Instable=1
+            MaxSlide=0
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=GooTouchesClosedLeft
+            TargetSpec=All
+            ExecMask=4
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+
+            [Material Rock]
+            Name=Rock
+            Density=100
+            "#,
+        );
+        let goo = materials.id_of("Goo").expect("goo material");
+        let vehicle = materials.id_of("Vehicle").expect("vehicle material");
+        let mut bytes = vec![2; 9];
+        bytes[3] = 1;
+        let grid = crate::landscape::PixelGrid::new(
+            3,
+            3,
+            bytes,
+            vec![0, 25, 100],
+            vec![None, Some("Goo".into()), Some("Rock".into())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(3, vec![3; 3]).expect("landscape builds");
+        landscape.set_world_height(3);
+        landscape.set_pixel_grid(grid);
+        let mut engine = engine_with(materials, landscape);
+        engine
+            .install_scenario_script(
+                "Scenario",
+                &format!(
+                    "global func GooTouchesClosedLeft(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {{ return x == 0 && y == 1 && lsx == -1 && lsy == 1 && xdir == 0 && ydir == 0 && ls_mat == {} && event == 2; }}",
+                    vehicle.index()
+                ),
+            )
+            .expect("scenario installs");
+        assert!(engine.mass_mover_create(0, 1, false));
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(0, 1)),
+            Some(goo)
+        );
+
+        engine.tick_mass_movers();
+
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(0, 1)),
+            None,
+            "truthy script proves the left-wall ls_mat argument was Vehicle"
+        );
+    }
+
+    #[test]
     fn blocked_mover_incinerate_spawns_flam_then_extracts_material_without_rng() {
         // mrfIncinerate on meeMassMove calls the full Landscape::Incinerate:
         // a successful FLAM creation consumes the reaction, then the mover's
@@ -964,6 +1119,7 @@ mod tests {
         let acid = materials.id_of("Acid").expect("acid material");
         let rock = materials.id_of("Rock").expect("rock material");
         let mut landscape = Landscape::flat_with_material(3, 5, Some(rock));
+        landscape.set_world_height(6);
         landscape.set_default_liquid_material(Some(acid));
         landscape.set_liquid_column(
             1,
@@ -1016,6 +1172,7 @@ mod tests {
         let goo = materials.id_of("Goo").expect("goo material");
         let rock = materials.id_of("Rock").expect("rock material");
         let mut landscape = Landscape::flat_with_material(3, 5, Some(rock));
+        landscape.set_world_height(6);
         landscape.set_default_liquid_material(Some(goo));
         landscape.set_liquid_column(
             1,
@@ -1089,6 +1246,7 @@ mod tests {
         let goo = materials.id_of("Goo").expect("goo material");
         let rock = materials.id_of("Rock").expect("rock material");
         let mut landscape = Landscape::flat_with_material(3, 5, Some(rock));
+        landscape.set_world_height(6);
         landscape.set_default_liquid_material(Some(goo));
         landscape.set_liquid_column(
             1,
@@ -1539,6 +1697,7 @@ mod tests {
         let goo = materials.id_of("Goo").expect("goo material");
         let rock = materials.id_of("Rock").expect("rock material");
         let mut landscape = Landscape::flat_with_material(3, 5, Some(rock));
+        landscape.set_world_height(6);
         landscape.set_default_liquid_material(Some(goo));
         landscape.set_liquid_column(
             1,

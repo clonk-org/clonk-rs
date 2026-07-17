@@ -49763,7 +49763,7 @@ impl Engine {
         let landscape_material = self
             .landscape
             .as_ref()
-            .and_then(|landscape| landscape.material_at(landscape_x, landscape_y));
+            .and_then(|landscape| landscape.border_material_at(landscape_x, landscape_y));
         let reaction = self.materials.reaction_for_event(
             Some(pxs_material),
             landscape_material,
