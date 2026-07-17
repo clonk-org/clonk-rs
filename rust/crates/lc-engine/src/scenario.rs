@@ -11924,7 +11924,9 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                     "skipping definition with invalid C4ID"
                 );
             } else if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
-                match ResourceDefinitionData::load_with_languages(group, languages) {
+                match ResourceDefinitionData::load_with_core_and_languages(
+                    group, core, languages,
+                ) {
                     Ok(resource) => {
                         primary_definition = true;
                         let mut definition =
@@ -16759,6 +16761,7 @@ global func Step(state, frame, random)
         message: Option<String>,
         group: Option<String>,
         error: Option<String>,
+        bit_name: Option<String>,
     }
 
     #[derive(Clone)]
@@ -16796,6 +16799,7 @@ global func Step(state, frame, random)
                 "message" => self.message = Some(value.to_string()),
                 "group" => self.group = Some(value.to_string()),
                 "error" => self.error = Some(value.to_string()),
+                "bit_name" => self.bit_name = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -20859,8 +20863,8 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir(&bits).expect("bits definition directory");
         std::fs::write(
             bits.join("DefCore.txt"),
-            "[DefCore]\nid=BITS\nCategory=C4D_Structure|C4D_Bogus\n\
-             LineConnect=C4D_PowerInput|Nonsense\n",
+            "[DefCore]\nid=BITS\nCategory=C4D_Bogus|C4D_Object\n\
+             LineConnect=Nonsense|C4D_PowerInput\n",
         )
         .expect("write unknown-token DefCore");
         let tail = dir.path().join("Defs.c4d/Tail.c4d");
@@ -20874,8 +20878,20 @@ public func ActualizePhase(pClonk)
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
         };
-        let scenario =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let (scenario, warnings) = capture_definition_warnings(|| {
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads")
+        });
+        let warning_count = |bit_name| {
+            warnings
+                .iter()
+                .filter(|warning| {
+                    warning.message.as_deref() == Some("unknown definition bit name")
+                        && warning.bit_name.as_deref() == Some(bit_name)
+                })
+                .count()
+        };
+        assert_eq!(warning_count("C4D_Bogus"), 1);
+        assert_eq!(warning_count("Nonsense"), 1);
         let mut ids = Vec::new();
         scenario.visit_definition_groups(|id, _| ids.push(id.to_string()));
         ids.sort();
@@ -20886,7 +20902,7 @@ public func ActualizePhase(pClonk)
         assert!(engine.definitions.contains_key("BITS"));
         assert!(engine.definitions.contains_key("GOOD"));
         assert!(engine.definitions.contains_key("TAIL"));
-        assert_eq!(engine.definition_category("BITS"), Some(1 << 1));
+        assert_eq!(engine.definition_category("BITS"), Some(1 << 4));
         assert_eq!(
             engine
                 .definitions

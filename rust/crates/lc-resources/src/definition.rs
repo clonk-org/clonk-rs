@@ -87,7 +87,17 @@ impl Definition {
         group: &Group,
         languages: &[S],
     ) -> Result<Self, DefinitionError> {
-        let mut core = DefCore::load(group)?;
+        let core = DefCore::load(group)?;
+        Self::load_with_core_and_languages(group, core, languages)
+    }
+
+    /// Loads the remaining definition resources after the caller has already
+    /// parsed `DefCore.txt` for ID filtering.
+    pub fn load_with_core_and_languages<S: AsRef<str>>(
+        group: &Group,
+        mut core: DefCore,
+        languages: &[S],
+    ) -> Result<Self, DefinitionError> {
         if let Some(name) = load_definition_name(group, languages)? {
             core.name = Some(name);
         }
@@ -1658,10 +1668,17 @@ fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
             if cursor == start {
                 return 0;
             }
-            flags |= names
+            if let Some(bit) = names
                 .iter()
                 .find_map(|(name, bit)| (&bytes[start..cursor] == name.as_bytes()).then_some(*bit))
-                .unwrap_or(0);
+            {
+                flags |= bit;
+            } else {
+                tracing::warn!(
+                    bit_name = %lc_script::c4_string_from_bytes(&bytes[start..cursor]),
+                    "unknown definition bit name"
+                );
+            }
         }
         while bytes
             .get(cursor)
