@@ -41,6 +41,8 @@ pub enum ScenarioError {
     ManifestParse(#[from] serde_json::Error),
     #[error("scenario resource error: {0}")]
     Resources(#[from] GroupError),
+    #[error("material enumeration failed: {0}")]
+    MaterialEnumeration(#[from] lc_resources::material::MaterialEnumerationError),
     #[error("script file `{path}` is missing from the scenario")]
     MissingScript { path: PathBuf },
     #[error("script file `{path}` is not valid UTF-8")]
@@ -8305,6 +8307,15 @@ pub(crate) fn build_map_pixel_classifier(
     group: &Group,
     resolver: &impl LegacyDefinitionResolver,
 ) -> Result<Option<MapPixelClassifier>, ScenarioError> {
+    // Parse the root savegame ledger before any no-material/no-texmap return:
+    // C++ still calls LoadEnumeration after an empty material loop, and a
+    // listed name must then fail against Num=0.
+    let enumeration = match try_read_group_file_case_insensitive(group, "MatMap.txt")? {
+        Some(source) if !source.is_empty() => {
+            Some(lc_resources::material::MaterialEnumeration::parse(&source)?)
+        }
+        Some(_) | None => None,
+    };
     let mut material_groups = Vec::new();
     let mut scenario_material_root = None;
     match group.open_child("Material.c4g") {
@@ -8324,12 +8335,20 @@ pub(crate) fn build_map_pixel_classifier(
     }
 
     let Some(first_group) = material_groups.first() else {
+        if let Some(name) = enumeration
+            .as_ref()
+            .and_then(|enumeration| enumeration.names().first())
+        {
+            return Err(lc_resources::material::MaterialEnumerationError::MissingMaterial(
+                name.clone(),
+            )
+            .into());
+        }
         return Ok(None);
     };
-    let Ok(texmap_source) = first_group.read_file("TexMap.txt") else {
-        return Ok(None);
-    };
-    let texmap = lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&texmap_source));
+    let texmap = first_group.read_file("TexMap.txt").ok().map(|source| {
+        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&source))
+    });
 
     let mut material_libraries: Vec<lc_resources::MaterialLibrary> = Vec::new();
     let mut texture_inventory = Vec::new();
@@ -8355,9 +8374,9 @@ pub(crate) fn build_map_pixel_classifier(
                 &String::from_utf8_lossy(&source),
             ))
         };
-        let flags = later_texmap.as_ref().unwrap_or(&texmap);
-        let mut next_materials = flags.overload_materials;
-        let mut next_textures = flags.overload_textures;
+        let flags = later_texmap.as_ref().or(texmap.as_ref());
+        let mut next_materials = flags.is_some_and(|flags| flags.overload_materials);
+        let mut next_textures = flags.is_some_and(|flags| flags.overload_textures);
 
         if load_materials {
             match lc_resources::MaterialLibrary::from_group(material_group) {
@@ -8422,8 +8441,27 @@ pub(crate) fn build_map_pixel_classifier(
     // uniques precede earlier/local definitions while earlier sources win
     // collisions (C4Material.cpp:263-299).
     let material_loads: Vec<_> = material_libraries.iter().collect();
-    let material_library =
+    let mut material_library =
         lc_resources::MaterialLibrary::from_overloaded_loads(&material_loads).ok();
+
+    // Savegames retain the numeric material order in root MatMap.txt. C++
+    // applies this pairwise-swap ledger after every material source has
+    // loaded but before TextureMap.Init and CrossMapMaterials
+    // (C4Game.cpp:979-993; C4Material.cpp:510-558).
+    if let Some(enumeration) = enumeration.as_ref().filter(|enumeration| !enumeration.is_empty()) {
+        let library = material_library.as_mut().ok_or_else(|| {
+            lc_resources::material::MaterialEnumerationError::MissingMaterial(
+                enumeration.names()[0].clone(),
+            )
+        })?;
+        library.sort_enumeration(enumeration)?;
+    }
+
+    // A missing first TexMap still loads/validates materials and MatMap in
+    // C++, but leaves no raster classifier for Rust's map fallback.
+    let Some(texmap) = texmap else {
+        return Ok(None);
+    };
 
     let runtime_materials = material_library
         .iter()
@@ -21341,6 +21379,33 @@ public func ActualizePhase(pClonk)
         .expect("write test texture");
     }
 
+    fn build_material_enumeration_classifier(
+        mat_map: Option<&[u8]>,
+    ) -> Result<MapPixelClassifier, ScenarioError> {
+        let dir = tempdir().expect("tempdir");
+        let materials = dir.path().join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "# dynamic slots only\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("All.c4m"),
+            "[Material A]\nName=A\nDensity=60\nTextureOverlay=Smooth\n\n\
+             [Material B]\nName=B\nDensity=70\nTextureOverlay=Smooth\n\n\
+             [Material C]\nName=C\nDensity=80\nTextureOverlay=Smooth\n",
+        )
+        .expect("write materials");
+        write_test_texture(&materials, "Smooth");
+        if let Some(mat_map) = mat_map {
+            std::fs::write(dir.path().join("MatMap.txt"), mat_map).expect("write MatMap");
+        }
+
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+        build_map_pixel_classifier(&group, &resolver)?.ok_or_else(|| {
+            ScenarioError::InvalidLandscape("material classifier was not built".to_string())
+        })
+    }
+
     #[test]
     fn in_liquid_is_the_cached_object_flag_like_cpp() {
         // C4Object::InLiquid is a CACHED flag: loaded from Objects.txt
@@ -22745,6 +22810,84 @@ public func ActualizePhase(pClonk)
             .push(crossmap_entry);
         assert_eq!(crossmap_entry, 30);
         assert_eq!(classifier.state.material_crossmap_entries, vec![30]);
+    }
+
+    #[test]
+    fn material_enumeration_pairwise_swaps_before_crossmap_like_cpp() {
+        // Raw A,B,C plus the prefix enumeration C must become C,B,A: C++
+        // swaps the requested entry with slot zero rather than stably moving
+        // it. The same order must drive both MaterialIds and dynamic texmap
+        // allocation (before CrossMapMaterials).
+        let classifier = build_material_enumeration_classifier(Some(
+            b"ignored [Enumeration]\r\nC\r\n",
+        ))
+        .expect("enumerated classifier builds");
+        let library = classifier.material_library().expect("materials loaded");
+        assert_eq!(
+            library.iter().map(|material| material.name()).collect::<Vec<_>>(),
+            vec!["C", "B", "A"]
+        );
+
+        let materials = crate::MaterialSet::from_resource_library(library);
+        assert_eq!(materials.id_of("C").map(|id| id.index()), Some(0));
+        assert_eq!(materials.id_of("B").map(|id| id.index()), Some(1));
+        assert_eq!(materials.id_of("A").map(|id| id.index()), Some(2));
+        assert_eq!(classifier.state.default_material_entry("C"), Some(1));
+        assert_eq!(classifier.state.default_material_entry("B"), Some(2));
+        assert_eq!(classifier.state.default_material_entry("A"), Some(3));
+    }
+
+    #[test]
+    fn material_enumeration_missing_name_fails_scenario_material_load() {
+        let error = match build_material_enumeration_classifier(Some(
+            b"[Enumeration]\r\nMissing\r\n",
+        )) {
+            Ok(_) => panic!("missing enumeration material must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ScenarioError::MaterialEnumeration(
+                lc_resources::material::MaterialEnumerationError::MissingMaterial(ref name)
+            ) if name == "Missing"
+        ));
+    }
+
+    #[test]
+    fn material_enumeration_name_fails_even_without_material_or_texmap_groups() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("MatMap.txt"),
+            b"[Enumeration]\r\nMissing\r\n",
+        )
+        .expect("write MatMap");
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+        let error = match build_map_pixel_classifier(&group, &resolver) {
+            Ok(_) => panic!("Num=0 cannot satisfy a listed material"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ScenarioError::MaterialEnumeration(
+                lc_resources::material::MaterialEnumerationError::MissingMaterial(ref name)
+            ) if name == "Missing"
+        ));
+    }
+
+    #[test]
+    fn missing_material_enumeration_keeps_fresh_scenario_load_order() {
+        let classifier =
+            build_material_enumeration_classifier(None).expect("fresh classifier builds");
+        assert_eq!(
+            classifier
+                .material_library()
+                .expect("materials loaded")
+                .iter()
+                .map(|material| material.name())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C"]
+        );
     }
 
     #[test]

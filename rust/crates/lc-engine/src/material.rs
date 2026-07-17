@@ -1,6 +1,6 @@
 use lc_resources::{
     material::MaterialReactionDefinition, MaterialDefinition as ResourceMaterialDefinition,
-    MaterialLibrary,
+    MaterialLibrary, MutableGroup, MutableGroupError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -759,6 +759,18 @@ impl MaterialSet {
         }
     }
 
+    /// `C4MaterialMap::SaveEnumeration`: add/replace root MatMap.txt with the
+    /// current runtime material names in numeric-id order.
+    pub fn save_enumeration(
+        &self,
+        group: &mut MutableGroup,
+    ) -> Result<(), MutableGroupError> {
+        let enumeration = lc_resources::material::MaterialEnumeration::from_names(
+            self.materials.iter().map(Material::name),
+        );
+        group.add_file("MatMap.txt", enumeration.to_bytes())
+    }
+
     /// The `ScriptFunc=` name behind a `MaterialReactionKind::Script` entry.
     pub fn script_reaction_name(&self, func: u16) -> Option<&str> {
         self.script_reactions
@@ -1321,6 +1333,40 @@ mod tests {
     fn build_material_set(source: &str) -> MaterialSet {
         let library = MaterialLibrary::parse(source).expect("material library parses");
         MaterialSet::from_resource_library(&library)
+    }
+
+    #[test]
+    fn material_enumeration_save_writes_cpp_matmap_in_material_id_order() {
+        let set = build_material_set(
+            r#"
+            [Material Granite]
+            Name=Granite
+
+            [Material Earth]
+            Name=Earth
+
+            [Material Water]
+            Name=Water
+            "#,
+        );
+        let mut mutable = MutableGroup::new("Runtime.c4s");
+        mutable
+            .add_file("matmap.TXT", b"stale".to_vec())
+            .expect("stale map adds");
+
+        set.save_enumeration(&mut mutable)
+            .expect("material enumeration saves");
+
+        let group = lc_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Runtime.c4s"),
+            mutable.pack_raw().expect("runtime group packs"),
+        )
+        .expect("runtime group reopens");
+        assert_eq!(group.entries().expect("entries read").len(), 1);
+        assert_eq!(
+            group.read_file("MatMap.txt").expect("MatMap reads"),
+            b"[Enumeration]\r\nGranite\r\nEarth\r\nWater\r\n "
+        );
     }
 
     #[test]

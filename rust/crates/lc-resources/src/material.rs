@@ -19,6 +19,100 @@ pub enum MaterialError {
     NotFound,
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum MaterialEnumerationError {
+    #[error("material enumeration is missing the exact `[Enumeration]` header")]
+    MissingHeader,
+    #[error("material enumeration references unavailable material `{0}`")]
+    MissingMaterial(String),
+}
+
+/// A savegame `MatMap.txt` material-index ledger
+/// (`C4MaterialMap::LoadEnumeration`, C4Material.cpp:510-558).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterialEnumeration {
+    names: Vec<String>,
+}
+
+impl MaterialEnumeration {
+    const HEADER: &'static [u8] = b"[Enumeration]";
+    const MAX_NAME_BYTES: usize = 15;
+
+    pub fn parse(source: &[u8]) -> Result<Self, MaterialEnumerationError> {
+        // LoadEntryString exposes a C string to SSearch/SCopyIdentifier;
+        // bytes after the first NUL are not visible to the native parser.
+        let source = source
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default();
+        let Some(header) = source
+            .windows(Self::HEADER.len())
+            .position(|window| window == Self::HEADER)
+        else {
+            return Err(MaterialEnumerationError::MissingHeader);
+        };
+        let mut remaining = &source[header + Self::HEADER.len()..];
+        skip_enumeration_whitespace(&mut remaining);
+        let mut names = Vec::new();
+        while remaining.first().is_some_and(|byte| enumeration_identifier(*byte)) {
+            // SCopyIdentifier caps each token at C4M_MaxName. A longer raw
+            // identifier therefore continues as another token, because the
+            // unconsumed suffix still begins with an identifier byte.
+            let length = remaining
+                .iter()
+                .take_while(|byte| enumeration_identifier(**byte))
+                .take(Self::MAX_NAME_BYTES)
+                .count();
+            names.push(
+                String::from_utf8(remaining[..length].to_vec())
+                    .expect("material enumeration identifiers are ASCII"),
+            );
+            remaining = &remaining[length..];
+            skip_enumeration_whitespace(&mut remaining);
+        }
+        Ok(Self { names })
+    }
+
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            names: names.into_iter().map(str::to_owned).collect(),
+        }
+    }
+
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// `C4MaterialMap::SaveEnumeration`: exact header/name CRLF framing and
+    /// the trailing `EndOfFile` byte (`"\x020"` is ASCII space).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Self::HEADER.to_vec();
+        bytes.extend_from_slice(b"\r\n");
+        for name in &self.names {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(b"\r\n");
+        }
+        bytes.push(b' ');
+        bytes
+    }
+}
+
+fn enumeration_identifier(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'~' | b'+' | b'-')
+}
+
+fn skip_enumeration_whitespace(source: &mut &[u8]) {
+    let count = source
+        .iter()
+        .take_while(|byte| matches!(**byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .count();
+    *source = &source[count..];
+}
+
 #[derive(Debug, Clone)]
 pub struct MaterialLibrary {
     materials: Vec<MaterialDefinition>,
@@ -78,6 +172,45 @@ impl MaterialLibrary {
 
     pub fn is_empty(&self) -> bool {
         self.materials.is_empty()
+    }
+
+    /// `C4MaterialMap::SortEnumeration`: for every requested index, search
+    /// only the still-unordered suffix and swap the exact-case match into
+    /// place. This is intentionally not a stable rank sort.
+    pub fn sort_enumeration(
+        &mut self,
+        enumeration: &MaterialEnumeration,
+    ) -> Result<(), MaterialEnumerationError> {
+        let result = enumeration
+            .names
+            .iter()
+            .enumerate()
+            .try_for_each(|(requested_index, requested_name)| {
+                let found_index = self
+                    .materials
+                    .get(requested_index..)
+                    .and_then(|suffix| {
+                        suffix
+                            .iter()
+                            .position(|material| material.name() == requested_name)
+                    })
+                    .map(|offset| requested_index + offset)
+                    .ok_or_else(|| {
+                        MaterialEnumerationError::MissingMaterial(requested_name.clone())
+                    })?;
+                self.materials.swap(requested_index, found_index);
+                Ok(())
+            });
+
+        // Keep name lookup coherent even on the fatal partial-sort path.
+        self.by_name.clear();
+        self.by_name.extend(
+            self.materials
+                .iter()
+                .enumerate()
+                .map(|(index, material)| (normalize_key(material.name()), index)),
+        );
+        result
     }
 
     fn from_definitions(definitions: Vec<MaterialDefinition>) -> Result<Self, MaterialError> {
@@ -578,5 +711,38 @@ mod tests {
         assert_eq!(reaction.value("type"), Some("Poof"));
         assert_eq!(reaction.value("targetspec"), Some("Incindiary"));
         assert_eq!(reaction.bool_flag("reverse"), Some(true));
+    }
+
+    #[test]
+    fn enumeration_uses_suffix_swaps_and_exact_case_names() {
+        let mut library = MaterialLibrary::parse(
+            "[Material A]\nName=A\n\n[Material B]\nName=B\n\n[Material C]\nName=C\n",
+        )
+        .expect("materials parse");
+        let enumeration = MaterialEnumeration::parse(b"[Enumeration]\r\nC\r\n")
+            .expect("enumeration parses");
+
+        library
+            .sort_enumeration(&enumeration)
+            .expect("enumeration sorts");
+
+        assert_eq!(
+            library.iter().map(MaterialDefinition::name).collect::<Vec<_>>(),
+            vec!["C", "B", "A"]
+        );
+        let wrong_case = MaterialEnumeration::parse(b"[Enumeration] c")
+            .expect("lowercase enumeration parses");
+        assert_eq!(
+            library.sort_enumeration(&wrong_case),
+            Err(MaterialEnumerationError::MissingMaterial("c".to_string()))
+        );
+    }
+
+    #[test]
+    fn enumeration_parser_cannot_see_a_header_after_nul() {
+        assert_eq!(
+            MaterialEnumeration::parse(b"\0[Enumeration]\r\nA\r\n"),
+            Err(MaterialEnumerationError::MissingHeader)
+        );
     }
 }
