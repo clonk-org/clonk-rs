@@ -1247,7 +1247,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 }
             }
             "RequireDef" => {
-                require_defs = parse_id_list(value);
+                require_defs = parse_id_list(raw_value);
             }
             "MaxUserSelect" => {
                 max_user_select = parse_i32(value).unwrap_or(0);
@@ -1574,7 +1574,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 }
             }
             "Components" => {
-                components = parse_components(value);
+                components = parse_components(raw_value);
             }
             "LineConnect" => {
                 line_connect = parse_line_connect(value);
@@ -6008,6 +6008,9 @@ Default=Ghost
             count,
         };
         for (source, expected) in [
+            ("ROCK=abc", vec![component("ROCK", 0)]),
+            ("LOAM=2;bad;WOOD=3", vec![component("LOAM", 2)]),
+            ("rock=5", vec![]),
             ("Rock=1;LOAM=2", vec![]),
             ("ROCK=1,LOAM=2", vec![component("ROCK", 1)]),
             ("ROCK=x;", vec![component("ROCK", 0)]),
@@ -6031,6 +6034,31 @@ Default=Ghost
         assert_eq!(parse_id_list("REQ1;REQ2"), ["REQ1", "REQ2"]);
         for source in ["REQ1,REQ2", "REQ1 REQ2", "REQ1;Rock;REQ2", "REQ1=7;REQ2"] {
             assert_eq!(parse_id_list(source), ["REQ1"], "{source}");
+        }
+    }
+
+    #[test]
+    fn parse_def_core_c4id_lists_skip_only_ascii_space_and_tab() {
+        let accepted = parse_def_core(
+            b"[DefCore]\nid=WSPC\nRequireDef= \tREQ1\nComponents=\t ROCK=2\n",
+        )
+        .expect("space/tab-prefixed C4ID lists parse");
+        assert_eq!(accepted.require_defs, ["REQ1"]);
+        assert_eq!(
+            accepted.components,
+            [DefComponent {
+                id: "ROCK".to_string(),
+                count: 2,
+            }]
+        );
+
+        for prefix in ['\u{000b}', '\u{000c}', '\u{00a0}'] {
+            let source = format!(
+                "[DefCore]\nid=WSPC\nRequireDef={prefix}REQ1\nComponents={prefix}ROCK=2\n"
+            );
+            let parsed = parse_def_core(source.as_bytes()).expect("DefCore parses");
+            assert!(parsed.require_defs.is_empty(), "prefix {prefix:?}");
+            assert!(parsed.components.is_empty(), "prefix {prefix:?}");
         }
     }
 
