@@ -379,15 +379,26 @@ impl CallbackArray {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MapCreatorS2State {
     tree: Tree,
+    /// Constructor-evaluated C4MapCreatorS2::DefaultMap. Section
+    /// Landscape.txt files parsed into a retained creator keep cloning this
+    /// original template even when their Scenario.txt changes MapWdt/Hgt.
+    #[serde(default = "default_retained_map")]
+    default_map: Overlay,
     #[serde(skip, default)]
     callbacks: PostInitMapCallbacks,
 }
 
+fn default_retained_map() -> Overlay {
+    let mut default_map = Overlay::default_template();
+    default_map.is_map = true;
+    default_map
+}
+
 // Callback bitmaps are transient PostInitMap work, deliberately omitted from
-// saves. Creator identity/equality therefore follows the persisted S2 tree.
+// saves. Creator identity/equality follows the persisted tree and DefaultMap.
 impl PartialEq for MapCreatorS2State {
     fn eq(&self, other: &Self) -> bool {
-        self.tree == other.tree
+        self.tree == other.tree && self.default_map == other.default_map
     }
 }
 
@@ -1695,6 +1706,35 @@ pub(crate) fn create_s2_map_with_state_and_functions(
     )
 }
 
+/// C4Landscape::CreateMapS2 with an already-retained pMapCreator
+/// (src/C4Landscape.cpp:531-546): append the section source to the live tree,
+/// keep the constructor-evaluated DefaultMap, and therefore take no fresh
+/// MapWdt/MapHgt draws. Existing callback arrays remain live and new callback
+/// declarations append to them just as C4MapCreatorS2::ReadFile does.
+pub(crate) fn extend_s2_map_with_state_and_functions(
+    creator: MapCreatorS2State,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
+) -> S2MapCreation {
+    let MapCreatorS2State {
+        tree,
+        default_map,
+        callbacks,
+    } = creator;
+    parse_and_render_s2_map_with_callbacks(
+        tree,
+        source,
+        classifier,
+        default_map,
+        rng,
+        false,
+        script_functions,
+        callbacks,
+    )
+}
+
 /// Runtime C4MapCreatorS2 construction seam for C4Landscape::DrawMap
 /// (C4Landscape.cpp:2636-2668). With KeepMapCreator state, the evaluated
 /// tree is cloned so additional script can resolve its named templates;
@@ -1758,6 +1798,30 @@ fn parse_and_render_s2_map(
     runtime_source: bool,
     script_functions: &HashSet<String>,
 ) -> S2MapCreation {
+    parse_and_render_s2_map_with_callbacks(
+        tree,
+        source,
+        classifier,
+        default_map,
+        rng,
+        runtime_source,
+        script_functions,
+        PostInitMapCallbacks::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_and_render_s2_map_with_callbacks(
+    tree: Tree,
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    default_map: Overlay,
+    rng: &mut LcgRng,
+    runtime_source: bool,
+    script_functions: &HashSet<String>,
+    mut callbacks: PostInitMapCallbacks,
+) -> S2MapCreation {
+    let retained_default_map = default_map.clone();
     let mut parser = Parser {
         tokens: Tokenizer::new(source),
         tree,
@@ -1776,12 +1840,24 @@ fn parse_and_render_s2_map(
         }
     }
     let tree = parser.tree;
-
-    let (bitmap, callbacks) = render_last_map(&tree);
+    callbacks.arrays.extend(
+        tree.callbacks
+            .iter()
+            .skip(callbacks.arrays.len())
+            .map(CallbackArray::new),
+    );
+    let bitmap = last_map(&tree).and_then(|map| {
+        if callbacks.arrays.is_empty() {
+            render_map(&tree, map)
+        } else {
+            render_map_recording_callbacks(&tree, map, &mut callbacks)
+        }
+    });
     S2MapCreation {
         bitmap,
         creator: MapCreatorS2State {
             tree,
+            default_map: retained_default_map,
             callbacks: callbacks.clone(),
         },
         callbacks,
@@ -1796,21 +1872,6 @@ fn last_map(tree: &Tree) -> Option<NodeId> {
         .rev()
         .find(|&&child| tree.overlay(child).is_some_and(|overlay| overlay.is_map))
         .copied()
-}
-
-fn render_last_map(
-    tree: &Tree,
-) -> (
-    Option<lc_resources::bitmap::IndexedBitmap>,
-    PostInitMapCallbacks,
-) {
-    let Some(map) = last_map(tree) else {
-        return (None, PostInitMapCallbacks::default());
-    };
-    render_map_with_callbacks(tree, map)
-        .map_or_else(|| (None, PostInitMapCallbacks::default()), |(bitmap, callbacks)| {
-            (Some(bitmap), callbacks)
-        })
 }
 
 fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedBitmap> {
@@ -1833,29 +1894,6 @@ fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedB
         height: hgt as u32,
         indices: bytes,
     })
-}
-
-fn render_map_with_callbacks(
-    tree: &Tree,
-    map: NodeId,
-) -> Option<(
-    lc_resources::bitmap::IndexedBitmap,
-    PostInitMapCallbacks,
-)> {
-    if tree.callbacks.is_empty() {
-        return render_map(tree, map)
-            .map(|bitmap| (bitmap, PostInitMapCallbacks::default()));
-    }
-    let mut callbacks = PostInitMapCallbacks {
-        arrays: tree
-            .callbacks
-            .iter()
-            .map(CallbackArray::new)
-            .collect(),
-        map_zoom: 0,
-    };
-    let bitmap = render_map_recording_callbacks(tree, map, &mut callbacks)?;
-    Some((bitmap, callbacks))
 }
 
 fn render_map_recording_callbacks(
@@ -2425,6 +2463,47 @@ mod tests {
             2,
             "FakeLS exact MapWdt/MapHgt still evaluate with two Random(1) draws"
         );
+    }
+
+    #[test]
+    fn retained_section_append_skips_size_draws_and_resolves_main_template() {
+        // A later CreateMapS2 call parses into the retained creator instead
+        // of constructing one, so it keeps DefaultMap and performs no
+        // MapWdt/MapHgt evaluations (src/C4Landscape.cpp:531-546;
+        // src/C4MapCreatorS2.cpp:633-644,741-751).
+        let mut classifier = test_classifier();
+        let mut main_rng = LcgRng::seed_from_u64(17);
+        let creator = create_s2_map_with_state(
+            "overlay Shared { mat=Earth; tex=Rough; sub=0; seed=7; }; \
+             map Main { seed=9; };",
+            &mut classifier,
+            LegacyC4SVal::new(2, 0, 2, 2),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut main_rng,
+        )
+        .creator;
+        let main_node_count = creator.node_count();
+        let mut section_rng = LcgRng::seed_from_u64(17);
+        let section_count_before = section_rng.count;
+
+        let creation = extend_s2_map_with_state_and_functions(
+            creator,
+            "map Section { seed=11; Shared; };",
+            &mut classifier,
+            &mut section_rng,
+            &HashSet::new(),
+        );
+        let map = creation.bitmap.expect("retained section map renders");
+
+        assert_eq!((map.width, map.height), (2, 1));
+        assert_eq!(map.indices, vec![2, 2]);
+        assert_eq!(
+            section_rng.count, section_count_before,
+            "no constructor-time size draws"
+        );
+        assert!(creation.creator.node_count() > main_node_count);
     }
 
     #[test]
