@@ -817,6 +817,25 @@ impl Default for NeededMaterialStrings {
     }
 }
 
+fn us_default_rank_names() -> Vec<String> {
+    [
+        "Clonk",
+        "Ensign",
+        "Lieutenant",
+        "Captain",
+        "Major",
+        "Lieutenant Colonel",
+        "Colonel",
+        "Brigade General",
+        "Major General",
+        "Lieutenant General",
+        "General",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 /// The `C4Object::DoCon` gate for its expensive mass/face/component refresh
 /// (C4Object.cpp:1439-1447). Construction still changes between percent
 /// boundaries, but the component list only follows these refresh points.
@@ -15887,6 +15906,10 @@ pub struct Engine {
     crew_info_control_counts: HashMap<CrewInfoLink, i32>,
     team_home_base_rule: bool,
     needed_material_strings: Rc<NeededMaterialStrings>,
+    /// Process-local `Game.Rank` names frozen from IDS_GAME_DEFRANKS during
+    /// game initialization. Rank numbers and experience remain synchronized;
+    /// this localized presentation table deliberately stays out of snapshots.
+    default_rank_names: Rc<Vec<String>>,
     construction_needs_material: bool,
     structures_need_energy: bool,
     structures_snow_in: bool,
@@ -17964,6 +17987,7 @@ impl Engine {
             crew_info_control_counts: HashMap::new(),
             team_home_base_rule: false,
             needed_material_strings: Rc::new(NeededMaterialStrings::default()),
+            default_rank_names: Rc::new(us_default_rank_names()),
             construction_needs_material: false,
             structures_need_energy: false,
             structures_snow_in: false,
@@ -20816,6 +20840,11 @@ impl Engine {
         self.needed_material_strings = Rc::new(NeededMaterialStrings::new(need, none));
     }
 
+    #[doc(hidden)]
+    pub fn set_default_rank_names(&mut self, names: Vec<String>) {
+        self.default_rank_names = Rc::new(names);
+    }
+
     pub fn set_landscape(&mut self, mut landscape: Landscape) {
         let default = self.materials.default_ground_material();
         if default.is_some() {
@@ -22884,6 +22913,7 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
+        .with_default_rank_names(Rc::clone(&self.default_rank_names))
         .with_control_key_names(Rc::clone(&self.control_key_names))
         .with_solid_mask_metadata(solid_mask_metadata)
         .with_solid_mask_bakes(
@@ -33849,7 +33879,8 @@ impl Engine {
                 .ok()
                 .and_then(|rank| names.get(rank))
                 .cloned(),
-            None => compat::default_rank_name(info.rank).map(str::to_owned),
+            None => compat::default_rank_name(&self.default_rank_names, info.rank)
+                .map(str::to_owned),
         }
     }
 

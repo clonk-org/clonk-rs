@@ -45901,6 +45901,74 @@ func RemoveAndRecruit(object target) {
     }
 
     #[test]
+    fn installed_default_rank_names_drive_global_promotion() {
+        let script = r#"#strict 2
+func Award()
+{
+    return [DoCrewExp(1000), GetRank(),
+            GetObjectInfoCoreVal("RankName", "ObjectInfo")];
+}
+"#;
+
+        for (rank_names, expected) in [
+            (vec!["Clonk", "Ensign"], "Ensign"),
+            (vec!["Clonk", "Fähnrich"], "Fähnrich"),
+        ] {
+            let mut engine = Engine::with_seed(0);
+            engine.set_default_rank_names(rank_names.into_iter().map(str::to_owned).collect());
+            let mut crew = Definition::from_script("CREW", "Crew", script)
+                .expect("global-rank promotion probe compiles");
+            crew.set_crew_member(true);
+            engine.register_definition(crew).expect("crew registers");
+
+            let mut start = PlayerStart::default();
+            start.ready_crew = vec![("CREW".to_string(), 1)];
+            engine.set_player_starts(vec![start]);
+            engine
+                .join_player(rank_join_config(Vec::new()))
+                .expect("rank owner joins");
+
+            let crew_id = engine.player(0).expect("rank owner exists").crew()[0];
+            let crew_index = engine.find_object_index(crew_id).expect("crew exists");
+            assert_eq!(
+                engine
+                    .call_object_function(crew_index, "Award", Vec::new())
+                    .expect("global-rank award succeeds"),
+                Value::Array(vec![
+                    Value::Bool(true),
+                    Value::Int(1),
+                    Value::String(expected.to_string()),
+                ])
+            );
+
+            let info = engine
+                .crew_object_info(crew_id)
+                .expect("promoted crew keeps its info");
+            assert_eq!((info.rank, info.experience), (1, 1_000));
+            assert_eq!(info.rank_name, expected);
+            let state = engine.capture_state();
+            let link = state.crew_info_links[&crew_id];
+            assert_eq!(
+                state.crew_info_rosters[&link.player_id][link.roster_index].rank_name,
+                expected
+            );
+            assert_eq!(
+                state
+                    .messages
+                    .iter()
+                    .find(|message| message.snapshot.target == Some(crew_id))
+                    .expect("promotion message is presented")
+                    .snapshot
+                    .lines,
+                [
+                    "Clonk is promoted".to_string(),
+                    format!("to {expected}!")
+                ]
+            );
+        }
+    }
+
+    #[test]
     fn object_info_core_reflects_fresh_custom_progression_and_all_scalar_fields() {
         let script = r#"#strict 2
 func ReadCore()

@@ -2388,6 +2388,17 @@ fn needed_material_resource_strings(table: &RuntimeLanguageTable) -> (String, St
     (get("IDS_CON_BUILDMATNEED"), get("IDS_CON_BUILDMATNONE"))
 }
 
+fn default_rank_resource_names(table: &RuntimeLanguageTable) -> Vec<String> {
+    table
+        .entries
+        .get("IDS_GAME_DEFRANKS")
+        .cloned()
+        .unwrap_or_else(|| "[Undefined: IDS_GAME_DEFRANKS]".to_string())
+        .split('|')
+        .map(str::to_owned)
+        .collect()
+}
+
 fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
     match (name, index) {
         ("ToggleShowHelp", 0) => "F1",
@@ -7556,6 +7567,13 @@ struct GameApp {
     /// reinstalled on every fresh Engine.
     needed_material_need: String,
     needed_material_none: String,
+    /// Game.Rank names frozen by the latest C4Game::PreInit analogue. Startup
+    /// Options may reload the process language table afterward, but a game
+    /// started from that same startup session retains these names.
+    default_rank_names: Option<Vec<String>>,
+    /// IDS_GAME_DEFRANKS from the currently loaded process language table.
+    /// The next return-to-startup PreInit promotes this to Game.Rank.
+    loaded_default_rank_names: Option<Vec<String>>,
     /// Process-local Config.General.MissionAccess shared across fresh games.
     mission_access: MissionAccessStore,
     /// Process-local Config.Graphics.ShowCommands enable requests shared
@@ -14918,10 +14936,18 @@ impl GameApp {
                     "%s needs|no more material.".to_owned(),
                 )
             });
+        let default_rank_names = runtime_language_table
+            .as_ref()
+            .ok()
+            .map(default_rank_resource_names);
+        let loaded_default_rank_names = default_rank_names.clone();
         engine.set_needed_material_resource_strings(
             needed_material_need.clone(),
             needed_material_none.clone(),
         );
+        if let Some(names) = default_rank_names.as_ref() {
+            engine.set_default_rank_names(names.clone());
+        }
         let runtime_help_text_cache = OnceLock::new();
         let _ = runtime_help_text_cache.set(match &runtime_language_table {
             Ok(table) => {
@@ -14945,6 +14971,8 @@ impl GameApp {
             standard_names,
             needed_material_need,
             needed_material_none,
+            default_rank_names,
+            loaded_default_rank_names,
             mission_access,
             show_commands_requests,
             input: InputDispatcher::new(),
@@ -15435,6 +15463,9 @@ impl GameApp {
             self.needed_material_need.clone(),
             self.needed_material_none.clone(),
         );
+        if let Some(names) = self.default_rank_names.as_ref() {
+            self.engine.set_default_rank_names(names.clone());
+        }
         if let Some(materials) = self.material_library.as_ref() {
             self.engine.set_materials((**materials).clone());
         } else {
@@ -15452,6 +15483,9 @@ impl GameApp {
             self.needed_material_need.clone(),
             self.needed_material_none.clone(),
         );
+        if let Some(names) = self.default_rank_names.as_ref() {
+            engine.set_default_rank_names(names.clone());
+        }
         if let Some(materials) = self.material_library.as_ref() {
             engine.set_materials((**materials).clone());
         } else {
@@ -28172,6 +28206,7 @@ impl GameApp {
         let (needed_material_need, needed_material_none) = needed_material_resource_strings(&table);
         self.needed_material_need = needed_material_need.clone();
         self.needed_material_none = needed_material_none.clone();
+        self.loaded_default_rank_names = Some(default_rank_resource_names(&table));
         self.engine
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
 
@@ -33439,6 +33474,10 @@ impl GameApp {
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
+        // C4Application::QuitGame runs Game.Default and enters PreInit before
+        // showing startup again. This is when a language selected in the
+        // previous startup session finally replaces Game.Rank.
+        self.default_rank_names = self.loaded_default_rank_names.clone();
         self.engine = Engine::new();
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
@@ -42855,6 +42894,54 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         panic!("app did not reach menu mode in time");
+    }
+
+    fn app_default_rank_promotion_name(app: &GameApp) -> String {
+        let script = r#"#strict 2
+func Award()
+{
+    DoCrewExp(1000);
+    return GetObjectInfoCoreVal("RankName", "ObjectInfo");
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        app.apply_material_library_to(&mut engine);
+        let mut crew = Definition::from_script("CREW", "Crew", script)
+            .expect("default-rank app probe compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("probe crew registers");
+        engine.set_player_starts(vec![lc_engine::scenario::PlayerStart {
+            ready_crew: vec![("CREW".to_string(), 1)],
+            ..Default::default()
+        }]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Rank owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("rank owner joins");
+        let crew_id = engine.player(0).expect("rank owner exists").crew()[0];
+        let crew_index = engine.find_object_index(crew_id).expect("probe crew exists");
+        match engine
+            .call_object_function(crew_index, "Award", Vec::new())
+            .expect("default-rank promotion succeeds")
+        {
+            lc_script::Value::String(name) => name,
+            other => panic!("promotion returned {other:?}"),
+        }
     }
 
     fn wait_for_running(app: &mut GameApp) {
@@ -56469,6 +56556,15 @@ public func Grant(password) { return GainMissionAccess(password); }
         codes.sort_unstable();
         assert_eq!(codes, vec!["DE", "US"]);
         assert_eq!(app.needed_material_need, "%s|braucht noch");
+        assert_eq!(
+            app.default_rank_names
+                .as_deref()
+                .and_then(|names| names.get(1))
+                .map(String::as_str),
+            Some("Fähnrich")
+        );
+        assert_eq!(app.loaded_default_rank_names, app.default_rank_names);
+        assert_eq!(app_default_rank_promotion_name(&app), "Fähnrich");
 
         app.process_options_dialog_actions(vec![
             lc_frontend::startup_options_dlg::OptionsDlgAction::OpenLanguageCombo,
@@ -56497,6 +56593,25 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(program.language_text, "US - English");
         assert_eq!(program.language_ex, "US,DE");
         assert_eq!(app.needed_material_need, "%s|needs");
+        assert_eq!(
+            app.default_rank_names
+                .as_deref()
+                .and_then(|names| names.get(1))
+                .map(String::as_str),
+            Some("Fähnrich")
+        );
+        assert_eq!(
+            app.loaded_default_rank_names
+                .as_deref()
+                .and_then(|names| names.get(1))
+                .map(String::as_str),
+            Some("Ensign")
+        );
+        assert_eq!(app_default_rank_promotion_name(&app), "Fähnrich");
+
+        app.return_to_menu();
+        assert_eq!(app.default_rank_names, app.loaded_default_rank_names);
+        assert_eq!(app_default_rank_promotion_name(&app), "Ensign");
 
         let config = Config::load(paths.config_file()).expect("reload selected config");
         assert_eq!(config.get_in(Some("General"), "Language"), Some("US"));
@@ -82271,6 +82386,40 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
+    fn default_rank_resource_names_decode_shipped_tables_and_preserve_segments() {
+        let us = parse_runtime_language_table(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../planet/System.c4g/LanguageUS.txt"
+            )),
+            "LanguageUS.txt",
+        )
+        .expect("parse shipped US language table");
+        let de = parse_runtime_language_table(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../planet/System.c4g/LanguageDE.txt"
+            )),
+            "LanguageDE.txt",
+        )
+        .expect("parse shipped German language table");
+        assert_eq!(default_rank_resource_names(&us)[1], "Ensign");
+        assert_eq!(default_rank_resource_names(&de)[1], "Fähnrich");
+
+        let segments = RuntimeLanguageTable {
+            charset: RuntimeHelpCharset::Utf8,
+            entries: HashMap::from([(
+                "IDS_GAME_DEFRANKS".to_string(),
+                " Recruit|| Captain |".to_string(),
+            )]),
+        };
+        assert_eq!(
+            default_rank_resource_names(&segments),
+            [" Recruit", "", " Captain ", ""]
+        );
+    }
+
+    #[test]
     fn runtime_f1_language_parser_preserves_cpp_boundaries_and_font_safety() {
         let malformed = parse_runtime_help_language_table(
             b"junk\r\nIDS_CON_HELP=Help\r\nIDS_CTL_MUSIC=Mu\\nsic\r\nIDS_CTL_SOUND=a=b\r\n",
@@ -82356,6 +82505,7 @@ protected func InputCallback(string answer, int player)
         let (need, none) = needed_material_resource_strings(&table);
         assert_eq!(need, "%s|braucht noch");
         assert_eq!(none, "%s braucht kein|weiteres Baumaterial.");
+        assert_eq!(default_rank_resource_names(&table)[1], "Fähnrich");
         let columns = build_runtime_help_columns(&table.entries).expect("build German help");
         assert!(columns.left.starts_with("[Spielfunktionen]\n"));
         assert!(columns.left.contains("F1</c> - Hilfe"));

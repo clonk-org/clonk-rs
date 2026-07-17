@@ -1765,6 +1765,9 @@ pub struct HostWorldContext {
     /// distinct from an empty custom table: absent definitions fall back to
     /// the game-global rank system during `C4Object::Promote`.
     definition_rank_names: Rc<HashMap<DefinitionId, Vec<String>>>,
+    /// Process-local `Game.Rank` names frozen from IDS_GAME_DEFRANKS when
+    /// this game initialized.
+    default_rank_names: Rc<Vec<String>>,
     /// `C4RankSystem::Base` paired with each custom definition rank table.
     definition_rank_bases: Rc<HashMap<DefinitionId, i32>>,
     /// Runtime `Game.Defs` order after C4DefList::SortByID. Definition-indexing
@@ -1957,6 +1960,7 @@ impl Default for HostWorldContext {
             no_sell_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_rank_names: Rc::new(HashMap::new()),
+            default_rank_names: Rc::new(crate::us_default_rank_names()),
             definition_rank_bases: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
@@ -2206,6 +2210,7 @@ impl HostWorldContext {
             no_sell_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_rank_names: Rc::new(HashMap::new()),
+            default_rank_names: Rc::new(crate::us_default_rank_names()),
             definition_rank_bases: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
@@ -2294,6 +2299,11 @@ impl HostWorldContext {
         names: HashMap<DefinitionId, Vec<String>>,
     ) -> Self {
         self.definition_rank_names = Rc::new(names);
+        self
+    }
+
+    pub(crate) fn with_default_rank_names(mut self, names: Rc<Vec<String>>) -> Self {
+        self.default_rank_names = names;
         self
     }
 
@@ -6066,24 +6076,10 @@ fn do_score(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-const DEFAULT_RANK_NAMES: [&str; 11] = [
-    "Clonk",
-    "Ensign",
-    "Lieutenant",
-    "Captain",
-    "Major",
-    "Lieutenant Colonel",
-    "Colonel",
-    "Brigade General",
-    "Major General",
-    "Lieutenant General",
-    "General",
-];
-
-pub(crate) fn default_rank_name(rank: i32) -> Option<&'static str> {
+pub(crate) fn default_rank_name(names: &[String], rank: i32) -> Option<&str> {
     usize::try_from(rank)
         .ok()
-        .and_then(|rank| DEFAULT_RANK_NAMES.get(rank).copied())
+        .and_then(|rank| names.get(rank).map(String::as_str))
 }
 
 fn apply_host_crew_experience(
@@ -6133,7 +6129,8 @@ fn apply_host_crew_experience(
                 .ok()
                 .and_then(|rank| names.get(rank))
                 .cloned(),
-            None => default_rank_name(info.rank).map(str::to_owned),
+            None => default_rank_name(&context.world.default_rank_names, info.rank)
+                .map(str::to_owned),
         }
     } else {
         None
@@ -20468,7 +20465,10 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
                                 })
                                 .filter(|name| !name.is_empty())
                                 .cloned()
-                                .or_else(|| default_rank_name(rank).map(str::to_owned))
+                                .or_else(|| {
+                                    default_rank_name(&context.world.default_rank_names, rank)
+                                        .map(str::to_owned)
+                                })
                                 .unwrap_or_else(|| "Clonk".to_string()),
                             experience: 0,
                             participation: 1,
