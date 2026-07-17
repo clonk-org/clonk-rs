@@ -94,9 +94,7 @@ impl HudFont<'_> {
     /// plus `iHSpace`, including on the last character considered.
     pub fn character_advance(&self, character: char) -> i32 {
         match self {
-            HudFont::Clonk(font) => font
-                .glyph(character)
-                .map_or(0, |glyph| glyph.width.saturating_add(font.h_space)),
+            HudFont::Clonk(font) => font.message_character_advance(character),
             HudFont::Fallback(font) => font
                 .measure_text(&character.to_string(), FALLBACK_FONT_SIZE)
                 .width
@@ -1723,6 +1721,19 @@ mod tests {
 
     fn bitmap_font() -> lc_graphics::BitmapFont {
         lc_graphics::BitmapFont::new()
+    }
+
+    #[test]
+    fn hud_clonk_character_advance_uses_the_rendered_missing_glyph() {
+        let mut font = lc_graphics::clonk_font::ClonkFont::new(3);
+        font.set_missing_glyph(lc_graphics::clonk_font::GlyphCell {
+            width: 5,
+            pixels: vec![Color::opaque(255, 255, 255); 5 * 4],
+        });
+        let font = HudFont::Clonk(&font);
+
+        assert_eq!(font.character_advance('☃'), 4);
+        assert_eq!(font.character_advance('\t'), 0);
     }
 
     /// Control.png stand-in sized like the C++ sheet regions

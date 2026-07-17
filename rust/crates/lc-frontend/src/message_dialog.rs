@@ -9,7 +9,7 @@ use crate::clonk_fonts::NativeClonkFont;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::Result;
 use lc_graphics::clonk_font::{
-    font_image_lookup_tag, inline_image_token, scaled_font_image_width, ClonkFont,
+    font_image_lookup_tag, inline_image_token, scaled_font_image_width, skip_markup_tag, ClonkFont,
     FontImageProvider, TextAlign,
 };
 use lc_graphics::{GammaRamp, Surface};
@@ -1115,15 +1115,7 @@ fn break_message_impl(
     break_message_in_units(
         text,
         max_width.max(1),
-        |character| {
-            if character >= ' ' {
-                font.glyph(character)
-                    .map_or(0, |glyph| glyph.width)
-                    .saturating_add(font.h_space)
-            } else {
-                0
-            }
-        },
+        |character| font.message_character_advance(character),
         |tag| {
             images
                 .and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
@@ -1177,21 +1169,15 @@ fn break_message_in_units(
     let mut tokens = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        if rest.starts_with('<') {
-            if let Some(end) = rest.find('>') {
-                let raw = &rest[..=end];
-                let contents = &rest[1..end];
-                if valid_message_markup(contents) {
-                    tokens.push(MessageToken::Text {
-                        raw: raw.to_string(),
-                        width: 0,
-                        break_kind: None,
-                        line_character: false,
-                    });
-                    rest = &rest[end + 1..];
-                    continue;
-                }
-            }
+        if let Some(advance) = skip_markup_tag(rest) {
+            tokens.push(MessageToken::Text {
+                raw: rest[..advance].to_string(),
+                width: 0,
+                break_kind: None,
+                line_character: false,
+            });
+            rest = &rest[advance..];
+            continue;
         }
         if let Some((tag, advance)) = inline_image_token(rest) {
             tokens.push(MessageToken::Text {
@@ -1297,18 +1283,6 @@ fn break_message_in_units(
     output
 }
 
-fn valid_message_markup(contents: &str) -> bool {
-    matches!(contents, "i" | "/i" | "/c")
-        || contents.strip_prefix("c ").is_some_and(|parameters| {
-            let parameters = parameters.trim();
-            !parameters.is_empty()
-                && parameters.len() <= 8
-                && parameters
-                    .chars()
-                    .all(|character| character.is_ascii_hexdigit())
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,6 +1292,21 @@ mod tests {
 
     struct TestFontImages {
         image: ImageData,
+    }
+
+    fn unit_width_font(characters: &str) -> ClonkFont {
+        let mut font = ClonkFont::new(3);
+        font.h_space = 0;
+        for character in characters.chars() {
+            font.add_glyph(
+                character,
+                lc_graphics::clonk_font::GlyphCell {
+                    width: 1,
+                    pixels: vec![Color::opaque(255, 255, 255); 4],
+                },
+            );
+        }
+        font
     }
 
     impl FontImageProvider for TestFontImages {
@@ -1635,6 +1624,50 @@ mod tests {
         let fonts = endeavour_font_set();
         let (single_width, _) = fonts.text.measure("W", true);
         assert_eq!(break_message(&fonts.text, "WWW", single_width), "W\nWW");
+    }
+
+    #[test]
+    fn break_message_uses_cpp_skip_mode_markup_validation() {
+        let font = unit_width_font("AB<>/focz ");
+        let max_width = font.measure("A", true).0;
+
+        for (message, expected) in [
+            ("</foo>AB", "</foo>A\nB"),
+            ("<c zz>AB", "<c zz>A\nB"),
+        ] {
+            assert_eq!(break_message(&font, message, max_width), expected);
+        }
+    }
+
+    #[test]
+    fn break_message_rewrites_a_zero_width_tab_break_candidate() {
+        let font = unit_width_font("AB");
+        assert_eq!(break_message(&font, "AAAA\tBBBB", 4), "AAAA\nBBBB");
+    }
+
+    #[test]
+    fn break_message_uses_the_drawn_missing_glyph_width() {
+        let mut font = ClonkFont::new(3);
+        font.add_glyph(
+            'A',
+            lc_graphics::clonk_font::GlyphCell {
+                width: 5,
+                pixels: vec![Color::opaque(255, 255, 255); 5 * 4],
+            },
+        );
+        font.set_missing_glyph(lc_graphics::clonk_font::GlyphCell {
+            width: 5,
+            pixels: vec![Color::opaque(255, 255, 255); 5 * 4],
+        });
+
+        let broken = break_message(&font, "A☃", 5);
+        assert_eq!(broken, "A\n☃");
+        assert!(
+            broken
+                .lines()
+                .all(|line| font.measure(line, true).0 <= 5),
+            "every broken line fits when measured with the rendered fallback"
+        );
     }
 
     #[test]

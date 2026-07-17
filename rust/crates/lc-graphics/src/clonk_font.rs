@@ -277,6 +277,17 @@ impl ClonkFont {
         self.cells.get(&ch).or(self.missing_glyph.as_ref())
     }
 
+    /// One `CStdFont::BreakMessage` character advance at scale 1. The same
+    /// rendered facet lookup is used by measurement and drawing.
+    pub fn message_character_advance(&self, character: char) -> i32 {
+        if character < ' ' {
+            return 0;
+        }
+        self.rendered_glyph(character)
+            .map_or(0, |glyph| glyph.width)
+            .saturating_add(self.h_space)
+    }
+
     /// Measure `text`, mirroring `CStdFont::GetTextExtent`
     /// (`src/StdFont.cpp:571-638`) with `scale = iFontZoom = 1`.
     ///
@@ -702,6 +713,16 @@ fn skip_tags(mut text: &str) -> &str {
         }
     }
     text
+}
+
+/// Consume one tag exactly as `CMarkup::Read(fSkip = true)` would.
+///
+/// The returned byte count is the native pointer advance (normally through
+/// `<` and `>`; an overlong tag follows C++'s 49-byte truncation). Unknown
+/// opening tags remain visible, while any parameterless closing tag and color
+/// parameters of at most eight raw bytes are accepted in skip mode.
+pub fn skip_markup_tag(text: &str) -> Option<usize> {
+    read_tag(text, None)
 }
 
 /// `CMarkup::Read` (`src/StdMarkup.cpp:36-107`). `text` must start at `'<'`.
