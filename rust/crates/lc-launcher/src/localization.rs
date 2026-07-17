@@ -316,7 +316,10 @@ mod tests {
         // C4ResStrTable replaces each literal "\\n" in a recognized value
         // with CRLF while loading the selected table
         // (src/C4ResStrTable.cpp:25-50).
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("lc-test-")
+            .tempdir()
+            .unwrap();
         std::fs::write(
             directory.path().join("LanguageZZ.txt"),
             b"IDS_LANG_NAME=First\\nSecond\n",

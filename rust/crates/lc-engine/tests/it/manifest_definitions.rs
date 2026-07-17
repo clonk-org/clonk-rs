@@ -3,7 +3,10 @@ use std::path::Path;
 
 use image::{Rgba, RgbaImage};
 use lc_engine::{Engine, Scenario};
-use tempfile::tempdir;
+
+fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().prefix("lc-test-").tempdir()
+}
 
 const BASIC_SCRIPT: &str = r#"
 global func Initialize(state, random) { return nil; }

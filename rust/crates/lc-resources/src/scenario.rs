@@ -1333,7 +1333,9 @@ mod tests {
     use byteorder::{LittleEndian, WriteBytesExt};
     use std::io::Cursor;
     use std::io::Write;
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
 
     const GROUP_HEADER_SIZE: usize = 204;
     const GROUP_ENTRY_SIZE: usize = 316;
@@ -1389,7 +1391,7 @@ mod tests {
         let scenario_path = dir.path().join("Packed.c4s");
         let scenario_bytes =
             build_group(&[("Scenario.json", br#"{"name":"Packed Scenario"}"#.to_vec())]);
-        fs::write(&scenario_path, scenario_bytes).unwrap();
+        fs::write(&scenario_path, gzip_group_image(&scenario_bytes)).unwrap();
 
         let entries = discover(dir.path()).expect("discover");
         assert_eq!(entries.len(), 1);
@@ -1412,7 +1414,7 @@ mod tests {
         // This entry is a packed child group, so its C4GroupEntryCore must
         // carry ChildGroup=1 (C4Group.cpp:1858-1862).
         mark_group_entry_child(&mut folder_bytes, 1);
-        fs::write(&folder_path, folder_bytes).unwrap();
+        fs::write(&folder_path, gzip_group_image(&folder_bytes)).unwrap();
 
         let entries = discover(dir.path()).expect("discover");
         assert_eq!(entries.len(), 1);
@@ -1958,7 +1960,7 @@ mod tests {
 
         let packed_path = dir.path().join("Packed.c4s");
         let packed_bytes = build_group(&[("Scenario.json", br#"{"name":"Packed"}"#.to_vec())]);
-        fs::write(&packed_path, packed_bytes).unwrap();
+        fs::write(&packed_path, gzip_group_image(&packed_bytes)).unwrap();
 
         let entries =
             discover_many([dir_root.as_path(), packed_path.as_path()]).expect("discover many");
@@ -2019,6 +2021,17 @@ mod tests {
             buffer.extend_from_slice(data);
         }
         buffer
+    }
+
+    fn gzip_group_image(image: &[u8]) -> Vec<u8> {
+        let mut compressed = Vec::new();
+        let mut encoder = flate2::write::GzEncoder::new(
+            &mut compressed,
+            flate2::Compression::default(),
+        );
+        encoder.write_all(image).unwrap();
+        encoder.finish().unwrap();
+        compressed
     }
 
     fn mark_group_entry_child(group: &mut [u8], entry_index: usize) {

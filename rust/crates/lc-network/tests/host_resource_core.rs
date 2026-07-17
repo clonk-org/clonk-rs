@@ -1,9 +1,12 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use lc_engine::LegacyCString;
 use lc_network::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourceType,
@@ -262,7 +265,7 @@ fn cpp_network_core_preserves_non_utf8_group_maker_bytes() {
     header[40..44].copy_from_slice(&[0xff, b'A', b'B', 0]);
     scramble_group_header(&mut header);
     image[..204].copy_from_slice(&header);
-    fs::write(&material, image).unwrap();
+    fs::write(&material, gzip_group_image(&image)).unwrap();
 
     let publication = build_host_resource_core(
         &material,
@@ -604,7 +607,7 @@ fn opaque_child_with_old_crc_state_fails_typed_instead_of_silently_becoming_new(
         }
     }
     assert!(changed_state);
-    fs::write(&player, raw).unwrap();
+    fs::write(&player, gzip_group_image(&raw)).unwrap();
 
     let error = build_host_resource_core(
         &player,
@@ -690,7 +693,8 @@ fn opaque_old_crc_without_a_rewrite_remains_an_exact_copy() {
         .unwrap();
     let mut raw = original.pack_raw().unwrap();
     raw[204 + 284] = 1;
-    fs::write(&player, &raw).unwrap();
+    let packed = gzip_group_image(&raw);
+    fs::write(&player, &packed).unwrap();
 
     let publication = build_host_resource_core(
         &player,
@@ -704,7 +708,10 @@ fn opaque_old_crc_without_a_rewrite_remains_an_exact_copy() {
     )
     .unwrap();
 
-    assert_eq!(fs::read(publication.standalone_path.unwrap()).unwrap(), raw);
+    assert_eq!(
+        fs::read(publication.standalone_path.unwrap()).unwrap(),
+        packed
+    );
     assert_eq!(publication.core.contents_crc, 0);
 }
 
@@ -773,7 +780,7 @@ fn cpp_duplicate_entry_marks_an_otherwise_unchanged_player_for_rewrite() {
     let second_name = 204 + 316;
     raw[second_name..second_name + 260].fill(0);
     raw[second_name..second_name + 5].copy_from_slice(b"A.txt");
-    fs::write(&player, raw).unwrap();
+    fs::write(&player, gzip_group_image(&raw)).unwrap();
 
     let publication = build_host_resource_core(
         &player,
@@ -820,7 +827,7 @@ fn cpp_player_rewrite_preserves_legacy_entry_name_bytes() {
         }
     }
     assert!(replaced);
-    fs::write(&player, raw).unwrap();
+    fs::write(&player, gzip_group_image(&raw)).unwrap();
 
     let publication = build_host_resource_core(
         &player,
@@ -1012,6 +1019,15 @@ fn scramble_group_header(buffer: &mut [u8]) {
     for index in (0..buffer.len().saturating_sub(2)).step_by(3) {
         buffer.swap(index, index + 2);
     }
+}
+
+fn gzip_group_image(image: &[u8]) -> Vec<u8> {
+    let mut compressed = Vec::new();
+    let mut encoder = GzEncoder::new(&mut compressed, Compression::default());
+    encoder.write_all(image).unwrap();
+    encoder.finish().unwrap();
+    compressed[..2].copy_from_slice(&[0x1e, 0x8c]);
+    compressed
 }
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);

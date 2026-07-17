@@ -3440,7 +3440,9 @@ Entrance=1,2,,4
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
 
     // Overlay.png is the ClrByOwner surface itself: C4DefGraphics::LoadGraphics
     // keeps it as BitmapClr with the base as pMainSfc (C4DefGraphics.cpp:74-94,

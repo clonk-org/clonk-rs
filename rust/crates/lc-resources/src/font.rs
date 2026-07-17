@@ -374,7 +374,9 @@ fn stdcompiler_ini_value(line: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
     use std::fs;
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
 
     #[test]
     fn font_defs_select_closest_name_size_and_later_tie() {

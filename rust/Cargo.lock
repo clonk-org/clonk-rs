@@ -2234,6 +2234,7 @@ dependencies = [
 name = "lc-network"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "iconv-native",
  "lc-engine",
  "lc-resources",

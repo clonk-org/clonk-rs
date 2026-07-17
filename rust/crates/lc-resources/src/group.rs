@@ -94,6 +94,14 @@ impl Group {
             return Err(GroupError::Missing(path.to_path_buf()));
         }
         if path.is_dir() {
+            if path.file_name().is_some_and(|name| {
+                ignored_group_entry_bytes(name.as_encoded_bytes())
+            }) {
+                return Err(GroupError::InvalidGroup(format!(
+                    "ignored directory name: {}",
+                    path.display()
+                )));
+            }
             return Ok(Self {
                 kind: GroupKind::Directory(path.to_path_buf()),
             });
@@ -505,6 +513,14 @@ impl MutableGroup {
 
 impl PackedGroup {
     fn open(path: &Path) -> Result<Self, GroupError> {
+        let mut file = File::open(path)?;
+        let mut magic = [0u8; 2];
+        file.read_exact(&mut magic)?;
+        if magic != C4GROUP_GZ_MAGIC && magic != GZ_MAGIC {
+            return Err(GroupError::InvalidGroup(
+                "invalid compressed group magic".into(),
+            ));
+        }
         Self::from_source(path.to_path_buf(), PackedSource::File(path.to_path_buf()))
     }
 
@@ -957,9 +973,6 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
         )));
     }
     let entries = cursor.read_i32::<LittleEndian>()?;
-    if entries < 0 {
-        return Err(GroupError::InvalidGroup("negative entry count".into()));
-    }
     let mut maker_field = [0u8; 32];
     cursor.read_exact(&mut maker_field)?;
     let maker_bytes = c_bytes(&maker_field).to_vec();
@@ -976,7 +989,7 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
             maker_field,
             raw: Box::new(raw),
         },
-        entry_count: entries as usize,
+        entry_count: entries.max(0) as usize,
     })
 }
 
@@ -1177,7 +1190,9 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use std::path::Path;
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
 
     #[test]
     fn open_directory_group() {
@@ -1272,6 +1287,18 @@ mod tests {
         // actual lowercase `.legacyclonk` entry.
         assert!(group.exists(".LEGACYCLONK"));
         assert_eq!(group.read_file(".LegacyClonk").unwrap(), b"visible");
+    }
+
+    #[test]
+    fn top_level_ignored_directories_do_not_open_as_groups() {
+        let parent = tempdir().unwrap();
+        for name in [".hidden", "cvs", ".legacyclonk"] {
+            fs::create_dir(parent.path().join(name)).unwrap();
+        }
+
+        assert!(Group::open(parent.path().join(".hidden")).is_err());
+        assert!(Group::open(parent.path().join("cvs")).is_err());
+        assert!(Group::open(parent.path().join(".legacyclonk")).is_ok());
     }
 
     #[test]
@@ -1445,6 +1472,20 @@ mod tests {
         assert_eq!(decompress_group(compressed).unwrap(), b"firstsecond");
     }
 
+    fn gzip_group_image(image: &[u8]) -> Vec<u8> {
+        gzip_member(image, GZ_MAGIC)
+    }
+
+    fn packed_group_image_with_entry_count(entry_count: i32) -> Vec<u8> {
+        let mut image = packed_group_image_with_entries(&[]);
+        let mut header: [u8; GROUP_HEADER_SIZE] = image[..GROUP_HEADER_SIZE].try_into().unwrap();
+        mem_unscramble(&mut header);
+        header[36..40].copy_from_slice(&entry_count.to_le_bytes());
+        mem_unscramble(&mut header);
+        image[..GROUP_HEADER_SIZE].copy_from_slice(&header);
+        image
+    }
+
     #[test]
     fn open_gz_wrapped_packed_group() {
         // On-disk C4Group files are gzip streams with the magic bytes
@@ -1472,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn open_packed_group() {
+    fn top_level_raw_group_file_is_rejected_but_raw_memory_opens() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.c4group");
         let mut file = File::create(&path).unwrap();
@@ -1511,8 +1552,11 @@ mod tests {
         }
         file.write_all(&entry).unwrap();
         file.write_all(b"world").unwrap();
+        drop(file);
 
-        let group = Group::open(&path).unwrap();
+        Group::open(&path).expect_err("top-level packed files require a gzip envelope");
+        let group = Group::from_raw_memory(path.clone(), fs::read(&path).unwrap())
+            .expect("raw nested-group parser remains available");
         let entries = group.entries().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].relative_path, Path::new("hello.txt"));
@@ -1523,6 +1567,20 @@ mod tests {
         assert_eq!(data, b"world");
         assert!(group.exists("hello.txt"));
         assert_eq!(group.maker(), Some(""));
+    }
+
+    #[test]
+    fn negative_entry_count_opens_as_an_empty_group() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("negative.c4g");
+        fs::write(
+            &path,
+            gzip_group_image(&packed_group_image_with_entry_count(-1)),
+        )
+        .unwrap();
+
+        let group = Group::open(path).expect("negative count is the C++ empty-loop case");
+        assert!(group.entries().unwrap().is_empty());
     }
 
     #[test]
@@ -1756,5 +1814,31 @@ mod tests {
             error,
             GroupError::InvalidGroup(message) if message.contains("not a child group")
         ));
+    }
+
+    #[test]
+    fn packed_open_child_rejects_gzip_wrapped_child_payload() {
+        let compressed_child = gzip_group_image(&packed_group_image());
+        let outer = packed_group_image_with_entry("child.c4g", true, &compressed_child);
+        let group =
+            Group::from_memory(PathBuf::from("outer.c4g"), outer).expect("valid outer group");
+
+        group
+            .open_child("child.c4g")
+            .expect_err("OpenAsChild reads an envelope-free raw image in place");
+        Group::from_raw_memory(PathBuf::from("child.c4g"), compressed_child)
+            .expect_err("raw nested parser must reject gzip magic");
+    }
+
+    #[test]
+    fn directory_open_child_accepts_raw_physical_group_image() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("child.c4g"), packed_group_image()).unwrap();
+        let group = Group::open(directory.path()).expect("open unpacked mother");
+
+        let child = group
+            .open_child("child.c4g")
+            .expect("unpacked mothers expose raw physical child images");
+        assert_eq!(child.read_file("hello.txt").unwrap(), b"world");
     }
 }

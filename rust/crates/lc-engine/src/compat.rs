@@ -70732,7 +70732,10 @@ func ChangeAndProbe()
     return CrewMember();
 }
 "#;
-        let caller_dir = tempfile::tempdir().expect("caller resource directory");
+        let caller_dir = tempfile::Builder::new()
+            .prefix("lc-test-")
+            .tempdir()
+            .expect("caller resource directory");
         std::fs::write(
             caller_dir.path().join("DefCore.txt"),
             b"[DefCore]\nid=CALL\nName=Caller\nCrewMember=-2\n",

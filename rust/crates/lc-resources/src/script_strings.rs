@@ -153,7 +153,9 @@ fn replace_localization_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
 
     #[test]
     fn script_localization_preserves_native_source_and_replacement_bytes() {

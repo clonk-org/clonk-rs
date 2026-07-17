@@ -38915,7 +38915,10 @@ mod tests {
     use std::sync::OnceLock;
     use std::thread;
     use std::time::Duration;
-    use tempfile::tempdir;
+
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
 
     #[test]
     fn mouse_drag_starts_only_after_cpp_five_pixel_sensitivity() {
@@ -43946,6 +43949,22 @@ mod tests {
             image.extend_from_slice(data);
         }
         image
+    }
+
+    fn packed_test_file_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
+        let mut group = lc_resources::MutableGroup::new("Fixture.bin");
+        for (name, child, data) in entries {
+            if *child {
+                group
+                    .add_packed_child_with_metadata(*name, data.to_vec(), 0, 0, false)
+                    .expect("add packed child fixture");
+            } else {
+                group
+                    .add_file(*name, data.to_vec())
+                    .expect("add packed file fixture");
+            }
+        }
+        group.pack().expect("compress packed fixture")
     }
 
     fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
@@ -54152,7 +54171,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn packed_logical_folder_ancestry_uses_case_insensitive_group_traversal() {
         let root = tempdir().expect("packed FolderMap fixture");
         let inner = packed_test_group(&[("fOlDeRmAp.TxT", false, b"[FolderMap]\n")]);
-        let outer = packed_test_group(&[("INNER.C4F", true, inner.as_slice())]);
+        let outer = packed_test_file_group(&[("INNER.C4F", true, inner.as_slice())]);
         let outer_path = root.path().join("Outer.c4f");
         fs::write(&outer_path, outer).expect("packed outer folder");
         let logical_inner = outer_path.join("inner.c4f");
@@ -54542,7 +54561,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let root = tempdir().expect("packed loader Origin fixture");
         let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
         let inner = packed_test_group(&[]);
-        let outer = packed_test_group(&[("INNER.C4F", true, inner.as_slice())]);
+        let outer = packed_test_file_group(&[("INNER.C4F", true, inner.as_slice())]);
         let outer_path = content.join("Outer.c4f");
         fs::write(&outer_path, outer).expect("packed outer Origin parent");
         let scenario_path = content.join("Actual.c4s");
@@ -54572,7 +54591,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         let root = tempdir().expect("ambiguous packed loader Origin fixture");
         let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
         let outer_path = content.join("Outer.c4f");
-        fs::write(&outer_path, packed_test_group(&[])).expect("packed outer Origin parent");
+        fs::write(&outer_path, packed_test_file_group(&[]))
+            .expect("packed outer Origin parent");
         let scenario_path = content.join("Actual.c4s");
         let (_, _, head) = loader_origin_fixture_scenario(
             &scenario_path,
@@ -82342,7 +82362,7 @@ protected func InputCallback(string answer, int player)
         fs::remove_dir_all(&extra).expect("replace directory Extra.c4g");
         fs::write(
             &extra,
-            packed_test_group(&[("KEYCONFIG.TXT", false, b"[Keys]\nToggleShowHelp=F2\n")]),
+            packed_test_file_group(&[("KEYCONFIG.TXT", false, b"[Keys]\nToggleShowHelp=F2\n")]),
         )
         .expect("packed Extra.c4g fixture");
         let error = guard_runtime_global_key_config(Some(&paths))
@@ -85751,7 +85771,7 @@ protected func InputCallback(string answer, int player)
             ("Material.c4g", true, inner_materials.as_slice()),
             ("Scen.c4s", true, scenario.as_slice()),
         ]);
-        let outer = packed_test_group(&[
+        let outer = packed_test_file_group(&[
             ("Graphics.c4g", true, outer_graphics.as_slice()),
             ("Material.c4g", true, outer_materials.as_slice()),
             ("Inner.c4f", true, inner.as_slice()),

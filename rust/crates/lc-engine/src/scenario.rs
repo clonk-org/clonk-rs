@@ -13288,11 +13288,14 @@ mod tests {
     use image::{ColorType, Rgba, RgbaImage, codecs::bmp::BmpEncoder};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
-    use tempfile::tempdir;
     use tracing::field::{Field, Visit};
     use tracing::{Level, subscriber};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
+
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
 
     const TEST_SCRIPT: &str = r#"
 global func Initialize(state, random)
@@ -14807,6 +14810,30 @@ RandomTeamCount=2
             image.extend_from_slice(data);
         }
         image
+    }
+
+    /// Wraps a raw packed-group fixture in the standalone-file gzip envelope.
+    /// Child entries stay raw because packed mother groups open them in place.
+    fn packed_test_group_file(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
+        let mut group = lc_resources::MutableGroup::new("PackedFixture");
+        for (name, child, data) in entries {
+            if *child {
+                group
+                    .add_packed_child_with_metadata(
+                        (*name).to_owned(),
+                        data.to_vec(),
+                        0,
+                        0,
+                        false,
+                    )
+                    .expect("packed child adds");
+            } else {
+                group
+                    .add_file((*name).to_owned(), data.to_vec())
+                    .expect("packed file adds");
+            }
+        }
+        group.pack().expect("standalone packed group compresses")
     }
 
     #[test]
@@ -21277,7 +21304,7 @@ public func ActualizePhase(pClonk)
             ("Nested.c4s", true, scenario_data.as_slice()),
         ]);
         let outer_definition = packed_definition("OUTR");
-        let outer = packed_test_group(&[
+        let outer = packed_test_group_file(&[
             ("Outer.c4d", true, outer_definition.as_slice()),
             ("Corrupt.c4d", true, b"not a packed group"),
             ("Inner.c4f", true, inner.as_slice()),
@@ -22868,7 +22895,7 @@ public func ActualizePhase(pClonk)
             ("DefCore.txt", false, rooted_core.as_slice()),
             ("Script.c", false, rooted_script.as_slice()),
         ]);
-        let outer = packed_test_group(&[("NeStEd.C4D", true, nested.as_slice())]);
+        let outer = packed_test_group_file(&[("NeStEd.C4D", true, nested.as_slice())]);
         std::fs::write(definition_root.join("PACK.C4D"), outer).expect("write outer packed group");
 
         let normal_root = dir.path().join("normal");
