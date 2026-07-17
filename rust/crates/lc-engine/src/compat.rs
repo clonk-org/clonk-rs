@@ -56998,6 +56998,21 @@ public func RejectConstruction(x, y, builder)
             || {
                 Ok::<_, RuntimeError>(Value::Array(vec![
                     set_texture_index(&[
+                        Value::Nil,
+                        Value::Int(2),
+                        Value::Bool(false),
+                    ])?,
+                    set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(0),
+                        Value::Bool(false),
+                    ])?,
+                    set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(127),
+                        Value::Bool(false),
+                    ])?,
+                    set_texture_index(&[
                         Value::String("Earth-Rough".to_string()),
                         Value::Int(300),
                         Value::Bool(false),
@@ -57044,11 +57059,63 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(0),
                 Value::Int(0),
                 Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
                 Value::Int(1),
                 Value::Nil,
             ])
         );
         assert!(outcome.landscape.is_empty());
+    }
+
+    #[test]
+    fn set_texture_index_exact_landscape_without_retained_map_moves_entry_only() {
+        let mut world = draw_map_world(8, 7, 1, false);
+        let landscape = world
+            .landscape
+            .as_mut()
+            .map(Rc::make_mut)
+            .expect("landscape exists");
+        assert!(landscape.set_mode(crate::landscape::LANDSCAPE_MODE_EXACT));
+        assert!(
+            landscape
+                .raster_state()
+                .and_then(|state| state.map())
+                .is_none(),
+            "exact landscape has no retained C4Landscape::Map"
+        );
+        let initial_landscape = landscape.clone();
+        let initial_surface = landscape
+            .pixel_grid()
+            .expect("pixel grid exists")
+            .bytes()
+            .to_vec();
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            set_texture_index(&[
+                Value::String("Earth-Rough".to_string()),
+                Value::Int(2),
+                Value::Bool(false),
+            ])
+        });
+        assert_eq!(result.expect("SetTextureIndex succeeds"), Value::Int(1));
+        assert_eq!(outcome.landscape.len(), 1);
+
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(outcome.landscape);
+
+        let landscape = engine.landscape().expect("folded landscape exists");
+        assert_eq!(
+            landscape.pixel_grid().expect("pixel grid").bytes(),
+            initial_surface
+        );
+        let raster = landscape.raster_state().expect("raster state exists");
+        assert!(raster.map().is_none());
+        assert_eq!(raster.texmap().material_names[1].as_deref(), Some("Earth"));
+        assert_eq!(raster.texmap().material_names[2].as_deref(), Some("Earth"));
+        assert_eq!(raster.texmap().texture_names[2].as_deref(), Some("Rough"));
     }
 
     #[test]
