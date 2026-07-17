@@ -1332,7 +1332,14 @@ impl RuntimeTexMapState {
             return 0;
         };
         if let Some(texture) = texture_name {
-            if !self.texture_exists(texture) {
+            let validation_texture = if (C4M_LIQUID..C4M_SOLID).contains(&density)
+                && texture.eq_ignore_ascii_case("Smooth")
+            {
+                "Liquid"
+            } else {
+                texture
+            };
+            if !self.texture_exists(validation_texture) {
                 return 0;
             }
         }
@@ -6537,6 +6544,51 @@ mod tests {
         assert_eq!(grid.material_names()[slot as usize].as_deref(), Some("Earth"));
         assert_eq!(grid.texture_names()[slot as usize].as_deref(), Some("Ridge"));
         assert_eq!(grid.revision(), revision, "texmap sync writes no pixels");
+    }
+
+    #[test]
+    fn runtime_texmap_liquid_smooth_validates_liquid_but_stores_raw_name() {
+        let make_texmap = || {
+            let landscape = raster_grid_landscape(1, 1, vec![0]);
+            landscape
+                .raster_state()
+                .expect("raster state")
+                .texmap()
+                .clone()
+        };
+
+        let mut liquid_only = make_texmap();
+        liquid_only.texture_inventory = vec!["Liquid".to_string()];
+        let slot = liquid_only.get_index("Water", Some("Smooth"), true);
+        assert_eq!(slot, 4, "liquid Smooth validates the Liquid texture");
+        assert_eq!(
+            liquid_only.match_texture_names[slot as usize].as_deref(),
+            Some("Smooth")
+        );
+        assert_eq!(
+            liquid_only.texture_names[slot as usize].as_deref(),
+            Some("Smooth"),
+            "the entry retains the raw name used by GetIndex matching"
+        );
+        assert_eq!(
+            liquid_only.get_index("water", Some("smooth"), false),
+            slot
+        );
+        liquid_only.texture_inventory.clear();
+        assert_eq!(
+            liquid_only.get_index("WATER", Some("SMOOTH"), true),
+            slot,
+            "an existing raw-name pair bypasses add-path validation"
+        );
+
+        let mut smooth_only = make_texmap();
+        smooth_only.texture_inventory = vec!["Smooth".to_string()];
+        assert_eq!(smooth_only.get_index("Water", Some("Smooth"), true), 0);
+        assert!(smooth_only.material_names[4].is_none());
+
+        let mut non_liquid = make_texmap();
+        non_liquid.texture_inventory = vec!["Smooth".to_string()];
+        assert_eq!(non_liquid.get_index("Earth", Some("Smooth"), true), 4);
     }
 
     fn raster_grid_landscape(width: u32, height: u32, bytes: Vec<u8>) -> Landscape {
