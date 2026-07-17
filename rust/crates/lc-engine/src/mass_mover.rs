@@ -559,6 +559,24 @@ mod tests {
         engine
     }
 
+    fn register_smoke_particle(engine: &mut Engine) {
+        engine
+            .register_particle_definition(
+                crate::particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "SmokeInit".into(),
+                    exec_fn: "SmokeExec".into(),
+                    draw_fn: "Smoke".into(),
+                    min_lifetime: 10,
+                    max_lifetime: 10,
+                    ..Default::default()
+                },
+                4,
+                1.0,
+            )
+            .expect("Smoke particle definition registers");
+    }
+
     fn water_materials() -> MaterialSet {
         materials(
             r#"
@@ -1184,7 +1202,57 @@ mod tests {
     }
 
     #[test]
-    fn blocked_mover_uses_massmove_corrosion_rng_before_dying() {
+    fn blocked_mover_poof_spawns_smoke_without_changing_rnd3_ledger() {
+        let materials = materials(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+            MaxSlide=0
+            Extinguisher=1
+
+            [Material Lava]
+            Name=Lava
+            Density=80
+            Incindiary=1
+            "#,
+        );
+        let water = materials.id_of("Water").expect("water material");
+        let lava = materials.id_of("Lava").expect("lava material");
+        let mut landscape = Landscape::flat_with_material(3, 5, Some(lava));
+        landscape.set_world_height(6);
+        landscape.set_default_liquid_material(Some(water));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(4, 4, Some(water))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        register_smoke_particle(&mut engine);
+        assert!(engine.mass_mover_create(1, 4, false));
+        engine.rng = crate::rng::LcgRng::seed_from_u64(9_876);
+
+        let mut expected = engine.rng.clone();
+        assert_eq!(expected.rnd3(), 0, "the smoke branch is forced");
+        let _ = expected.rnd3(); // Pshshsh sound gate
+
+        engine.tick_mass_movers();
+
+        assert_eq!(engine.rng, expected, "Poof still consumes exactly two Rnd3 draws");
+        let smoke: Vec<_> = engine
+            .particle_system()
+            .particles()
+            .iter()
+            .filter(|particle| particle.def_name == "Smoke")
+            .collect();
+        assert_eq!(smoke.len(), 1);
+        assert_eq!(smoke[0].x.to_bits(), 1.0f32.to_bits());
+        assert_eq!(smoke[0].y.to_bits(), 3.0f32.to_bits());
+        assert_eq!(smoke[0].a.to_bits(), 3.0f32.to_bits());
+    }
+
+    #[test]
+    fn blocked_mover_corrosion_spawns_smoke_without_changing_rng_ledger() {
         // C4MassMover::Execute corrosion check (C4MassMover.cpp:126-132)
         // with the mrfCorrode meeMassMove draws (C4Material.cpp:699-714).
         let materials = materials(
@@ -1212,21 +1280,33 @@ mod tests {
             vec![crate::LiquidSegment::with_material(4, 4, Some(acid))],
         );
         let mut engine = engine_with(materials, landscape);
+        register_smoke_particle(&mut engine);
         assert!(engine.mass_mover_create(1, 4, false));
+        engine.rng = crate::rng::LcgRng::seed_from_u64(202);
 
         let mut expected = engine.rng.clone();
-        assert!(crate::material::evaluate_corrosion(
-            100,
-            100,
-            None,
-            &mut expected
-        ));
-        crate::material::consume_corrosion_effect_rng(&mut expected);
+        assert!(expected.random(100) < 100);
+        assert!(expected.random(100) < 100);
+        assert_eq!(expected.random(5), 0, "the smoke branch is forced");
+        let expected_level = 3 + expected.random(3);
+        let _ = expected.random(20); // Corrode sound gate
 
         engine.tick_mass_movers();
 
-        assert_eq!(engine.rng.count, expected.count);
-        assert_eq!(engine.rng.hold, expected.hold);
+        assert_eq!(engine.rng, expected, "Corrode draw order remains unchanged");
+        let smoke: Vec<_> = engine
+            .particle_system()
+            .particles()
+            .iter()
+            .filter(|particle| particle.def_name == "Smoke")
+            .collect();
+        assert_eq!(smoke.len(), 1);
+        assert_eq!(smoke[0].x.to_bits(), 1.0f32.to_bits());
+        assert_eq!(
+            smoke[0].y.to_bits(),
+            (4.0f32 - (expected_level / 2) as f32).to_bits()
+        );
+        assert_eq!(smoke[0].a.to_bits(), (expected_level as f32).to_bits());
     }
 
     #[test]

@@ -50009,11 +50009,12 @@ impl Engine {
             };
         }
         let mut instability_probes = Vec::new();
+        let mut smoke_request = None;
         let result = {
             let Some(landscape) = self.landscape.as_mut() else {
                 return material::MaterialReactionExecution::Unhandled;
             };
-            self.materials.execute_mass_move_reaction(
+            self.materials.execute_mass_move_reaction_with_smoke(
                 landscape,
                 pxs_material,
                 pxs_x,
@@ -50022,12 +50023,16 @@ impl Engine {
                 landscape_y,
                 &mut self.rng,
                 &mut instability_probes,
+                &mut smoke_request,
             )
         };
         // The CheckInstabilityRange half of each ExtractMaterial the
         // reaction ran (C4Landscape.cpp:1154).
         for (probe_x, probe_y) in instability_probes {
             self.check_instability_range(probe_x, probe_y);
+        }
+        if let Some(request) = smoke_request {
+            self.spawn_smoke(request.x, request.y, request.level);
         }
         result
     }
