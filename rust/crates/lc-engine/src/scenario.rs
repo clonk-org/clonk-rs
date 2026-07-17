@@ -5384,17 +5384,11 @@ impl LegacyGame {
                     self.rules = parse_legacy_id_list(key, raw)?;
                 }
                 "fowcolor" => {
-                    let parsed = parse_i64(raw).map_err(|err| {
+                    self.fow_color = parse_std_u32(raw).ok_or_else(|| {
                         ScenarioError::LegacyParse(format!(
-                            "invalid value `{raw}` for `{key}`: {err}"
+                            "invalid value `{raw}` for `{key}`"
                         ))
                     })?;
-                    if parsed < 0 || parsed > u32::MAX as i64 {
-                        return Err(ScenarioError::LegacyParse(format!(
-                            "value `{raw}` for `{key}` is out of range"
-                        )));
-                    }
-                    self.fow_color = parsed as u32;
                 }
                 _ => {}
             }
@@ -8288,6 +8282,71 @@ fn ini_team_distribution(tree: &LegacyIniTree, parent: usize) -> ScenarioTeamDis
 
 fn parse_std_i32(raw: &str) -> Option<i32> {
     parse_std_i64(raw).and_then(|value| i32::try_from(value).ok())
+}
+
+fn parse_std_u32(raw: &str) -> Option<u32> {
+    let raw = raw.trim_start_matches([' ', '\t']);
+    let bytes = raw.as_bytes();
+    let mut cursor = 0;
+
+    // StdCompilerINIRead selects hexadecimal only when the number itself
+    // begins with 0x. A leading sign therefore keeps strtoul in base 10.
+    let radix = if bytes.get(cursor) == Some(&b'0')
+        && bytes
+            .get(cursor + 1)
+            .is_some_and(|byte| matches!(byte, b'x' | b'X'))
+    {
+        cursor += 2;
+        16u32
+    } else {
+        10u32
+    };
+    let negative = if radix == 10 {
+        match bytes.get(cursor) {
+            Some(b'-') => {
+                cursor += 1;
+                true
+            }
+            Some(b'+') => {
+                cursor += 1;
+                false
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let digits_start = cursor;
+    let mut magnitude = 0u128;
+    while let Some(digit) = bytes.get(cursor).and_then(|byte| match byte {
+        b'0'..=b'9' => Some(u32::from(*byte - b'0')),
+        b'a'..=b'f' if radix == 16 => Some(u32::from(*byte - b'a') + 10),
+        b'A'..=b'F' if radix == 16 => Some(u32::from(*byte - b'A') + 10),
+        _ => None,
+    }) {
+        if digit >= radix {
+            break;
+        }
+        magnitude = magnitude
+            .saturating_mul(u128::from(radix))
+            .saturating_add(u128::from(digit));
+        cursor += 1;
+    }
+    if cursor == digits_start {
+        // strtoul("0x", ..., 16) still consumes the leading zero.
+        return (radix == 16).then_some(0);
+    }
+
+    let c_ulong_bits = std::mem::size_of::<std::os::raw::c_ulong>() * 8;
+    let c_ulong_max = (1u128 << c_ulong_bits) - 1;
+    let unsigned = if magnitude > c_ulong_max {
+        c_ulong_max
+    } else if negative {
+        0u128.wrapping_sub(magnitude) & c_ulong_max
+    } else {
+        magnitude
+    };
+    Some(unsigned as u32)
 }
 
 fn compile_defaulted_i32_components(
@@ -15717,6 +15776,51 @@ RandomTeamCount=2
         assert_eq!(LegacyC4SVal::new(5, 0, 0, 250).evaluate(&mut rng), 5);
         assert_ne!(rng.hold, before.hold);
         assert_eq!(rng.count, before.count + 1);
+    }
+
+    #[test]
+    fn legacy_fow_color_minus_one_reinterprets_as_u32_max() {
+        let manifest = parse_legacy_scenario_text("[Game]\nFoWColor=-1\n")
+            .expect("signed FoWColor parses");
+
+        assert_eq!(manifest.core.game.fow_color, u32::MAX);
+    }
+
+    #[test]
+    fn legacy_fow_color_uses_stdcompiler_signed_prefix_rules() {
+        for (raw, expected) in [
+            ("-2147483648", 0x8000_0000),
+            ("-0x80000000", 0),
+            ("+0x80000000", 0),
+            ("4294967295", u32::MAX),
+        ] {
+            let manifest = parse_legacy_scenario_text(&format!("[Game]\nFoWColor={raw}\n"))
+                .expect("FoWColor prefix parses");
+
+            assert_eq!(manifest.core.game.fow_color, expected, "FoWColor={raw}");
+        }
+    }
+
+    #[test]
+    fn legacy_fow_color_keeps_in_range_decimal_and_hex_values() {
+        for (raw, expected) in [("305419896", 0x1234_5678), ("0x89abcdef", 0x89ab_cdef)] {
+            let manifest = parse_legacy_scenario_text(&format!("[Game]\nFoWColor={raw}\n"))
+                .expect("in-range FoWColor parses");
+
+            assert_eq!(manifest.core.game.fow_color, expected, "FoWColor={raw}");
+        }
+    }
+
+    #[test]
+    fn scenario_value_store_reinterprets_fow_color_as_signed_i32() {
+        let manifest = parse_legacy_scenario_text("[Game]\nFoWColor=-1\n")
+            .expect("signed FoWColor parses");
+        let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
+
+        assert_eq!(
+            values.get("FoWColor", Some("Game"), 0),
+            Some(&ScenarioValue::Int(-1))
+        );
     }
 
     #[test]
