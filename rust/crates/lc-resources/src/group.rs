@@ -81,6 +81,12 @@ struct PackedEntry {
     executable: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PackedEntryNamePolicy {
+    RootValidated,
+    ChildBasename,
+}
+
 impl Group {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GroupError> {
         let path = path.as_ref();
@@ -263,7 +269,14 @@ impl Group {
     pub fn open_child<P: AsRef<Path>>(&self, relative: P) -> Result<Self, GroupError> {
         let relative = normalize_path(relative.as_ref());
         match &self.kind {
-            GroupKind::Directory(root) => Self::open(resolve_directory_entry(root, &relative)?),
+            GroupKind::Directory(root) => {
+                let path = resolve_directory_entry(root, &relative)?;
+                if path.is_dir() {
+                    Self::open(path)
+                } else {
+                    Self::from_child_bytes(path.clone(), fs::read(path)?)
+                }
+            }
             GroupKind::Packed(packed) => packed.open_child(&relative),
         }
     }
@@ -330,6 +343,13 @@ impl Group {
     /// skips child-marked payloads that are standalone compressed groups.
     pub fn from_raw_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
         let packed = PackedGroup::from_raw_memory(path, data)?;
+        Ok(Self {
+            kind: GroupKind::Packed(packed),
+        })
+    }
+
+    fn from_child_bytes(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        let packed = PackedGroup::from_child_memory(path, data)?;
         Ok(Self {
             kind: GroupKind::Packed(packed),
         })
@@ -474,7 +494,19 @@ impl PackedGroup {
         let data = Arc::new(data);
         let source = PackedSource::Memory(Arc::clone(&data));
         let mut cursor = Cursor::new(data.as_slice());
-        Self::parse_from_reader(path, source, &mut cursor)
+        Self::parse_from_reader(
+            path,
+            source,
+            &mut cursor,
+            PackedEntryNamePolicy::ChildBasename,
+        )
+    }
+
+    fn from_child_memory(path: PathBuf, mut data: Vec<u8>) -> Result<Self, GroupError> {
+        if data.len() >= 2 && (data[..2] == C4GROUP_GZ_MAGIC || data[..2] == GZ_MAGIC) {
+            data = decompress_group(data)?;
+        }
+        Self::from_raw_memory(path, data)
     }
 
     fn from_source(path: PathBuf, source: PackedSource) -> Result<Self, GroupError> {
@@ -496,9 +528,15 @@ impl PackedGroup {
                         path,
                         PackedSource::Memory(data_arc),
                         &mut cursor,
+                        PackedEntryNamePolicy::RootValidated,
                     );
                 }
-                Self::parse_from_reader(path, PackedSource::File(file_path), &mut file)
+                Self::parse_from_reader(
+                    path,
+                    PackedSource::File(file_path),
+                    &mut file,
+                    PackedEntryNamePolicy::RootValidated,
+                )
             }
             PackedSource::Memory(data) => {
                 let data = if data.len() >= 2
@@ -510,7 +548,12 @@ impl PackedGroup {
                 };
                 let data_clone = Arc::clone(&data);
                 let mut cursor = Cursor::new(data_clone.as_slice());
-                Self::parse_from_reader(path, PackedSource::Memory(data), &mut cursor)
+                Self::parse_from_reader(
+                    path,
+                    PackedSource::Memory(data),
+                    &mut cursor,
+                    PackedEntryNamePolicy::RootValidated,
+                )
             }
         }
     }
@@ -519,6 +562,7 @@ impl PackedGroup {
         path: PathBuf,
         source: PackedSource,
         reader: &mut R,
+        entry_name_policy: PackedEntryNamePolicy,
     ) -> Result<Self, GroupError> {
         let mut header_bytes = [0u8; GROUP_HEADER_SIZE];
         reader.read_exact(&mut header_bytes)?;
@@ -531,7 +575,7 @@ impl PackedGroup {
         for _ in 0..header.entry_count {
             let mut entry_bytes = [0u8; GROUP_ENTRY_SIZE];
             reader.read_exact(&mut entry_bytes)?;
-            let mut entry = parse_entry(&entry_bytes)?;
+            let mut entry = parse_entry(&entry_bytes, entry_name_policy)?;
             entry.offset = next_entry_offset;
             next_entry_offset += entry.size;
             if let Some(existing) = entries
@@ -708,7 +752,7 @@ impl PackedGroup {
             )));
         }
         let data = self.read_entry_bytes(entry)?;
-        Group::from_packed_bytes(self.path.join(relative), data)
+        Group::from_raw_memory(self.path.join(relative), data)
     }
 
     fn open_child_entry(&self, entry: &PackedEntry) -> Result<Group, GroupError> {
@@ -914,11 +958,21 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
     })
 }
 
-fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
+fn parse_entry(
+    bytes: &[u8],
+    name_policy: PackedEntryNamePolicy,
+) -> Result<PackedEntry, GroupError> {
     let mut cursor = Cursor::new(bytes);
     let mut name_bytes = [0u8; 260];
     cursor.read_exact(&mut name_bytes)?;
-    let name_bytes = sanitize_group_entry_filename_bytes(c_bytes(&name_bytes));
+    let name_bytes = match name_policy {
+        PackedEntryNamePolicy::RootValidated => {
+            sanitize_group_entry_filename_bytes(c_bytes(&name_bytes))
+        }
+        PackedEntryNamePolicy::ChildBasename => {
+            child_group_entry_filename_bytes(c_bytes(&name_bytes)).to_vec()
+        }
+    };
     let name = String::from_utf8_lossy(&name_bytes).into_owned();
     let _packed = cursor.read_i32::<LittleEndian>()?;
     let child = cursor.read_i32::<LittleEndian>()? != 0;
@@ -949,6 +1003,13 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
         stored_crc,
         executable,
     })
+}
+
+fn child_group_entry_filename_bytes(name: &[u8]) -> &[u8] {
+    let separator = name.iter().rposition(|byte| {
+        *byte == b'/' || (cfg!(windows) && *byte == b'\\')
+    });
+    separator.map_or(name, |index| &name[index + 1..])
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {
@@ -1476,6 +1537,53 @@ mod tests {
             Path::new("___bad_.txt")
         );
         assert_eq!(group.read_file("___bad_.txt").unwrap(), b"safe");
+    }
+
+    #[test]
+    fn packed_child_preserves_raw_entry_names_and_hashes_them_into_contents_crc() {
+        let child_payload = b"nested";
+        let child_image = packed_group_image_with_entry("a*b.txt", false, child_payload);
+        let outer = packed_group_image_with_entries(&[
+            ("a*b.txt", false, b"root"),
+            ("Child.c4g", true, &child_image),
+        ]);
+        let root = Group::from_memory(PathBuf::from("Outer.c4g"), outer)
+            .expect("root group opens");
+
+        let root_entries = root.entries().unwrap();
+        assert_eq!(root_entries[0].name_bytes, b"a_b.txt");
+        assert!(root.exists("a_b.txt"), "OpenRealGrpFile validates root names");
+
+        let child = root.open_child("Child.c4g").expect("nested child opens");
+        assert_eq!(child.entries().unwrap()[0].name_bytes, b"a*b.txt");
+        assert_eq!(child.read_file("a*b.txt").unwrap(), child_payload);
+        assert!(!child.exists("a_b.txt"));
+
+        let expected_crc = crc32(crc32(0, child_payload), b"a*b.txt");
+        assert_eq!(expected_crc, 0x5a38_ebb8, "C++/zlib EntryCRC32 oracle");
+        assert_eq!(child.contents_crc().unwrap(), expected_crc);
+        let root_file_crc = crc32(crc32(0, b"root"), b"a_b.txt");
+        assert_eq!(root.contents_crc().unwrap(), root_file_crc ^ expected_crc);
+    }
+
+    #[test]
+    fn directory_packed_child_uses_child_entry_name_policy() {
+        let dir = tempdir().unwrap();
+        let child_image = packed_group_image_with_entry("a*b.txt", false, b"nested");
+        let mut compressed = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+            encoder.write_all(&child_image).unwrap();
+            encoder.finish().unwrap();
+        }
+        compressed[..2].copy_from_slice(&C4GROUP_GZ_MAGIC);
+        fs::write(dir.path().join("Child.c4g"), compressed).unwrap();
+
+        let root = Group::open(dir.path()).expect("directory mother opens");
+        let child = root.open_child("Child.c4g").expect("packed child opens");
+        assert_eq!(child.entries().unwrap()[0].name_bytes, b"a*b.txt");
+        assert_eq!(child.read_file("a*b.txt").unwrap(), b"nested");
     }
 
     #[test]
