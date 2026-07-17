@@ -41844,6 +41844,11 @@ impl Engine {
         // PXS.Synchronize() resets only the per-Execute Count ledger; live
         // chunk contents stay in place (C4PXS.cpp:401-404).
         self.pxs_system.synchronize();
+        // Objects.Synchronize removes every put mask without causing
+        // instability, then updates every active object's mask. Both passes
+        // follow the C++ master list First -> Next; `exec_list` stores that
+        // list reversed (C4GameObjects.cpp:254-261,296-311).
+        self.synchronize_solid_masks();
         // C++ persists local player files here when SavePlrs is set and the
         // control stream is not a replay. Player files are application-owned
         // in the Rust port, so keep this gap explicit until that callback is
@@ -43815,7 +43820,7 @@ impl Engine {
     /// (SetRotation/DoCon/Enter/Exit/destruction all pass false in C++).
     #[doc(hidden)]
     pub fn remove_solid_mask(&mut self, index: usize) {
-        self.remove_solid_mask_impl(index, false);
+        self.remove_solid_mask_impl(index, true, false);
     }
 
     /// C4Object::DoMotion removes its mask with fBackupAttachment=true
@@ -43824,7 +43829,7 @@ impl Engine {
         &mut self,
         index: usize,
     ) -> Option<SolidMaskAttachmentBackup> {
-        self.remove_solid_mask_impl(index, true)
+        self.remove_solid_mask_impl(index, true, true)
     }
 
     /// C4SolidMask::Remove (C4SolidMask.cpp:233-305): restore the saved
@@ -43834,6 +43839,7 @@ impl Engine {
     fn remove_solid_mask_impl(
         &mut self,
         index: usize,
+        cause_instability: bool,
         backup_attachments: bool,
     ) -> Option<SolidMaskAttachmentBackup> {
         if index >= self.objects.len() {
@@ -43867,12 +43873,13 @@ impl Engine {
                         landscape.grid_write_byte(lx, ly, saved);
                     }
                 }
-                // Instability probe per mask-used pixel — C++ Remove runs
-                // it whether or not the restore write happened
-                // (C4SolidMask.cpp:244-257); every rust removal path
-                // mirrors a C++ Remove(fCauseInstability=true) caller
-                // (C4Object.cpp:5652/5667, C4Movement.cpp:123/545).
-                self.check_instability_range(lx, ly);
+                // C++ probes every mask-used pixel when requested, whether
+                // or not the restore write happened. Object synchronization
+                // is the exceptional Remove(false, false) caller
+                // (C4SolidMask.cpp:244-257; C4GameObjects.cpp:296-303).
+                if cause_instability {
+                    self.check_instability_range(lx, ly);
+                }
             }
         }
         // Re-put overlapping masks: doubled MCVehic pixels were just
@@ -43917,6 +43924,34 @@ impl Engine {
         backup_attachments
             .then(|| self.capture_solid_mask_attachments(index, &bake, vehicle))
             .flatten()
+    }
+
+    /// The solid-mask half of `C4GameObjects::Synchronize`: first remove all
+    /// put masks with `fCauseInstability=false`, preserving each Remove's
+    /// overlapping-mask re-put chain, then call UpdateSolidMask for every
+    /// active object in the same post-resort master-list order.
+    fn synchronize_solid_masks(&mut self) {
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        for &id in &master_order {
+            let Some(index) = self.find_object_index(id) else {
+                continue;
+            };
+            if self.objects[index].destroyed || !self.objects[index].state.status.is_active() {
+                continue;
+            }
+            if self.objects[index].solid_mask_bake.is_some() {
+                self.remove_solid_mask_impl(index, false, false);
+            }
+        }
+        for id in master_order {
+            let Some(index) = self.find_object_index(id) else {
+                continue;
+            };
+            if self.objects[index].destroyed || !self.objects[index].state.status.is_active() {
+                continue;
+            }
+            self.update_solid_mask(index);
+        }
     }
 
     /// C4Object::IsMoveableBySolidMask (C4Object.h:434-440).

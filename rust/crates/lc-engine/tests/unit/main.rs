@@ -55956,6 +55956,105 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
+    fn game_synchronize_reowns_overlapping_masks_without_instability_like_cpp() {
+        // C4GameObjects::Synchronize removes every mask First->Next with
+        // Remove(false, false), then re-puts them in that same order. Rust's
+        // exec list is the reverse master list, so spawning loaded B then A
+        // makes A the canonical owner even though the masks start put B->A.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        let mut bytes = vec![0u8; 400];
+        bytes[10 * 20 + 10] = 3;
+        let grid = landscape::PixelGrid::new(
+            20,
+            20,
+            bytes,
+            vec![0, 100, 100, 25],
+            vec![
+                None,
+                Some("Earth".into()),
+                Some("Vehicle".into()),
+                Some("Water".into()),
+            ],
+            vec![None; 4],
+        );
+        let mut landscape = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        landscape.set_world_height(20);
+        landscape.set_pixel_grid(grid);
+
+        let mut mask = simple_definition("Mask");
+        mask.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        mask.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut engine = Engine::with_seed(33);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine.register_definition(mask).expect("mask registers");
+        let b = engine
+            .spawn_object(
+                SpawnConfig::new("Mask")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("B spawns");
+        let a = engine
+            .spawn_object(
+                SpawnConfig::new("Mask")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("A spawns");
+        assert_eq!(engine.debug_exec_order(), vec![b, a]);
+
+        // Loaded object face setup puts masks as each object joins the list,
+        // so the initial ownership order is already B then A.
+        assert_eq!(engine.debug_solid_mask_buffer(b.as_u64()), Some(vec![3]));
+        assert_eq!(engine.debug_solid_mask_buffer(a.as_u64()), Some(vec![2]));
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+
+        engine
+            .execute_synchronize_control(false, false)
+            .expect("game synchronization succeeds");
+
+        assert_eq!(engine.debug_exec_order(), vec![b, a]);
+        assert_eq!(
+            engine.debug_solid_mask_buffer(a.as_u64()),
+            Some(vec![3]),
+            "master-list-first A must own the saved Water background"
+        );
+        assert_eq!(
+            engine.debug_solid_mask_buffer(b.as_u64()),
+            Some(vec![2]),
+            "later B must record the Vehicle sentinel at the overlap"
+        );
+        assert_eq!(
+            engine
+                .landscape()
+                .expect("landscape set")
+                .grid_byte_at(10, 10),
+            Some(2)
+        );
+        assert_eq!(
+            engine.mass_movers.live_movers(),
+            0,
+            "Remove(false, false) must not probe restored instable pixels"
+        );
+    }
+
+    #[test]
     fn rotated_solid_mask_bakes_inverse_rotated_pixels_like_cpp() {
         // Mirrors the rotated branch of C4SolidMask::Put
         // (src/C4SolidMask.cpp:108-174), gated by Def->RotatedSolidmasks
