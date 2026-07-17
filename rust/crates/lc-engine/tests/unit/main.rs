@@ -55767,6 +55767,21 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
         }
     }
 
+    fn solid_mask_sprite(width: u32, height: u32, alphas: &[u8]) -> DefinitionSpriteImage {
+        assert_eq!(alphas.len(), (width * height) as usize);
+        let pixels: Arc<[u8]> = alphas
+            .iter()
+            .flat_map(|&alpha| [0, 0, 0, alpha])
+            .collect::<Vec<_>>()
+            .into();
+        DefinitionSpriteImage {
+            width,
+            height,
+            pixels,
+            color_mask: None,
+        }
+    }
+
     fn movement_mask_definition(
         id: &str,
         width: i32,
@@ -56448,6 +56463,93 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
+    fn set_solid_mask_clamps_negative_origin_and_stores_height_disable_like_cpp() {
+        // CheckSolidMaskRect moves a negative source origin to zero, but its
+        // width/height limits use the OLD coordinates. Thus (-1,-1,3,3) on
+        // a 2x2 bitmap remains 3x3. The retained out-of-bitmap row/column
+        // read as zero from GetPixDw and are solid under C++'s inverted-alpha
+        // transparency test (C4Object.cpp:3820-3827; C4SolidMask.cpp:400-412).
+        let mut definition = Definition::from_script(
+            "CLMP",
+            "Clamped mask",
+            r#"
+            #strict 2
+            public func ClipMask() { return SetSolidMask(-1, -1, 3, 3, 4, 5); }
+            public func DisableMask() { return SetSolidMask(0, 3, 2, 1, 4, 5); }
+            "#,
+        )
+        .expect("clamped-mask script compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 3, 3)));
+        definition.set_sprite_image(Some(solid_mask_sprite(
+            2,
+            2,
+            &[
+                0, 255, // row 0: transparent, solid
+                0, 0, // row 1: transparent, transparent
+            ],
+        )));
+
+        let mut engine = Engine::with_seed(40);
+        engine.set_landscape(vehicle_grid_landscape(30, 30));
+        engine
+            .register_definition(definition)
+            .expect("clamped-mask definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CLMP")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("clamped-mask object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+        assert!(vehicle_pixels(&engine).is_empty());
+
+        let result = engine
+            .call_object_function(index, "ClipMask", Vec::new())
+            .expect("negative-origin SetSolidMask succeeds");
+        assert_eq!(result, Value::Bool(true));
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(Some((0, 0, 3, 3)))
+        );
+        let clipped_pixels = vec![
+            (15, 15),
+            (16, 15),
+            (16, 16),
+            (14, 17),
+            (15, 17),
+            (16, 17),
+        ];
+        assert_eq!(vehicle_pixels(&engine), clipped_pixels);
+        assert_eq!(
+            engine.debug_solid_mask_buffer(id.as_u64()),
+            Some(vec![2, 0, 0, 2, 2, 0, 0, 0, 0])
+        );
+
+        // Callback preview already clamps; an authoritative rebuild proves
+        // that the clamped rectangle, rather than the raw request, persisted.
+        engine.update_solid_mask(index);
+        assert_eq!(vehicle_pixels(&engine), clipped_pixels);
+        assert_eq!(
+            engine.debug_solid_mask_buffer(id.as_u64()),
+            Some(vec![2, 0, 0, 2, 2, 0, 0, 0, 0])
+        );
+
+        engine
+            .call_object_function(index, "DisableMask", Vec::new())
+            .expect("out-of-height SetSolidMask succeeds");
+        // height=min(1, 2-3)=-1; CheckSolidMaskRect then forces width to 0
+        // while retaining that negative height and both target offsets.
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(Some((0, 3, 0, -1)))
+        );
+        engine.update_solid_mask(index);
+        assert!(vehicle_pixels(&engine).is_empty());
+        assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()), None);
+    }
+
+    #[test]
     fn nested_set_solid_mask_callback_rebakes_the_target_like_cpp() {
         // An object-targeted script call mutates that same live C4Object in
         // C++, so its nested SetSolidMask also re-puts the target mask before
@@ -56542,6 +56644,178 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             .call_object_function(idx, "Reset", Vec::new())
             .expect("default graphics restore succeeds");
         assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
+    }
+
+    #[test]
+    fn invalid_base_defcore_solid_mask_is_disabled_before_object_init_like_cpp() {
+        // C4Def::Load validates DefCore SolidMask against the base bitmap and
+        // clears an overflowing rect before C4Object::Init gets a chance to
+        // copy/check it (C4Def.cpp:727-733). Runtime object rects still use
+        // CheckSolidMaskRect's clipping behavior.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("InvalidMask.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=IMSK\nName=Invalid mask\nShape=0,0,4,2\nSolidMask=0,0,4,2,0,0\n",
+        )
+        .expect("write DefCore");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([255, 255, 255, 255]))
+            .save(def_dir.join("Graphics.png"))
+            .expect("write graphics");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource).expect("convert definition");
+        assert_eq!(definition.solid_mask(), None);
+    }
+
+    #[test]
+    fn solid_mask_init_and_graphics_changes_clamp_without_reexpanding_like_cpp() {
+        // C4Object::Init copies the definition rectangle into the object and
+        // clamps that per-object copy before the first UpdateFace/Put. Use a
+        // synthetic definition: the resource loader may reject an invalid
+        // DefCore rectangle before object initialization can exercise this.
+        {
+            let mut definition = simple_definition("ICLP");
+            definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 2)));
+            definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 4, 2, 0, 0)));
+            definition.set_sprite_image(Some(solid_mask_sprite(3, 2, &[255; 6])));
+
+            let mut engine = Engine::with_seed(41);
+            engine.set_landscape(vehicle_grid_landscape(30, 30));
+            engine
+                .register_definition(definition)
+                .expect("init-clamp definition registers");
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("ICLP")
+                        .with_position(Vector2::new(10, 12)),
+                )
+                .expect("init-clamp object spawns");
+            let index = engine.find_object_index(id).expect("object exists");
+            assert_eq!(
+                engine.debug_solid_mask_override(id.as_u64()),
+                Some(Some((0, 0, 3, 2)))
+            );
+            let initial_pixels = vec![
+                (10, 10),
+                (11, 10),
+                (12, 10),
+                (10, 11),
+                (11, 11),
+                (12, 11),
+            ];
+            assert_eq!(vehicle_pixels(&engine), initial_pixels);
+            assert_eq!(
+                engine.debug_solid_mask_buffer(id.as_u64()),
+                Some(vec![0; 6])
+            );
+            engine.update_solid_mask(index);
+            assert_eq!(vehicle_pixels(&engine), initial_pixels);
+        }
+
+        // Start this object with a fully valid 4x2 mask, shrink its active
+        // bitmap to 2x1, then return to 4x2. CheckSolidMaskRect mutates the
+        // object rectangle, so the final graphics change must not restore the
+        // definition's original 4x2 dimensions (C4Object.cpp:381-402).
+        let mut gate = Definition::from_script(
+            "GCLP",
+            "Graphics-clamped gate",
+            r#"
+            #strict 2
+            public func Switch() { return SetGraphics("small", nil, SKIN); }
+            public func Same() { return SetGraphics("SMALL", nil, SKIN, 0, 0, nil, 123); }
+            public func Reset() { return SetGraphics(nil); }
+            "#,
+        )
+        .expect("graphics-clamp script compiles");
+        gate.set_shape_rect(Some(DefinitionRect::new(0, 0, 4, 2)));
+        gate.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 4, 2, 0, 0)));
+        gate.set_sprite_image(Some(solid_mask_sprite(4, 2, &[255; 8])));
+
+        let mut skin = simple_definition("SKIN");
+        skin.set_sprite_variants(HashMap::from([(
+            "small".to_string(),
+            solid_mask_sprite(2, 1, &[255; 2]),
+        )]));
+
+        let mut engine = Engine::with_seed(42);
+        engine.set_landscape(vehicle_grid_landscape(30, 30));
+        engine.register_definition(gate).expect("gate registers");
+        engine.register_definition(skin).expect("skin registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("GCLP")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("graphics-clamp gate spawns");
+        let index = engine.find_object_index(id).expect("gate exists");
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![
+                (10, 10),
+                (11, 10),
+                (12, 10),
+                (13, 10),
+                (10, 11),
+                (11, 11),
+                (12, 11),
+                (13, 11),
+            ]
+        );
+        assert_eq!(
+            engine.debug_solid_mask_buffer(id.as_u64()),
+            Some(vec![0; 8])
+        );
+
+        engine
+            .call_object_function(index, "Switch", Vec::new())
+            .expect("smaller named graphics succeeds");
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(Some((0, 0, 2, 1)))
+        );
+        let small_pixels = vec![(10, 10), (11, 10)];
+        assert_eq!(vehicle_pixels(&engine), small_pixels);
+        engine.update_solid_mask(index);
+        assert_eq!(vehicle_pixels(&engine), small_pixels);
+        assert_eq!(
+            engine.debug_solid_mask_buffer(id.as_u64()),
+            Some(vec![0; 2])
+        );
+
+        engine
+            .call_object_function(index, "Same", Vec::new())
+            .expect("same named graphics succeeds");
+        let base_graphics = engine
+            .object_snapshot(id)
+            .expect("gate remains")
+            .base_graphics
+            .expect("named graphics remain selected");
+        assert_eq!(base_graphics.graphics_name.as_deref(), Some("small"));
+        assert_eq!(base_graphics.blit_mode, 0, "base SetGraphics ignores blit mode");
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(Some((0, 0, 2, 1)))
+        );
+        engine.update_solid_mask(index);
+        assert_eq!(vehicle_pixels(&engine), small_pixels);
+
+        engine
+            .call_object_function(index, "Reset", Vec::new())
+            .expect("default graphics restore succeeds");
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(Some((0, 0, 2, 1)))
+        );
+        engine.update_solid_mask(index);
+        assert_eq!(vehicle_pixels(&engine), small_pixels);
+        assert_eq!(
+            engine.debug_solid_mask_buffer(id.as_u64()),
+            Some(vec![0; 2])
+        );
     }
 
     #[test]

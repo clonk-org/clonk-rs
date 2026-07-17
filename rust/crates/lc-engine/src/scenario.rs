@@ -2927,6 +2927,7 @@ impl Scenario {
                 DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())
             });
             compiled.set_sprite_image(sprite_image);
+            compiled.validate_base_solid_mask();
             if !definition.additional_graphics.is_empty() {
                 let mut variants = HashMap::with_capacity(definition.additional_graphics.len());
                 for (key, variant) in &definition.additional_graphics {
@@ -20205,11 +20206,14 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&foo_core).expect("definition dir");
         std::fs::write(
             foo_core.join("DefCore.txt"),
-            "[DefCore]\nid=FOOO\nName=Foo\nCategory=0\nCrewMember=0\n",
+            "[DefCore]\nid=FOOO\nName=Foo\nCategory=0\nCrewMember=0\nSolidMask=0,0,2,1,0,0\n",
         )
         .expect("write defcore");
         std::fs::write(foo_core.join("Script.c"), "// empty definition script\n")
             .expect("write definition script");
+        RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 255]))
+            .save(foo_core.join("Graphics.png"))
+            .expect("write definition graphics");
 
         assert!(foo_core.join("DefCore.txt").exists(), "defcore exists");
         assert!(foo_core.join("Script.c").exists(), "script exists");
@@ -20305,6 +20309,11 @@ public func ActualizePhase(pClonk)
             .object_snapshot(id)
             .expect("object created from legacy definition");
         assert_eq!(object.definition_id, "FOOO");
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(None),
+            "C4Def::Load disables an out-of-bitmap base mask before object Init can clamp it"
+        );
     }
 
     #[test]

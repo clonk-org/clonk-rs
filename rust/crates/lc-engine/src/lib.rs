@@ -9235,6 +9235,81 @@ impl DefinitionTargetRect {
     pub fn is_positive(&self) -> bool {
         self.width > 0 && self.height > 0
     }
+
+    /// `C4Object::CheckSolidMaskRect` (C4Object.cpp:3820-3827). The size
+    /// limits deliberately use the OLD source coordinates: a negative source
+    /// origin moves to zero without shrinking the requested width/height.
+    pub(crate) fn checked_for_solid_mask_bitmap(
+        self,
+        bitmap_width: i32,
+        bitmap_height: i32,
+    ) -> Self {
+        let mut checked = Self::new(
+            self.x.max(0),
+            self.y.max(0),
+            self.width.min(bitmap_width.saturating_sub(self.x)),
+            self.height.min(bitmap_height.saturating_sub(self.y)),
+            self.target_x,
+            self.target_y,
+        );
+        if checked.height <= 0 {
+            checked.width = 0;
+        }
+        checked
+    }
+}
+
+/// Copy one already-checked C4SolidMask rectangle from its active bitmap.
+/// The legacy negative-origin clamp can retain samples beyond the bitmap;
+/// `C4Surface::GetPixDw` returns zero there, which the inverted-alpha
+/// `IsPixTransparent` path classifies as solid.
+pub(crate) fn solid_mask_pixels_for_checked_bitmap(
+    mask: DefinitionTargetRect,
+    bitmap_width: i32,
+    bitmap_height: i32,
+    source: &[u8],
+) -> Option<Arc<Vec<u8>>> {
+    if !mask.is_positive() {
+        return None;
+    }
+    let stride = usize::try_from(bitmap_width).ok()?.checked_mul(4)?;
+    let mut solid = Vec::with_capacity(
+        usize::try_from(mask.width.checked_mul(mask.height)?).ok()?,
+    );
+    for y in 0..mask.height {
+        for x in 0..mask.width {
+            let Some(source_x) = mask.x.checked_add(x) else {
+                solid.push(1);
+                continue;
+            };
+            let Some(source_y) = mask.y.checked_add(y) else {
+                solid.push(1);
+                continue;
+            };
+            if source_x < 0
+                || source_y < 0
+                || source_x >= bitmap_width
+                || source_y >= bitmap_height
+            {
+                solid.push(1);
+                continue;
+            }
+            let alpha = usize::try_from(source_y)
+                .ok()
+                .and_then(|row| row.checked_mul(stride))
+                .and_then(|offset| {
+                    usize::try_from(source_x)
+                        .ok()
+                        .and_then(|column| column.checked_mul(4))
+                        .and_then(|column| offset.checked_add(column))
+                })
+                .and_then(|offset| offset.checked_add(3))
+                .and_then(|index| source.get(index))
+                .copied();
+            solid.push(u8::from(alpha.is_none_or(|alpha| alpha >= 128)));
+        }
+    }
+    Some(Arc::new(solid))
 }
 
 impl From<ResourceTargetRect> for DefinitionTargetRect {
@@ -9784,7 +9859,7 @@ enum SolidMaskPixels {
     Rectangle,
     /// Per-pixel alpha mask (1 = solid).
     Alpha(Arc<Vec<u8>>),
-    /// Mask rect out of the sprite bounds: ignore the mask entirely.
+    /// Invalid rect or unavailable named bitmap: ignore the mask entirely.
     OutOfBounds,
 }
 
@@ -10277,6 +10352,7 @@ impl Definition {
             let mask = resource.color_by_owner_mask.as_ref();
             definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image, mask)));
         }
+        definition.validate_base_solid_mask();
         if !resource.additional_graphics.is_empty() {
             let mut variants = HashMap::with_capacity(resource.additional_graphics.len());
             for (key, variant) in &resource.additional_graphics {
@@ -10981,6 +11057,25 @@ impl Definition {
         self.rebuild_solid_mask_pixels();
     }
 
+    /// C4Def::Load clears an invalid BASE DefCore SolidMask before any
+    /// object copies and runtime-clamps it (C4Def.cpp:727-733).
+    pub(crate) fn validate_base_solid_mask(&mut self) {
+        let invalid = self
+            .solid_mask
+            .zip(self.sprite_image.as_ref())
+            .is_some_and(|(solid_mask, image)| {
+                solid_mask.x < 0
+                    || solid_mask.y < 0
+                    || i64::from(solid_mask.x) + i64::from(solid_mask.width)
+                        > i64::from(image.width)
+                    || i64::from(solid_mask.y) + i64::from(solid_mask.height)
+                        > i64::from(image.height)
+            });
+        if invalid {
+            self.set_solid_mask(None);
+        }
+    }
+
     pub fn sprite_image_variant(
         &self,
         graphics_name: Option<&str>,
@@ -11097,35 +11192,16 @@ impl Definition {
                 SolidMaskPixels::OutOfBounds
             };
         };
-        let image_width = image.width as i32;
-        let image_height = image.height as i32;
-        if mask.x < 0
-            || mask.y < 0
-            || mask.x.saturating_add(mask.width) > image_width
-            || mask.y.saturating_add(mask.height) > image_height
-        {
-            return SolidMaskPixels::OutOfBounds;
-        }
-        let source = image.pixels.as_ref();
-        let stride = image.width as usize * 4;
-        let mut pixels = Vec::with_capacity((mask.width * mask.height) as usize);
-        for y in 0..mask.height {
-            let source_y = (mask.y + y) as usize;
-            for x in 0..mask.width {
-                let source_x = (mask.x + x) as usize;
-                let alpha_index = source_y * stride + source_x * 4 + 3;
-                // Solid where the pixel is NOT transparent (C4SolidMask.cpp:
-                // 411): IsPixTransparent = internal alpha >= 128
-                // (C4Surface.cpp:718-724) on the INVERTED channel
-                // (png_set_invert_alpha, StdPNGLibpng.cpp:139-140) —
-                // PNG alpha >= 128 is solid; anti-aliased edges (1..127)
-                // stay passable (the GoldRush _FWS posts).
-                pixels.push(u8::from(
-                    source.get(alpha_index).copied().unwrap_or(0) >= 128,
-                ));
-            }
-        }
-        SolidMaskPixels::Alpha(Arc::new(pixels))
+        let image_width = i32::try_from(image.width).unwrap_or(i32::MAX);
+        let image_height = i32::try_from(image.height).unwrap_or(i32::MAX);
+        solid_mask_pixels_for_checked_bitmap(
+            mask,
+            image_width,
+            image_height,
+            image.pixels.as_ref(),
+        )
+        .map(SolidMaskPixels::Alpha)
+        .unwrap_or(SolidMaskPixels::OutOfBounds)
     }
 
     /// Extract the SolidMask alpha pixels from the sprite (alpha != 0 =
@@ -11136,40 +11212,23 @@ impl Definition {
             self.solid_mask_pixels = SolidMaskPixels::default();
             return;
         };
-        let Some(image) = self.sprite_image.as_ref() else {
-            self.solid_mask_pixels = SolidMaskPixels::Rectangle;
-            return;
-        };
-        let image_width = image.width as i32;
-        let image_height = image.height as i32;
-        if mask.x < 0
-            || mask.y < 0
-            || mask.x.saturating_add(mask.width) > image_width
-            || mask.y.saturating_add(mask.height) > image_height
-        {
-            self.solid_mask_pixels = SolidMaskPixels::OutOfBounds;
-            return;
-        }
-        let source = image.pixels.as_ref();
-        let stride = image.width as usize * 4;
-        let mut pixels = Vec::with_capacity((mask.width * mask.height) as usize);
-        for y in 0..mask.height {
-            let source_y = (mask.y + y) as usize;
-            for x in 0..mask.width {
-                let source_x = (mask.x + x) as usize;
-                let alpha_index = source_y * stride + source_x * 4 + 3;
-                // Solid where the pixel is NOT transparent (C4SolidMask.cpp:
-                // 411): IsPixTransparent = internal alpha >= 128
-                // (C4Surface.cpp:718-724) on the INVERTED channel
-                // (png_set_invert_alpha, StdPNGLibpng.cpp:139-140) —
-                // PNG alpha >= 128 is solid; anti-aliased edges (1..127)
-                // stay passable (the GoldRush _FWS posts).
-                pixels.push(u8::from(
-                    source.get(alpha_index).copied().unwrap_or(0) >= 128,
-                ));
+        if let Some(image) = self.sprite_image.as_ref() {
+            let right = i64::from(mask.x) + i64::from(mask.width);
+            let bottom = i64::from(mask.y) + i64::from(mask.height);
+            if mask.x < 0
+                || mask.y < 0
+                || right > i64::from(image.width)
+                || bottom > i64::from(image.height)
+            {
+                // The definition-level cache holds the RAW DefCore rect.
+                // Object Init/runtime checks persist a distinct checked rect
+                // and therefore bypass this entry. Keep malformed raw sizes
+                // from allocating before C4Def::Load validation runs.
+                self.solid_mask_pixels = SolidMaskPixels::OutOfBounds;
+                return;
             }
         }
-        self.solid_mask_pixels = SolidMaskPixels::Alpha(Arc::new(pixels));
+        self.solid_mask_pixels = self.compute_solid_mask_pixels(mask, None);
     }
 
     pub fn shape_vertices(&self) -> &[ObjectVertex] {
@@ -44105,6 +44164,33 @@ impl Engine {
     /// C4SolidMask copies alpha from `pForObject->GetGraphics()->GetBitmap()`
     /// (C4SolidMask.cpp:400-412), not necessarily the owning definition's
     /// default sprite. Mask geometry still belongs to the owning definition.
+    fn checked_solid_mask_rect_for_object(
+        &self,
+        object: &Object,
+        mask: DefinitionTargetRect,
+    ) -> Option<DefinitionTargetRect> {
+        let (graphics_definition, graphics_name) = object
+            .state
+            .base_graphics
+            .as_ref()
+            .map(|graphics| {
+                (
+                    graphics.definition.as_str(),
+                    graphics.graphics_name.as_deref(),
+                )
+            })
+            .unwrap_or((object.definition_id.as_str(), None));
+        let definition = self.definitions.get(graphics_definition)?;
+        match definition.sprite_image_variant(graphics_name) {
+            Some(image) => Some(mask.checked_for_solid_mask_bitmap(
+                i32::try_from(image.width).unwrap_or(i32::MAX),
+                i32::try_from(image.height).unwrap_or(i32::MAX),
+            )),
+            None if graphics_name.is_none() => Some(mask),
+            None => None,
+        }
+    }
+
     fn solid_mask_pixels_for_object(
         &self,
         object: &Object,
@@ -51266,6 +51352,27 @@ impl Engine {
             own_shape_vertices,
         );
         object.solid_mask_instance_sequence = solid_mask_instance_sequence;
+        if !loaded {
+            // C4Object::Init checks the copied object rect against the base
+            // graphics before Construction/Initialize and before the first
+            // possible mask put (C4Object.cpp:206-211). Keep a distinct
+            // override only when an explicit rect or the clamp changed it.
+            let explicit_mask = object.state.solid_mask_override.is_some();
+            let raw_mask = object.state.solid_mask_override.or_else(|| {
+                self.definitions
+                    .get(&object.definition_id)
+                    .and_then(Definition::solid_mask)
+            });
+            if let Some(raw_mask) = raw_mask {
+                if let Some(checked) =
+                    self.checked_solid_mask_rect_for_object(&object, raw_mask)
+                {
+                    if explicit_mask || checked != raw_mask {
+                        object.state.solid_mask_override = Some(checked);
+                    }
+                }
+            }
+        }
         // C4Object::Clear initializes fix_r to zero. Objects.txt compiles
         // Rotation and FixR independently, so an absent FixR must not inherit
         // the serialized integer Rotation until SyncClearance synchronizes it.

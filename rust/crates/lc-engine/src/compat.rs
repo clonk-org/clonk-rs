@@ -823,71 +823,35 @@ impl HostSolidMaskImage {
         }
     }
 
-    /// C4Object::CheckSolidMaskRect's exact legacy clamp uses max(x/y, 0)
-    /// but computes width/height from the OLD source x/y (C4Object.cpp:
-    /// 3820-3827). The PNG channel retained by Rust is non-inverted, so
-    /// alpha >= 128 is the C++ non-transparent/solid threshold.
+    fn check_mask_rect(
+        &self,
+        mask: crate::DefinitionTargetRect,
+    ) -> crate::DefinitionTargetRect {
+        mask.checked_for_solid_mask_bitmap(self.width, self.height)
+    }
+
+    fn pixels_for_checked_mask(
+        &self,
+        mask: crate::DefinitionTargetRect,
+    ) -> Option<Arc<Vec<u8>>> {
+        crate::solid_mask_pixels_for_checked_bitmap(
+            mask,
+            self.width,
+            self.height,
+            self.pixels.as_ref(),
+        )
+    }
+
+    /// Clamp once like CheckSolidMaskRect, then copy the effective bitmap
+    /// pixels. Lifecycle callers that persist the checked object rectangle
+    /// use `pixels_for_checked_mask` directly to avoid clamping it twice.
     fn mask_pixels(
         &self,
         mask: crate::DefinitionTargetRect,
     ) -> Option<(crate::DefinitionTargetRect, Arc<Vec<u8>>)> {
-        let source_x = mask.x.max(0);
-        let source_y = mask.y.max(0);
-        let width = mask.width.min(self.width.saturating_sub(mask.x));
-        let height = mask.height.min(self.height.saturating_sub(mask.y));
-        if width <= 0 || height <= 0 {
-            return None;
-        }
-        let mask = crate::DefinitionTargetRect::new(
-            source_x,
-            source_y,
-            width,
-            height,
-            mask.target_x,
-            mask.target_y,
-        );
-        let stride = usize::try_from(self.width).ok()?.checked_mul(4)?;
-        let mut solid =
-            Vec::with_capacity(usize::try_from(mask.width.checked_mul(mask.height)?).ok()?);
-        for y in 0..mask.height {
-            for x in 0..mask.width {
-                let Some(source_x) = mask.x.checked_add(x) else {
-                    solid.push(1);
-                    continue;
-                };
-                let Some(source_y) = mask.y.checked_add(y) else {
-                    solid.push(1);
-                    continue;
-                };
-                // CheckSolidMaskRect deliberately retains the OLD negative
-                // source coordinate when clipping width/height, so its new
-                // zero-based rectangle may extend one or more pixels beyond
-                // the bitmap. C4Surface::GetPixDw returns zero for those
-                // coordinates; IsPixTransparent therefore says false and
-                // MaskPixel treats the out-of-bounds sample as SOLID. Check
-                // each axis before flattening so a right-edge sample cannot
-                // wrap into the next row.
-                if source_x < 0 || source_y < 0 || source_x >= self.width || source_y >= self.height
-                {
-                    solid.push(1);
-                    continue;
-                }
-                let alpha = usize::try_from(source_y)
-                    .ok()
-                    .and_then(|row| row.checked_mul(stride))
-                    .and_then(|offset| {
-                        usize::try_from(source_x)
-                            .ok()
-                            .and_then(|column| column.checked_mul(4))
-                            .and_then(|column| offset.checked_add(column))
-                    })
-                    .and_then(|offset| offset.checked_add(3))
-                    .and_then(|index| self.pixels.get(index))
-                    .copied();
-                solid.push(u8::from(alpha.is_none_or(|alpha| alpha >= 128)));
-            }
-        }
-        Some((mask, Arc::new(solid)))
+        let mask = self.check_mask_rect(mask);
+        let pixels = self.pixels_for_checked_mask(mask)?;
+        Some((mask, pixels))
     }
 }
 
@@ -917,22 +881,41 @@ impl HostSolidMaskMetadata {
         }
     }
 
-    fn mask_pixels(
+    fn check_mask_rect(
         &self,
         mask: crate::DefinitionTargetRect,
         name: Option<&str>,
-    ) -> Option<(crate::DefinitionTargetRect, Option<Arc<Vec<u8>>>)> {
+    ) -> Option<crate::DefinitionTargetRect> {
+        match name.filter(|name| !name.is_empty()) {
+            Some(name) => self
+                .named_images
+                .get(&name.to_ascii_lowercase())
+                .map(|image| image.check_mask_rect(mask)),
+            None => Some(
+                self.default_image
+                    .as_ref()
+                    .map_or(mask, |image| image.check_mask_rect(mask)),
+            ),
+        }
+    }
+
+    fn pixels_for_checked_mask(
+        &self,
+        mask: crate::DefinitionTargetRect,
+        name: Option<&str>,
+    ) -> Option<Option<Arc<Vec<u8>>>> {
+        if !mask.is_positive() {
+            return None;
+        }
         match name.filter(|name| !name.is_empty()) {
             Some(name) => self
                 .named_images
                 .get(&name.to_ascii_lowercase())?
-                .mask_pixels(mask)
-                .map(|(mask, pixels)| (mask, Some(pixels))),
+                .pixels_for_checked_mask(mask)
+                .map(Some),
             None => match self.default_image.as_ref() {
-                Some(image) => image
-                    .mask_pixels(mask)
-                    .map(|(mask, pixels)| (mask, Some(pixels))),
-                None => Some((mask, None)),
+                Some(image) => image.pixels_for_checked_mask(mask).map(Some),
+                None => Some(None),
             },
         }
     }
@@ -8763,6 +8746,9 @@ fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
             );
             return Ok(Value::Bool(false));
         }
+        let rect = context
+            .check_solid_mask_rect_for_object(target, rect)
+            .unwrap_or(rect);
         let Some(object) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
@@ -37074,6 +37060,11 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             let color_by_owner = context.world.definition_color_by_owner(&definition_id);
             let target_definition = context.object_effective_definition_id(object_id);
+            // UpdateGraphics(true) only re-checks the object rectangle when
+            // a live C4SolidMask instance existed before the graphics swap.
+            let active_solid_mask = context
+                .live_solid_mask_spec(object_id)
+                .map(|spec| spec.mask);
 
             let base_graphics = if graphics_name.is_none()
                 && target_definition.as_deref() == Some(definition_id.as_str())
@@ -37083,20 +37074,62 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
                 Some(ObjectBaseGraphics {
                     definition: definition_id,
                     graphics_name: graphics_name.clone(),
-                    blit_mode,
+                    // FnSetGraphics forwards blit mode only to overlays;
+                    // C4Object::SetGraphics receives just name/source def.
+                    blit_mode: 0,
                 })
             };
             let changed = {
                 let Some(object) = context.object_scope_mut(object_id) else {
                     return Ok(Value::Bool(false));
                 };
-                let changed = object.set_base_graphics(base_graphics);
+                let own_definition = target_definition.as_deref().unwrap_or_default();
+                let same_name = |left: Option<&str>, right: Option<&str>| {
+                    match (
+                        left.filter(|name| !name.is_empty()),
+                        right.filter(|name| !name.is_empty()),
+                    ) {
+                        (None, None) => true,
+                        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+                        _ => false,
+                    }
+                };
+                let same_graphics = match (object.base_graphics.as_ref(), base_graphics.as_ref()) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => {
+                        left.definition.eq_ignore_ascii_case(&right.definition)
+                            && same_name(
+                                left.graphics_name.as_deref(),
+                                right.graphics_name.as_deref(),
+                            )
+                    }
+                    (None, Some(right)) => {
+                        right.definition.eq_ignore_ascii_case(own_definition)
+                            && same_name(None, right.graphics_name.as_deref())
+                    }
+                    (Some(left), None) => {
+                        left.definition.eq_ignore_ascii_case(own_definition)
+                            && same_name(left.graphics_name.as_deref(), None)
+                    }
+                };
+                let changed = !same_graphics && object.set_base_graphics(base_graphics);
                 if changed && !color_by_owner {
                     object.pending_update.color = Some(0);
                 }
                 changed
             };
             if changed {
+                if let Some(mask) = active_solid_mask {
+                    if let Some(checked) =
+                        context.check_solid_mask_rect_for_object(object_id, mask)
+                    {
+                        if checked != mask {
+                            if let Some(object) = context.object_scope_mut(object_id) {
+                                object.set_solid_mask_rect(checked);
+                            }
+                        }
+                    }
+                }
                 context.update_live_solid_mask(object_id, true);
             }
             return Ok(Value::Bool(true));
@@ -42954,8 +42987,24 @@ impl EffectHostContext {
         id
     }
 
-    fn register_spawn(&mut self, spawn: SpawnConfig, preview: HostWorldObject) {
+    fn register_spawn(&mut self, spawn: SpawnConfig, mut preview: HostWorldObject) {
         let id = preview.id;
+        // C4Object::Init copies Def->SolidMask and checks it against the
+        // already-selected base bitmap before Construction/Initialize can
+        // observe the object (C4Object.cpp:172-174,206-211).
+        if !spawn.loaded {
+            if let Some(metadata) = self.world.solid_mask_metadata.get(&preview.definition_id) {
+                if let Some(raw) = spawn.solid_mask.or(metadata.default_mask) {
+                    if let Some(checked) = metadata.check_mask_rect(raw, None) {
+                        if spawn.solid_mask.is_some() || checked != raw {
+                            if let Some(state) = preview.state.as_mut() {
+                                Rc::make_mut(state).solid_mask_override = Some(checked);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if !self.pending_objects.contains_key(&id) {
             self.pending_order.push(id);
         }
@@ -42964,6 +43013,55 @@ impl EffectHostContext {
         if self.master_order_preview.is_some() {
             self.preview_sort_master_by_category();
         }
+    }
+
+    fn live_solid_mask_rect(&self, id: ObjectId) -> Option<crate::DefinitionTargetRect> {
+        let scope = self.object_scope(id)?;
+        let definition_id = self.object_effective_definition_id(id)?;
+        let definition = self.world.solid_mask_metadata.get(&definition_id)?;
+        // ChangeDef clears the old object's SolidMask override at the swap
+        // point; otherwise the frame-start override remains effective until
+        // a same-call SetSolidMask replaces it.
+        let persisted_override = scope
+            .pending_update
+            .change_def
+            .is_none()
+            .then(|| {
+                self.get_world_object(id).and_then(|object| {
+                    object
+                        .full_state()
+                        .and_then(|state| state.solid_mask_override)
+                })
+            })
+            .flatten();
+        scope
+            .pending_update
+            .solid_mask_override
+            .or(persisted_override)
+            .or(definition.default_mask)
+    }
+
+    fn check_solid_mask_rect_for_object(
+        &self,
+        id: ObjectId,
+        mask: crate::DefinitionTargetRect,
+    ) -> Option<crate::DefinitionTargetRect> {
+        let scope = self.object_scope(id)?;
+        let definition_id = self.object_effective_definition_id(id)?;
+        let (graphics_definition, graphics_name) = scope
+            .base_graphics
+            .as_ref()
+            .map(|graphics| {
+                (
+                    graphics.definition.as_str(),
+                    graphics.graphics_name.as_deref(),
+                )
+            })
+            .unwrap_or((definition_id.as_str(), None));
+        self.world
+            .solid_mask_metadata
+            .get(graphics_definition)?
+            .check_mask_rect(mask, graphics_name)
     }
 
     /// The effective parameters C4Object::UpdateSolidMask would use for a
@@ -42983,30 +43081,10 @@ impl EffectHostContext {
         if rotation != 0 && !definition.rotated_solid_masks {
             return None;
         }
-        // ChangeDef clears the old object's SolidMask override at the swap
-        // point; otherwise the frame-start override remains effective until
-        // a same-call SetSolidMask replaces it.
-        let persisted_override = scope
-            .pending_update
-            .change_def
-            .is_none()
-            .then(|| {
-                self.get_world_object(id).and_then(|object| {
-                    object
-                        .full_state()
-                        .and_then(|state| state.solid_mask_override)
-                })
-            })
-            .flatten();
-        let mask = match scope
-            .pending_update
-            .solid_mask_override
-            .or(persisted_override)
-        {
-            Some(mask) if mask.width <= 0 || mask.height <= 0 => return None,
-            Some(mask) => mask,
-            None => definition.default_mask?,
-        };
+        let mask = self.live_solid_mask_rect(id)?;
+        if !mask.is_positive() {
+            return None;
+        }
         let (graphics_definition, graphics_name) = scope
             .base_graphics
             .as_ref()
@@ -43017,11 +43095,11 @@ impl EffectHostContext {
                 )
             })
             .unwrap_or((definition_id.as_str(), None));
-        let (mask, pixels) = self
+        let pixels = self
             .world
             .solid_mask_metadata
             .get(graphics_definition)?
-            .mask_pixels(mask, graphics_name)?;
+            .pixels_for_checked_mask(mask, graphics_name)?;
         let shape = definition.shape?;
         Some(crate::SolidMaskSpec {
             mask,
@@ -43166,11 +43244,10 @@ impl EffectHostContext {
         }
         let definition_id = self.object_effective_definition_id(id)?;
         let definition = self.world.solid_mask_metadata.get(&definition_id)?;
-        let mask = match scope.pending_update.solid_mask_override {
-            Some(mask) if mask.width <= 0 || mask.height <= 0 => return None,
-            Some(mask) => mask,
-            None => definition.default_mask?,
-        };
+        let mask = self.live_solid_mask_rect(id)?;
+        if !mask.is_positive() {
+            return None;
+        }
         let (graphics_definition, graphics_name) = scope
             .base_graphics
             .as_ref()
@@ -43181,11 +43258,11 @@ impl EffectHostContext {
                 )
             })
             .unwrap_or((definition_id.as_str(), None));
-        let (mask, pixels) = self
+        let pixels = self
             .world
             .solid_mask_metadata
             .get(graphics_definition)?
-            .mask_pixels(mask, graphics_name)?;
+            .pixels_for_checked_mask(mask, graphics_name)?;
         let shape = definition.shape?;
         let position = scope.effective_position();
         Some(crate::SolidMaskRect {
