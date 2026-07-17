@@ -1117,8 +1117,16 @@ fn is_physical_compiler_key(name: &str) -> bool {
     )
 }
 
+fn truncate_c4_string_bytes(value: &str, max_bytes: usize) -> String {
+    let bytes = lc_script::c4_string_bytes(value);
+    lc_script::c4_string_from_bytes(&bytes[..bytes.len().min(max_bytes)])
+}
+
 fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
-    let text = String::from_utf8_lossy(bytes);
+    // C4DefCore::Compile passes a native C string to StdCompilerINIRead.
+    // Preserve every pre-NUL byte through the script string projection.
+    let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    let text = lc_script::c4_string_from_bytes(bytes);
     let mut current_section: Option<String> = None;
     // StdCompilerINIRead compiles each named section and value once, using
     // the first matching node and leaving later duplicates unused.
@@ -1363,7 +1371,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     reflected_int!("ColorByOwner", parse_reflected_int(value)) != 0;
             }
             "ColorByMaterial" => {
-                color_by_material = rct_all_value.chars().take(15).collect();
+                color_by_material = truncate_c4_string_bytes(rct_all_value, 15);
             }
             "AllowPictureStack" => {
                 // StdBitfieldAdapt over the APS_* table
@@ -1625,7 +1633,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "TimerCall" => {
                 if !rct_all_value.is_empty() {
-                    timer_call = Some(rct_all_value.chars().take(29).collect());
+                    timer_call = Some(truncate_c4_string_bytes(rct_all_value, 29));
                 }
             }
             "Components" => {
@@ -4378,6 +4386,76 @@ Entrance=1,2,,4
         assert_eq!(parsed.color_by_material, "Granite \t");
         assert_eq!(parsed.burn_turn_to.as_deref(), Some("BURN"));
         assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
+    }
+
+    #[test]
+    fn parse_def_core_preserves_native_bytes_from_shipped_hut() {
+        let parsed = parse_def_core(include_bytes!(
+            "../../../../content/Objects.c4d/Structures.c4d/Hut2.c4d/DefCore.txt"
+        ))
+        .expect("shipped Hut2 DefCore parses");
+        let name = parsed.name.as_deref().expect("Hut2 carries a core name");
+
+        assert_eq!(lc_script::c4_string_bytes(name), b"Holzh\xfctte");
+        assert!(!name.contains('\u{fffd}'));
+        assert_ne!(name, "Holzhütte", "raw 0xfc is not UTF-8 ü");
+    }
+
+    #[test]
+    fn parse_def_core_preserves_native_bytes_in_rct_all_fields() {
+        let parsed = parse_def_core(
+            b"[DefCore]\nid=BYTE\nColorByMaterial=Rock\x80\nTimerCall=F\xfcnc\x80\n",
+        )
+        .expect("native-byte DefCore strings parse");
+
+        assert_eq!(
+            lc_script::c4_string_bytes(&parsed.color_by_material),
+            b"Rock\x80"
+        );
+        assert_eq!(
+            lc_script::c4_string_bytes(parsed.timer_call.as_deref().expect("TimerCall")),
+            b"F\xfcnc\x80"
+        );
+    }
+
+    #[test]
+    fn parse_def_core_truncates_native_strings_at_byte_and_nul_boundaries() {
+        let parsed = parse_def_core(
+            b"[DefCore]\nid=BYTE\nName=pre\xfc\0ignored\nTimerCall=Late\n",
+        )
+        .expect("NUL-terminated DefCore parses");
+        assert_eq!(
+            lc_script::c4_string_bytes(parsed.name.as_deref().expect("Name")),
+            b"pre\xfc"
+        );
+        assert_eq!(parsed.timer_call, None);
+
+        let mut bounded = b"[DefCore]\nid=BYTE\nColorByMaterial=".to_vec();
+        bounded.extend_from_slice(b"12345678901234\xc3\xbc\nTimerCall=");
+        bounded.extend_from_slice(b"1234567890123456789012345678\xc3\xbc\n");
+        let parsed = parse_def_core(&bounded).expect("bounded native strings parse");
+        assert_eq!(
+            lc_script::c4_string_bytes(&parsed.color_by_material),
+            b"12345678901234\xc3"
+        );
+        assert_eq!(
+            lc_script::c4_string_bytes(parsed.timer_call.as_deref().expect("TimerCall")),
+            b"1234567890123456789012345678\xc3"
+        );
+    }
+
+    #[test]
+    fn parse_def_core_keeps_raw_and_utf8_names_byte_distinct() {
+        let raw = parse_def_core(b"[DefCore]\nid=BYTE\nName=\x80\n")
+            .expect("raw-byte DefCore parses");
+        let utf8 = parse_def_core(b"[DefCore]\nid=BYTE\nName=\xe2\x82\xac\n")
+            .expect("UTF-8 DefCore parses");
+        let raw = raw.name.as_deref().expect("raw Name");
+        let utf8 = utf8.name.as_deref().expect("UTF-8 Name");
+
+        assert_eq!(lc_script::c4_string_bytes(raw), b"\x80");
+        assert_eq!(lc_script::c4_string_bytes(utf8), b"\xe2\x82\xac");
+        assert_ne!(raw, utf8);
     }
 
     #[test]
