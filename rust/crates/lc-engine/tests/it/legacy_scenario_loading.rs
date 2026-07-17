@@ -75,9 +75,12 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
 
     let landscape = engine.landscape().expect("legacy Map.bmp should load");
     // No MapZoom key → the C4S default of 10 (C4Scenario.cpp:307,353):
-    // 4 map columns × 10; ground starts at map row 1 → surface Y = 10.
-    assert_eq!(landscape.width(), 40);
+    // the rendered map is 40x40 and ground starts at map row 1 → y=10;
+    // C4Landscape::Init pads both dimensions to the 100px minimum.
+    assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
     assert_eq!(landscape.surface_height(0), Some(10));
+    assert_eq!(landscape.surface_height(39), Some(10));
+    assert_eq!(landscape.surface_height(40), Some(100), "right padding is sky");
 
     assert!(engine.definition_ids().any(|id| id == "TEST"));
     let snapshot = engine.snapshot();

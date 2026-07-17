@@ -8645,11 +8645,19 @@ fn classified_landscape(
 ) -> Result<Landscape, ScenarioError> {
     let map_width = bitmap.width as i32;
     let map_height = bitmap.height as i32;
-    let world_height = map_height.saturating_mul(zoom).max(0);
-    let final_width = bitmap.width.saturating_mul(zoom as u32);
+    let rendered_width = bitmap.width.saturating_mul(zoom as u32);
+    let rendered_height = map_height.saturating_mul(zoom).max(0) as u32;
+    // C4Landscape::Init clamps the allocated Surface8 independently of the
+    // map's zoomed render rectangle (C4Landscape.cpp:638-641). MapToSurface
+    // still clips ChunkOZoom to the smaller rectangle, so pad its finished
+    // bytes instead of letting inclusive Flat/rough chunk edges bleed into
+    // the right/bottom sky margin.
+    let final_width = rendered_width.max(100);
+    let final_height = rendered_height.max(100);
+    let world_height = final_height as i32;
     let plane_width = final_width as usize;
 
-    let bytes = crate::chunky::synthesize_landscape(
+    let synthesized = crate::chunky::synthesize_landscape(
         &bitmap.indices,
         map_width,
         map_height,
@@ -8658,12 +8666,27 @@ fn classified_landscape(
         &classifier.state.shapes,
     )
     .into_bytes();
+    let bytes = if (final_width, final_height) == (rendered_width, rendered_height) {
+        synthesized
+    } else {
+        let final_width = final_width as usize;
+        let rendered_width = rendered_width as usize;
+        let rendered_height = rendered_height as usize;
+        let mut padded = vec![0; final_width * final_height as usize];
+        for row in 0..rendered_height {
+            let source = row * rendered_width;
+            let target = row * final_width;
+            padded[target..target + rendered_width]
+                .copy_from_slice(&synthesized[source..source + rendered_width]);
+        }
+        padded
+    };
     let mut landscape = Landscape::new(final_width, vec![world_height; plane_width])
         .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
     landscape.set_world_height(world_height);
     landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
         final_width,
-        world_height.max(0) as u32,
+        final_height,
         bytes,
         classifier.state.densities.clone(),
         classifier.state.material_names.clone(),
@@ -8802,7 +8825,12 @@ fn load_legacy_landscape_body(
             .unwrap_or_else(|| legacy_map_zoom(landscape_section, &mut map_rng));
         let map_zoom_i32 = map_zoom_u32 as i32;
         let sky_pixel = rgba.get_pixel(0, 0).0;
-        let world_height = (height as i32).saturating_mul(map_zoom_i32).max(0);
+        let rendered_height = (height as i32).saturating_mul(map_zoom_i32).max(0);
+        let world_height = if exact_landscape {
+            rendered_height
+        } else {
+            rendered_height.max(100)
+        };
         let capacity = (width as usize).saturating_mul(map_zoom_u32 as usize);
         let mut surfaces = Vec::with_capacity(capacity);
 
@@ -8831,7 +8859,13 @@ fn load_legacy_landscape_body(
             surfaces.fill(surface);
         }
 
-        let final_width = width.saturating_mul(map_zoom_u32);
+        let rendered_width = width.saturating_mul(map_zoom_u32);
+        let final_width = if exact_landscape {
+            rendered_width
+        } else {
+            rendered_width.max(100)
+        };
+        surfaces.resize(final_width as usize, world_height);
         let mut landscape = Landscape::new(final_width, surfaces)
             .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
         // GBackHgt is known exactly here (map height × zoom); placement
@@ -8941,10 +8975,11 @@ fn load_legacy_landscape_body(
     let width_u32 = width_product
         .clamp(1, i64::from(u32::MAX))
         .try_into()
-        .unwrap_or(u32::MAX);
+        .unwrap_or(u32::MAX)
+        .max(100);
     let fallback_height = fallback_map_height
         .saturating_mul(map_zoom_u32 as i32)
-        .max(1);
+        .max(100);
     let mut landscape = Landscape::flat(width_u32, fallback_height);
     landscape.set_world_height(fallback_height);
     let _ = landscape.set_mode(LANDSCAPE_MODE_DYNAMIC);
@@ -22748,7 +22783,7 @@ public func ActualizePhase(pClonk)
         )
         .expect("write scenario core");
         // Column 0 turns solid at map row 2 (world y 20); column 3 is all
-        // sky (right side fully open: RightOpen = world height 40).
+        // sky (right side fully open through the 100px minimum height).
         std::fs::write(
             scenario_dir.join("Landscape.bmp"),
             encode_indexed_bmp(&[
@@ -22781,7 +22816,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(landscape.left_open(), 20, "first non-sky pixel in column 0");
         assert_eq!(
             landscape.right_open(),
-            40,
+            100,
             "all-sky border column opens the full height"
         );
     }
@@ -23207,6 +23242,22 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn dynamic_landscape_without_materials_still_clamps_to_cpp_minimum() {
+        let dir = tempdir().expect("tempdir");
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nMapWidth=8,0,1,8\nMapHeight=5,0,1,5\nMapZoom=5\n",
+        )
+        .expect("scenario core parses");
+
+        let landscape = load_legacy_landscape_body(&group, &manifest, None, 0, 1)
+            .expect("fallback landscape loads")
+            .expect("fallback landscape exists");
+
+        assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
+    }
+
+    #[test]
     fn randomized_map_zoom_uses_post_map_creation_cpp_rng_draw() {
         // FixRandom(7) makes an early MapZoom Evaluate produce 9. C++ first
         // builds this basic map, then draw #530 is Random(5)=0, so
@@ -23392,6 +23443,86 @@ public func ActualizePhase(pClonk)
             !landscape.is_solid_at(35, 25),
             "sky below roof level in an open column is not solid"
         );
+    }
+
+    #[test]
+    fn classified_landscape_clamps_tiny_maps_to_cpp_minimum_dimensions() {
+        // C4Landscape::Init allocates max(MapZoom*MapSize, 100) in each
+        // dimension, but MapToLandscape still clips drawing to the zoomed
+        // map rectangle. The remaining right/bottom pixels stay sky and the
+        // closed border begins at the clamped coordinate.
+        let bitmap = lc_resources::bitmap::IndexedBitmap {
+            width: 8,
+            height: 5,
+            indices: vec![30; 8 * 5],
+        };
+        let mut densities = [0i32; 128];
+        densities[30] = 100;
+        let mut names = vec![None; 128];
+        names[30] = Some("Earth".into());
+        let mut shapes = vec![None; 128];
+        shapes[30] = Some(crate::chunky::ChunkShape::Flat);
+        let classifier = MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
+
+        let landscape =
+            classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
+        let grid = landscape
+            .pixel_grid()
+            .expect("classified maps build Surface8");
+        assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
+        assert_eq!((grid.width(), grid.height()), (100, 100));
+        assert_eq!(grid.byte_at(79, 49), Some(30), "map reaches its own edge");
+        for y in 0..50 {
+            for x in 80..100 {
+                assert_eq!(grid.byte_at(x, y), Some(0), "right padding at ({x},{y})");
+            }
+        }
+        for y in 50..100 {
+            for x in 0..100 {
+                assert_eq!(grid.byte_at(x, y), Some(0), "bottom padding at ({x},{y})");
+            }
+        }
+        assert!(!landscape.is_solid_at(99, 99), "last in-bounds pixel is sky");
+        assert!(landscape.is_solid_at(100, 99), "right border starts at x=100");
+        assert!(landscape.is_solid_at(99, 100), "bottom border starts at y=100");
+    }
+
+    #[test]
+    fn classified_landscape_keeps_large_map_plane_byte_identical() {
+        let bitmap = lc_resources::bitmap::IndexedBitmap {
+            width: 11,
+            height: 10,
+            indices: vec![30; 11 * 10],
+        };
+        let mut densities = [0i32; 128];
+        densities[30] = 100;
+        let mut names = vec![None; 128];
+        names[30] = Some("Earth".into());
+        let mut shapes = vec![None; 128];
+        shapes[30] = Some(crate::chunky::ChunkShape::Flat);
+        let classifier = MapPixelClassifier::from_slots(
+            densities,
+            names,
+            vec![None; 128],
+            shapes.clone(),
+        );
+        let expected = crate::chunky::synthesize_landscape(
+            &bitmap.indices,
+            11,
+            10,
+            10,
+            0,
+            &shapes,
+        )
+        .into_bytes();
+
+        let landscape =
+            classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
+        let grid = landscape
+            .pixel_grid()
+            .expect("classified maps build Surface8");
+        assert_eq!((grid.width(), grid.height()), (110, 100));
+        assert_eq!(grid.bytes(), expected, "unclamped planes stay byte-identical");
     }
 
     #[test]
@@ -23610,14 +23741,12 @@ public func ActualizePhase(pClonk)
 
         let landscape = engine.landscape().expect("landscape present");
         // MapZoom=2 clamps to the C4SVal Min of 5 (C4Scenario.cpp:307,353):
-        // 4 map columns × zoom 5 = 20 landscape columns; ground starts at
-        // map row 1 → surface Y = 5.
-        assert_eq!(landscape.width(), 20);
-        assert_eq!(
-            landscape.surface(),
-            vec![5; 20].as_slice(),
-            "the surface Y coordinate scales with the zoom"
-        );
+        // the rendered map is 20x20 with ground starting at y=5, while
+        // C4Landscape::Init pads both axes to 100. The column-only fallback
+        // represents the right-hand padding as all-sky columns.
+        assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
+        assert_eq!(&landscape.surface()[..20], vec![5; 20].as_slice());
+        assert_eq!(&landscape.surface()[20..], vec![100; 80].as_slice());
     }
 
     #[test]
