@@ -34148,8 +34148,11 @@ impl GameApp {
             // state below supplies the already-initialized world.
             let apply_result = match save.engine_state.team_configuration {
                 Some(configuration) => scenario_data
-                    .apply_before_players_with_team_configuration(&mut self.engine, configuration),
-                None => scenario_data.apply_before_players(&mut self.engine),
+                    .apply_before_players_for_restore_with_team_configuration(
+                        &mut self.engine,
+                        configuration,
+                    ),
+                None => scenario_data.apply_before_players_for_restore(&mut self.engine),
             };
             apply_result.with_context(|| {
                 format!(

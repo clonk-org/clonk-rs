@@ -196,6 +196,9 @@ pub(crate) struct ScenarioSpawn {
 pub(crate) struct ScenarioSectionSpec {
     pub(crate) name: String,
     pub(crate) landscape: Option<Landscape>,
+    pub(crate) post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks,
+    pub(crate) keep_map_creator: bool,
+    pub(crate) no_initialize: bool,
     pub(crate) objects: Vec<ScenarioSpawn>,
     pub(crate) scenario_values: ScenarioValueStore,
     pub(crate) base_reject_entrance_enabled: bool,
@@ -212,6 +215,59 @@ struct ScenarioScriptSource {
     /// parameters; GRBroadcast args start with the player number,
     /// C4Player.cpp:769-775). JSON fixtures keep the state proplist.
     c4_args: bool,
+}
+
+/// Named non-global functions visible from the fully linked scenario host
+/// when Landscape.txt is parsed. Build the same lightweight script-host tree
+/// used at apply time so #appendto is resolved before scenario #include.
+/// Engine-global functions remain excluded: Game.Script.GetSFunc performs a
+/// local-owner lookup and the declaring host's global FnLink is unnamed.
+fn scenario_map_callback_functions(
+    script: Option<&ScenarioScriptSource>,
+    definitions: &[ScenarioDefinition],
+    definition_load_steps: &[DefinitionLoadStep],
+    scenario_system_scripts: &[(String, String)],
+) -> Result<HashSet<String>, ScenarioError> {
+    let Some(script) = script else {
+        return Ok(HashSet::new());
+    };
+
+    let mut linker = Engine::new();
+    for step in definition_load_steps {
+        match step {
+            DefinitionLoadStep::Definition(id) => {
+                let definition = definitions
+                    .iter()
+                    .find(|definition| definition.id.eq_ignore_ascii_case(id))
+                    .ok_or_else(|| ScenarioError::UnknownDefinition(id.clone()))?;
+                let name = definition.name.as_deref().unwrap_or(&definition.id);
+                let mut compiled = Definition::from_script(
+                    &definition.id,
+                    name,
+                    &definition.script,
+                )
+                .or_else(|_| Definition::from_script(&definition.id, name, ""))?;
+                compiled.set_c4_callback_convention(true);
+                linker.register_definition(compiled)?;
+            }
+            DefinitionLoadStep::SystemScripts(sources) => {
+                linker.install_additional_global_scripts(sources);
+            }
+            // Destroyed overload hosts retain declarations only; their
+            // functions no longer participate in append/include linking.
+            DefinitionLoadStep::Declarations { .. } => {}
+        }
+    }
+
+    match linker.load_scenario_script_with_convention(&script.name, &script.source, true) {
+        Ok(()) => {}
+        Err(EngineError::Script { .. }) => return Ok(HashSet::new()),
+        Err(other) => return Err(other.into()),
+    }
+    linker.install_scenario_global_scripts(scenario_system_scripts);
+    linker.resolve_appends();
+    linker.resolve_includes()?;
+    Ok(linker.scenario_local_function_names())
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +307,8 @@ pub struct Scenario {
     value_overloads: Vec<(String, i32)>,
     initial_spawns: Vec<ScenarioSpawn>,
     landscape: Option<Landscape>,
+    post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks,
+    keep_map_creator: bool,
     scenario_sections: Vec<ScenarioSectionSpec>,
     physics: Option<PhysicsSettings>,
     /// The `[Landscape] Gravity` C4SVal — evaluated through the synced
@@ -2213,17 +2271,28 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group, languages)?;
+        let scenario_system_scripts = load_scenario_system_scripts(group)?;
+        let map_callback_functions = scenario_map_callback_functions(
+            script.as_ref(),
+            &collected,
+            &definition_load_steps,
+            &scenario_system_scripts,
+        )?;
         let mut classifier = build_map_pixel_classifier(group, resolver)?;
         let material_library = classifier
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
             .cloned();
+        let mut post_init_map_callbacks =
+            crate::map_creator_s2::PostInitMapCallbacks::default();
         let landscape = load_legacy_landscape(
             group,
             &manifest,
             classifier.as_mut(),
             random_seed,
             startup_player_count,
+            &map_callback_functions,
+            &mut post_init_map_callbacks,
         )?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
@@ -2256,6 +2325,8 @@ impl Scenario {
             &initial_spawns,
             environment,
             sky.surface.is_some(),
+            &map_callback_functions,
+            &post_init_map_callbacks,
         )?;
         let (_, legacy_team_metadata) = load_initial_network_teams(group, languages)?;
         let (teams, lobby_teams) = load_legacy_teams(group, languages, &manifest.core)?;
@@ -2308,6 +2379,8 @@ impl Scenario {
             value_overloads: id_list_pairs(&manifest.core.game.realism.value_overloads),
             initial_spawns,
             landscape,
+            post_init_map_callbacks,
+            keep_map_creator: manifest.core.landscape.keep_map_creator,
             scenario_sections,
             physics,
             gravity,
@@ -2341,7 +2414,7 @@ impl Scenario {
                 .then_some(manifest.core.head.forced_control_style != 0),
             definition_load_steps,
             definition_resource_paths,
-            scenario_system_scripts: load_scenario_system_scripts(group)?,
+            scenario_system_scripts,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
             teams,
             lobby_metadata: Some(lobby_metadata),
@@ -2490,7 +2563,7 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, true, None, None)
+        self.apply_before_players_with_final_synchronize(engine, true, None, None, true)
     }
 
     /// Applies a fresh or restored scenario after installing the authoritative
@@ -2507,6 +2580,34 @@ impl Scenario {
             true,
             Some(team_configuration),
             None,
+            true,
+        )
+    }
+
+    /// Resource/setup pass used immediately before restoring an authoritative
+    /// saved EngineState. The save's exact landscape has no live S2 creator,
+    /// so replaying callbacks from the original Scenario.txt would duplicate
+    /// side effects that are not necessarily overwritten by restore.
+    #[doc(hidden)]
+    pub fn apply_before_players_for_restore(
+        &self,
+        engine: &mut Engine,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(engine, true, None, None, false)
+    }
+
+    #[doc(hidden)]
+    pub fn apply_before_players_for_restore_with_team_configuration(
+        &self,
+        engine: &mut Engine,
+        team_configuration: crate::TeamConfiguration,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(
+            engine,
+            true,
+            Some(team_configuration),
+            None,
+            false,
         )
     }
 
@@ -2517,7 +2618,7 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, false, None, None)
+        self.apply_before_players_with_final_synchronize(engine, false, None, None, true)
     }
 
     /// Network variant of
@@ -2533,6 +2634,7 @@ impl Scenario {
             false,
             Some(team_configuration),
             None,
+            true,
         )
     }
 
@@ -2551,6 +2653,7 @@ impl Scenario {
             false,
             Some(team_configuration),
             Some(teams),
+            true,
         )
     }
 
@@ -2560,6 +2663,7 @@ impl Scenario {
         final_synchronize: bool,
         team_configuration_override: Option<crate::TeamConfiguration>,
         team_registry_override: Option<Vec<TeamInfo>>,
+        execute_post_init_map_callbacks: bool,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
         // C4Scenario::Load/ConvertGoals and C4Landscape::Init have completed
@@ -3006,6 +3110,17 @@ impl Scenario {
         {
             engine.run_legacy_init_placements(placement);
             engine.surface_pending_runtime_flash_boundary()?;
+            // C4Landscape::PostInitMap follows InitGoals inside the same
+            // !NoInitialize/LandscapeLoaded block. Callback arrays execute
+            // in field-registration order and each bitset in descending
+            // pixel order, on the live post-FixRandom synced ledger
+            // (C4Game.cpp:2493-2521; C4MapCreatorS2.cpp:49-114).
+            if execute_post_init_map_callbacks {
+                engine.run_post_init_map_callbacks(&self.post_init_map_callbacks)?;
+            }
+            if !self.keep_map_creator {
+                engine.clear_runtime_map_creator();
+            }
         }
         if let Some(weather_init) = self.weather_init.as_ref() {
             // C4Weather::Init runs at the END of C4Game::InitGame after
@@ -3343,6 +3458,8 @@ impl Scenario {
             value_overloads: Vec::new(),
             initial_spawns: spawns,
             landscape,
+            post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks::default(),
+            keep_map_creator: false,
             scenario_sections: Vec::new(),
             physics,
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
@@ -8725,13 +8842,18 @@ fn load_legacy_landscape(
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
     startup_player_count: i32,
+    map_callback_functions: &HashSet<String>,
+    post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
 ) -> Result<Option<Landscape>, ScenarioError> {
+    *post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
     let Some(mut landscape) = load_legacy_landscape_body(
         group,
         manifest,
         classifier,
         random_seed,
         startup_player_count,
+        map_callback_functions,
+        post_init_map_callbacks,
     )? else {
         return Ok(None);
     };
@@ -8757,6 +8879,8 @@ fn load_legacy_landscape_body(
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
     startup_player_count: i32,
+    map_callback_functions: &HashSet<String>,
+    post_init_map_callbacks: &mut crate::map_creator_s2::PostInitMapCallbacks,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_width_hint = landscape_section
@@ -8909,7 +9033,7 @@ fn load_legacy_landscape_body(
         let landscape_core = &manifest.core.landscape;
         let mut retained_creator = None;
         let bitmap = if let Some(bytes) = read_optional("Landscape.txt")? {
-            let creation = crate::map_creator_s2::create_s2_map_with_state(
+            let creation = crate::map_creator_s2::create_s2_map_with_state_and_functions(
                 &String::from_utf8_lossy(&bytes),
                 classifier,
                 landscape_core.map_width,
@@ -8917,10 +9041,13 @@ fn load_legacy_landscape_body(
                 landscape_core.map_player_extend,
                 players,
                 &mut map_rng,
+                map_callback_functions,
             );
-            if landscape_core.keep_map_creator {
-                retained_creator = Some(creation.creator);
-            }
+            *post_init_map_callbacks = creation.callbacks;
+            // CreateMapS2 keeps pMapCreator alive through InitializeDef,
+            // placements and PostInitMap even when KeepMapCreator is false;
+            // PostInitMap performs the conditional destruction afterward.
+            retained_creator = Some(creation.creator);
             creation.bitmap.unwrap_or_else(|| {
                 // Dynamic map by scenario (C4Landscape.cpp:612-614) —
                 // also the fallback when the exmap yields no map node.
@@ -8932,6 +9059,10 @@ fn load_legacy_landscape_body(
             crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
         };
         let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
+        post_init_map_callbacks.set_map_zoom(map_zoom_u32 as i32);
+        if let Some(creator) = retained_creator.as_mut() {
+            creator.set_callback_map_zoom(map_zoom_u32 as i32);
+        }
         let mut landscape = classified_landscape(
             &bitmap,
             classifier,
@@ -8954,7 +9085,7 @@ fn load_legacy_landscape_body(
     let landscape_core = &manifest.core.landscape;
     let mut discarded_classifier = MapPixelClassifier::empty_for_map_creation();
     if let Some(bytes) = read_optional("Landscape.txt")? {
-        let creation = crate::map_creator_s2::create_s2_map_with_state(
+        let creation = crate::map_creator_s2::create_s2_map_with_state_and_functions(
             &String::from_utf8_lossy(&bytes),
             &mut discarded_classifier,
             landscape_core.map_width,
@@ -8962,7 +9093,9 @@ fn load_legacy_landscape_body(
             landscape_core.map_player_extend,
             players,
             &mut map_rng,
+            map_callback_functions,
         );
+        *post_init_map_callbacks = creation.callbacks;
         if creation.bitmap.is_none() {
             let params = basic_map_params(landscape_core);
             let _ = crate::map_creator::create_basic_map(
@@ -8983,6 +9116,7 @@ fn load_legacy_landscape_body(
     }
 
     let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
+    post_init_map_callbacks.set_map_zoom(map_zoom_u32 as i32);
     let fallback_map_width = map_width_hint.unwrap_or(96);
     let fallback_map_height = map_height_hint.unwrap_or(50);
     let width_product = i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_u32));
@@ -9427,10 +9561,15 @@ fn load_legacy_scenario_sections(
     main_objects: &[ScenarioSpawn],
     main_environment: EnvironmentSettings,
     has_sky_surface: bool,
+    map_callback_functions: &HashSet<String>,
+    main_post_init_map_callbacks: &crate::map_creator_s2::PostInitMapCallbacks,
 ) -> Result<Vec<ScenarioSectionSpec>, ScenarioError> {
     let mut sections = vec![ScenarioSectionSpec {
         name: "main".to_string(),
         landscape: main_landscape.clone(),
+        post_init_map_callbacks: main_post_init_map_callbacks.clone(),
+        keep_map_creator: main_manifest.core.landscape.keep_map_creator,
+        no_initialize: main_manifest.core.head.no_initialize != 0,
         objects: main_objects.to_vec(),
         scenario_values: ScenarioValueStore::from_runtime_core(
             &main_manifest.core,
@@ -9464,12 +9603,16 @@ fn load_legacy_scenario_sections(
         let section_group = group.open_child(path)?;
         let overlay = parse_legacy_scenario_manifest(&section_group)?;
         let manifest = overlay_legacy_scenario_manifest(main_manifest, overlay)?;
+        let mut post_init_map_callbacks =
+            crate::map_creator_s2::PostInitMapCallbacks::default();
         let landscape = load_legacy_landscape(
             &section_group,
             &manifest,
             classifier.as_deref_mut(),
             random_seed,
             startup_player_count,
+            map_callback_functions,
+            &mut post_init_map_callbacks,
         )?;
         let objects = collect_legacy_objects(&section_group, definitions)?;
         let environment = derive_legacy_environment(&manifest)?;
@@ -9478,6 +9621,9 @@ fn load_legacy_scenario_sections(
         sections.push(ScenarioSectionSpec {
             name,
             landscape,
+            post_init_map_callbacks,
+            keep_map_creator: manifest.core.landscape.keep_map_creator,
+            no_initialize: manifest.core.head.no_initialize != 0,
             objects,
             scenario_values,
             base_reject_entrance_enabled: (manifest.core.game.realism.base_functionality
@@ -15709,6 +15855,8 @@ global func Step(state, frame, random)
                 config: SpawnConfig::new("Mover"),
             }],
             landscape: None,
+            post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks::default(),
+            keep_map_creator: false,
             scenario_sections: Vec::new(),
             physics: None,
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
@@ -15832,6 +15980,8 @@ global func Step(state, frame, random)
                 config: SpawnConfig::new("Mover").with_owner(1),
             }],
             landscape: None,
+            post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks::default(),
+            keep_map_creator: false,
             scenario_sections: Vec::new(),
             physics: None,
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
@@ -15881,6 +16031,25 @@ global func Step(state, frame, random)
 
     struct FileSystemResolver {
         roots: Vec<PathBuf>,
+    }
+
+    fn load_legacy_landscape_body_for_test(
+        group: &Group,
+        manifest: &LegacyScenarioManifest,
+        classifier: Option<&mut MapPixelClassifier>,
+        random_seed: u64,
+        startup_player_count: i32,
+    ) -> Result<Option<Landscape>, ScenarioError> {
+        let mut callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
+        load_legacy_landscape_body(
+            group,
+            manifest,
+            classifier,
+            random_seed,
+            startup_player_count,
+            &HashSet::new(),
+            &mut callbacks,
+        )
     }
 
     impl LegacyDefinitionResolver for FileSystemResolver {
@@ -22526,6 +22695,275 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn s2_map_callbacks_run_after_render_in_cpp_array_and_pixel_order() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nstatic callback_trace;\nstatic callback_calls;\nstatic callback_random;\n\
+             static callback_draw_result;\nstatic callback_map_result;\n\
+             func AddCallback(tag, x, y, zoom) {\n\
+                 if (!callback_trace) callback_trace = \"\";\n\
+                 callback_trace = Format(\"%s%d,%d,%d,%d;\", callback_trace, tag, x, y, zoom);\n\
+                 return 1;\n\
+             }\n\
+             func OnDraw(x, y, zoom) {\n\
+                 if (!callback_calls) {\n\
+                     callback_random = Random(1000000);\n\
+                     callback_draw_result = DrawDefMap(0, 0, 10, 5, \"Named\");\n\
+                     callback_map_result = DrawMap(0, 0, 15, 5,\n\
+                         \"map Runtime { seed=8; Marked { x=2px; }; };\");\n\
+                 }\n\
+                 callback_calls++;\n\
+                 return AddCallback(1, x, y, zoom);\n\
+             }\n\
+             func OnEval(x, y, zoom) { return AddCallback(2, x, y, zoom); }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Map callbacks\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=3,0,3,3\nMapHeight=2,0,2,2\nMapZoom=5,0,5,5\nKeepMapCreator=0\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.txt"),
+            "overlay Marked { x=1px; y=0px; wdt=1px; hgt=1px; seed=2;\n\
+                              mat=Earth; tex=Rough; sub=0;\n\
+                              drawFn=OnDraw; evalFn=OnEval; };\n\
+             map Named { seed=9; Marked; };\n\
+             map Test { seed=1; mat=Earth; tex=Rough; sub=0;\n\
+               Marked { x=0px; y=0px; wdt=2px; hgt=2px; };\n\
+               overlay { x=1px; y=0px; wdt=1px; hgt=1px; seed=3;\n\
+                         mat=Earth; tex=Rough; sub=0; };\n\
+             };\n",
+        )
+        .expect("write landscape script");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write material");
+        write_test_texture(&materials, "Rough");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("callback_trace")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String(
+                "1,3,3,5;1,-2,3,5;1,8,-2,5;1,3,-2,5;1,-2,-2,5;\
+                 2,3,3,5;2,-2,3,5;2,8,-2,5;2,3,-2,5;2,-2,-2,5;"
+                    .into()
+            )),
+            "drawFn's final-writer mask runs before evalFn in descending index order"
+        );
+        let mut replay = crate::rng::LcgRng::seed_from_u64(0);
+        LegacyC4SVal::new(100, 0, 10, 200).evaluate(&mut replay);
+        LegacyC4SVal::new(50, 30, 0, 100).evaluate(&mut replay);
+        LegacyC4SVal::new(50, 0, 0, 100).evaluate(&mut replay);
+        let expected_callback_random = replay.random(1_000_000);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("callback_random")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(expected_callback_random)),
+            "PostInitMap runs after Gravity and placements but before Weather.Init"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("callback_draw_result")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(1)),
+            "the creator remains available to DrawDefMap until callbacks finish"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("callback_map_result")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(1)),
+            "retained-template DrawMap also updates the live callback masks"
+        );
+        assert!(
+            engine
+                .landscape()
+                .and_then(Landscape::raster_state)
+                .and_then(LandscapeRasterState::map_creator)
+                .is_none(),
+            "callbacks survive to PostInitMap without KeepMapCreator"
+        );
+
+        let mut restore_engine = Engine::with_seed(0);
+        scenario
+            .apply_before_players_for_restore(&mut restore_engine)
+            .expect("restore setup applies without replaying map callbacks");
+        assert_eq!(
+            restore_engine
+                .script_globals
+                .borrow()
+                .get("callback_trace")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Nil),
+            "save restoration must not replay original-scenario PostInitMap callbacks"
+        );
+
+        let scenario_core = std::fs::read_to_string(scenario_dir.join("Scenario.txt"))
+            .expect("read scenario core");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            scenario_core.replace("Title=Map callbacks", "Title=Map callbacks\nNoInitialize=1"),
+        )
+        .expect("disable initialization");
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario reloads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("no-initialize scenario applies");
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("callback_trace")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Nil),
+            "NoInitialize skips PostInitMap together with environment placement"
+        );
+    }
+
+    #[test]
+    fn s2_callback_lookup_resolves_append_before_scenario_include() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some((
+                "APPN",
+                "#appendto GOOD\n\
+                 func LinkedDraw(x, y, zoom) {\n\
+                     linked_trace = Format(\"%d,%d,%d\", x, y, zoom);\n\
+                     return 1;\n\
+                 }\n",
+            )),
+            "#strict\n#include GOOD\nstatic linked_trace;\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Linked callback\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=1,0,1,1\nMapHeight=1,0,1,1\nMapZoom=5,0,5,5\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.txt"),
+            "map Test { seed=1; mat=Earth; tex=Rough; sub=0; drawFn=LinkedDraw; };",
+        )
+        .expect("write landscape script");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write material");
+        write_test_texture(&materials, "Rough");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("linked_trace")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String("-2,-2,5".into()))
+        );
+    }
+
+    #[test]
+    fn scenario_section_executes_its_own_post_init_map_callbacks() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "#strict\nstatic section_trace;\n\
+             func OnSection(x, y, zoom) {\n\
+                 section_trace = Format(\"%d,%d,%d\", x, y, zoom);\n\
+                 return 1;\n\
+             }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Section callback\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=1,0,1,1\nMapHeight=1,0,1,1\nMapZoom=5,0,5,5\n",
+        )
+        .expect("write scenario core");
+        let section = scenario_dir.join("SectNext.c4g");
+        std::fs::create_dir_all(&section).expect("section dir");
+        std::fs::write(section.join("Scenario.txt"), "[Head]\nTitle=Next\n")
+            .expect("write section core");
+        std::fs::write(
+            section.join("Landscape.txt"),
+            "map Next { seed=1; mat=Earth; tex=Rough; sub=0; drawFn=OnSection; };",
+        )
+        .expect("write section landscape");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write material");
+        write_test_texture(&materials, "Rough");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(
+            engine
+                .load_scenario_section("Next", 0, Vec::new())
+                .expect("section load succeeds")
+        );
+
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("section_trace")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String("-2,-2,5".into()))
+        );
+    }
+
+    #[test]
     fn ancestor_texmap_overloads_global_water_material() {
         // C4Game::InitMaterialTexture walks the ordered NRT_Material chain
         // while each source's OverloadMaterials/OverloadTextures flags admit
@@ -23241,7 +23679,7 @@ public func ActualizePhase(pClonk)
         );
 
         let landscape =
-            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 3)
+            load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 3)
                 .expect("landscape loads")
                 .expect("landscape exists");
 
@@ -23264,7 +23702,16 @@ public func ActualizePhase(pClonk)
         )
         .expect("scenario core parses");
 
-        let landscape = load_legacy_landscape_body(&group, &manifest, None, 0, 1)
+        let mut callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
+        let landscape = load_legacy_landscape_body(
+            &group,
+            &manifest,
+            None,
+            0,
+            1,
+            &HashSet::new(),
+            &mut callbacks,
+        )
             .expect("fallback landscape loads")
             .expect("fallback landscape exists");
 
@@ -23296,7 +23743,7 @@ public func ActualizePhase(pClonk)
         );
 
         let landscape =
-            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 7, 1)
+            load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 7, 1)
                 .expect("landscape loads")
                 .expect("landscape exists");
         assert_eq!(
@@ -23308,7 +23755,7 @@ public func ActualizePhase(pClonk)
         );
         assert_eq!(landscape.width(), 160);
 
-        let fallback = load_legacy_landscape_body(&group, &manifest, None, 7, 1)
+        let fallback = load_legacy_landscape_body_for_test(&group, &manifest, None, 7, 1)
             .expect("fallback landscape loads")
             .expect("fallback landscape exists");
         assert_eq!(
@@ -23341,7 +23788,7 @@ public func ActualizePhase(pClonk)
         );
 
         let landscape =
-            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 1)
+            load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 1)
                 .expect("landscape loads")
                 .expect("landscape exists");
         let raster = landscape.raster_state().expect("raster state retained");
@@ -23382,8 +23829,13 @@ public func ActualizePhase(pClonk)
                 vec![None; 128],
             );
 
-            let landscape =
-                load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 1)
+            let landscape = load_legacy_landscape_body_for_test(
+                &group,
+                &manifest,
+                Some(&mut classifier),
+                0,
+                1,
+            )
                     .expect("shipped landscape loads")
                     .expect("shipped landscape exists");
             assert!(
@@ -23613,7 +24065,13 @@ public func ActualizePhase(pClonk)
         let mut classifier =
             MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
-        let landscape = load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 1)
+        let landscape = load_legacy_landscape_body_for_test(
+            &group,
+            &manifest,
+            Some(&mut classifier),
+            0,
+            1,
+        )
             .expect("exact landscape loads")
             .expect("exact landscape exists");
         let grid = landscape
@@ -23650,7 +24108,7 @@ public func ActualizePhase(pClonk)
         let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\n")
             .expect("scenario core parses");
 
-        let error = load_legacy_landscape_body(&group, &manifest, None, 0, 1)
+        let error = load_legacy_landscape_body_for_test(&group, &manifest, None, 0, 1)
             .expect_err("exact load must require Landscape.bmp");
         assert!(
             matches!(

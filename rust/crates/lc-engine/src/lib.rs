@@ -14051,6 +14051,9 @@ struct ScenarioScript {
     script: Arc<ScriptEngine>,
     /// Pristine scenario host used to discard linked copies during ReLink.
     base_script: lc_script::Script,
+    /// Whether `base_script`'s definition includes have been copied into the
+    /// live scenario host for the current link pass.
+    includes_resolved: bool,
     has_initialize: bool,
     has_step: bool,
 }
@@ -14083,6 +14086,7 @@ impl ScenarioScript {
             c4_args: false,
             script: Arc::new(script),
             base_script: compiled,
+            includes_resolved: false,
             has_initialize,
             has_step,
         })
@@ -14103,8 +14107,23 @@ impl ScenarioScript {
 
     fn reset_script_links(&mut self) {
         Arc::make_mut(&mut self.script).replace_script(self.base_script.clone(), false);
+        self.includes_resolved = false;
         self.has_initialize = self.script.has_function("Initialize");
         self.has_step = self.script.has_function("Step");
+    }
+
+    fn refresh_script_flags(&mut self) {
+        self.has_initialize = self.script.has_function("Initialize");
+        self.has_step = self.script.has_function("Step");
+    }
+
+    fn local_function_names(&self) -> HashSet<String> {
+        self.script
+            .functions()
+            .keys()
+            .filter(|name| self.script.has_local_function(name))
+            .cloned()
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -14766,6 +14785,9 @@ pub struct ScenarioBatch {
 struct RuntimeScenarioSection {
     name: String,
     landscape: Option<Landscape>,
+    post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks,
+    keep_map_creator: bool,
+    no_initialize: bool,
     initial_objects: Vec<scenario::ScenarioSpawn>,
     saved_objects: Option<Vec<PersistedObject>>,
     saved_object_order: Vec<ObjectId>,
@@ -17695,6 +17717,9 @@ impl Engine {
                     RuntimeScenarioSection {
                         name: section.name.clone(),
                         landscape: section.landscape.clone(),
+                        post_init_map_callbacks: section.post_init_map_callbacks.clone(),
+                        keep_map_creator: section.keep_map_creator,
+                        no_initialize: section.no_initialize,
                         initial_objects: section.objects.clone(),
                         saved_objects: None,
                         saved_object_order: Vec::new(),
@@ -22763,6 +22788,53 @@ impl Engine {
         }
     }
 
+    pub(crate) fn scenario_local_function_names(&self) -> HashSet<String> {
+        self.scenario_script
+            .as_ref()
+            .map(ScenarioScript::local_function_names)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn run_post_init_map_callbacks(
+        &mut self,
+        fallback: &map_creator_s2::PostInitMapCallbacks,
+    ) -> Result<(), EngineError> {
+        let array_count = self
+            .live_post_init_map_callbacks()
+            .unwrap_or(fallback)
+            .array_count();
+        for array in 0..array_count {
+            let size = self
+                .live_post_init_map_callbacks()
+                .unwrap_or(fallback)
+                .array_size(array);
+            for index in (0..size).rev() {
+                let invocation = self
+                    .live_post_init_map_callbacks()
+                    .unwrap_or(fallback)
+                    .invocation_at(array, index);
+                let Some((function, args)) = invocation else {
+                    continue;
+                };
+                let args = args.into_iter().map(Value::Int).collect();
+                let _ = tolerate_script_error(
+                    self.call_scenario_script_function(&function, args),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn live_post_init_map_callbacks(
+        &self,
+    ) -> Option<&map_creator_s2::PostInitMapCallbacks> {
+        self.landscape
+            .as_ref()
+            .and_then(Landscape::raster_state)
+            .and_then(crate::landscape::LandscapeRasterState::map_creator)
+            .map(map_creator_s2::MapCreatorS2State::callbacks)
+    }
+
     fn check_game_over(&mut self) -> Result<(), EngineError> {
         if self.game_over_triggered || !self.players_registered {
             return Ok(());
@@ -24963,6 +25035,44 @@ impl Engine {
         let mut resolved = HashSet::new();
         for definition_id in definition_ids {
             let _ = resolve_definition(self, &definition_id, &mut resolving, &mut resolved)?;
+        }
+
+        // Game.Script is a regular C4AulScript host too. Resolve its
+        // definition includes only after every definition has received
+        // #appendto copies, so callback lookup and execution see the exact
+        // append-before-include symbol set (C4AulLink.cpp:27-29,83-95).
+        let scenario_includes = self
+            .scenario_script
+            .as_ref()
+            .filter(|scenario| !scenario.includes_resolved)
+            .map(|scenario| scenario.base_script.includes().to_vec());
+        if let Some(includes) = scenario_includes {
+            for parent_id in includes.iter().rev() {
+                if !self.definitions.contains_key(parent_id.as_str()) {
+                    tracing::warn!(
+                        target = %parent_id,
+                        definition = "Scenario",
+                        "script to #include not found"
+                    );
+                    continue;
+                }
+                if !resolve_definition(self, parent_id, &mut resolving, &mut resolved)? {
+                    continue;
+                }
+                let parent_script = self
+                    .definitions
+                    .get(parent_id.as_str())
+                    .expect("checked scenario include exists")
+                    .script
+                    .clone();
+                if let Some(scenario) = self.scenario_script.as_mut() {
+                    Arc::make_mut(&mut scenario.script).merge_from(&parent_script);
+                }
+            }
+            if let Some(scenario) = self.scenario_script.as_mut() {
+                scenario.includes_resolved = true;
+                scenario.refresh_script_flags();
+            }
         }
 
         Ok(())
@@ -32563,6 +32673,17 @@ impl Engine {
             {
                 if flags & 1 != 0 {
                     current.landscape = state.landscape.clone();
+                    // A saved section landscape reloads as ExactLandscape;
+                    // C++ has no S2 creator or callback masks to replay.
+                    current.post_init_map_callbacks =
+                        map_creator_s2::PostInitMapCallbacks::default();
+                    if let Some(raster) = current
+                        .landscape
+                        .as_mut()
+                        .and_then(Landscape::raster_state_mut)
+                    {
+                        raster.set_map_creator(None);
+                    }
                     current.scenario_values = self.scenario_values.as_ref().clone();
                     current.base_reject_entrance_enabled =
                         self.base_reject_entrance_enabled;
@@ -32581,6 +32702,9 @@ impl Engine {
             .get(&key)
             .cloned()
             .expect("section presence checked above");
+        let run_post_init_map = !target.no_initialize && target.landscape.is_some();
+        let post_init_map_callbacks = target.post_init_map_callbacks.clone();
+        let keep_map_creator = target.keep_map_creator;
         let retained = state
             .objects
             .iter()
@@ -32630,6 +32754,12 @@ impl Engine {
         self.fix_random();
         if load_initial_objects {
             self.spawn_scenario_section_objects(target.initial_objects)?;
+        }
+        if run_post_init_map {
+            self.run_post_init_map_callbacks(&post_init_map_callbacks)?;
+            if !keep_map_creator {
+                self.clear_runtime_map_creator();
+            }
         }
         self.current_scenario_section = target.name;
         self.last_scenario_section_flags = Some(flags);
@@ -48270,8 +48400,12 @@ impl Engine {
                     map_width,
                     map_height,
                     texmap,
+                    map_creator,
                 } => {
                     let _ = self.draw_indexed_map(origin, &bitmap, map_width, map_height, texmap);
+                    if let Some(map_creator) = map_creator {
+                        let _ = self.replace_runtime_map_creator(map_creator.0);
+                    }
                 }
                 LandscapeOperation::DrawDefMap {
                     origin,
@@ -59373,6 +59507,9 @@ mod scenario_section_random_regression {
         scenario::ScenarioSectionSpec {
             name: name.to_string(),
             landscape: Some(Landscape::flat(width, 40)),
+            post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks::default(),
+            keep_map_creator: false,
+            no_initialize: false,
             objects: Vec::new(),
             scenario_values: scenario::ScenarioValueStore::default(),
             environment: EnvironmentSettings::default(),
@@ -59400,6 +59537,9 @@ mod scenario_section_random_regression {
         scenario::ScenarioSectionSpec {
             name: name.to_string(),
             landscape: Some(landscape),
+            post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks::default(),
+            keep_map_creator: false,
+            no_initialize: false,
             objects: Vec::new(),
             scenario_values: scenario::ScenarioValueStore::default(),
             environment: EnvironmentSettings::default(),

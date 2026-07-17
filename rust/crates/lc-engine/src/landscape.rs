@@ -5762,6 +5762,18 @@ impl crate::Engine {
         };
         landscape.replace_runtime_map_creator_state(creator)
     }
+
+    pub(crate) fn clear_runtime_map_creator(&mut self) -> bool {
+        let Some(state) = self
+            .landscape
+            .as_mut()
+            .and_then(Landscape::raster_state_mut)
+        else {
+            return false;
+        };
+        state.set_map_creator(None);
+        true
+    }
 }
 
 impl LandscapeCommand {

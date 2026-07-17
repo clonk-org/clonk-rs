@@ -2927,8 +2927,20 @@ impl HostWorldContext {
     /// in both cases.
     pub(crate) fn preview_runtime_landscape_operation(&mut self, operation: &LandscapeOperation) {
         match operation {
-            LandscapeOperation::DrawMap { texmap, .. }
-            | LandscapeOperation::SyncRuntimeTexMap { texmap } => {
+            LandscapeOperation::DrawMap {
+                texmap,
+                map_creator,
+                ..
+            } => {
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let _ = landscape.replace_runtime_texmap_state(texmap.clone());
+                if let Some(map_creator) = map_creator {
+                    let _ = landscape.replace_runtime_map_creator_state(map_creator.0.clone());
+                }
+            }
+            LandscapeOperation::SyncRuntimeTexMap { texmap } => {
                 let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
                     return;
                 };
@@ -17442,6 +17454,7 @@ pub enum LandscapeOperation {
         map_width: i32,
         map_height: i32,
         texmap: crate::landscape::RuntimeTexMapState,
+        map_creator: Option<RetainedMapCreatorUpdate>,
     },
     /// FnDrawDefMap mutates the scenario's retained C4MapCreatorS2 before
     /// mapping its named map to the landscape (C4Landscape.cpp:2672-2696).
@@ -28367,7 +28380,7 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Int(0));
         };
-        let Some((landscape_width, landscape_height, map_zoom, retained_creator)) =
+        let Some((landscape_width, landscape_height, map_zoom, mut retained_creator)) =
             context.world.landscape_ref().and_then(|landscape| {
                 let (landscape_width, landscape_height) = landscape.grid_dimensions()?;
                 let raster = landscape.raster_state()?;
@@ -28407,6 +28420,18 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         let texmap_before = texmap.clone();
         let mut classifier = crate::scenario::MapPixelClassifier::from_runtime_state(texmap);
+        let script_functions = context
+            .world
+            .scenario_script()
+            .map(|script| {
+                script
+                    .functions()
+                    .keys()
+                    .filter(|name| script.has_local_function(name))
+                    .cloned()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
         let rendered = RANDOM_CONTEXT.with(|random_cell| {
             let random_context = random_cell
                 .borrow()
@@ -28415,12 +28440,13 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
                 .ok_or_else(|| RuntimeError::new("DrawMap: random context unavailable"))?;
             let mut rng = random_context.rng.borrow_mut();
             Ok(crate::map_creator_s2::render_runtime_s2_map(
-                retained_creator.as_ref(),
+                retained_creator.as_mut(),
                 &source,
                 &mut classifier,
                 map_width,
                 map_height,
                 &mut rng,
+                &script_functions,
             ))
         });
         let texmap = classifier.into_runtime_state();
@@ -28435,12 +28461,14 @@ fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             return Ok(Value::Int(0));
         };
+        let map_creator = retained_creator.map(RetainedMapCreatorUpdate);
         let operation = LandscapeOperation::DrawMap {
             origin: Vector2::new(clipped_x, clipped_y),
             bitmap,
             map_width,
             map_height,
             texmap,
+            map_creator,
         };
         context.world.preview_runtime_landscape_operation(&operation);
         context.register_landscape_operation(operation);
@@ -57286,6 +57314,7 @@ public func RejectConstruction(x, y, builder)
                 map_width,
                 map_height,
                 texmap,
+                ..
             } => {
                 assert_eq!(*origin, Vector2::new(0, 1));
                 assert_eq!((*map_width, *map_height), (2, 2));

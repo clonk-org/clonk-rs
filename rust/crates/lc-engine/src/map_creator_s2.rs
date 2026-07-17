@@ -9,14 +9,14 @@
 //! FixRandom bracket of C4Landscape::Init (src/C4Landscape.cpp:578,734),
 //! keeping the post-init synced ledger untouched.
 //!
-//! Unsupported (no shipped content uses them): `evalFn=`/`drawFn=` script
-//! callbacks and `algo=script` — the field setters fail like C++'s missing
-//! script-func parse error, which degrades to the basic map creator.
+//! `evalFn=`/`drawFn=` record pixels during rendering for the post-landscape
+//! scenario-script callback phase. `algo=script` remains unsupported.
 
 use crate::map_creator::evaluate_map_size;
 use crate::rng::LcgRng;
 use crate::scenario::{LegacyC4SVal, MapPixelClassifier};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// `C4MC_SizeRes` — positions in percent (C4MapCreatorS2.h:29).
 const SIZE_RES: i32 = 100;
@@ -24,6 +24,7 @@ const SIZE_RES: i32 = 100;
 const ZOOM_RES: i32 = 100;
 
 type NodeId = usize;
+type CallbackId = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Op {
@@ -130,6 +131,12 @@ struct Overlay {
     loose_bounds: bool,
     group: bool,
     mask: bool,
+    /// Creator-global callback arrays. Template clones copy these IDs so all
+    /// instances union their enabled pixels into the original array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    eval_callback: Option<CallbackId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draw_callback: Option<CallbackId>,
 }
 
 impl Overlay {
@@ -169,6 +176,8 @@ impl Overlay {
             loose_bounds: false,
             group: false,
             mask: false,
+            eval_callback: None,
+            draw_callback: None,
         }
     }
 
@@ -205,27 +214,207 @@ struct Node {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Tree {
     nodes: Vec<Node>,
+    /// C4MapCreatorS2::CallbackArrays in successful field-assignment order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    callbacks: Vec<CallbackDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CallbackDefinition {
+    function: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallbackArray {
+    function: String,
+    width: i32,
+    height: i32,
+    bits: Vec<u8>,
+}
+
+/// Pixel masks deferred from C4MCMap::RenderTo to
+/// C4Landscape::PostInitMap. They remain live on the retained creator until
+/// PostInitMap finishes so callback-triggered DrawDefMap/DrawMap calls can add
+/// pixels that have not yet been visited by the descending execution pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PostInitMapCallbacks {
+    arrays: Vec<CallbackArray>,
+    map_zoom: i32,
+}
+
+impl PostInitMapCallbacks {
+    pub(crate) fn set_map_zoom(&mut self, map_zoom: i32) {
+        self.map_zoom = map_zoom;
+    }
+
+    pub(crate) fn invocations(&self) -> impl Iterator<Item = (&str, [i32; 3])> + '_ {
+        let zoom = self.map_zoom;
+        self.arrays.iter().flat_map(move |array| {
+            let size = array.width.saturating_mul(array.height).max(0) as usize;
+            (0..size).rev().filter_map(move |index| {
+                let enabled = array
+                    .bits
+                    .get(index / 8)
+                    .is_some_and(|byte| byte & (1 << (index % 8)) != 0);
+                enabled.then(|| {
+                    let index = index as i32;
+                    (
+                        array.function.as_str(),
+                        [
+                            (index % array.width) * zoom - zoom / 2,
+                            (index / array.width) * zoom - zoom / 2,
+                            zoom,
+                        ],
+                    )
+                })
+            })
+        })
+    }
+
+    pub(crate) fn array_count(&self) -> usize {
+        self.arrays.len()
+    }
+
+    pub(crate) fn array_size(&self, array: usize) -> usize {
+        self.arrays
+            .get(array)
+            .map(|array| array.width.saturating_mul(array.height).max(0) as usize)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn invocation_at(
+        &self,
+        array: usize,
+        index: usize,
+    ) -> Option<(String, [i32; 3])> {
+        let array = self.arrays.get(array)?;
+        let enabled = array
+            .bits
+            .get(index / 8)
+            .is_some_and(|byte| byte & (1 << (index % 8)) != 0);
+        enabled.then(|| {
+            let index = index as i32;
+            (
+                array.function.clone(),
+                [
+                    (index % array.width) * self.map_zoom - self.map_zoom / 2,
+                    (index / array.width) * self.map_zoom - self.map_zoom / 2,
+                    self.map_zoom,
+                ],
+            )
+        })
+    }
+
+    fn merge_runtime_clone_prefix_from(&mut self, other: &Self, count: usize) {
+        for (target, source) in self
+            .arrays
+            .iter_mut()
+            .zip(&other.arrays)
+            .take(count)
+        {
+            // A DrawMap clone's overlays still point at arrays owned by the
+            // original creator. If such an array has no bitmap yet,
+            // EnablePixel consults the ORIGINAL pCurrentMap (null while the
+            // clone renders) and therefore cannot allocate it.
+            if target.is_empty() {
+                continue;
+            }
+            for index in 0..source.width.saturating_mul(source.height).max(0) as usize {
+                if source
+                    .bits
+                    .get(index / 8)
+                    .is_some_and(|byte| byte & (1 << (index % 8)) != 0)
+                {
+                    let index = index as i32;
+                    target.enable(
+                        index % source.width,
+                        index / source.width,
+                        source.width,
+                        source.height,
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl CallbackArray {
+    fn new(definition: &CallbackDefinition) -> Self {
+        Self {
+            function: definition.function.clone(),
+            width: 0,
+            height: 0,
+            // C4MCCallbackArray allocates its bitmap on the first enabled
+            // pixel; unused and overwritten declarations stay allocation-free.
+            bits: Vec::new(),
+        }
+    }
+
+    fn enable(&mut self, x: i32, y: i32, width: i32, height: i32) {
+        if self.bits.is_empty() {
+            self.width = width;
+            self.height = height;
+            let size = self.width.saturating_mul(self.height).max(0) as usize;
+            self.bits.resize(size.div_ceil(8), 0);
+        }
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return;
+        }
+        let index = (x + y * self.width) as usize;
+        self.bits[index / 8] |= 1 << (index % 8);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bits.is_empty()
+    }
 }
 
 /// The parsed and evaluated `C4MapCreatorS2` node tree retained by
 /// `KeepMapCreator`. Runtime `DrawMap` can clone this tree to resolve the
 /// scenario's named overlay templates without reparsing ranges or drawing
 /// new synced random values (C4Landscape.cpp:2650-2658).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MapCreatorS2State {
     tree: Tree,
+    #[serde(skip, default)]
+    callbacks: PostInitMapCallbacks,
 }
+
+// Callback bitmaps are transient PostInitMap work, deliberately omitted from
+// saves. Creator identity/equality therefore follows the persisted S2 tree.
+impl PartialEq for MapCreatorS2State {
+    fn eq(&self, other: &Self) -> bool {
+        self.tree == other.tree
+    }
+}
+
+impl Eq for MapCreatorS2State {}
 
 impl MapCreatorS2State {
     #[cfg(test)]
     fn node_count(&self) -> usize {
         self.tree.nodes.len()
     }
+
+    pub(crate) fn set_callback_map_zoom(&mut self, map_zoom: i32) {
+        self.callbacks.set_map_zoom(map_zoom);
+    }
+
+    pub(crate) fn callbacks(&self) -> &PostInitMapCallbacks {
+        &self.callbacks
+    }
 }
 
 pub(crate) struct S2MapCreation {
     pub(crate) bitmap: Option<lc_resources::bitmap::IndexedBitmap>,
     pub(crate) creator: MapCreatorS2State,
+    pub(crate) callbacks: PostInitMapCallbacks,
+}
+
+#[derive(Default)]
+struct PixelRenderTrace {
+    eval_callbacks: Vec<CallbackId>,
+    rendered_overlay: Option<NodeId>,
 }
 
 impl Tree {
@@ -237,6 +426,7 @@ impl Tree {
                 name: String::new(),
                 kind: NodeKind::Root,
             }],
+            callbacks: Vec::new(),
         }
     }
 
@@ -266,6 +456,12 @@ impl Tree {
             NodeKind::Overlay(overlay) => Some(overlay),
             _ => None,
         }
+    }
+
+    fn add_callback(&mut self, function: String) -> CallbackId {
+        let id = self.callbacks.len();
+        self.callbacks.push(CallbackDefinition { function });
+        id
     }
 
     fn add(&mut self, owner: NodeId, name: String, kind: NodeKind) -> NodeId {
@@ -510,6 +706,7 @@ impl Tree {
         last_op: Op,
         last_set: bool,
         draw: bool,
+        mut trace: Option<&mut PixelRenderTrace>,
     ) -> bool {
         let overlay = self.overlay(id).expect("render_pix on overlay");
         let set_this = self.check_mask(id, ix, iy);
@@ -526,16 +723,35 @@ impl Tree {
             let draw = draw && (!overlay.group || overlay.op == Op::None);
             if draw && do_set && !overlay.mask {
                 *pix = overlay.mat_clr;
+                if let Some(trace) = trace.as_deref_mut() {
+                    trace.rendered_overlay = Some(id);
+                }
             }
             let mut last_set_c = false;
             let mut child_op = Op::None;
             for &child in &self.nodes[id].children {
                 if let Some(child_overlay) = self.overlay(child) {
-                    last_set_c = self.render_pix(child, ix, iy, pix, child_op, last_set_c, draw);
+                    last_set_c = self.render_pix(
+                        child,
+                        ix,
+                        iy,
+                        pix,
+                        child_op,
+                        last_set_c,
+                        draw,
+                        trace.as_deref_mut(),
+                    );
                     if overlay.group && child_overlay.op == Op::None {
                         do_set |= last_set_c;
                     }
                     child_op = child_overlay.op;
+                }
+            }
+            if do_set && draw {
+                if let (Some(callback), Some(trace)) =
+                    (overlay.eval_callback, trace.as_deref_mut())
+                {
+                    trace.eval_callbacks.push(callback);
                 }
             }
         }
@@ -549,7 +765,8 @@ impl Tree {
         let mut last_op = Op::None;
         let mut crap = 0u8;
         loop {
-            last_set = self.render_pix(current, ix, iy, &mut crap, last_op, last_set, false);
+            last_set =
+                self.render_pix(current, ix, iy, &mut crap, last_op, last_set, false, None);
             let overlay = self.overlay(current).expect("peek chain overlay");
             last_op = overlay.op;
             if overlay.op == Op::None {
@@ -969,6 +1186,7 @@ struct Parser<'a, 'b> {
     default_map: Overlay,
     classifier: &'b mut MapPixelClassifier,
     rng: &'b mut LcgRng,
+    script_functions: &'b HashSet<String>,
 }
 
 impl Parser<'_, '_> {
@@ -1292,6 +1510,7 @@ impl Parser<'_, '_> {
                     Material(String),
                     Texture(String),
                     Algo(Algo),
+                    Callback(String),
                 }
                 let pending = match field {
                     "mat" => {
@@ -1322,11 +1541,16 @@ impl Parser<'_, '_> {
                         Some(Pending::Algo(algo))
                     }
                     "evalFn" | "drawFn" => {
-                        return Err(format!(
-                            "script func '{}' not supported by the rust map creator",
-                            str_par()?
-                        ));
+                        let name = str_par()?.to_string();
+                        if !self.script_functions.contains(&name) {
+                            return Err(format!("script func '{name}' not found"));
+                        }
+                        Some(Pending::Callback(name))
                     }
+                    _ => None,
+                };
+                let callback = match &pending {
+                    Some(Pending::Callback(name)) => Some(self.tree.add_callback(name.clone())),
                     _ => None,
                 };
                 let overlay = self.tree.overlay_mut(node).expect("overlay field");
@@ -1353,6 +1577,8 @@ impl Parser<'_, '_> {
                             overlay.algorithm = algo;
                         }
                     }
+                    "evalFn" => overlay.eval_callback = callback,
+                    "drawFn" => overlay.draw_callback = callback,
                     "sub" => overlay.sub = int_par()? != 0,
                     // C4MCV_Zoom: BoundBy(ZoomRes - value, 1, 2*ZoomRes)
                     // (src/C4MapCreatorS2.cpp:366-368).
@@ -1417,6 +1643,32 @@ pub(crate) fn create_s2_map_with_state(
     player_count: i32,
     rng: &mut LcgRng,
 ) -> S2MapCreation {
+    create_s2_map_with_state_and_functions(
+        source,
+        classifier,
+        map_width,
+        map_height,
+        map_player_extend,
+        player_count,
+        rng,
+        &HashSet::new(),
+    )
+}
+
+/// Initial-landscape form with the already-linked scenario host's named
+/// script functions. C4MCV_ScriptFunc rejects a missing name during parsing,
+/// but rendering merely records pixels for the later PostInitMap phase.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_s2_map_with_state_and_functions(
+    source: &str,
+    classifier: &mut MapPixelClassifier,
+    map_width: LegacyC4SVal,
+    map_height: LegacyC4SVal,
+    map_player_extend: bool,
+    player_count: i32,
+    rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
+) -> S2MapCreation {
     // C4MCMap::Default (src/C4MapCreatorS2.cpp:633-644) runs at creator
     // construction: MapWdt/MapHgt evaluate through the synced rng.
     let (wdt, hgt) = evaluate_map_size(map_width, map_height, map_player_extend, player_count, rng);
@@ -1427,23 +1679,32 @@ pub(crate) fn create_s2_map_with_state(
         default_map_for_size(wdt, hgt),
         rng,
         false,
+        script_functions,
     )
 }
 
 /// Runtime C4MapCreatorS2 construction seam for C4Landscape::DrawMap
 /// (C4Landscape.cpp:2636-2668). With KeepMapCreator state, the evaluated
 /// tree is cloned so additional script can resolve its named templates;
-/// otherwise parsing starts from a fresh root. The retained state is never
-/// mutated. No landscape write or script host is performed here.
+/// otherwise parsing starts from a fresh root. Overlay callback pointers in
+/// the clone still target the original creator's live arrays, so matching
+/// runtime pixels are merged back before the temporary creator is discarded.
+/// No landscape write or script host is performed here.
 pub(crate) fn render_runtime_s2_map(
-    retained: Option<&MapCreatorS2State>,
+    retained: Option<&mut MapCreatorS2State>,
     source: &str,
     classifier: &mut MapPixelClassifier,
     map_width: i32,
     map_height: i32,
     rng: &mut LcgRng,
+    script_functions: &HashSet<String>,
 ) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let original_callback_count = retained
+        .as_ref()
+        .map(|creator| creator.tree.callbacks.len())
+        .unwrap_or(0);
     let tree = retained
+        .as_ref()
         .map(|creator| creator.tree.clone_creator())
         .unwrap_or_else(Tree::new);
     // FakeLS.MapWdt/MapHgt are C4SVal(requested, 0, requested, requested).
@@ -1451,15 +1712,21 @@ pub(crate) fn render_runtime_s2_map(
     // returns the exact value (C4Scenario.cpp:38-46).
     let _ = rng.random(1);
     let _ = rng.random(1);
-    parse_and_render_s2_map(
+    let creation = parse_and_render_s2_map(
         tree,
         source,
         classifier,
         default_map_for_size(map_width, map_height),
         rng,
         true,
-    )
-    .bitmap
+        script_functions,
+    );
+    if let Some(retained) = retained {
+        retained
+            .callbacks
+            .merge_runtime_clone_prefix_from(&creation.callbacks, original_callback_count);
+    }
+    creation.bitmap
 }
 
 fn default_map_for_size(wdt: i32, hgt: i32) -> Overlay {
@@ -1477,6 +1744,7 @@ fn parse_and_render_s2_map(
     default_map: Overlay,
     rng: &mut LcgRng,
     runtime_source: bool,
+    script_functions: &HashSet<String>,
 ) -> S2MapCreation {
     let mut parser = Parser {
         tokens: Tokenizer::new(source),
@@ -1484,6 +1752,7 @@ fn parse_and_render_s2_map(
         default_map,
         classifier,
         rng,
+        script_functions,
     };
     if let Err(error) = parser.parse_into(0) {
         // C4MCParserErr::show (src/C4MapCreatorS2.cpp:823-827): log and
@@ -1496,10 +1765,14 @@ fn parse_and_render_s2_map(
     }
     let tree = parser.tree;
 
-    let bitmap = render_last_map(&tree);
+    let (bitmap, callbacks) = render_last_map(&tree);
     S2MapCreation {
         bitmap,
-        creator: MapCreatorS2State { tree },
+        creator: MapCreatorS2State {
+            tree,
+            callbacks: callbacks.clone(),
+        },
+        callbacks,
     }
 }
 
@@ -1513,8 +1786,19 @@ fn last_map(tree: &Tree) -> Option<NodeId> {
         .copied()
 }
 
-fn render_last_map(tree: &Tree) -> Option<lc_resources::bitmap::IndexedBitmap> {
-    render_map(tree, last_map(tree)?)
+fn render_last_map(
+    tree: &Tree,
+) -> (
+    Option<lc_resources::bitmap::IndexedBitmap>,
+    PostInitMapCallbacks,
+) {
+    let Some(map) = last_map(tree) else {
+        return (None, PostInitMapCallbacks::default());
+    };
+    render_map_with_callbacks(tree, map)
+        .map_or_else(|| (None, PostInitMapCallbacks::default()), |(bitmap, callbacks)| {
+            (Some(bitmap), callbacks)
+        })
 }
 
 fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedBitmap> {
@@ -1524,13 +1808,88 @@ fn render_map(tree: &Tree, map: NodeId) -> Option<lc_resources::bitmap::IndexedB
         return None;
     }
 
-    // C4MCMap::RenderTo (src/C4MapCreatorS2.cpp:646-674).
     let mut bytes = vec![0u8; (wdt * hgt) as usize];
     for iy in 0..hgt {
         for ix in 0..wdt {
             let pix = &mut bytes[(iy * wdt + ix) as usize];
             *pix = 0;
-            tree.render_pix(map, ix, iy, pix, Op::None, false, true);
+            tree.render_pix(map, ix, iy, pix, Op::None, false, true, None);
+        }
+    }
+    Some(lc_resources::bitmap::IndexedBitmap {
+        width: wdt as u32,
+        height: hgt as u32,
+        indices: bytes,
+    })
+}
+
+fn render_map_with_callbacks(
+    tree: &Tree,
+    map: NodeId,
+) -> Option<(
+    lc_resources::bitmap::IndexedBitmap,
+    PostInitMapCallbacks,
+)> {
+    if tree.callbacks.is_empty() {
+        return render_map(tree, map)
+            .map(|bitmap| (bitmap, PostInitMapCallbacks::default()));
+    }
+    let mut callbacks = PostInitMapCallbacks {
+        arrays: tree
+            .callbacks
+            .iter()
+            .map(CallbackArray::new)
+            .collect(),
+        map_zoom: 0,
+    };
+    let bitmap = render_map_recording_callbacks(tree, map, &mut callbacks)?;
+    Some((bitmap, callbacks))
+}
+
+fn render_map_recording_callbacks(
+    tree: &Tree,
+    map: NodeId,
+    callbacks: &mut PostInitMapCallbacks,
+) -> Option<lc_resources::bitmap::IndexedBitmap> {
+    let map_overlay = tree.overlay(map)?;
+    let (wdt, hgt) = (map_overlay.wdt, map_overlay.hgt);
+    if wdt <= 0 || hgt <= 0 {
+        return None;
+    }
+
+    // C4MCMap::RenderTo (src/C4MapCreatorS2.cpp:646-674).
+    let mut bytes = vec![0u8; (wdt * hgt) as usize];
+    let mut trace = PixelRenderTrace::default();
+    for iy in 0..hgt {
+        for ix in 0..wdt {
+            let pix = &mut bytes[(iy * wdt + ix) as usize];
+            *pix = 0;
+            trace.eval_callbacks.clear();
+            trace.rendered_overlay = None;
+            tree.render_pix(
+                map,
+                ix,
+                iy,
+                pix,
+                Op::None,
+                false,
+                true,
+                Some(&mut trace),
+            );
+            for &callback in &trace.eval_callbacks {
+                if let Some(array) = callbacks.arrays.get_mut(callback) {
+                    array.enable(ix, iy, wdt, hgt);
+                }
+            }
+            if let Some(callback) = trace
+                .rendered_overlay
+                .and_then(|overlay| tree.overlay(overlay))
+                .and_then(|overlay| overlay.draw_callback)
+            {
+                if let Some(array) = callbacks.arrays.get_mut(callback) {
+                    array.enable(ix, iy, wdt, hgt);
+                }
+            }
         }
     }
     Some(lc_resources::bitmap::IndexedBitmap {
@@ -1568,7 +1927,7 @@ pub(crate) fn render_named_s2_map(
     map_overlay.wdt = map_width;
     map_overlay.hgt = map_height;
     creator.tree.re_evaluate(0, classifier, rng);
-    render_map(&creator.tree, map)
+    render_map_recording_callbacks(&creator.tree, map, &mut creator.callbacks)
 }
 
 #[cfg(test)]
@@ -1764,6 +2123,9 @@ mod tests {
         assert!(creation.creator.node_count() > 1);
 
         let encoded = serde_json::to_string(&creation.creator).expect("creator serializes");
+        assert!(!encoded.contains("callbacks"));
+        assert!(!encoded.contains("eval_callback"));
+        assert!(!encoded.contains("draw_callback"));
         let restored: MapCreatorS2State =
             serde_json::from_str(&encoded).expect("creator restores");
         assert_eq!(restored, creation.creator);
@@ -1778,7 +2140,7 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(17);
         let (w, h) = params();
-        let retained = create_s2_map_with_state(
+        let mut retained = create_s2_map_with_state(
             "overlay Named { mat = Earth; tex = Rough; wdt = 50; seed = 7; };",
             &mut classifier,
             w,
@@ -1792,12 +2154,13 @@ mod tests {
         let before = rng.count;
 
         let map = render_runtime_s2_map(
-            Some(&retained),
+            Some(&mut retained),
             "map Runtime { seed = 9; Named; };",
             &mut classifier,
             8,
             4,
             &mut rng,
+            &HashSet::new(),
         )
         .expect("cloned creator renders retained template");
 
@@ -1877,6 +2240,7 @@ mod tests {
             9,
             5,
             &mut runtime_rng,
+            &HashSet::new(),
         )
         .expect("fresh runtime creator renders");
         let initial = create_s2_map(
@@ -2108,6 +2472,164 @@ mod tests {
         assert_eq!(at(2, 5), 3 | 0x80, "left rim is Rock");
         assert_eq!(at(9, 5), 2 | 0x80, "interior stays Earth-Rough");
         assert_eq!(at(1, 5), 0, "outside stays sky");
+    }
+
+    #[test]
+    fn eval_and_draw_callbacks_capture_cpp_pixel_masks_in_field_order() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let functions = ["EvalA", "DrawA", "EvalB", "DrawB", "EvalMask", "DrawMask"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let creation = create_s2_map_with_state_and_functions(
+            "map Test { seed=1; \
+               overlay { x=0px; y=0px; wdt=2px; hgt=2px; seed=2; \
+                         evalFn=EvalA; drawFn=DrawA; }; \
+               overlay { x=1px; y=0px; wdt=2px; hgt=1px; seed=3; \
+                         evalFn=EvalB; drawFn=DrawB; }; \
+               overlay { wdt=3px; hgt=2px; seed=4; mask=1; \
+                         evalFn=EvalMask; drawFn=DrawMask; }; \
+             };",
+            &mut classifier,
+            LegacyC4SVal::new(3, 0, 3, 3),
+            LegacyC4SVal::new(2, 0, 2, 2),
+            false,
+            1,
+            &mut rng,
+            &functions,
+        );
+
+        let bitmap = creation.bitmap.expect("callback map still renders");
+        assert_eq!((bitmap.width, bitmap.height), (3, 2));
+        assert_eq!(
+            creation
+                .callbacks
+                .arrays
+                .iter()
+                .filter(|array| !array.is_empty())
+                .map(|array| (array.function.as_str(), array.bits.as_slice()))
+                .collect::<Vec<_>>(),
+            [
+                ("EvalA", &[0x1b][..]),
+                ("DrawA", &[0x19][..]),
+                ("EvalB", &[0x06][..]),
+                ("DrawB", &[0x06][..]),
+                ("EvalMask", &[0x3f][..]),
+            ],
+            "eval records boolean fulfillment while draw records only the final writer"
+        );
+    }
+
+    #[test]
+    fn operator_suppressed_group_never_arms_eval_or_draw_callbacks() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let functions = ["GroupEval", "ChildEval", "ChildDraw", "TailEval", "TailDraw"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let creation = create_s2_map_with_state_and_functions(
+            "map Test { seed=1; \
+               overlay { seed=2; grp=1; evalFn=GroupEval; \
+                 overlay { seed=3; evalFn=ChildEval; drawFn=ChildDraw; }; \
+               } & overlay { seed=4; evalFn=TailEval; drawFn=TailDraw; }; \
+             };",
+            &mut classifier,
+            LegacyC4SVal::new(3, 0, 3, 3),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+            &functions,
+        );
+
+        assert!(creation.bitmap.is_some());
+        assert_eq!(
+            creation
+                .callbacks
+                .arrays
+                .iter()
+                .filter(|array| !array.is_empty())
+                .map(|array| (array.function.as_str(), array.bits.as_slice()))
+                .collect::<Vec<_>>(),
+            [("TailEval", &[0x07][..]), ("TailDraw", &[0x07][..])],
+            "the left operand and its children evaluate with fDraw=false"
+        );
+    }
+
+    #[test]
+    fn template_copies_share_the_original_callback_arrays() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let functions = ["OnEval", "OnDraw"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let creation = create_s2_map_with_state_and_functions(
+            "overlay Marked { x=0px; y=0px; wdt=1px; hgt=1px; seed=2; \
+                              evalFn=OnEval; drawFn=OnDraw; }; \
+             map Test { seed=1; Marked; Marked { x=2px; }; };",
+            &mut classifier,
+            LegacyC4SVal::new(3, 0, 3, 3),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+            &functions,
+        );
+
+        assert!(creation.bitmap.is_some());
+        assert_eq!(
+            creation
+                .callbacks
+                .arrays
+                .iter()
+                .map(|array| (array.function.as_str(), array.bits.as_slice()))
+                .collect::<Vec<_>>(),
+            [("OnEval", &[0x05][..]), ("OnDraw", &[0x05][..])]
+        );
+    }
+
+    #[test]
+    fn runtime_draw_map_accepts_valid_callback_fields_without_executing_them() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let functions = ["OnDraw"].into_iter().map(str::to_string).collect();
+        let map = render_runtime_s2_map(
+            None,
+            "map Runtime { seed=1; drawFn=OnDraw; mat=Earth; tex=Rough; \
+               overlay { x=1px; y=0px; wdt=1px; hgt=1px; seed=2; \
+                         mat=Rock; tex=Ridge; sub=0; }; \
+             };",
+            &mut classifier,
+            2,
+            1,
+            &mut rng,
+            &functions,
+        )
+        .expect("valid runtime callback field does not abort the later overlay");
+
+        assert_eq!(map.indices, vec![2 | 0x80, 3]);
+    }
+
+    #[test]
+    fn missing_callback_function_stops_parse_before_later_map() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let creation = create_s2_map_with_state_and_functions(
+            "overlay Bad { evalFn=Missing; }; map Late { seed=1; };",
+            &mut classifier,
+            LegacyC4SVal::new(3, 0, 3, 3),
+            LegacyC4SVal::new(2, 0, 2, 2),
+            false,
+            1,
+            &mut rng,
+            &HashSet::new(),
+        );
+
+        assert!(creation.bitmap.is_none(), "the later map was never parsed");
+        assert!(creation.callbacks.arrays.is_empty());
     }
 
     #[test]
