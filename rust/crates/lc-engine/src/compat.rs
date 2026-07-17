@@ -3116,6 +3116,10 @@ impl HostWorldContext {
         self.scenario_values.get(entry, section, entry_nr)
     }
 
+    fn landscape_push_pull(&self) -> bool {
+        self.scenario_values.landscape_push_pull()
+    }
+
     pub(crate) fn with_movement_solid_masks(mut self, masks: Vec<crate::SolidMaskRect>) -> Self {
         self.movement_solid_masks = Rc::new(masks);
         self
@@ -39634,6 +39638,8 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
         let density = definition.density();
+        let max_slide = definition.max_slide();
+        let instable = definition.instable();
         let position = context
             .caller_scope()
             .map_or(Vector2::new(x, y), |(_, base)| {
@@ -39646,7 +39652,15 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         let can_insert = context.world.landscape_ref().is_some_and(|landscape| {
             landscape
-                .insert_material_destination(position.x, position.y, density, materials)
+                .insert_material_destination(
+                    position.x,
+                    position.y,
+                    density,
+                    context.world.landscape_push_pull(),
+                    max_slide,
+                    instable,
+                    materials,
+                )
                 .is_some()
         });
         if !can_insert {
@@ -58853,6 +58867,82 @@ public func RejectConstruction(x, y, builder)
                 && *position == Vector2::new(0, 0)
                 && *velocity == Vector2::new(0, 0)
         ));
+    }
+
+    #[test]
+    fn insert_material_push_pull_preflight_routes_an_escape_and_rejects_a_sealed_pocket() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Water]\nName=Water\nDensity=25\nMaxSlide=1\nInstable=1\n\n\
+             [Material Earth]\nName=Earth\nDensity=100\n",
+        )
+        .expect("push-pull materials build");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let world = |width: u32, height: u32, bytes: Vec<u8>, push_pull: bool| {
+            let materials = materials.clone();
+            let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
+                .expect("landscape builds");
+            landscape.set_world_height(height as i32);
+            landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+                width,
+                height,
+                bytes,
+                vec![0, 25, 100],
+                vec![None, Some("Water".into()), Some("Earth".into())],
+                vec![None; 3],
+            ));
+            landscape.set_border_open(0, 0, false, false);
+            landscape.resolve_grid_materials(|name| materials.id_of(name));
+            HostWorldContext::with_landscape(
+                Vec::<HostWorldObject>::new(),
+                Some(landscape),
+                HashMap::new(),
+                Vec::new(),
+                HashMap::new(),
+                HashMap::new(),
+                1,
+                false,
+            )
+            .with_scenario_values(Rc::new(
+                ScenarioValueStore::with_landscape_push_pull_for_test(push_pull),
+            ))
+            .with_materials(Some(Rc::new(materials)))
+        };
+        let probe = |world| {
+            with_effect_context(None, &[], world, 1, || {
+                insert_material(&[
+                    Value::Int(water.index() as i32),
+                    Value::Int(2),
+                    Value::Int(2),
+                ])
+            })
+        };
+
+        let mut corridor = vec![2; 25];
+        corridor[2 * 5] = 0;
+        corridor[2 * 5 + 1] = 1;
+        corridor[2 * 5 + 2] = 1;
+        corridor[2 * 5 + 3] = 1;
+        let (result, outcome) = probe(world(5, 5, corridor.clone(), false));
+        assert_eq!(result.expect("default preflight succeeds"), Value::Bool(false));
+        assert!(outcome.landscape.is_empty());
+
+        let (result, outcome) = probe(world(5, 5, corridor, true));
+        assert_eq!(result.expect("push preflight succeeds"), Value::Bool(true));
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [LandscapeOperation::InsertMaterial { material, position, velocity }]
+                if *material == water.index() as i32
+                    && *position == Vector2::new(2, 2)
+                    && *velocity == Vector2::ZERO
+        ));
+
+        let (result, outcome) = probe(world(3, 3, vec![2; 9], true));
+        assert_eq!(
+            result.expect("sealed push preflight succeeds"),
+            Value::Bool(false)
+        );
+        assert!(outcome.landscape.is_empty());
     }
 
     #[test]

@@ -3860,6 +3860,13 @@ impl ScenarioValueStore {
         Self::from_runtime_core(&core, false)
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_landscape_push_pull_for_test(enabled: bool) -> Self {
+        let mut core = LegacyScenarioCore::default();
+        core.game.realism.landscape_push_pull = i32::from(enabled);
+        Self::from_runtime_core(&core, false)
+    }
+
     fn entry(name: &'static str, values: Vec<ScenarioValue>) -> ScenarioValueEntry {
         ScenarioValueEntry {
             name: name.to_string(),
@@ -4228,6 +4235,13 @@ impl ScenarioValueStore {
                 })
             }).is_some_and(|count| count != 0)
         })
+    }
+
+    pub(crate) fn landscape_push_pull(&self) -> bool {
+        matches!(
+            self.get("LandscapePushPull", Some("Game"), 0),
+            Some(ScenarioValue::Int(value)) if *value != 0
+        )
     }
 
     /// Mirrors C4ValueGetCompiler's traversal: with no section, same-name

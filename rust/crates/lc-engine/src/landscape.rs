@@ -4453,14 +4453,178 @@ impl Landscape {
         false
     }
 
-    /// The failure-producing prefix of `C4Landscape::InsertMaterial` for
-    /// Clonk Rage's default `LandscapePushPull=0` path. Once this succeeds,
-    /// slide, reaction, and dead-pixel insertion paths all return true.
+    /// `C4Landscape::FindMatPathPush` (C4Landscape.cpp:1282-1415): walk the
+    /// equal-density border and select the closest lower-density point.
+    /// `liquid` is the material's `Instable` flag, which switches the C++
+    /// distance calculation to its signed vertical term. Like C++, the
+    /// border-pruning calculation assumes a positive `mslide`.
+    pub(crate) fn find_mat_path_push(
+        &self,
+        fx: &mut i32,
+        fy: &mut i32,
+        mdens: i32,
+        mslide: i32,
+        liquid: bool,
+        materials: &MaterialSet,
+    ) -> bool {
+        let Some((width, height)) = self.grid_dimensions() else {
+            return false;
+        };
+        *fx = (*fx).clamp(0, width - 1);
+        *fy = (*fy).clamp(0, height - 1);
+
+        const PUSH_RANGE: i32 = 500;
+        const RIGHT: i8 = 0;
+        const DOWN: i8 = 1;
+        const LEFT: i8 = 2;
+        const UP: i8 = 3;
+
+        let mut left = 0.max(*fx - PUSH_RANGE);
+        let mut right = (width - 1).min(*fx + PUSH_RANGE);
+        let mut top = 0.max(*fy - PUSH_RANGE);
+        let mut bottom = (height - 1).min(*fy + PUSH_RANGE);
+        let mut direction = RIGHT;
+        let (mut x, mut y) = (*fx, *fy);
+        let density = self.density_at(*fx, *fy, materials);
+        if density < mdens {
+            return true;
+        }
+        if density == mdens {
+            let mut radius = 0;
+            loop {
+                if x - radius - 1 < left
+                    || self.density_at(x - radius - 1, y, materials) != mdens
+                {
+                    x -= radius;
+                    direction = LEFT;
+                    break;
+                }
+                if y - radius - 1 < top
+                    || self.density_at(x, y - radius - 1, materials) != mdens
+                {
+                    y -= radius;
+                    direction = UP;
+                    break;
+                }
+                if x + radius + 1 > right
+                    || self.density_at(x + radius + 1, y, materials) != mdens
+                {
+                    x += radius;
+                    direction = RIGHT;
+                    break;
+                }
+                if y + radius + 1 > bottom
+                    || self.density_at(x, y + radius + 1, materials) != mdens
+                {
+                    y += radius;
+                    direction = DOWN;
+                    break;
+                }
+                radius += 1;
+            }
+        } else {
+            let mut radius = 1;
+            while radius < PUSH_RANGE {
+                if self.density_at(x - radius, y, materials) <= mdens {
+                    x -= radius;
+                    direction = RIGHT;
+                    break;
+                }
+                if self.density_at(x, y - radius, materials) <= mdens {
+                    y -= radius;
+                    direction = DOWN;
+                    break;
+                }
+                if self.density_at(x + radius, y, materials) <= mdens {
+                    x += radius;
+                    direction = LEFT;
+                    break;
+                }
+                if self.density_at(x, y + radius, materials) <= mdens {
+                    y += radius;
+                    direction = UP;
+                    break;
+                }
+                radius += 1;
+            }
+            if radius >= PUSH_RANGE {
+                return false;
+            }
+            if self.density_at(x, y, materials) < mdens {
+                *fx = x;
+                *fy = y;
+                return true;
+            }
+        }
+
+        let (mut start_x, mut start_y, mut start_direction) = (x, y, direction);
+        let mut best: Option<(i32, i32, i32)> = None;
+        loop {
+            debug_assert!(
+                x >= left
+                    && y >= top
+                    && x <= right
+                    && y <= bottom
+                    && self.density_at(x, y, materials) == mdens
+            );
+            let (mut next_x, mut next_y) = (x, y);
+            match direction {
+                RIGHT => next_x += 1,
+                DOWN => next_y += 1,
+                LEFT => next_x -= 1,
+                UP => next_y -= 1,
+                _ => unreachable!("FindMatPathPush direction"),
+            }
+            let in_bounds =
+                next_x >= left && next_y >= top && next_x <= right && next_y <= bottom;
+            let density = self.density_at(next_x, next_y, materials);
+            if density < mdens {
+                let vertical = if liquid {
+                    *fy - next_y
+                } else {
+                    (*fy - next_y).abs()
+                };
+                let distance = (next_x - *fx).abs() + mslide * vertical;
+                if best.is_none_or(|(_, _, best_distance)| distance < best_distance) {
+                    best = Some((next_x, next_y, distance));
+                    top = top.max(*fy - distance / mslide - 1);
+                    if !liquid {
+                        bottom = bottom.min(*fy + distance / mslide + 1);
+                        left = left.max(*fx - distance - 1);
+                        right = right.min(*fx + distance + 1);
+                    }
+                    (start_x, start_y, start_direction) = (x, y, direction);
+                }
+            }
+            if in_bounds && density == mdens {
+                (x, y) = (next_x, next_y);
+                direction = (direction + 3) % 4;
+            } else {
+                direction = (direction + 1) % 4;
+            }
+            if (x, y, direction) == (start_x, start_y, start_direction) {
+                break;
+            }
+        }
+        let Some((best_x, best_y, _)) = best else {
+            return false;
+        };
+        *fx = best_x;
+        *fy = best_y;
+        true
+    }
+
+    /// The failure-producing prefix of `C4Landscape::InsertMaterial`. Once
+    /// this succeeds, slide, reaction, and dead-pixel insertion paths all
+    /// return true.
     pub(crate) fn insert_material_destination(
         &self,
         mut x: i32,
         mut y: i32,
         density: i32,
+        landscape_push_pull: bool,
+        max_slide: i32,
+        liquid: bool,
         materials: &MaterialSet,
     ) -> Option<InsertMaterialDestination> {
         let Some((width, height)) = self.grid_dimensions() else {
@@ -4471,20 +4635,35 @@ impl Landscape {
         if !(0..width).contains(&x) || !(0..=height).contains(&y) {
             return None;
         }
-        while density == self.density_at(x, y, materials) {
-            y -= 1;
-            if y < 0 {
+        if landscape_push_pull {
+            if self.density_at(x, y, materials) >= density
+                && !self.find_mat_path_push(
+                    &mut x,
+                    &mut y,
+                    density,
+                    max_slide,
+                    liquid,
+                    materials,
+                )
+            {
                 return None;
             }
-            if self.density_at(x - 1, y, materials) < density {
-                x -= 1;
+        } else {
+            while density == self.density_at(x, y, materials) {
+                y -= 1;
+                if y < 0 {
+                    return None;
+                }
+                if self.density_at(x - 1, y, materials) < density {
+                    x -= 1;
+                }
+                if self.density_at(x + 1, y, materials) < density {
+                    x += 1;
+                }
             }
-            if self.density_at(x + 1, y, materials) < density {
-                x += 1;
+            if self.density_at(x, y, materials) > density {
+                return None;
             }
-        }
-        if self.density_at(x, y, materials) > density {
-            return None;
         }
         Some(InsertMaterialDestination::Grid { x, y })
     }
@@ -8359,6 +8538,167 @@ func TransactionThenRaw()
             .expect("landscape builds");
         let (mut fx, mut fy) = (1, 9);
         assert!(!landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 3, &materials));
+    }
+
+    fn find_mat_path_push_landscape(width: u32, height: u32, bytes: Vec<u8>) -> Landscape {
+        let grid = PixelGrid::new(
+            width,
+            height,
+            bytes,
+            vec![0, 100, 25],
+            vec![None, Some("Solid".into()), Some("Flow".into())],
+            vec![None; 3],
+        );
+        let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
+            .expect("push-path landscape builds");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(grid);
+        landscape.set_border_open(0, 0, false, false);
+        landscape
+    }
+
+    #[test]
+    fn find_mat_path_push_matches_cpp_start_and_ray_order() {
+        // Equal-density startpoint selection expands in L/U/R/D order at
+        // every radius. Each case keeps the preceding directions equal and
+        // makes only the selected neighbor lower-density.
+        let origin = (3_i32, 3_i32);
+        let neighbors = [(2, 3), (3, 2), (4, 3), (3, 4)];
+        for selected in 0..neighbors.len() {
+            let mut bytes = vec![1; 7 * 7];
+            bytes[origin.1 as usize * 7 + origin.0 as usize] = 2;
+            for &(x, y) in &neighbors[..selected] {
+                bytes[y as usize * 7 + x as usize] = 2;
+            }
+            let (exit_x, exit_y) = neighbors[selected];
+            bytes[exit_y as usize * 7 + exit_x as usize] = 0;
+            let landscape = find_mat_path_push_landscape(7, 7, bytes);
+            let (mut x, mut y) = origin;
+            assert!(landscape.find_mat_path_push(
+                &mut x,
+                &mut y,
+                25,
+                1,
+                false,
+                &MaterialSet::new(),
+            ));
+            assert_eq!((x, y), neighbors[selected], "direction case {selected}");
+        }
+
+        // The greater-density ray uses the same L/U/R/D priority. Four
+        // equal-distance exits therefore return the left one immediately.
+        let mut bytes = vec![1; 7 * 7];
+        for (x, y) in neighbors {
+            bytes[y as usize * 7 + x as usize] = 0;
+        }
+        let landscape = find_mat_path_push_landscape(7, 7, bytes);
+        let (mut x, mut y) = origin;
+        assert!(landscape.find_mat_path_push(
+            &mut x,
+            &mut y,
+            25,
+            1,
+            false,
+            &MaterialSet::new(),
+        ));
+        assert_eq!((x, y), (2, 3));
+    }
+
+    #[test]
+    fn find_mat_path_push_matches_cpp_border_metric_and_strict_ties() {
+        // A 3x3 equal-density island has one upper and one lower exit. The
+        // stable metric chooses the shorter weighted upper exit; Instable's
+        // signed (origin_y-next_y) term instead chooses the lower exit.
+        let mut bytes = vec![1; 7 * 7];
+        for y in 2..=4 {
+            for x in 2..=4 {
+                bytes[y * 7 + x] = 2;
+            }
+        }
+        bytes[1 * 7 + 3] = 0;
+        bytes[5 * 7 + 4] = 0;
+        let landscape = find_mat_path_push_landscape(7, 7, bytes);
+        let mut stable = (3, 3);
+        assert!(landscape.find_mat_path_push(
+            &mut stable.0,
+            &mut stable.1,
+            25,
+            2,
+            false,
+            &MaterialSet::new(),
+        ));
+        assert_eq!(stable, (3, 1));
+        let mut instable = (3, 3);
+        assert!(landscape.find_mat_path_push(
+            &mut instable.0,
+            &mut instable.1,
+            25,
+            2,
+            true,
+            &MaterialSet::new(),
+        ));
+        assert_eq!(instable, (4, 5));
+
+        // Best replacement is strict: four equal exits around one material
+        // pixel retain the traversal-first left candidate.
+        let mut bytes = vec![1; 7 * 7];
+        bytes[3 * 7 + 3] = 2;
+        for (x, y) in [(2, 3), (3, 2), (4, 3), (3, 4)] {
+            bytes[y * 7 + x] = 0;
+        }
+        let landscape = find_mat_path_push_landscape(7, 7, bytes);
+        let mut tied = (3, 3);
+        assert!(landscape.find_mat_path_push(
+            &mut tied.0,
+            &mut tied.1,
+            25,
+            1,
+            false,
+            &MaterialSet::new(),
+        ));
+        assert_eq!(tied, (2, 3));
+    }
+
+    #[test]
+    fn find_mat_path_push_matches_cpp_range_and_sealed_failure() {
+        let sealed = find_mat_path_push_landscape(7, 7, vec![1; 7 * 7]);
+        let mut point = (3, 3);
+        assert!(!sealed.find_mat_path_push(
+            &mut point.0,
+            &mut point.1,
+            25,
+            1,
+            false,
+            &MaterialSet::new(),
+        ));
+
+        // The greater-density ray tests radii 1..499; radius 500 is excluded.
+        let mut bytes = vec![1; 1001 * 3];
+        bytes[1 * 1001 + 1] = 0;
+        let landscape = find_mat_path_push_landscape(1001, 3, bytes);
+        let mut within = (500, 1);
+        assert!(landscape.find_mat_path_push(
+            &mut within.0,
+            &mut within.1,
+            25,
+            1,
+            false,
+            &MaterialSet::new(),
+        ));
+        assert_eq!(within, (1, 1));
+
+        let mut bytes = vec![1; 1001 * 3];
+        bytes[1 * 1001] = 0;
+        let landscape = find_mat_path_push_landscape(1001, 3, bytes);
+        let mut at_limit = (500, 1);
+        assert!(!landscape.find_mat_path_push(
+            &mut at_limit.0,
+            &mut at_limit.1,
+            25,
+            1,
+            false,
+            &MaterialSet::new(),
+        ));
     }
 
     fn temperature_pixel_landscape(
