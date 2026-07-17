@@ -2351,15 +2351,9 @@ fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLangua
         // bytes are the same shipped System.c4g table used by production.
         return parse_runtime_language_table(EMBEDDED_US, "embedded LanguageUS.txt");
     };
-    let system_path = paths.system_group_path();
-    let system = Group::open(system_path).with_context(|| {
-        format!(
-            "opening classic runtime-help System.c4g at {}",
-            system_path.display()
-        )
-    })?;
+    let system = Group::open(paths.system_group_path()).ok();
     let language_packs = classic_language_packs(paths);
-    let system_groups = language_packs.system_groups(&system);
+    let system_groups = language_packs.system_groups_with_optional_local(system.as_ref());
     for code in classic_runtime_language_sequence(paths)? {
         let filename = format!("Language{code}.txt");
         for group in system_groups.groups() {
@@ -6977,6 +6971,7 @@ enum AppContextMenuCommand {
     StartupPlayer(PlrSelPlayerContextCommand),
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
+    OptionsLanguage(String),
     ScenarioSearch(ScenselSearchContextCommand),
     InputDialog(InputDialogContextCommand),
 }
@@ -7557,8 +7552,8 @@ struct GameApp {
     /// specific ClonkNames list (C4Game::InitScriptEngine).
     standard_names: Option<String>,
     /// Process-global Application.ResStrTable entries used by
-    /// GetNeededMatStr. Frozen from the installed language table at startup
-    /// and reinstalled on every fresh Engine.
+    /// GetNeededMatStr. Rebuilt after an Options language selection and
+    /// reinstalled on every fresh Engine.
     needed_material_need: String,
     needed_material_none: String,
     /// Process-local Config.General.MissionAccess shared across fresh games.
@@ -13300,11 +13295,39 @@ fn load_scenario_with_definition_load_and_startup_player_count(
 fn load_options_program_state(
     paths: Option<&AppPaths>,
 ) -> lc_frontend::startup_options_dlg::ProgramSheetState {
-    let show_log_timestamps = load_show_log_timestamps(paths);
-    lc_frontend::startup_options_dlg::ProgramSheetState {
-        show_log_timestamps,
-        ..Default::default()
+    let mut state = lc_frontend::startup_options_dlg::ProgramSheetState::default();
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    state.show_log_timestamps = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "ShowLogTimestamps"))
+        .map(parse_config_bool)
+        .unwrap_or(false);
+
+    let language = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "Language"))
+        .unwrap_or(&state.language)
+        .to_string();
+    let language_ex = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "LanguageEx"))
+        .unwrap_or(&state.language_ex)
+        .to_string();
+    let language_infos = paths
+        .map(|paths| {
+            let system = Group::open(paths.system_group_path()).ok();
+            classic_language_packs(paths).language_infos(system.as_ref())
+        })
+        .unwrap_or_else(|| state.language_infos.clone());
+    if let Ok(table) = load_runtime_language_table(paths) {
+        state.no_language_info = table
+            .entries
+            .get("IDS_CTL_NOLANGINFO")
+            .cloned()
+            .unwrap_or_else(|| "[Undefined: IDS_CTL_NOLANGINFO]".to_string());
     }
+    state.set_language_catalog(language, language_ex, language_infos);
+    state
 }
 
 fn load_show_log_timestamps(paths: Option<&AppPaths>) -> bool {
@@ -13751,6 +13774,8 @@ fn persist_config_value(
 
 fn persist_startup_options_config(
     paths: &AppPaths,
+    language: &str,
+    language_ex: &str,
     show_log_timestamps: bool,
     audio_options: Option<&AudioOptions>,
 ) -> io::Result<()> {
@@ -13760,6 +13785,8 @@ fn persist_startup_options_config(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
         Err(error) => return Err(error),
     };
+    config.set_in(Some("General"), "Language", language);
+    config.set_in(Some("General"), "LanguageEx", language_ex);
     config.set_in(
         Some("General"),
         "ShowLogTimestamps",
@@ -16557,9 +16584,18 @@ impl GameApp {
         // C4KeyCodeEx matches the exact Alt/Ctrl/Shift mask for the Options
         // dialog bindings. Logo is not part of that mask, so Logo-only input
         // intentionally remains equivalent to the bare key.
-        !(self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
-            .is_empty()
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if modifiers == ModifiersState::ALT
+            && matches!(key, VirtualKeyCode::Down | VirtualKeyCode::Space)
+            && self
+                .startup_options_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.language_combo_focused())
+        {
+            return false;
+        }
+        !modifiers.is_empty()
     }
 
     fn handle_game_option_input_dialog_key(
@@ -25706,6 +25742,34 @@ impl GameApp {
         Ok(true)
     }
 
+    fn open_options_language_combo(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some((anchor, entries)) = self.startup_options_dialog.as_ref().and_then(|dialog| {
+            let anchor = dialog.language_combo_anchor()?;
+            let entries = dialog
+                .program()
+                .language_infos
+                .iter()
+                .map(|info| {
+                    ContextMenuEntry::new(format!("{} - {}", info.code, info.name))
+                        .with_icon(ContextMenuIcon::Empty)
+                        .with_action(AppContextMenuCommand::OptionsLanguage(info.code.clone()))
+                })
+                .collect();
+            Some((anchor, entries))
+        }) else {
+            return Ok(false);
+        };
+        self.open_context_menu_at(entries, anchor)
+    }
+
     fn open_startup_player_context_menu(&mut self) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup_view != StartupView::PlayerSelection
@@ -25882,6 +25946,50 @@ impl GameApp {
                     }
                     AppContextMenuCommand::RemoveStartupParticipant(index) => {
                         self.remove_startup_participant(index);
+                    }
+                    AppContextMenuCommand::OptionsLanguage(code) => {
+                        let selected = self
+                            .startup_options_dialog
+                            .as_mut()
+                            .is_some_and(|dialog| dialog.select_language(&code));
+                        if !selected {
+                            tracing::error!(code, "language combo selected a stale entry");
+                            continue;
+                        }
+                        match self.persist_open_options_config() {
+                            Some(Ok(())) => {
+                                match self.reload_application_language_resources() {
+                                    Ok(charset) => {
+                                        if let Some(paths) = self.app_paths.as_ref() {
+                                            if let Err(error) = persist_config_value(
+                                                paths,
+                                                "General",
+                                                "LanguageCharset",
+                                                charset,
+                                            ) {
+                                                tracing::warn!(
+                                                    error = %error,
+                                                    "failed to save selected language charset"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(error) => tracing::error!(
+                                        error = %error,
+                                        "failed to reload selected application language"
+                                    ),
+                                }
+                                self.open_options_menu();
+                            }
+                            Some(Err(error)) => tracing::warn!(
+                                error = %error,
+                                "failed to save selected options language"
+                            ),
+                            None => {
+                                let _ = self.reload_application_language_resources();
+                                self.open_options_menu();
+                            }
+                        }
                     }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
@@ -26337,6 +26445,9 @@ impl GameApp {
                 OptionsDlgAction::ShowLogTimestampsChanged(enabled) => {
                     self.show_log_timestamps = enabled;
                     self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::OpenLanguageCombo => {
+                    self.open_options_language_combo()?;
                 }
                 OptionsDlgAction::Sound(action) => match action {
                     SoundSheetAction::GuiSound(sound) | SoundSheetAction::TestSound(sound) => {
@@ -28025,6 +28136,45 @@ impl GameApp {
         self.status_text.clear();
     }
 
+    fn persist_open_options_config(&self) -> Option<io::Result<()>> {
+        self.app_paths
+            .as_ref()
+            .zip(self.startup_options_dialog.as_ref())
+            .map(|(paths, dialog)| {
+                persist_startup_options_config(
+                    paths,
+                    &dialog.program().language,
+                    &dialog.program().language_ex,
+                    dialog.program().show_log_timestamps,
+                    self.audio.as_ref().map(|audio| &audio.options),
+                )
+            })
+    }
+
+    fn reload_application_language_resources(&mut self) -> Result<String> {
+        let table = load_runtime_language_table(self.app_paths.as_ref())?;
+        let charset = table
+            .entries
+            .get("IDS_LANG_CHARSET")
+            .cloned()
+            .unwrap_or_else(|| "[Undefined: IDS_LANG_CHARSET]".to_string());
+        let (needed_material_need, needed_material_none) = needed_material_resource_strings(&table);
+        self.needed_material_need = needed_material_need.clone();
+        self.needed_material_none = needed_material_none.clone();
+        self.engine
+            .set_needed_material_resource_strings(needed_material_need, needed_material_none);
+
+        self.runtime_help_text_cache = OnceLock::new();
+        let _ = self
+            .runtime_help_text_cache
+            .set(build_runtime_help_columns(&table.entries).map_err(|error| format!("{error:#}")));
+        self.runtime_flash_resources_cache = OnceLock::new();
+        let _ = self
+            .runtime_flash_resources_cache
+            .set(Ok(build_runtime_flash_resources(&table)));
+        Ok(charset)
+    }
+
     fn open_about_dialog(&mut self) {
         self.close_context_menu_silently();
         let mut dialog = lc_frontend::startup_about_dlg::AboutDlgState::new();
@@ -28041,17 +28191,7 @@ impl GameApp {
     }
 
     fn close_options_menu(&mut self) {
-        let save_result = self
-            .app_paths
-            .as_ref()
-            .zip(self.startup_options_dialog.as_ref())
-            .map(|(paths, dialog)| {
-                persist_startup_options_config(
-                    paths,
-                    dialog.program().show_log_timestamps,
-                    self.audio.as_ref().map(|audio| &audio.options),
-                )
-            });
+        let save_result = self.persist_open_options_config();
         if let Some(Err(error)) = save_result {
             tracing::warn!(error = %error, "failed to save options dialog settings");
         }
@@ -52323,17 +52463,29 @@ public func Grant(password) { return GainMissionAccess(password); }
         let tabular_cached_frame = tabular_cache.frame.clone();
         assert_eq!(tabular_cached_frame, tabular_frame);
 
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("forward focus enters the implemented Language combo");
+        assert!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options state retained")
+                .language_combo_focused()
+        );
         let error = app
             .handle_gamepad_direction(
                 GamepadSlot::new(0),
                 ControlButton::Right,
                 ElementState::Pressed,
             )
-            .expect_err("forward focus reaches the unported Language combo");
+            .expect_err("forward focus reaches the unported Font Face combo");
         assert_engine_parity_boundary(
             error,
             ClassicParityBoundary::StartupAction(ClassicStartupAction::OptionsProgramFocus(
-                OptionsProgramFocusTarget::LanguageCombo,
+                OptionsProgramFocusTarget::FontFaceCombo,
             )),
         );
         assert_eq!(app.startup_view, StartupView::Options);
@@ -52362,11 +52514,18 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("replay retained tabular cache"));
         assert_eq!(sentinel, tabular_frame);
 
-        app.process_gamepad_event_batch([GamepadEvent::Direction {
-            slot: GamepadSlot::new(0),
-            button: ControlButton::Left,
-            state: ElementState::Pressed,
-        }])
+        app.process_gamepad_event_batch([
+            GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+        ])
         .expect("backward focus reaches Back");
         let mut back_frame = vec![0_u8; 640 * 480 * 4];
         assert!(app.render(&mut back_frame).expect("render focused Back"));
@@ -56057,6 +56216,99 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .show_log_timestamps,
             "the live checkbox must reflect General.ShowLogTimestamps"
         );
+    }
+
+    #[test]
+    fn options_language_loads_real_de_and_selection_reloads_and_persists() {
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguage=DE - Deutsch\nLanguageEx=DE\n",
+        )
+        .expect("seed DE config");
+
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_options_menu();
+
+        let program = app
+            .startup_options_dialog
+            .as_ref()
+            .expect("options dialog")
+            .program();
+        assert_eq!(program.language_text, "DE - Deutsch");
+        assert_eq!(
+            program.language_info,
+            "Original-Sprachpaket von RedWolf Design."
+        );
+        assert_eq!(
+            program.no_language_info,
+            "Sprachpaket nicht verf\u{00fc}gbar."
+        );
+        let mut codes = program
+            .language_infos
+            .iter()
+            .map(|info| info.code.as_str())
+            .collect::<Vec<_>>();
+        codes.sort_unstable();
+        assert_eq!(codes, vec!["DE", "US"]);
+        assert_eq!(app.needed_material_need, "%s|braucht noch");
+
+        app.process_options_dialog_actions(vec![
+            lc_frontend::startup_options_dlg::OptionsDlgAction::OpenLanguageCombo,
+        ])
+        .expect("open language combo");
+        assert!(app.context_menu.is_some());
+        app.process_context_menu_outcome(ContextMenuOutcome {
+            captured: true,
+            pass_through: false,
+            focus_suppressed: true,
+            events: vec![
+                ContextMenuEvent::Closed,
+                ContextMenuEvent::Activated(AppContextMenuCommand::OptionsLanguage(
+                    "US".to_string(),
+                )),
+            ],
+        })
+        .expect("select US language");
+
+        let program = app
+            .startup_options_dialog
+            .as_ref()
+            .expect("recreated options dialog")
+            .program();
+        assert_eq!(program.language, "US");
+        assert_eq!(program.language_text, "US - English");
+        assert_eq!(program.language_ex, "US,DE");
+        assert_eq!(app.needed_material_need, "%s|needs");
+
+        let config = Config::load(paths.config_file()).expect("reload selected config");
+        assert_eq!(config.get_in(Some("General"), "Language"), Some("US"));
+        assert_eq!(config.get_in(Some("General"), "LanguageEx"), Some("US,DE"));
+        assert_eq!(config.get_in(Some("General"), "LanguageCharset"), Some(""));
     }
 
     #[test]

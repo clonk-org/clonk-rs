@@ -42,6 +42,7 @@ use freetype::Library;
 use lc_graphics::clonk_font::{ClonkFont, GlyphCell, TextAlign};
 use lc_graphics::{Color, GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
+use lc_resources::LanguageInfo;
 
 // ---------------------------------------------------------------------------
 // Startup colors (C4Startup.h:28-34) and GUI constants. Engine box/line/quad
@@ -780,10 +781,20 @@ pub struct OptionsDlgAssets {
 /// shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgramSheetState {
+    /// Verbatim `Config.General.Language` until the user selects a combo row.
+    pub language: String,
+    /// `Config.General.LanguageEx`, recomposed by `UpdateLanguage` for a known
+    /// primary language.
+    pub language_ex: String,
+    /// `C4Language::Infos` in native local/pack discovery order.
+    pub language_infos: Vec<LanguageInfo>,
     /// Lang combo text, `"{CC} - {Name}"` (UpdateLanguage, ctor 1196-1232).
     pub language_text: String,
     /// Language pack info line (`IDS_LANG_INFO` of the active pack).
     pub language_info: String,
+    /// Active `IDS_CTL_NOLANGINFO`, retained when the configured code is not
+    /// present in the catalog.
+    pub no_language_info: String,
     /// `Config.General.RXFontName` (default "Endeavour").
     pub font_face: String,
     /// `Config.General.RXFontSize` (default "14").
@@ -941,9 +952,20 @@ impl Default for SoundSheetState {
 
 impl Default for ProgramSheetState {
     fn default() -> Self {
-        Self {
-            language_text: "US - English".into(),
-            language_info: "Original language pack by RedWolf Design.".into(),
+        let mut state = Self {
+            language: "US - English".into(),
+            language_ex: String::new(),
+            language_infos: vec![LanguageInfo {
+                code_bytes: *b"US",
+                code: "US".into(),
+                name: "English".into(),
+                info: "Original language pack by RedWolf Design.".into(),
+                fallback: String::new(),
+                charset: String::new(),
+            }],
+            language_text: String::new(),
+            language_info: String::new(),
+            no_language_info: "Language pack not available.".into(),
             font_face: "Endeavour".into(),
             font_size: "14".into(),
             white_chat_ingame: false,
@@ -951,8 +973,91 @@ impl Default for ProgramSheetState {
             show_log_timestamps: false,
             preloading: false,
             fair_crew_slider: 9,
+        };
+        state.refresh_language();
+        state
+    }
+}
+
+impl ProgramSheetState {
+    /// Installs the process-global language catalog and applies the same
+    /// constructor-time `UpdateLanguage` projection as the C++ dialog.
+    pub fn set_language_catalog(
+        &mut self,
+        language: impl Into<String>,
+        language_ex: impl Into<String>,
+        infos: Vec<LanguageInfo>,
+    ) {
+        self.language = language.into();
+        self.language_ex = language_ex.into();
+        self.language_infos = infos;
+        self.refresh_language();
+    }
+
+    /// Applies `OnLangComboSelChange`. Returns false for a stale code that no
+    /// longer exists in the catalog.
+    pub fn select_language(&mut self, code: &str) -> bool {
+        let Some(info) = self
+            .language_infos
+            .iter()
+            .find(|info| info.code == code || info.matches_code(code))
+        else {
+            return false;
+        };
+        self.language = info.code.clone();
+        self.refresh_language();
+        true
+    }
+
+    fn refresh_language(&mut self) {
+        let selected = self
+            .language_infos
+            .iter()
+            .find(|info| info.code == self.language || info.matches_code(&self.language));
+        if let Some(info) = selected {
+            self.language_text = format!("{} - {}", info.code, info.name);
+            self.language_info = info.info.clone();
+            self.language_ex = compose_language_ex(info);
+        } else {
+            self.language_text = format!("unknown ({})", self.language);
+            self.language_info = self.no_language_info.clone();
         }
     }
+}
+
+/// `C4StartupOptionsDlg::UpdateLanguage` fallback composition. Substring
+/// checks and fallback casing intentionally retain the native quirks.
+pub fn compose_language_ex(info: &LanguageInfo) -> String {
+    let mut language_ex = info.code.clone();
+    if !info.fallback.is_empty() {
+        language_ex.push(',');
+        let mut condensed = String::new();
+        for segment in info.fallback.split(',') {
+            let segment = segment.as_bytes();
+            let start = segment
+                .iter()
+                .position(|byte| !matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+                .unwrap_or(segment.len());
+            let code = &segment[start..(start + 2).min(segment.len())];
+            if code.is_empty() {
+                continue;
+            }
+            if !condensed.is_empty() {
+                condensed.push(',');
+            }
+            condensed.push_str(&String::from_utf8_lossy(code));
+        }
+        language_ex.push_str(&condensed);
+    }
+    for fallback in ["US", "DE"] {
+        if !language_ex.contains(fallback) {
+            if !language_ex.is_empty() {
+                language_ex.push(',');
+            }
+            language_ex.push_str(fallback);
+        }
+    }
+    language_ex
 }
 
 /// One `C4GUI::Tabular::Sheet` in constructor order
@@ -1005,6 +1110,8 @@ pub enum OptionsDlgAction {
     SheetChanged(OptionsSheet),
     /// `BoolConfig::OnCheckChange` updated `Config.General.ShowLogTimestamps`.
     ShowLogTimestampsChanged(bool),
+    /// Open the language combo's classic context-menu list.
+    OpenLanguageCombo,
     /// One ordered callback/feedback effect from the fully implemented Sound
     /// sheet. Ordering inside the outer action vector is observable.
     Sound(SoundSheetAction),
@@ -1022,6 +1129,7 @@ pub enum OptionsDlgAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptionsProgramFocusTarget {
     LanguageCombo,
+    FontFaceCombo,
     AdvancedButton,
 }
 
@@ -1030,6 +1138,7 @@ enum OptionsFocus {
     None,
     Back,
     Tabular,
+    LanguageCombo,
     SoundCheckbox(SoundCheckboxId),
 }
 
@@ -1037,6 +1146,7 @@ enum OptionsFocus {
 enum OptionsHit {
     Back,
     Tab(OptionsSheet),
+    LanguageCombo,
     ShowLogTimestamps,
     SoundCheckbox(SoundCheckboxId),
     SoundSlider(SoundVolumeId, SoundSliderPart),
@@ -1143,6 +1253,20 @@ impl OptionsDlgState {
         &mut self.program
     }
 
+    /// Applies one combo selection and mirrors `RecreateDialog(true)`'s
+    /// reset to the Program sheet with the tabular focused.
+    pub fn select_language(&mut self, code: &str) -> bool {
+        if !self.program.select_language(code) {
+            return false;
+        }
+        self.active_sheet = OptionsSheet::Program;
+        self.focus = OptionsFocus::Tabular;
+        self.pointer_down = false;
+        self.back_pointer_owned = false;
+        self.pressed_back = false;
+        true
+    }
+
     pub fn sound(&self) -> &SoundSheetState {
         &self.sound
     }
@@ -1173,6 +1297,19 @@ impl OptionsDlgState {
 
     pub const fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
+    }
+
+    pub const fn language_combo_focused(&self) -> bool {
+        matches!(self.focus, OptionsFocus::LanguageCombo)
+    }
+
+    pub fn language_combo_anchor(&self) -> Option<GuiPoint> {
+        self.layout.as_ref().map(|layout| {
+            GuiPoint::new(
+                layout.language_combo.x as f32,
+                (layout.language_combo.y + layout.language_combo.h) as f32,
+            )
+        })
     }
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
@@ -1242,6 +1379,14 @@ impl OptionsDlgState {
             Some(OptionsHit::Tab(sheet)) => {
                 self.pressed_back = false;
                 self.select_sheet(sheet)
+            }
+            Some(OptionsHit::LanguageCombo) => {
+                self.pressed_back = false;
+                // The context menu captures the matching release. Do not
+                // leave the underlying dialog in a held-pointer state when
+                // that menu is cancelled instead of selecting an entry.
+                self.pointer_down = false;
+                vec![OptionsDlgAction::OpenLanguageCombo]
             }
             Some(OptionsHit::ShowLogTimestamps) => {
                 self.pressed_back = false;
@@ -1323,6 +1468,9 @@ impl OptionsDlgState {
             KeyCode::Down if self.focus == OptionsFocus::Tabular => {
                 self.select_sheet(self.active_sheet.wrapping_offset(1))
             }
+            KeyCode::Down | KeyCode::Space if self.focus == OptionsFocus::LanguageCombo => {
+                vec![OptionsDlgAction::OpenLanguageCombo]
+            }
             KeyCode::Tab => self.handle_tab(false),
             KeyCode::Space if matches!(self.focus, OptionsFocus::SoundCheckbox(_)) => {
                 let OptionsFocus::SoundCheckbox(id) = self.focus else {
@@ -1396,14 +1544,14 @@ impl OptionsDlgState {
                         OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects),
                         true,
                     ) => OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic),
+                    (OptionsFocus::LanguageCombo, _) => unreachable!(),
                 };
                 Vec::new()
             }
             OptionsSheet::Program => match (self.focus, backwards) {
                 (OptionsFocus::Tabular, false) | (OptionsFocus::None, false) => {
-                    vec![OptionsDlgAction::UnsupportedProgramFocus(
-                        OptionsProgramFocusTarget::LanguageCombo,
-                    )]
+                    self.focus = OptionsFocus::LanguageCombo;
+                    Vec::new()
                 }
                 (OptionsFocus::Back, true) | (OptionsFocus::None, true) => {
                     vec![OptionsDlgAction::UnsupportedProgramFocus(
@@ -1418,12 +1566,22 @@ impl OptionsDlgState {
                     self.focus = OptionsFocus::Tabular;
                     Vec::new()
                 }
+                (OptionsFocus::LanguageCombo, true) => {
+                    self.focus = OptionsFocus::Tabular;
+                    Vec::new()
+                }
+                (OptionsFocus::LanguageCombo, false) => {
+                    vec![OptionsDlgAction::UnsupportedProgramFocus(
+                        OptionsProgramFocusTarget::FontFaceCombo,
+                    )]
+                }
                 (OptionsFocus::SoundCheckbox(_), _) => unreachable!(),
             },
             _ => {
                 self.focus = match self.focus {
                     OptionsFocus::None | OptionsFocus::Tabular => OptionsFocus::Back,
                     OptionsFocus::Back => OptionsFocus::Tabular,
+                    OptionsFocus::LanguageCombo => OptionsFocus::None,
                     OptionsFocus::SoundCheckbox(_) => OptionsFocus::None,
                 };
                 Vec::new()
@@ -1447,6 +1605,7 @@ impl OptionsDlgState {
     pub fn handle_gamepad_low_down(&mut self) -> Vec<OptionsDlgAction> {
         match self.focus {
             OptionsFocus::SoundCheckbox(id) => self.toggle_sound_checkbox(id),
+            OptionsFocus::LanguageCombo => vec![OptionsDlgAction::OpenLanguageCombo],
             OptionsFocus::Back => {
                 self.pressed_back = true;
                 Vec::new()
@@ -1497,7 +1656,9 @@ impl OptionsDlgState {
         if self.active_sheet == sheet {
             return Vec::new();
         }
-        if matches!(self.focus, OptionsFocus::SoundCheckbox(_)) && sheet != OptionsSheet::Sound {
+        if (matches!(self.focus, OptionsFocus::SoundCheckbox(_)) && sheet != OptionsSheet::Sound)
+            || (self.focus == OptionsFocus::LanguageCombo && sheet != OptionsSheet::Program)
+        {
             self.focus = OptionsFocus::None;
         }
         self.captured_sound_slider = None;
@@ -1720,6 +1881,9 @@ fn options_hit_test(
     };
     if active_sheet == OptionsSheet::Program && rect_contains(&timestamp_square, point) {
         return Some(OptionsHit::ShowLogTimestamps);
+    }
+    if active_sheet == OptionsSheet::Program && rect_contains(&layout.language_combo, point) {
+        return Some(OptionsHit::LanguageCombo);
     }
     if active_sheet == OptionsSheet::Sound {
         for id in SoundCheckboxId::ALL {
@@ -3486,18 +3650,32 @@ mod tests {
     // combo. Backward from Back wraps to the Program sheet's last focusable
     // control, Advanced; forward from Back returns to Tabular.
     #[test]
-    fn live_state_gamepad_horizontal_reports_unported_program_focus_exactly() {
+    fn live_state_gamepad_horizontal_opens_language_then_reports_next_boundary() {
         let mut state = OptionsDlgState::default();
 
+        assert!(state.handle_gamepad_horizontal(false).is_empty());
+        assert!(state.language_combo_focused());
+        assert_eq!(
+            state.handle_gamepad_low_down(),
+            vec![OptionsDlgAction::OpenLanguageCombo]
+        );
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Down),
+            vec![OptionsDlgAction::OpenLanguageCombo]
+        );
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Space),
+            vec![OptionsDlgAction::OpenLanguageCombo]
+        );
         assert_eq!(
             state.handle_gamepad_horizontal(false),
             vec![OptionsDlgAction::UnsupportedProgramFocus(
-                OptionsProgramFocusTarget::LanguageCombo,
+                OptionsProgramFocusTarget::FontFaceCombo,
             )]
         );
-        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
-        assert!(state.handle_key_up(crate::KeyCode::Enter).is_empty());
 
+        assert!(state.handle_gamepad_horizontal(true).is_empty());
+        assert!(!state.language_combo_focused());
         assert!(state.handle_gamepad_horizontal(true).is_empty());
         assert_eq!(
             state.handle_gamepad_horizontal(true),
@@ -3515,6 +3693,69 @@ mod tests {
         assert!(state.handle_gamepad_horizontal(false).is_empty());
         assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
         assert!(state.handle_key_up(crate::KeyCode::Enter).is_empty());
+    }
+
+    #[test]
+    fn language_catalog_projects_de_and_selection_recomposes_cpp_fallbacks() {
+        let infos = vec![
+            LanguageInfo {
+                code_bytes: *b"US",
+                code: "US".into(),
+                name: "English".into(),
+                info: "English info".into(),
+                fallback: String::new(),
+                charset: String::new(),
+            },
+            LanguageInfo {
+                code_bytes: *b"DE",
+                code: "DE".into(),
+                name: "Deutsch".into(),
+                info: "Deutsche Info".into(),
+                fallback: "  us long, x, de".into(),
+                charset: String::new(),
+            },
+        ];
+        let mut program = ProgramSheetState::default();
+        program.set_language_catalog("DE - Deutsch", "stale", infos.clone());
+        assert_eq!(program.language_text, "DE - Deutsch");
+        assert_eq!(program.language_info, "Deutsche Info");
+        assert_eq!(program.language_ex, "DE,us,x,de,US");
+
+        program.no_language_info = "Keine Sprachinfo".into();
+        program.set_language_catalog("ZZ - Missing", "keep,this", infos.clone());
+        assert_eq!(program.language_text, "unknown (ZZ - Missing)");
+        assert_eq!(program.language_info, "Keine Sprachinfo");
+        assert_eq!(program.language_ex, "keep,this");
+
+        let mut dialog = OptionsDlgState::new(program);
+        assert!(dialog.select_language("us"));
+        assert_eq!(dialog.program().language, "US");
+        assert_eq!(dialog.program().language_text, "US - English");
+        assert_eq!(dialog.program().language_ex, "US,DE");
+        assert!(!dialog.select_language("ZZ"));
+    }
+
+    #[test]
+    fn language_combo_pointer_down_opens_at_the_program_control() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+        let combo = options_dlg_layout(1280, 720, &gui, &book).language_combo;
+        let point = crate::GuiPoint::new(combo.x as f32, combo.y as f32);
+
+        assert_eq!(
+            state.handle_pointer_down(point),
+            vec![OptionsDlgAction::OpenLanguageCombo]
+        );
+        assert!(!state.pointer_down);
+        assert_eq!(
+            state.language_combo_anchor(),
+            Some(crate::GuiPoint::new(
+                combo.x as f32,
+                (combo.y + combo.h) as f32,
+            ))
+        );
     }
 
     // CallbackButton only fires if a left-down is released over the same

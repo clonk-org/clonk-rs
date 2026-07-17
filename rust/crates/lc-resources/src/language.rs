@@ -2,6 +2,31 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{Group, GroupError};
 
+/// One `C4LanguageInfo` discovered from a `System.c4g/Language*.txt` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageInfo {
+    /// Capitalized native filename bytes used by `C4Language::FindInfo`.
+    pub code_bytes: [u8; 2],
+    pub code: String,
+    pub name: String,
+    pub info: String,
+    pub fallback: String,
+    pub charset: String,
+}
+
+impl LanguageInfo {
+    /// C++ compares the first two configured bytes through `CharCapital`.
+    pub fn matches_code(&self, configured: &str) -> bool {
+        let configured = configured.as_bytes();
+        configured.len() >= 2
+            && self
+                .code_bytes
+                .into_iter()
+                .zip(configured.iter().copied())
+                .all(|(left, right)| legacy_char_capital(left) == legacy_char_capital(right))
+    }
+}
+
 /// External language packs registered from one or more `Language.c4g`
 /// containers.
 ///
@@ -87,9 +112,18 @@ impl LanguagePacks {
     /// order. `LoadEx` reverses that order once more; `component_groups` above
     /// therefore intentionally uses the original order instead.
     pub fn system_groups(&self, local_system: &Group) -> ComponentGroups {
+        self.system_groups_with_optional_local(Some(local_system))
+    }
+
+    /// The same direct lookup chain when the installed `System.c4g` could
+    /// not be opened. C++ still probes every registered language pack.
+    pub fn system_groups_with_optional_local(
+        &self,
+        local_system: Option<&Group>,
+    ) -> ComponentGroups {
         let target = Path::new("System.c4g");
         let mut groups = Vec::with_capacity(self.packs.len().saturating_add(1));
-        groups.push(local_system.clone());
+        groups.extend(local_system.cloned());
         groups.extend(
             self.packs
                 .iter()
@@ -97,6 +131,37 @@ impl LanguagePacks {
                 .filter_map(|pack| open_mirrored_group(pack, target)),
         );
         ComponentGroups { groups }
+    }
+
+    /// `C4Language::InitInfos`: scan local System first, followed by each
+    /// registered pack System in native priority and entry order. The first
+    /// successfully loaded table for a case-insensitive two-byte code wins.
+    pub fn language_infos(&self, local_system: Option<&Group>) -> Vec<LanguageInfo> {
+        let mut infos = Vec::new();
+        for group in self
+            .system_groups_with_optional_local(local_system)
+            .groups()
+        {
+            let Ok(entries) = group.entries() else {
+                continue;
+            };
+            for entry in entries {
+                let Some(code_bytes) = language_entry_code(&entry.name_bytes) else {
+                    continue;
+                };
+                if infos
+                    .iter()
+                    .any(|info: &LanguageInfo| info.code_bytes == code_bytes)
+                {
+                    continue;
+                }
+                let Ok(bytes) = group.read_entry_bytes_exact(&entry) else {
+                    continue;
+                };
+                infos.push(parse_language_info(code_bytes, &bytes));
+            }
+        }
+        infos
     }
 
     fn register_from_group(&mut self, container: &Group) {
@@ -215,6 +280,93 @@ fn has_extension(path: &Path, expected: &str) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn legacy_char_capital(byte: u8) -> u8 {
+    match byte {
+        b'a'..=b'z' => byte - 32,
+        0xe4 => 0xc4,
+        0xf6 => 0xd6,
+        0xfc => 0xdc,
+        _ => byte,
+    }
+}
+
+fn language_entry_code(name: &[u8]) -> Option<[u8; 2]> {
+    const PREFIX: &[u8] = b"Language";
+    const SUFFIX: &[u8] = b".txt";
+    if name.len() < PREFIX.len() + SUFFIX.len()
+        || !name[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        || !name[name.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX)
+    {
+        return None;
+    }
+    let stem = &name[..name.len() - SUFFIX.len()];
+    let code = stem.get(stem.len().checked_sub(2)?..)?;
+    Some([legacy_char_capital(code[0]), legacy_char_capital(code[1])])
+}
+
+fn parse_language_info(code_bytes: [u8; 2], bytes: &[u8]) -> LanguageInfo {
+    let mut table = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    let mut entries = std::collections::HashMap::<&[u8], Vec<u8>>::new();
+    while let Some(equals) = table.iter().position(|byte| *byte == b'=') {
+        let key = &table[..equals];
+        table = &table[equals + 1..];
+        let value_end = table
+            .iter()
+            .position(|byte| matches!(*byte, b'\r' | b'\n'))
+            .and_then(|line_end| {
+                table[line_end..]
+                    .iter()
+                    .position(|byte| !matches!(*byte, b'\r' | b'\n'))
+                    .map(|offset| line_end + offset)
+            })
+            .unwrap_or(table.len());
+        let value_with_line_end = &table[..value_end];
+        table = &table[value_end..];
+        let value_end = value_with_line_end
+            .iter()
+            .rposition(|byte| !matches!(*byte, b'\r' | b'\n'))
+            .map_or(0, |index| index + 1);
+        let value = &value_with_line_end[..value_end];
+        if entries.contains_key(key) {
+            continue;
+        }
+        let mut value = value.to_vec();
+        let mut cursor = 0;
+        while cursor + 1 < value.len() {
+            if value[cursor..].starts_with(b"\\n") {
+                value.splice(cursor..cursor + 2, [b'\r', b'\n']);
+                cursor += 2;
+            } else {
+                cursor += 1;
+            }
+        }
+        entries.insert(key, value);
+    }
+
+    let get = |key: &'static [u8], replace_pipes: bool| {
+        let mut value = entries.get(key).cloned().unwrap_or_else(|| {
+            format!("[Undefined: {}]", String::from_utf8_lossy(key)).into_bytes()
+        });
+        if replace_pipes {
+            value.iter_mut().for_each(|byte| {
+                if *byte == b'|' {
+                    *byte = b' ';
+                }
+            });
+        }
+        crate::decode_legacy_script_text(&value)
+    };
+
+    LanguageInfo {
+        code_bytes,
+        code: crate::decode_legacy_script_text(&code_bytes),
+        name: get(b"IDS_LANG_NAME", true),
+        info: get(b"IDS_LANG_INFO", true),
+        fallback: get(b"IDS_LANG_FALLBACK", true),
+        charset: get(b"IDS_LANG_CHARSET", false),
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +546,114 @@ mod tests {
             .expect("read LoadEx component")
             .expect("LoadEx component exists");
         assert_eq!(component.bytes, b"first");
+    }
+
+    #[test]
+    fn language_infos_preserve_cpp_priority_parsing_and_first_successful_code() {
+        fn system(files: &[(&str, &[u8])]) -> Group {
+            let mut group = MutableGroup::new("System.c4g");
+            for &(name, bytes) in files {
+                group
+                    .add_file(name, bytes.to_vec())
+                    .expect("add language table");
+            }
+            Group::from_memory(
+                PathBuf::from("System.c4g"),
+                group.pack().expect("pack System group"),
+            )
+            .expect("open packed System group")
+        }
+
+        fn pack(name: &str, files: &[(&str, &[u8])]) -> Group {
+            let mut root = MutableGroup::new(name);
+            let mut system = MutableGroup::new("System.c4g");
+            for &(entry, bytes) in files {
+                system
+                    .add_file(entry, bytes.to_vec())
+                    .expect("add pack language table");
+            }
+            root.add_child("System.c4g", system)
+                .expect("add pack System group");
+            Group::from_memory(
+                PathBuf::from(name),
+                root.pack().expect("pack language pack"),
+            )
+            .expect("open language pack")
+        }
+
+        let local = system(&[
+            (
+                "Language00US.txt",
+                b"IDS_LANG_NAME=English\nIDS_LANG_INFO=\nIDS_LANG_FALLBACK=\n",
+            ),
+            ("LanguageDE.txt", b""),
+            (
+                "lAnGuAgEfi.TxT",
+                b"IDS_LANG_NAME=Suomi|Local\n\
+                  IDS_LANG_NAME=Ignored\n\
+                  IDS_LANG_INFO=Line|one\\nLine two\n\
+                  IDS_LANG_FALLBACK=DE|US\n\
+                  IDS_LANG_CHARSET=UTF|8\0IDS_LANG_INFO=ignored",
+            ),
+        ]);
+        let first = pack(
+            "First.c4g",
+            &[
+                ("LanguageDE.txt", b"IDS_LANG_NAME=wrong pack\n"),
+                ("LanguageNO.txt", b"IDS_LANG_NAME=Norsk\n"),
+                ("LanguageUS.txt", b"IDS_LANG_NAME=wrong local duplicate\n"),
+            ],
+        );
+        let second = pack(
+            "Second.c4g",
+            &[
+                (
+                    "LanguageDE.txt",
+                    b"IDS_LANG_NAME=Deutsch aus zweitem Pack\n",
+                ),
+                ("LanguageSV.txt", b"IDS_LANG_NAME=Svenska\n"),
+            ],
+        );
+        let packs = LanguagePacks {
+            packs: vec![first, second],
+            logical_roots: Vec::new(),
+        };
+
+        let infos = packs.language_infos(Some(&local));
+        assert_eq!(
+            infos
+                .iter()
+                .map(|info| info.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["US", "DE", "FI", "SV", "NO"]
+        );
+
+        let us = infos.iter().find(|info| info.code == "US").unwrap();
+        assert_eq!(us.info, "");
+        assert_eq!(us.charset, "[Undefined: IDS_LANG_CHARSET]");
+
+        let fi = infos.iter().find(|info| info.code == "FI").unwrap();
+        assert_eq!(fi.name, "Suomi Local");
+        assert_eq!(fi.info, "Line one\r\nLine two");
+        assert_eq!(fi.fallback, "DE US");
+        assert_eq!(fi.charset, "UTF|8");
+
+        let de = infos.iter().find(|info| info.code == "DE").unwrap();
+        assert_eq!(de.name, "[Undefined: IDS_LANG_NAME]");
+
+        let pack_only = packs.language_infos(None);
+        assert_eq!(pack_only[0].code, "DE");
+        assert_eq!(pack_only[0].name, "Deutsch aus zweitem Pack");
+
+        assert_eq!(
+            language_entry_code(b"Language\xe4x.txt"),
+            Some([0xc4, b'X'])
+        );
+        let legacy = parse_language_info([0xc4, b'X'], b"");
+        assert_eq!(legacy.code, "\u{00c4}X");
+        let utf8 = parse_language_info([0xc3, 0xa4], b"");
+        assert_eq!(utf8.code, "\u{00e4}");
+        assert!(utf8.matches_code("\u{00e4} - UTF-8 filename"));
     }
 
     #[test]
