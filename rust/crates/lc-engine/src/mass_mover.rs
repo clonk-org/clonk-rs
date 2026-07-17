@@ -499,6 +499,41 @@ mod tests {
         engine_with(materials, landscape)
     }
 
+    fn blocked_incinerating_mover_engine() -> (Engine, MaterialId) {
+        let materials = materials(
+            r#"
+            [Material Oil]
+            Name=Oil
+            Density=25
+            Instable=1
+            MaxSlide=0
+            Inflammable=1
+
+            [Material Lava]
+            Name=Lava
+            Density=50
+            Incindiary=1
+            "#,
+        );
+        let oil = materials.id_of("Oil").expect("oil material");
+        let lava = materials.id_of("Lava").expect("lava material");
+        let mut landscape = Landscape::flat_with_material(3, 5, Some(lava));
+        landscape.set_default_liquid_material(Some(oil));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(4, 4, Some(oil))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        engine
+            .register_definition(
+                crate::Definition::from_script(crate::FIRE_DEFINITION_ID, "Fire", "#strict\n")
+                    .expect("FLAM definition compiles"),
+            )
+            .expect("FLAM definition registers");
+        assert!(engine.mass_mover_create(1, 4, false));
+        (engine, oil)
+    }
+
     #[test]
     fn create_scans_slots_after_create_ptr_and_wraps() {
         // C4MassMoverSet::Create (C4MassMover.cpp:75-87): the scan starts
@@ -817,6 +852,94 @@ mod tests {
         assert_eq!(engine.mass_movers.slot(3), None);
         assert_eq!(engine.mass_movers.slot(7), None);
         assert_eq!(engine.mass_movers.slot(9), None);
+    }
+
+    #[test]
+    fn blocked_mover_incinerate_spawns_flam_then_extracts_material_without_rng() {
+        // mrfIncinerate on meeMassMove calls the full Landscape::Incinerate:
+        // a successful FLAM creation consumes the reaction, then the mover's
+        // pixel is extracted (C4Material.cpp:754-757; C4MassMover.cpp:126-132).
+        let (mut engine, oil) = blocked_incinerating_mover_engine();
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(1, 4)),
+            Some(oil),
+            "fixture: blocked Oil mover"
+        );
+        let rng_before = (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr());
+
+        engine.tick_mass_movers();
+
+        let fires = engine
+            .objects
+            .iter()
+            .filter(|object| {
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.definition_id == crate::FIRE_DEFINITION_ID
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fires.len(), 1, "exactly one FLAM is created");
+        assert_eq!(fires[0].state.position, crate::Vector2::new(1, 4));
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(1, 4)),
+            None,
+            "the consumed Oil pixel is extracted"
+        );
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+        assert_eq!(
+            (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
+            rng_before,
+            "Incinerate and FLAM creation consume no synced RNG"
+        );
+    }
+
+    #[test]
+    fn blocked_mover_incinerate_with_nearby_flam_is_unhandled_and_ceases() {
+        // C4Landscape::Incinerate returns false when FindObject locates a
+        // FLAM in (x-4,y-1,8,20). The mass-mover reaction must remain
+        // unhandled: try its other contact directions, then Cease without
+        // extracting the Oil pixel.
+        let (mut engine, oil) = blocked_incinerating_mover_engine();
+        engine
+            .spawn_object(
+                crate::SpawnConfig::new(crate::FIRE_DEFINITION_ID)
+                    .with_position(crate::Vector2::new(1, 4)),
+            )
+            .expect("existing FLAM spawns inside the suppression rect");
+        let rng_before = (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr());
+
+        engine.tick_mass_movers();
+
+        let fire_count = engine
+            .objects
+            .iter()
+            .filter(|object| {
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.definition_id == crate::FIRE_DEFINITION_ID
+            })
+            .count();
+        assert_eq!(fire_count, 1, "the nearby FLAM suppresses creation");
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(1, 4)),
+            Some(oil),
+            "an unhandled reaction leaves the Oil pixel in place"
+        );
+        assert_eq!(engine.mass_movers.live_movers(), 0, "the blocked mover ceases");
+        assert_eq!(
+            (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
+            rng_before,
+            "the failed Incinerate path consumes no synced RNG"
+        );
     }
 
     #[test]

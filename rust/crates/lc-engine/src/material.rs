@@ -1005,10 +1005,12 @@ fn execute_mass_move_reaction_kind(
         MaterialReactionKind::None | MaterialReactionKind::Insert => {
             MaterialReactionExecution::Unhandled
         }
-        // meeMassMove Script reactions run at the ENGINE level
-        // (`Engine::execute_mass_move_reaction`); this builtin-kind path is
-        // never reached for them.
-        MaterialReactionKind::Script { .. } => MaterialReactionExecution::Unhandled,
+        // meeMassMove Script and Incinerate reactions run at the ENGINE
+        // level (`Engine::execute_mass_move_reaction`): both need state this
+        // material/landscape-only helper cannot access.
+        MaterialReactionKind::Script { .. } | MaterialReactionKind::Incinerate => {
+            MaterialReactionExecution::Unhandled
+        }
         // mrfConvert meeMassMove (C4Material.cpp:654-657): unconditional
         // conversion-transfer of the MOVER's material to PXS — the convert
         // target (even an invalid one) plays no role on this event.
@@ -1027,13 +1029,6 @@ fn execute_mass_move_reaction_kind(
             let _ = rng.rnd3();
             let _ = rng.rnd3();
             MaterialReactionExecution::Consumed
-        }
-        MaterialReactionKind::Incinerate => {
-            if landscape.incinerate_at(pxs_x, pxs_y, materials) {
-                MaterialReactionExecution::Consumed
-            } else {
-                MaterialReactionExecution::Unhandled
-            }
         }
         MaterialReactionKind::Corrode {
             corrosive_strength,

@@ -4681,13 +4681,6 @@ impl Landscape {
         }
     }
 
-    pub fn incinerate_at(&mut self, x: i32, y: i32, materials: &MaterialSet) -> bool {
-        if !self.can_incinerate(x, y, materials) {
-            return false;
-        }
-        true
-    }
-
     pub fn path_is_clear(&self, start: Vector2, end: Vector2) -> bool {
         self.first_collision_on_line(start, end).is_none()
     }

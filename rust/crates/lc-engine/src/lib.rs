@@ -48836,12 +48836,13 @@ impl Engine {
         }
     }
 
-    /// One mass-move reaction (meeMassMove) through the engine, so
-    /// `Type=Script` functions can run (mrfScript on meeMassMove,
+    /// One mass-move reaction (meeMassMove) through the engine, so reactions
+    /// that need engine state can run: `Type=Script` functions (mrfScript,
     /// C4MassMover.cpp:163-167: xdir=ydir=Fix0, pfPosChanged=nullptr — the
     /// by-ref write-backs land in discarded locals; only a truthy return
-    /// matters, consuming the material). Builtin kinds delegate to the
-    /// MaterialSet path unchanged.
+    /// matters, consuming the material), and Incinerate's FLAM object query
+    /// and creation (C4Landscape.cpp:1417-1427). Other builtin kinds delegate
+    /// to the MaterialSet path unchanged.
     fn execute_mass_move_reaction(
         &mut self,
         pxs_material: MaterialId,
@@ -48887,6 +48888,13 @@ impl Engine {
                     material::MaterialReactionExecution::Consumed
                 }
                 _ => material::MaterialReactionExecution::Unhandled,
+            };
+        }
+        if reaction.kind == MaterialReactionKind::Incinerate {
+            return if self.spawn_fire_at(pxs_x, pxs_y) {
+                material::MaterialReactionExecution::Consumed
+            } else {
+                material::MaterialReactionExecution::Unhandled
             };
         }
         let mut instability_probes = Vec::new();
@@ -49251,10 +49259,12 @@ impl Engine {
             return false;
         }
 
-        match self
-            .spawn_object(SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)))
-        {
-            Ok(_) => true,
+        match self.spawn_object_with_initial_lifecycle(
+            SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)),
+            None,
+        ) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
             Err(error) => {
                 let _ = self.defer_runtime_flash_boundary(error);
                 false
