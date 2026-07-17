@@ -1405,6 +1405,12 @@ impl RuntimeTexMapState {
         if !add_if_missing {
             return 0;
         }
+        // AddEntry rejects a null texture before mutating the slot, while
+        // GetIndex's scan above still treats it as a wildcard for existing
+        // material entries (src/C4Texture.cpp:119-121,319-340).
+        if texture_name.is_none() {
+            return 0;
+        }
         let Some((density, shape)) = self
             .material(material_name)
             .map(|material| (material.density, material.shape))
@@ -7748,6 +7754,48 @@ mod tests {
         assert_eq!(grid.material_names()[slot as usize].as_deref(), Some("Earth"));
         assert_eq!(grid.texture_names()[slot as usize].as_deref(), Some("Ridge"));
         assert_eq!(grid.revision(), revision, "texmap sync writes no pixels");
+    }
+
+    #[test]
+    fn runtime_texmap_null_texture_matches_existing_but_never_allocates() {
+        // GetIndex checks existing material entries before its add path, but
+        // AddEntry rejects a null texture (src/C4Texture.cpp:119-121,
+        // 319-340). A wildcard lookup may therefore match but never create.
+        let base = raster_grid_landscape(1, 1, vec![0])
+            .raster_state()
+            .expect("raster state")
+            .texmap()
+            .clone();
+        let without_earth = || {
+            let mut texmap = base.clone();
+            texmap.material_names[1] = None;
+            texmap.texture_names[1] = None;
+            texmap.match_texture_names[1] = None;
+            texmap.shapes[1] = None;
+            texmap.densities[1] = 0;
+            texmap
+        };
+
+        let mut add_miss = without_earth();
+        let before_add_miss = add_miss.clone();
+        assert_eq!(add_miss.get_index("Earth", None, true), 0);
+        assert_eq!(add_miss, before_add_miss, "failed add changes no slots");
+
+        let mut existing = without_earth();
+        existing.material_names[12] = Some("Earth".to_string());
+        existing.texture_names[12] = Some("Rough".to_string());
+        existing.match_texture_names[12] = Some("Rough".to_string());
+        existing.shapes[12] = Some(crate::chunky::ChunkShape::Flat);
+        existing.densities[12] = 100;
+        let before_existing = existing.clone();
+        assert_eq!(existing.get_index("Earth", None, true), 12);
+        assert_eq!(existing.get_index("Earth", None, false), 12);
+        assert_eq!(existing, before_existing, "existing lookup is read-only");
+
+        let mut no_add = without_earth();
+        let before_no_add = no_add.clone();
+        assert_eq!(no_add.get_index("Earth", None, false), 0);
+        assert_eq!(no_add, before_no_add, "add=false remains read-only");
     }
 
     #[test]
