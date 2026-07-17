@@ -1271,6 +1271,24 @@ impl RuntimeTexMapState {
             .find(|material| material.name.eq_ignore_ascii_case(name))
     }
 
+    /// Return the numeric slot captured by `CrossMapMaterials`, if this is a
+    /// current-format state with a matching material ledger. `Some(0)` is a
+    /// real failed cross-map and must not fall back to a later name lookup.
+    fn frozen_crossmap_entry(
+        &self,
+        materials: &MaterialSet,
+        source: MaterialId,
+        target_spec: &str,
+    ) -> Option<u8> {
+        let runtime_material = self.materials.get(source.index())?;
+        let material = materials.get_by_id(source)?;
+        if !runtime_material.name.eq_ignore_ascii_case(material.name()) {
+            return None;
+        }
+        let ordinal = materials.crossmap_entry_ordinal(source, target_spec)?;
+        self.material_crossmap_entries.get(ordinal).copied()
+    }
+
     /// The already-cross-mapped result of `C4TextureMap::GetIndexMatTex`
     /// (C4Texture.cpp:346-369). Scenario activation has allocated every
     /// `BlastShiftTo` pair before simulation starts, so runtime mutation must
@@ -2625,6 +2643,33 @@ impl Landscape {
         }
     }
 
+    /// Use the source material's numeric CrossMapMaterials result. Missing
+    /// ledgers belong to old saves and synthetic fixtures, which retain the
+    /// legacy name-resolution fallback; a stored zero remains disabled.
+    pub(crate) fn crossmapped_material_texture_byte(
+        &self,
+        material_texture: &str,
+        source_material: MaterialId,
+        materials: &MaterialSet,
+        fallback_material: MaterialId,
+    ) -> Option<u8> {
+        match self.raster_state.as_ref() {
+            Some(state) => {
+                let byte = state
+                    .texmap()
+                    .frozen_crossmap_entry(materials, source_material, material_texture)
+                    .unwrap_or_else(|| {
+                        state.texmap().resolved_index_mat_tex(material_texture)
+                    });
+                (byte != 0).then_some(byte)
+            }
+            None => self
+                .pixels
+                .as_ref()
+                .and_then(|grid| grid.byte_for_material(fallback_material)),
+        }
+    }
+
     /// `SetPix(..., MatTex2PixCol(...)+GBackIFT(...))` for an already-resolved
     /// material-texture byte (C4Landscape.cpp:951).
     pub fn insert_material_texture_pix(&mut self, x: i32, y: i32, byte: u8) -> bool {
@@ -3146,11 +3191,38 @@ impl Landscape {
     ) -> Option<TemperatureScanAction> {
         let outcome =
             materials.evaluate_temperature_conversion(material, direction, temperature)?;
-        let target = outcome.target.as_material_id()?;
-        let target_byte = self.material_texture_byte(&outcome.target_spec, target)?;
-        if target_byte == 0 {
-            return None;
-        }
+        let frozen_byte = self.raster_state.as_ref().and_then(|state| {
+            state
+                .texmap()
+                .frozen_crossmap_entry(materials, material, &outcome.target_spec)
+        });
+        let (target, target_byte) = match frozen_byte {
+            Some(0) => return None,
+            Some(target_byte) => {
+                let target = self
+                    .raster_state
+                    .as_ref()
+                    .and_then(|state| {
+                        state
+                            .texmap()
+                            .material_names
+                            .get(usize::from(target_byte & 0x7f))
+                    })
+                    .and_then(Option::as_deref)
+                    .and_then(|name| materials.id_of(name))?;
+                (target, target_byte)
+            }
+            None => {
+                let target = outcome.target.as_material_id()?;
+                let target_byte = self.crossmapped_material_texture_byte(
+                    &outcome.target_spec,
+                    material,
+                    materials,
+                    target,
+                )?;
+                (target, target_byte)
+            }
+        };
         Some(TemperatureScanAction {
             target,
             target_byte,
@@ -8816,6 +8888,136 @@ func TransactionThenRaw()
         landscape.resolve_grid_materials(|name| materials.id_of(name));
         landscape.refresh_all_raster_columns();
         landscape
+    }
+
+    fn frozen_temperature_pixel_landscape(materials: &MaterialSet) -> Landscape {
+        let mut densities = vec![0; 128];
+        densities[10] = 80;
+        densities[11] = 80;
+        densities[40] = 30;
+        let mut material_names = vec![None; 128];
+        material_names[10] = Some("HotAbove".to_string());
+        material_names[11] = Some("ColdBelow".to_string());
+        material_names[40] = Some("Target".to_string());
+        let mut texture_names = vec![None; 128];
+        texture_names[10] = Some("Rough".to_string());
+        texture_names[11] = Some("Rough".to_string());
+        texture_names[40] = Some("Smooth".to_string());
+        let grid = PixelGrid::new(
+            2,
+            2,
+            vec![0, 0, 10 | 0x80, 11],
+            densities.clone(),
+            material_names.clone(),
+            texture_names.clone(),
+        );
+        let runtime_materials = materials
+            .iter()
+            .map(|material| RuntimeTexMapMaterial {
+                name: material.name().to_string(),
+                density: material.density(),
+                shape: crate::chunky::ChunkShape::Smooth,
+            })
+            .collect();
+        let texmap = RuntimeTexMapState {
+            densities,
+            material_names,
+            texture_names: texture_names.clone(),
+            match_texture_names: texture_names,
+            shapes: vec![None; 128],
+            materials: runtime_materials,
+            texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
+            default_material_entries: vec![
+                ("HotAbove".to_string(), 10),
+                ("ColdBelow".to_string(), 11),
+                ("Target".to_string(), 40),
+            ],
+            material_crossmap_entries: vec![40, 40],
+        };
+        let mut landscape = Landscape::new(2, vec![2; 2]).expect("temperature landscape builds");
+        landscape.set_world_height(2);
+        landscape.set_pixel_grid(grid);
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
+        landscape.refresh_all_raster_columns();
+        landscape.set_raster_state(LandscapeRasterState::new(1, 0, texmap));
+        landscape
+    }
+
+    #[test]
+    fn temperature_scan_uses_frozen_crossmap_slots_after_lower_index_copy() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material HotAbove]
+            Name=HotAbove
+            Density=80
+            AboveTempConvert=-1
+            AboveTempConvertDir=0
+            AboveTempConvertTo=Target-Smooth
+            TempConvStrength=0
+
+            [Material ColdBelow]
+            Name=ColdBelow
+            Density=80
+            BelowTempConvert=1
+            BelowTempConvertDir=0
+            BelowTempConvertTo=Target-Smooth
+            TempConvStrength=0
+
+            [Material Target]
+            Name=Target
+            Density=30
+
+            [Material Stale]
+            Name=Stale
+            Density=50
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let hot = materials.id_of("HotAbove").expect("hot source exists");
+        let target = materials.id_of("Target").expect("target exists");
+        let stale = materials.id_of("Stale").expect("stale material exists");
+        let mut baseline = frozen_temperature_pixel_landscape(&materials);
+        let mut moved = baseline.clone();
+        let mut moved_texmap = moved
+            .raster_state()
+            .expect("raster state exists")
+            .texmap()
+            .clone();
+        let (success, indices) =
+            moved_texmap.set_texture_index("Target-Smooth", 5, false);
+        assert!(success);
+        assert_eq!(indices, Some((40, 5)));
+        assert!(moved.apply_runtime_texture_index_move(moved_texmap, 40, 5));
+
+        baseline.apply_temperature_conversions(&materials, 0);
+        moved.apply_temperature_conversions(&materials, 0);
+
+        assert_eq!(baseline.grid_byte_at(0, 1), Some(40 | 0x80));
+        assert_eq!(baseline.grid_byte_at(1, 1), Some(40));
+        assert_eq!(moved.grid_byte_at(0, 1), Some(40 | 0x80));
+        assert_eq!(moved.grid_byte_at(1, 1), Some(40));
+        assert_eq!(moved.material_pixel_count(target, None), 2);
+        let texmap = moved.raster_state().expect("raster state exists").texmap();
+        assert_eq!(texmap.material_names[5].as_deref(), Some("Target"));
+        assert_eq!(texmap.material_names[40].as_deref(), Some("Target"));
+        assert_eq!(texmap.material_crossmap_entries, vec![40, 40]);
+
+        let mut stale_cache = frozen_temperature_pixel_landscape(&materials);
+        let grid = stale_cache.pixels.as_mut().expect("pixel grid exists");
+        grid.material_names[40] = Some("Stale".to_string());
+        grid.resolve_materials(|name| materials.id_of(name));
+        assert_eq!(grid.material_for_byte(40), Some(stale));
+        let action = stale_cache
+            .temperature_scan_action(
+                &materials,
+                hot,
+                TemperatureDirection::Downwards,
+                0,
+            )
+            .expect("above conversion applies");
+        assert_eq!(action.target, target);
+        assert_eq!(action.target_byte, 40);
     }
 
     #[test]

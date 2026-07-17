@@ -765,6 +765,40 @@ impl MaterialSet {
         }
     }
 
+    /// Flat `C4MaterialMap::CrossMapMaterials` ordinal for one material's
+    /// BlastShiftTo/BelowTempConvertTo/AboveTempConvertTo specification.
+    /// The runtime texture map stores those numeric results in this exact
+    /// material/property order, including failed lookups (slot zero).
+    pub(crate) fn crossmap_entry_ordinal(
+        &self,
+        source: MaterialId,
+        target_spec: &str,
+    ) -> Option<usize> {
+        let mut ordinal = 0;
+        for material in &self.materials {
+            for key in [
+                "blastshiftto",
+                "belowtempconvertto",
+                "abovetempconvertto",
+            ] {
+                let Some(spec) = material.definition.value(key).filter(|spec| !spec.is_empty())
+                else {
+                    continue;
+                };
+                if material.id == source
+                    && spec.trim().eq_ignore_ascii_case(target_spec.trim())
+                {
+                    return Some(ordinal);
+                }
+                ordinal += 1;
+            }
+            if material.id == source {
+                return None;
+            }
+        }
+        None
+    }
+
     /// `C4MaterialMap::SaveEnumeration`: add/replace root MatMap.txt with the
     /// current runtime material names in numeric-id order.
     pub fn save_enumeration(
