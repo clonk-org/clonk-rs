@@ -315,9 +315,7 @@ fn load_definition_name<S: AsRef<str>>(
     };
     let text = decode_legacy_script_text(&component.bytes);
     let localized_name = |code: &str| {
-        component_language_string(&text, code)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
+        component_language_string(&text, code).map(str::to_string)
     };
     if languages.is_empty() {
         Ok(localized_name(""))
@@ -5121,6 +5119,29 @@ HideHUDElements=Portrait|Bogus|Inventory
             .expect("load definition name");
 
         assert_eq!(definition.core.name.as_deref(), Some("Cabin\nDE:Huette"));
+    }
+
+    #[test]
+    fn definition_name_empty_first_language_value_wins() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("EmptyName.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=EMNM\nName=Core Name\n",
+        )
+        .expect("DefCore");
+        fs::write(def_dir.join("Names.txt"), b"US:\r\nDE:Huette\r\n")
+            .expect("localized names");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let empty = Definition::load_with_languages(&group, &["US", "DE"])
+            .expect("empty first language name");
+        assert_eq!(empty.core.name.as_deref(), Some(""));
+
+        let missing = Definition::load_with_languages(&group, &["FR"])
+            .expect("missing language name");
+        assert_eq!(missing.core.name.as_deref(), Some("Core Name"));
     }
 
     #[test]
