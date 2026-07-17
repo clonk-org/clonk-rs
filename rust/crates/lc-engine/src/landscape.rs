@@ -2540,11 +2540,11 @@ impl Landscape {
     pub fn clear_pix(&mut self, x: i32, y: i32) -> bool {
         let tunnel_byte = self.default_material_byte("Tunnel");
         match self.pixels.as_mut() {
-            Some(grid) => {
+            Some(grid) if grid.byte_at(x, y).is_some() => {
                 grid.clear_pix_with_tunnel(x, y, tunnel_byte);
                 true
             }
-            None => false,
+            Some(_) | None => false,
         }
     }
 
