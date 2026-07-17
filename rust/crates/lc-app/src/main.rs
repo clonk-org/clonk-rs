@@ -44825,7 +44825,11 @@ func Award()
         let captain = resolve_message_portrait(&engine, "Portrait:SCLK::ff0000::Captain1")
             .expect("named portrait resolves");
         assert_eq!((captain.width(), captain.height()), (2, 1));
-        assert_eq!(captain.pixels(), &[10, 20, 30, 255, 40, 50, 60, 255]);
+        assert_eq!(
+            captain.pixels(),
+            &[255, 225, 225, 255, 40, 50, 60, 255],
+            "missing OverlayCaptain1.png auto-generates an owner mask for its blue shade"
+        );
         assert!(
             resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::Missing").is_none(),
             "C++ requires the requested named bitmap; it does not fall back to portrait 1"

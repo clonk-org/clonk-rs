@@ -2410,6 +2410,61 @@ mod tests {
     }
 
     #[test]
+    fn resource_auto_mask_detector_matches_hud_over_sampled_colors() {
+        const CHANNELS: [u8; 16] = [
+            0, 1, 15, 31, 42, 63, 100, 101, 127, 128, 145, 170, 175, 223, 254, 255,
+        ];
+        let side = CHANNELS.len() as u32;
+        let width = side * side;
+        let mut source = image::RgbaImage::new(width, side);
+        for (r_index, &r) in CHANNELS.iter().enumerate() {
+            for (g_index, &g) in CHANNELS.iter().enumerate() {
+                for (b_index, &b) in CHANNELS.iter().enumerate() {
+                    source.put_pixel(
+                        r_index as u32 * side + g_index as u32,
+                        b_index as u32,
+                        image::Rgba([r, g, b, 255]),
+                    );
+                }
+            }
+        }
+
+        let temp = tempfile::Builder::new()
+            .prefix("lc-hud-owner-mask-")
+            .tempdir()
+            .expect("tempdir");
+        let definition_dir = temp.path().join("Sweep.c4d");
+        std::fs::create_dir(&definition_dir).expect("definition directory");
+        std::fs::write(
+            definition_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=SWEP\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+        source
+            .save(definition_dir.join("Graphics.png"))
+            .expect("graphics");
+        let group = lc_resources::Group::open(&definition_dir).expect("open definition");
+        let definition = lc_resources::ResourceDefinition::load(&group).expect("load definition");
+        let mask = definition
+            .color_by_owner_mask
+            .expect("sample sweep contains blue shades");
+
+        for (r_index, &r) in CHANNELS.iter().enumerate() {
+            for (g_index, &g) in CHANNELS.iter().enumerate() {
+                for (b_index, &b) in CHANNELS.iter().enumerate() {
+                    let x = r_index as u32 * side + g_index as u32;
+                    let y = b_index as u32;
+                    assert_eq!(
+                        mask.pixels[(y * width + x) as usize],
+                        clr_by_owner_gray(i32::from(r), i32::from(g), i32::from(b)).unwrap_or(0),
+                        "sample rgb({r}, {g}, {b})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn energy_bar_draws_filled_column_from_the_bottom() {
         // DrawEnergyLevelEx: rows below yBar sample the filled column 0,
         // rows above the empty column 1 (src/C4Facet.cpp:334-389).

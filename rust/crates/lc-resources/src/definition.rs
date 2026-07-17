@@ -2902,7 +2902,7 @@ fn generate_color_by_owner_mask(image: &mut image::RgbaImage) -> Option<ColorByO
             let g = pixel[1];
             let b = pixel[2];
             let a = pixel[3];
-            let dw = u32::from(a) << 24 | u32::from(b) << 16 | u32::from(g) << 8 | u32::from(r);
+            let dw = u32::from(a) << 24 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b);
             if let Some(mask_value) = detect_color_by_owner(dw) {
                 pixels[idx] = mask_value;
                 pixel[0] = 255;
@@ -3578,6 +3578,96 @@ Entrance=1,2,,4
         tempfile::Builder::new().prefix("lc-test-").tempdir()
     }
 
+    fn cpp_color_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
+        const HLSMAX: i32 = 255;
+        const RGBMAX: i32 = 255;
+
+        let c_max = r.max(g).max(b);
+        let c_min = r.min(g).min(b);
+        let l = ((c_max + c_min) * HLSMAX + RGBMAX) / (2 * RGBMAX);
+        if c_max == c_min {
+            return None;
+        }
+        let s = if l <= HLSMAX / 2 {
+            ((c_max - c_min) * HLSMAX + (c_max + c_min) / 2) / (c_max + c_min)
+        } else {
+            ((c_max - c_min) * HLSMAX + (2 * RGBMAX - c_max - c_min) / 2)
+                / (2 * RGBMAX - c_max - c_min)
+        };
+        let rdelta = ((c_max - r) * (HLSMAX / 6) + (c_max - c_min) / 2) / (c_max - c_min);
+        let gdelta = ((c_max - g) * (HLSMAX / 6) + (c_max - c_min) / 2) / (c_max - c_min);
+        let bdelta = ((c_max - b) * (HLSMAX / 6) + (c_max - c_min) / 2) / (c_max - c_min);
+        let mut hue = if r == c_max {
+            bdelta - gdelta
+        } else if g == c_max {
+            HLSMAX / 3 + rdelta - bdelta
+        } else {
+            2 * HLSMAX / 3 + gdelta - rdelta
+        };
+        if hue < 0 {
+            hue += HLSMAX;
+        }
+        if hue > HLSMAX {
+            hue -= HLSMAX;
+        }
+        ((145..=175).contains(&hue) && s > 100).then_some(b as u8)
+    }
+
+    #[test]
+    fn auto_generated_color_by_owner_mask_matches_c4surface_color_sweep() {
+        let surface_pixel = |r: u8, g: u8, b: u8| {
+            u32::from(255_u8) << 24 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+        };
+        assert_eq!(detect_color_by_owner(surface_pixel(0, 0, 255)), Some(255));
+        assert_eq!(detect_color_by_owner(surface_pixel(255, 0, 0)), None);
+
+        for (rgb, expected) in [
+            ([128, 128, 128], None),
+            ([50, 50, 115], None),
+            ([50, 50, 116], Some(116)),
+            ([0, 152, 255], Some(255)),
+            ([0, 157, 255], None),
+            ([30, 0, 255], Some(255)),
+            ([37, 0, 255], None),
+            ([30, 30, 200], Some(200)),
+        ] {
+            assert_eq!(
+                detect_color_by_owner(surface_pixel(rgb[0], rgb[1], rgb[2])),
+                expected,
+                "boundary color {rgb:?}"
+            );
+        }
+
+        const CHANNELS: [u8; 24] = [
+            0, 1, 2, 15, 16, 31, 32, 41, 42, 43, 63, 85, 100, 101, 127, 128, 145, 170, 175, 191,
+            223, 240, 254, 255,
+        ];
+        let side = CHANNELS.len() as u32;
+        let width = side * side;
+        let mut image = image::RgbaImage::new(width, side);
+        let mut expected = vec![None; (width * side) as usize];
+        for (r_index, &r) in CHANNELS.iter().enumerate() {
+            for (g_index, &g) in CHANNELS.iter().enumerate() {
+                for (b_index, &b) in CHANNELS.iter().enumerate() {
+                    let x = r_index as u32 * side + g_index as u32;
+                    let y = b_index as u32;
+                    image.put_pixel(x, y, image::Rgba([r, g, b, 255]));
+                    expected[(y * width + x) as usize] =
+                        cpp_color_by_owner_gray(i32::from(r), i32::from(g), i32::from(b));
+                }
+            }
+        }
+
+        let mask = generate_color_by_owner_mask(&mut image).expect("sweep contains blue shades");
+        for (index, expected) in expected.into_iter().enumerate() {
+            assert_eq!(
+                mask.pixels[index],
+                expected.unwrap_or(0),
+                "sample index {index}"
+            );
+        }
+    }
+
     // Overlay.png is the ClrByOwner surface itself: C4DefGraphics::LoadGraphics
     // keeps it as BitmapClr with the base as pMainSfc (C4DefGraphics.cpp:74-94,
     // C4Surface::SetAsClrByOwnerOf, C4Surface.cpp:320-331), so drawing blits
@@ -3902,13 +3992,13 @@ Entrance=1,2,,4
         image::RgbaImage::from_pixel(1, 1, image::Rgba([32, 32, 32, 255]))
             .save(def_dir.join("Overlay.png"))
             .expect("base overlay");
-        image::RgbaImage::from_pixel(1, 1, image::Rgba([136, 0, 0, 255]))
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 136, 255]))
             .save(def_dir.join("GraphicsAuto.png"))
             .expect("named graphics");
-        image::RgbaImage::from_pixel(1, 1, image::Rgba([144, 0, 0, 255]))
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 144, 255]))
             .save(def_dir.join("Portrait1.png"))
             .expect("PNG portrait");
-        image::RgbaImage::from_pixel(1, 1, image::Rgba([160, 0, 0, 255]))
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 160, 255]))
             .save(def_dir.join("PortraitLegacy.bmp"))
             .expect("BMP portrait");
 
