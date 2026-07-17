@@ -8499,6 +8499,28 @@ pub(crate) fn build_map_pixel_classifier(
         material_library,
     };
 
+    // C4TextureMap::Init initializes every parsed entry only after the final
+    // material and texture inventories have loaded. Entries whose material
+    // or effective texture cannot be resolved are cleared before
+    // CrossMapMaterials, making their slots available to the ascending
+    // GetIndex allocation scan (C4Texture.cpp:68-104,229-244). For liquid
+    // `Material-Smooth` entries, `texture_names` already carries the
+    // hard-coded effective `Liquid` lookup while `match_texture_names`
+    // deliberately retains the raw `Smooth` pair.
+    let invalid_slots = (1..127usize)
+        .filter(|&slot| {
+            let Some(material_name) = classifier.state.material_names[slot].as_deref() else {
+                return false;
+            };
+            classifier.state.material(material_name).is_none()
+                || classifier.state.texture_names[slot]
+                    .as_deref()
+                    .is_none_or(|texture_name| !classifier.state.texture_exists(texture_name))
+        })
+        .map(|slot| slot as u8)
+        .collect::<Vec<_>>();
+    classifier.state.clear_entries(&invalid_slots);
+
     // Dynamic texmap entries (C4MaterialMap::CrossMapMaterials,
     // C4Material.cpp:345-484): the DefaultMatTex loop registers
     // (MaterialName, TextureOverlay-or-"Smooth") for EVERY material with
@@ -20160,6 +20182,7 @@ public func ActualizePhase(pClonk)
             "[Material]\nName=PackStone\nDensity=100\n",
         )
         .expect("write package material");
+        write_test_texture(&map_materials, "Liquid");
         let global_materials = network.join("Material.c4g");
         std::fs::create_dir_all(&global_materials).expect("global materials");
         std::fs::write(global_materials.join("TexMap.txt"), "# global\n")
@@ -21310,6 +21333,14 @@ public func ActualizePhase(pClonk)
         bytes
     }
 
+    fn write_test_texture(group: &Path, name: &str) {
+        std::fs::write(
+            group.join(format!("{name}.bmp")),
+            encode_indexed_bmp(&[&[0u8]]),
+        )
+        .expect("write test texture");
+    }
+
     #[test]
     fn in_liquid_is_the_cached_object_flag_like_cpp() {
         // C4Object::InLiquid is a CACHED flag: loaded from Objects.txt
@@ -21369,6 +21400,8 @@ public func ActualizePhase(pClonk)
             "[Material]\nName=Earth\nDensity=100\n",
         )
         .expect("write earth");
+        write_test_texture(&materials, "Liquid");
+        write_test_texture(&materials, "Smooth");
         // A sits in the cave water without the flag; B sits in dry air
         // above column 0 with a stale InLiquid=1. Category 16 (C4D_Object):
         // ExecMovement skips C4D_StaticBack objects entirely
@@ -22024,6 +22057,7 @@ public func ActualizePhase(pClonk)
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
         )
         .expect("write earth");
+        write_test_texture(&materials, "Smooth");
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -22322,6 +22356,8 @@ public func ActualizePhase(pClonk)
             "[Material]\nName=Earth\nDensity=100\n",
         )
         .expect("write earth");
+        write_test_texture(&materials, "Liquid");
+        write_test_texture(&materials, "Smooth");
         // A placed object INSIDE the pool: C4GameObjects::Load keeps
         // positions verbatim — no spawn-time surface ejection (GoldRush's
         // bubbles and fish sit in an underground river below the column
@@ -22425,6 +22461,8 @@ public func ActualizePhase(pClonk)
             "[Material]\nName=PackStone\nDensity=100\n",
         )
         .expect("write package material");
+        write_test_texture(&package_materials, "Liquid");
+        write_test_texture(&package_materials, "Smooth");
 
         let global_materials = dir.path().join("Material.c4g");
         std::fs::create_dir_all(&global_materials).expect("global materials");
@@ -22665,6 +22703,7 @@ public func ActualizePhase(pClonk)
             "[Material]\nName=Earth\nDensity=100\n",
         )
         .expect("write earth");
+        write_test_texture(&materials, "Smooth");
 
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
@@ -22726,6 +22765,8 @@ public func ActualizePhase(pClonk)
             "[Material]\nName=Earth\nDensity=100\nTextureOverlay=Smooth\nBlastShiftTo=Earth\n",
         )
         .expect("write material");
+        write_test_texture(&materials, "Ridge");
+        write_test_texture(&materials, "Smooth");
 
         let group = Group::open(dir.path()).expect("scenario group opens");
         let resolver = FileSystemResolver { roots: Vec::new() };
@@ -22739,6 +22780,157 @@ public func ActualizePhase(pClonk)
         let restored: RuntimeTexMapState =
             serde_json::from_str(&encoded).expect("texmap restores");
         assert_eq!(restored, classifier.state);
+    }
+
+    #[test]
+    fn texmap_init_clears_unresolved_entries_and_frees_their_slots() {
+        // C4TextureMap::Init clears both a known material with an unloaded
+        // texture and an unknown material before CrossMapMaterials. Once
+        // slots 1..29 are occupied, GetIndex must therefore be able to reuse
+        // the cleared slot 30 (C4Texture.cpp:68-104,229-244,319-345).
+        let dir = tempdir().expect("tempdir");
+        let materials = dir.path().join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(
+            materials.join("TexMap.txt"),
+            "1=Earth-NoSuchTex\n30=Earth-NoSuchTex\n31=NoSuchMat-Rough\n",
+        )
+        .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=50\n",
+        )
+        .expect("write earth");
+        std::fs::write(
+            materials.join("X.c4m"),
+            "[Material]\nName=X\nDensity=75\nShape=2\nTextureOverlay=Rough\n",
+        )
+        .expect("write allocation material");
+        std::fs::write(
+            materials.join("Y.c4m"),
+            "[Material]\nName=Y\nDensity=80\nShape=3\n",
+        )
+        .expect("write fresh-pair material");
+        write_test_texture(&materials, "Rough");
+
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+        let mut classifier = build_map_pixel_classifier(&group, &resolver)
+            .expect("classifier builds")
+            .expect("local texmap exists");
+
+        for slot in [30usize, 31] {
+            assert_eq!(classifier.state.densities[slot], 0);
+            assert!(classifier.state.material_names[slot].is_none());
+            assert!(classifier.state.texture_names[slot].is_none());
+            assert!(classifier.state.match_texture_names[slot].is_none());
+            assert!(classifier.state.shapes[slot].is_none());
+        }
+        assert!(!classifier.is_solid(30), "the invalid map byte is sky");
+        assert_eq!(
+            classifier.state.default_material_entry("X"),
+            Some(1),
+            "CrossMapMaterials reuses the cleared first slot"
+        );
+
+        for slot in 1..30 {
+            classifier.state.material_names[slot] = Some(format!("Taken{slot}"));
+        }
+        assert_eq!(classifier.get_index("Y", Some("Rough"), true), 30);
+        assert_eq!(classifier.state.material_names[30].as_deref(), Some("Y"));
+        assert_eq!(
+            classifier.state.match_texture_names[30].as_deref(),
+            Some("Rough")
+        );
+        assert_eq!(classifier.state.densities[30], 80);
+    }
+
+    #[test]
+    fn texmap_init_validates_liquid_smooth_against_liquid_texture() {
+        // C4TexMapEntry::Init substitutes Liquid only for the texture lookup.
+        // Smooth being loaded cannot save the static slot when Liquid is not.
+        // The separately tracked dynamic-add substitution gap may create a
+        // Water-Smooth pair elsewhere; this assertion pins the parsed slot.
+        let dir = tempdir().expect("tempdir");
+        let materials = dir.path().join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "25=Water-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Water.c4m"),
+            "[Material]\nName=Water\nDensity=25\n",
+        )
+        .expect("write water");
+        write_test_texture(&materials, "Smooth");
+
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+        let classifier = build_map_pixel_classifier(&group, &resolver)
+            .expect("classifier builds")
+            .expect("local texmap exists");
+
+        assert_eq!(classifier.state.densities[25], 0);
+        assert!(classifier.state.material_names[25].is_none());
+        assert!(classifier.state.texture_names[25].is_none());
+        assert!(classifier.state.match_texture_names[25].is_none());
+        assert!(classifier.state.shapes[25].is_none());
+        assert!(!classifier.is_liquid(25), "the invalid map byte is sky");
+    }
+
+    #[test]
+    fn texmap_init_preserves_valid_entries_and_raw_liquid_pair_name() {
+        // A valid liquid Smooth entry retains Smooth for pair matching while
+        // selecting Liquid for rendering. Ordinary valid entries remain
+        // byte-for-byte classified at their original slot.
+        let dir = tempdir().expect("tempdir");
+        let materials = dir.path().join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(
+            materials.join("TexMap.txt"),
+            "25=Water-Smooth\n30=Earth-Rough\n",
+        )
+        .expect("write texmap");
+        std::fs::write(
+            materials.join("Water.c4m"),
+            "[Material]\nName=Water\nDensity=25\n",
+        )
+        .expect("write water");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+        write_test_texture(&materials, "Liquid");
+        write_test_texture(&materials, "Rough");
+
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+        let classifier = build_map_pixel_classifier(&group, &resolver)
+            .expect("classifier builds")
+            .expect("local texmap exists");
+
+        assert_eq!(classifier.state.densities[25], 25);
+        assert_eq!(
+            classifier.state.material_names[25].as_deref(),
+            Some("Water")
+        );
+        assert_eq!(
+            classifier.state.match_texture_names[25].as_deref(),
+            Some("Smooth")
+        );
+        assert_eq!(
+            classifier.state.texture_names[25].as_deref(),
+            Some("Liquid")
+        );
+        assert_eq!(classifier.state.densities[30], 100);
+        assert_eq!(
+            classifier.state.material_names[30].as_deref(),
+            Some("Earth")
+        );
+        assert_eq!(
+            classifier.state.texture_names[30].as_deref(),
+            Some("Rough")
+        );
     }
 
     #[test]
