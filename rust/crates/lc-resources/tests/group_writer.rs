@@ -4,7 +4,7 @@
 mod group_writer;
 
 use group_writer::{c4group_file_crc, compress_c4group_for_test};
-use lc_resources::{Group, MutableGroup, MutableGroupChildMut, MutableGroupError};
+use lc_resources::{Group, MutableGroup, MutableGroupChildMut};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
@@ -156,17 +156,119 @@ fn cpp_case_insensitive_replacement_appends_the_new_entry() {
     assert_eq!(group.entry_crc("SAME.txt"), group.entry_crc("same.TXT"));
 }
 
-#[cfg(unix)]
 #[test]
-fn cpp_unix_entry_names_are_limited_to_name_max_bytes() {
-    // AddEntry copies through SCopy(..., _MAX_FNAME), and Unix defines
-    // _MAX_FNAME as NAME_MAX (src/C4Group.cpp:864-866; src/StdFile.h:30-35).
+fn cpp_add_entry_truncates_to_the_platform_filename_limit() {
+    // AddEntry copies through SCopy(..., _MAX_FNAME): NAME_MAX (255) on Unix
+    // and the CRT's 256-byte _MAX_FNAME on Windows. The 260-byte core remains
+    // zero-padded (src/C4Group.cpp:864-866; src/C4Group.h:105-116).
+    let mut group = MutableGroup::new("Test.c4g");
+    let source = vec![b'a'; 300];
+    let expected_length = if cfg!(windows) { 256 } else { 255 };
+    let expected = "a".repeat(expected_length);
+
+    group
+        .add_file_bytes_with_metadata(source, b"data".to_vec(), 1, false)
+        .unwrap();
+
+    assert_eq!(group.entry_names(), [expected.as_str()]);
+    let image = group.pack_raw().unwrap();
+    assert_eq!(&image[204..204 + expected_length], expected.as_bytes());
+    assert!(image[204 + expected_length..204 + 260]
+        .iter()
+        .all(|byte| *byte == 0));
+    assert_eq!(packed_entry_names(&image), [expected]);
+}
+
+#[test]
+fn cpp_overlong_duplicate_lookup_precedes_truncation_and_removes_only_the_first_match() {
+    // AddEntry calls GetEntry with the full input before SCopy truncates the
+    // stored core. Repeated long inputs therefore coexist. A later exact
+    // truncated input removes only the first match, then appends at the tail
+    // (src/C4Group.cpp:851-888,896-904).
+    let mut group = MutableGroup::new("Test.c4g");
+    let source = vec![b'b'; 300];
+    let expected_length = if cfg!(windows) { 256 } else { 255 };
+    let stored = vec![b'b'; expected_length];
+
+    group
+        .add_file_bytes_with_metadata(source.clone(), vec![1], 1, false)
+        .unwrap();
+    group
+        .add_file_bytes_with_metadata(source, vec![2], 1, false)
+        .unwrap();
+    assert_eq!(group.entry_names().len(), 2);
+
+    group
+        .add_file_bytes_with_metadata(stored, vec![3], 1, false)
+        .unwrap();
+    assert_eq!(group.entry_names().len(), 2);
+    let image = group.pack_raw().unwrap();
+    assert_eq!(&image[204 + 2 * 316..], &[2, 3]);
+}
+
+#[test]
+fn cpp_add_entry_accepts_empty_names_and_zero_pads_the_core() {
+    // Packed-group AddEntry accepts an explicit empty name. The zero-initialized
+    // core therefore retains 260 zero filename bytes. A leading NUL is the
+    // same empty C string and replaces it (src/C4Group.cpp:849-866;
+    // src/C4Group.h:105-116).
     let mut group = MutableGroup::new("Test.c4g");
 
-    assert_eq!(group.add_file("a".repeat(255), Vec::new()), Ok(()));
+    group
+        .add_file_with_metadata("", b"old".to_vec(), 1, false)
+        .unwrap();
+    group
+        .add_file_bytes_with_metadata(b"\0ignored".to_vec(), b"empty".to_vec(), 1, false)
+        .unwrap();
+
+    assert_eq!(group.entry_names(), [""]);
+    let image = group.pack_raw().unwrap();
+    assert!(image[204..204 + 260].iter().all(|byte| *byte == 0));
+    assert_eq!(packed_entry_names(&image), [""]);
+    assert_eq!(&image[204 + 316..], b"empty");
+}
+
+#[test]
+fn cpp_add_entry_stops_at_nul_and_replaces_the_prefix() {
+    // SCopy and every const-char lookup stop at the first NUL. Rust byte-name
+    // entrypoints therefore store and replace by that prefix instead of
+    // rejecting the input (src/C4Strings.cpp:65-80).
+    let mut group = MutableGroup::new("Test.c4g");
+    group
+        .add_file_with_metadata("prefix", vec![1], 1, false)
+        .unwrap();
+    group
+        .add_file_bytes_with_metadata(b"prefix\0ignored".to_vec(), vec![2], 1, false)
+        .unwrap();
+    let mut expected = MutableGroup::new("Test.c4g");
+    expected
+        .add_file_with_metadata("prefix", vec![2], 1, false)
+        .unwrap();
+
+    assert_eq!(group.entry_names(), ["prefix"]);
+    assert_eq!(group.entry_crc("prefix"), expected.entry_crc("prefix"));
+    let image = group.pack_raw().unwrap();
+    assert_eq!(packed_entry_names(&image), ["prefix"]);
+    assert_eq!(&image[204 + 316..], &[2]);
+}
+
+#[test]
+fn cpp_nul_terminated_child_name_uses_its_prefix_for_sort_and_storage() {
+    let mut child = MutableGroup::new("Test.c4g");
+    child.add_file("000.unmatched", vec![1]).unwrap();
+    child.add_file("Scenario.txt", vec![1]).unwrap();
+    let mut parent = MutableGroup::new("Test.c4g");
+    parent
+        .add_child_bytes(b"Child.c4s\0ignored".to_vec(), child)
+        .unwrap();
+
     assert_eq!(
-        group.add_file("b".repeat(256), Vec::new()),
-        Err(MutableGroupError::EntryNameTooLong(256))
+        packed_entry_names(&parent.pack_raw().unwrap()),
+        ["Child.c4s"]
+    );
+    assert_eq!(
+        packed_entry_names(&parent.pack_raw().unwrap()[204 + 316..]),
+        ["Scenario.txt", "000.unmatched"]
     );
 }
 

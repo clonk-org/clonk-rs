@@ -494,14 +494,31 @@ impl MutableGroup {
 
     fn add_entry_bytes(
         &mut self,
-        name_bytes: Vec<u8>,
-        data: MutableGroupEntryData,
+        mut name_bytes: Vec<u8>,
+        mut data: MutableGroupEntryData,
         time: u32,
         executable: bool,
     ) -> Result<(), MutableGroupError> {
+        // C4Group::AddEntry performs its replacement lookup before SCopy
+        // truncates the new core name; both operations still see a C string.
+        let c_name_length = name_bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name_bytes.len());
+        let lookup_name = &name_bytes[..c_name_length];
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.name_bytes.eq_ignore_ascii_case(lookup_name))
+        {
+            self.entries.remove(index);
+        }
+        // Child sorting uses the source name before the _MAX_FNAME copy.
+        if let MutableGroupEntryData::Child(child) = &mut data {
+            child.filename = lookup_name.to_vec();
+        }
+        name_bytes.truncate(c_name_length.min(MAX_ENTRY_NAME_BYTES));
         validate_entry_name(&name_bytes)?;
-        self.entries
-            .retain(|entry| !entry.name_bytes.eq_ignore_ascii_case(&name_bytes));
         let name = String::from_utf8_lossy(&name_bytes).into_owned();
         self.entries.push(MutableGroupEntry {
             name,
@@ -756,9 +773,6 @@ impl MutableGroupEntry {
 }
 
 fn validate_entry_name(name: &[u8]) -> Result<(), MutableGroupError> {
-    if name.is_empty() {
-        return Err(MutableGroupError::EmptyEntryName);
-    }
     if name.contains(&0) {
         return Err(MutableGroupError::EntryNameContainsNul);
     }
