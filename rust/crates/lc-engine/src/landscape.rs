@@ -2208,39 +2208,23 @@ impl Landscape {
         true
     }
 
-    /// Callback-COW counterpart of Engine's solid-mask raster transaction.
-    /// Keep active MCVehic pixels put while updating each bake's saved
-    /// background exactly as PrepareChange/FinishChange would in C++.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn preview_draw_material_chunks_with_masks(
+    /// Callback-COW counterpart of Engine's solid-mask transaction. The
+    /// change runs once with intersecting masks removed newest-to-oldest;
+    /// repair then refreshes their saved backgrounds oldest-to-newest.
+    pub(crate) fn preview_raster_transaction_with_masks<R>(
         &mut self,
         bakes: &mut [(crate::ObjectId, crate::SolidMaskBake)],
-        origin: Vector2,
-        width: i32,
-        height: i32,
-        count_x: i32,
-        count_y: i32,
-        material: &str,
-        byte: u8,
-        map_seed: i32,
-        random_offsets: &[i32],
-        texmap: RuntimeTexMapState,
-    ) -> bool {
-        let mask_bounds = self.grid_dimensions().and_then(|(grid_width, grid_height)| {
-            let (prepare_bounds, _) = material_chunk_raster_bounds(
-                origin,
-                width,
-                height,
-                grid_width,
-                grid_height,
-            );
+        prepare_bounds: RasterChangeRect,
+        change: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let mask_bounds = self.grid_dimensions().and_then(|(width, height)| {
             RasterChangeRect::new(
                 prepare_bounds.x.saturating_sub(2),
                 prepare_bounds.y.saturating_sub(16),
                 prepare_bounds.width.saturating_add(4),
                 prepare_bounds.height.saturating_add(32),
             )
-            .clipped_to(grid_width, grid_height)
+            .clipped_to(width, height)
         });
         let vehicle = self.grid_vehicle_byte();
         let mask_indices = vehicle
@@ -2264,7 +2248,7 @@ impl Landscape {
                     .and_then(|bounds| {
                         bounds.intersection(bake.x, bake.y, bake.width, bake.height)
                     })
-                    .expect("selected DrawMatChunks mask still overlaps");
+                    .expect("selected preview mask still overlaps");
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
                         let buffer_index = ((y - bake.y) * bake.width + (x - bake.x)) as usize;
@@ -2277,18 +2261,7 @@ impl Landscape {
             }
         }
 
-        let result = self.preview_draw_material_chunks(
-            origin,
-            width,
-            height,
-            count_x,
-            count_y,
-            material,
-            byte,
-            map_seed,
-            random_offsets,
-            texmap,
-        );
+        let result = change(self);
 
         if let Some(vehicle) = vehicle {
             for &index in &mask_indices {
@@ -2297,7 +2270,7 @@ impl Landscape {
                     .and_then(|bounds| {
                         bounds.intersection(bake.x, bake.y, bake.width, bake.height)
                     })
-                    .expect("selected DrawMatChunks mask still overlaps");
+                    .expect("selected preview mask still overlaps");
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
                         let buffer_index = ((y - bake.y) * bake.width + (x - bake.x)) as usize;
@@ -2311,6 +2284,46 @@ impl Landscape {
             }
         }
         result
+    }
+
+    /// Keep active MCVehic pixels put while updating each bake's saved
+    /// background around callback-time DrawMatChunks.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn preview_draw_material_chunks_with_masks(
+        &mut self,
+        bakes: &mut [(crate::ObjectId, crate::SolidMaskBake)],
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        count_x: i32,
+        count_y: i32,
+        material: &str,
+        byte: u8,
+        map_seed: i32,
+        random_offsets: &[i32],
+        texmap: RuntimeTexMapState,
+    ) -> bool {
+        let prepare_bounds = self.grid_dimensions().map(|(grid_width, grid_height)| {
+            material_chunk_raster_bounds(origin, width, height, grid_width, grid_height).0
+        });
+        let draw = |landscape: &mut Self| {
+            landscape.preview_draw_material_chunks(
+                origin,
+                width,
+                height,
+                count_x,
+                count_y,
+                material,
+                byte,
+                map_seed,
+                random_offsets,
+                texmap,
+            )
+        };
+        match prepare_bounds {
+            Some(bounds) => self.preview_raster_transaction_with_masks(bakes, bounds, draw),
+            None => draw(self),
+        }
     }
 
     /// Rebuild the Rust column approximation from the authoritative Surface8
@@ -2477,6 +2490,35 @@ impl Landscape {
                 true
             }
             None => false,
+        }
+    }
+
+    /// ClearRect's complete raw Surface8 row loop. Solid-mask removal and
+    /// repair are owned by the caller so this can run inside one whole-rect
+    /// PrepareChange/FinishChange bracket.
+    pub(crate) fn clear_rect_pixels(&mut self, bounds: RasterChangeRect) {
+        let tunnel_byte = self.default_material_byte("Tunnel");
+        if let Some(grid) = self.pixels.as_mut() {
+            for y in bounds.y..bounds.y.saturating_add(bounds.height) {
+                for x in bounds.x..bounds.x.saturating_add(bounds.width) {
+                    grid.clear_pix_with_tunnel(x, y, tunnel_byte);
+                }
+            }
+        }
+        self.finish_clear_rect_change(bounds);
+    }
+
+    /// FinishChange's relight/derived-column half after a callback preview
+    /// has interleaved ClearRect rows with its already-consumed Rnd3 ledger.
+    pub(crate) fn finish_clear_rect_change(&mut self, bounds: RasterChangeRect) {
+        let Some((width, height)) = self.grid_dimensions() else {
+            return;
+        };
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.relight_surface32_rect(bounds);
+        }
+        if let Some(changed) = bounds.clipped_to(width, height) {
+            self.refresh_raster_columns(changed.columns());
         }
     }
 
@@ -4885,18 +4927,15 @@ impl crate::Engine {
         self.landscape_raster_transaction_with_draw_bounds(bounds, bounds, change)
     }
 
-    /// Variant for C4Landscape::DrawChunks, whose actual inclusive
-    /// Surface8 clip differs from its PrepareChange/FinishChange bounds.
-    fn landscape_raster_transaction_with_draw_bounds<R>(
+    /// Mask-only core of PrepareChange/FinishChange. Unlike the retained
+    /// raster transaction, this also works for synthetic PixelGrid worlds
+    /// without a LandscapeRasterState.
+    pub(crate) fn landscape_solid_mask_transaction<R>(
         &mut self,
         prepare_bounds: RasterChangeRect,
-        changed_bounds: RasterChangeRect,
-        change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
+        change: impl FnOnce(&mut Landscape) -> R,
     ) -> Option<R> {
         let (width, height) = self.landscape.as_ref()?.grid_dimensions()?;
-        let changed_bounds = changed_bounds.clipped_to(width, height);
-        // PrepareChange expands the solid-mask removal window by twice the
-        // maximum light distance before walking Last -> Prev.
         let mask_bounds = RasterChangeRect::new(
             prepare_bounds.x.saturating_sub(2),
             prepare_bounds.y.saturating_sub(16),
@@ -4942,10 +4981,7 @@ impl crate::Engine {
             }
         }
 
-        let result = self
-            .landscape
-            .as_mut()?
-            .raster_transaction_with_bounds(Some(prepare_bounds), changed_bounds, change);
+        let result = change(self.landscape.as_mut()?);
 
         // C4SolidMask::First -> Next (oldest to newest). Repair updates the
         // saved background before restoring MCVehic.
@@ -4968,7 +5004,27 @@ impl crate::Engine {
                 }
             }
         }
-        result
+        Some(result)
+    }
+
+    /// Variant for C4Landscape::DrawChunks, whose actual inclusive
+    /// Surface8 clip differs from its PrepareChange/FinishChange bounds.
+    fn landscape_raster_transaction_with_draw_bounds<R>(
+        &mut self,
+        prepare_bounds: RasterChangeRect,
+        changed_bounds: RasterChangeRect,
+        change: impl FnOnce(&mut PixelGrid, &mut LandscapeRasterState) -> R,
+    ) -> Option<R> {
+        let (width, height) = self.landscape.as_ref()?.grid_dimensions()?;
+        let changed_bounds = changed_bounds.clipped_to(width, height);
+        self.landscape_solid_mask_transaction(prepare_bounds, |landscape| {
+            landscape.raster_transaction_with_bounds(
+                Some(prepare_bounds),
+                changed_bounds,
+                change,
+            )
+        })
+        .flatten()
     }
 
     pub(crate) fn set_editor_landscape_mode(&mut self, mode: i32) {

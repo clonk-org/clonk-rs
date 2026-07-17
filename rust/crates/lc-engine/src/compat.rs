@@ -2868,6 +2868,66 @@ impl HostWorldContext {
                 };
                 let _ = landscape.clear_runtime_texmap_entries(cleared_slots);
             }
+            LandscapeOperation::ClearRect {
+                origin,
+                width,
+                height,
+            } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let bounds = crate::landscape::RasterChangeRect::new(
+                    origin.x,
+                    origin.y,
+                    *width,
+                    *height,
+                );
+                if landscape.pixel_grid().is_some() {
+                    let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
+                    landscape.preview_raster_transaction_with_masks(
+                        bakes,
+                        bounds,
+                        |landscape| landscape.clear_rect_pixels(bounds),
+                    );
+                } else {
+                    let landscape_height = landscape.estimated_height();
+                    for row in origin.y..origin.y.saturating_add(*height) {
+                        crate::Engine::mutate_clear_rect_landscape_row(
+                            landscape,
+                            materials.as_ref(),
+                            origin.x,
+                            row,
+                            *width,
+                            None,
+                            landscape_height,
+                        );
+                    }
+                }
+            }
+            LandscapeOperation::ClearRectDensity {
+                origin,
+                width,
+                height,
+                density,
+            } => {
+                let materials = self.materials.clone().unwrap_or_default();
+                let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
+                    return;
+                };
+                let landscape_height = landscape.estimated_height();
+                for row in origin.y..origin.y.saturating_add(*height) {
+                    crate::Engine::mutate_clear_rect_landscape_row(
+                        landscape,
+                        materials.as_ref(),
+                        origin.x,
+                        row,
+                        *width,
+                        Some(*density),
+                        landscape_height,
+                    );
+                }
+            }
             LandscapeOperation::DrawMatChunks {
                 origin,
                 width,
@@ -42905,20 +42965,60 @@ impl EffectHostContext {
             .landscape_ref()
             .map(Landscape::estimated_height)
             .unwrap_or(0);
-        for row in origin.y..origin.y.saturating_add(height) {
-            if let Some(landscape) = self.world.landscape.as_mut() {
-                crate::Engine::mutate_clear_rect_landscape_row(
-                    Rc::make_mut(landscape),
-                    materials.as_ref(),
-                    origin.x,
-                    row,
-                    width,
-                    density,
-                    landscape_height,
-                );
-            }
-            if draw_context_rnd3()? != 0 {
-                draw_context_rnd3()?;
+        let bracket_masks = density.is_none()
+            && self
+                .world
+                .landscape_ref()
+                .is_some_and(|landscape| landscape.pixel_grid().is_some());
+        if bracket_masks {
+            let bounds = crate::landscape::RasterChangeRect::new(
+                origin.x, origin.y, width, height,
+            );
+            let landscape = self
+                .world
+                .landscape
+                .as_mut()
+                .map(Rc::make_mut)
+                .expect("mask-bracketed FreeRect has a landscape");
+            landscape.preview_raster_transaction_with_masks(
+                &mut self.solid_mask_bakes,
+                bounds,
+                |landscape| -> Result<(), RuntimeError> {
+                    for row in origin.y..origin.y.saturating_add(height) {
+                        crate::Engine::mutate_clear_rect_landscape_row(
+                            landscape,
+                            materials.as_ref(),
+                            origin.x,
+                            row,
+                            width,
+                            None,
+                            landscape_height,
+                        );
+                        if draw_context_rnd3()? != 0 {
+                            draw_context_rnd3()?;
+                        }
+                    }
+                    landscape.finish_clear_rect_change(bounds);
+                    Ok(())
+                },
+            )?;
+            self.world.solid_mask_bakes = Rc::new(self.solid_mask_bakes.clone());
+        } else {
+            for row in origin.y..origin.y.saturating_add(height) {
+                if let Some(landscape) = self.world.landscape.as_mut() {
+                    crate::Engine::mutate_clear_rect_landscape_row(
+                        Rc::make_mut(landscape),
+                        materials.as_ref(),
+                        origin.x,
+                        row,
+                        width,
+                        density,
+                        landscape_height,
+                    );
+                }
+                if draw_context_rnd3()? != 0 {
+                    draw_context_rnd3()?;
+                }
             }
         }
         self.register_landscape_operation(match density {

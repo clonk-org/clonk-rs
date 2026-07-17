@@ -656,6 +656,174 @@ mod tests {
         );
     }
 
+    fn free_rect_mask_test_engine(script_body: &str) -> (Engine, ObjectId, MaterialId) {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            "#,
+        )
+        .expect("FreeRect mask materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let vehicle = materials.id_of("Vehicle").expect("Vehicle exists");
+        let mut bytes = vec![0u8; 20 * 20];
+        bytes[10 * 20 + 10] = 1;
+        bytes[10 * 20 + 11] = 1 | 0x80;
+        let grid = landscape::PixelGrid::new(
+            20,
+            20,
+            bytes,
+            vec![0, 100, 100],
+            vec![None, Some("Earth".into()), Some("Vehicle".into())],
+            vec![None; 3],
+        );
+        let mut world = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        world.set_world_height(20);
+        world.set_pixel_grid(grid);
+
+        let mut mask = Definition::from_script(
+            "MASK",
+            "FreeRect mask",
+            &format!("#strict 2\npublic func Probe() {{ {script_body} }}"),
+        )
+        .expect("mask script compiles");
+        mask.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 1)));
+        mask.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 2, 1, 0, 0)));
+
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        engine.set_landscape(world);
+        engine.register_definition(mask).expect("mask registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("MASK").with_position(Vector2::new(10, 10)))
+            .expect("mask spawns");
+        let index = engine.find_object_index(id).expect("mask exists");
+        engine.objects[index].state.position = Vector2::new(10, 10);
+        engine.objects[index].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.update_solid_mask(index);
+        assert_eq!(
+            engine
+                .debug_solid_mask_buffer(id.as_u64())
+                .expect("mask is baked"),
+            vec![1, 1 | 0x80]
+        );
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2
+                [10 * 20 + 10..10 * 20 + 12],
+            [2, 2]
+        );
+        (engine, id, vehicle)
+    }
+
+    #[test]
+    fn free_rect_plain_clear_repairs_mask_and_updates_saved_background() {
+        let (mut engine, mask, vehicle) = free_rect_mask_test_engine(
+            "FreeRect(10, 10, 2, 1); return [GBackSolid(0, 0), \
+             GBackSolid(1, 0), GetMaterial(0, 0), GetMaterial(1, 0)];",
+        );
+        let mut expected_rng = engine.rng.clone();
+        if expected_rng.rnd3() != 0 {
+            expected_rng.rnd3();
+        }
+        let probe_index = engine.find_object_index(mask).expect("mask remains");
+        let result = engine
+            .call_object_function(probe_index, "Probe", Vec::new())
+            .expect("plain masked FreeRect runs");
+
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Int(vehicle.index() as i32),
+                Value::Int(vehicle.index() as i32),
+            ]),
+            "same-call reads see FinishChange's repaired Vehicle mask"
+        );
+        assert_eq!(engine.rng, expected_rng, "one source-row Rnd3 arm");
+        assert_eq!(engine.pxs_system.count(), 0);
+
+        let index = engine.find_object_index(mask).expect("mask remains");
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2
+                [10 * 20 + 10..10 * 20 + 12],
+            [2, 2],
+            "the authoritative fold also re-puts Vehicle"
+        );
+        assert_eq!(
+            engine
+                .debug_solid_mask_buffer(mask.as_u64())
+                .expect("mask remains baked"),
+            vec![0, 0x80],
+            "Repair saves the cleared sky/IFT background"
+        );
+
+        engine.remove_solid_mask(index);
+        engine.objects[index].state.position = Vector2::new(15, 15);
+        engine.objects[index].fixed_position = FixedVec2::from_ints(15, 15);
+        engine.update_solid_mask(index);
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2
+                [10 * 20 + 10..10 * 20 + 12],
+            [0, 0x80],
+            "moving the owner uncovers the cleared background"
+        );
+    }
+
+    #[test]
+    fn free_rect_density_over_mask_stays_raw() {
+        let (mut engine, mask, _vehicle) = free_rect_mask_test_engine(
+            "FreeRect(10, 10, 2, 1, C4M_Vehicle); return [GBackSolid(0, 0), \
+             GBackSolid(1, 0), GetMaterial(0, 0), GetMaterial(1, 0)];",
+        );
+        let mut expected_rng = engine.rng.clone();
+        if expected_rng.rnd3() != 0 {
+            expected_rng.rnd3();
+        }
+        let probe_index = engine.find_object_index(mask).expect("mask remains");
+        let result = engine
+            .call_object_function(probe_index, "Probe", Vec::new())
+            .expect("density masked FreeRect runs");
+
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Int(-1),
+                Value::Int(-1),
+            ]),
+            "ClearRectDensity reads and clears the raw Vehicle bytes"
+        );
+        assert_eq!(engine.rng, expected_rng, "one source-row Rnd3 arm");
+
+        let index = engine.find_object_index(mask).expect("mask remains");
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2
+                [10 * 20 + 10..10 * 20 + 12],
+            [0, 0]
+        );
+        assert_eq!(
+            engine
+                .debug_solid_mask_buffer(mask.as_u64())
+                .expect("stale bake remains attached"),
+            vec![1, 1 | 0x80],
+            "density clear has no PrepareChange/Repair bracket"
+        );
+        engine.remove_solid_mask(index);
+        assert_eq!(
+            engine.debug_landscape_plane().expect("pixel plane exists").2
+                [10 * 20 + 10..10 * 20 + 12],
+            [0, 0],
+            "raw-cleared mask pixels are not restored later"
+        );
+    }
+
     #[test]
     fn free_rect_column_fallback_ignores_dig_free_and_clears_liquids() {
         let library = MaterialLibrary::parse(

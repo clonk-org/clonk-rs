@@ -42197,6 +42197,15 @@ impl Engine {
             })
     }
 
+    /// Debug/test helper: saved background bytes under an active solid mask.
+    pub fn debug_solid_mask_buffer(&self, id: u64) -> Option<Vec<u8>> {
+        self.objects
+            .iter()
+            .find(|object| object.id.as_u64() == id)
+            .and_then(|object| object.solid_mask_bake.as_ref())
+            .map(|bake| bake.buffer.clone())
+    }
+
     /// The force-close/RejectContents lifecycle shared by the internal
     /// Activate/Get/Contents menus (C4Object.cpp:1884-1959).
     fn apply_container_menu_request(&mut self, request: MenuRequest) -> Result<(), EngineError> {
@@ -47777,6 +47786,18 @@ impl Engine {
         density: Option<i32>,
     ) {
         if height <= 0 {
+            return;
+        }
+        if density.is_none()
+            && self
+                .landscape
+                .as_ref()
+                .is_some_and(|landscape| landscape.pixel_grid().is_some())
+        {
+            let bounds = landscape::RasterChangeRect::new(origin.x, origin.y, width, height);
+            let _ = self.landscape_solid_mask_transaction(bounds, |landscape| {
+                landscape.clear_rect_pixels(bounds);
+            });
             return;
         }
         let materials = self.materials.clone();
