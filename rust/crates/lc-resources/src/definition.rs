@@ -794,17 +794,21 @@ impl DefCore {
 
     /// `LooksLikeID(C4ID)` after C4IDAdapt has compiled the four-byte token.
     pub fn has_valid_id(&self) -> bool {
-        let bytes = self.id.as_bytes();
-        if bytes.len() != 4 || self.id == "NONE" {
-            return false;
-        }
-        if bytes.iter().all(u8::is_ascii_digit) {
-            return bytes != b"0000";
-        }
-        bytes
-            .iter()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        looks_like_compiled_c4id(&self.id)
     }
+}
+
+fn looks_like_compiled_c4id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    if bytes.len() != 4 || id == "NONE" {
+        return false;
+    }
+    if bytes.iter().all(u8::is_ascii_digit) {
+        return bytes != b"0000";
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
 /// Combined script sources originating from a definition group.
@@ -1689,47 +1693,75 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
 }
 
 fn parse_components(value: &str) -> Vec<DefComponent> {
-    value
-        .split([';', ',', ' '])
-        .filter_map(|entry| {
-            let trimmed = entry.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let (id_part, count_part) = match trimmed.find([':', '=']) {
-                Some(idx) => {
-                    let (lhs, rhs) = trimmed.split_at(idx);
-                    (lhs.trim(), Some(rhs[1..].trim()))
-                }
-                None => (trimmed, None),
-            };
-            if id_part.is_empty() {
-                return None;
-            }
-            let id = id_part.to_ascii_uppercase();
-            // C4IDList::Entry starts at zero. Its compiler reads the count
-            // only when an '=' separator is present, and stores the signed
-            // int32 verbatim (C4IDList.cpp:239-253). Retain the historical
-            // lenient fallback for an explicitly malformed count without
-            // conflating that case with a bare ID.
-            let count = match count_part {
-                Some(raw) => raw.parse::<i32>().unwrap_or(1),
-                None => 0,
-            };
-            Some(DefComponent { id, count })
-        })
-        .collect()
+    parse_c4id_list(value, true)
 }
 
 fn parse_id_list(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| {
-            character == ';' || character == ',' || character.is_ascii_whitespace()
-        })
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
+    parse_c4id_list(value, false)
+        .into_iter()
+        .map(|entry| entry.id)
         .collect()
+}
+
+/// `C4IDList::CompileFunc`: entries are separated only by `SEP_SEP2` (`;`),
+/// `C4IDAdapt` consumes at most four identifier bytes, and an invalid ID
+/// throws `NotFound` so the container keeps earlier entries and stops.
+fn parse_c4id_list(value: &str, with_values: bool) -> Vec<DefComponent> {
+    let bytes = value.as_bytes();
+    let mut entries = Vec::new();
+    let mut cursor = 0;
+    let mut first = true;
+
+    loop {
+        if !first {
+            skip_c4id_list_whitespace(bytes, &mut cursor);
+            if bytes.get(cursor) != Some(&b';') {
+                break;
+            }
+            cursor += 1;
+        }
+        first = false;
+
+        skip_c4id_list_whitespace(bytes, &mut cursor);
+        let id_start = cursor;
+        while cursor < bytes.len()
+            && cursor - id_start < 4
+            && (bytes[cursor].is_ascii_alphanumeric() || matches!(bytes[cursor], b'_' | b'-'))
+        {
+            cursor += 1;
+        }
+        let id = &value[id_start..cursor];
+        if !looks_like_compiled_c4id(id) {
+            break;
+        }
+
+        let mut count = 0;
+        if with_values {
+            skip_c4id_list_whitespace(bytes, &mut cursor);
+            if bytes.get(cursor) == Some(&b'=') {
+                cursor += 1;
+                if let Some((parsed, consumed)) = parse_action_i32_prefix(&bytes[cursor..]) {
+                    count = parsed;
+                    cursor += consumed;
+                }
+            }
+        }
+        entries.push(DefComponent {
+            id: id.to_string(),
+            count,
+        });
+    }
+
+    entries
+}
+
+fn skip_c4id_list_whitespace(bytes: &[u8], cursor: &mut usize) {
+    while bytes
+        .get(*cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        *cursor += 1;
+    }
 }
 
 fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
@@ -5722,45 +5754,67 @@ Default=Ghost
         let data = br#"
             [DefCore]
             id=HUTS
-            Components=WOOD:2,Metal=1; rock; ZERO=0; NEGA=-3
+            Components=WOOD=2;METL=1;ROCK;ZERO=0;NEGA=-3
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
-        assert_eq!(parsed.components.len(), 5);
         assert_eq!(
-            parsed.components[0],
-            DefComponent {
-                id: "WOOD".to_string(),
-                count: 2
-            }
+            parsed.components,
+            [
+                DefComponent {
+                    id: "WOOD".to_string(),
+                    count: 2,
+                },
+                DefComponent {
+                    id: "METL".to_string(),
+                    count: 1,
+                },
+                DefComponent {
+                    id: "ROCK".to_string(),
+                    count: 0,
+                },
+                DefComponent {
+                    id: "ZERO".to_string(),
+                    count: 0,
+                },
+                DefComponent {
+                    id: "NEGA".to_string(),
+                    count: -3,
+                },
+            ]
         );
-        assert_eq!(
-            parsed.components[1],
-            DefComponent {
-                id: "METAL".to_string(),
-                count: 1
-            }
-        );
-        assert_eq!(
-            parsed.components[2],
-            DefComponent {
-                id: "ROCK".to_string(),
-                count: 0
-            }
-        );
-        assert_eq!(
-            parsed.components[3],
-            DefComponent {
-                id: "ZERO".to_string(),
-                count: 0
-            }
-        );
-        assert_eq!(
-            parsed.components[4],
-            DefComponent {
-                id: "NEGA".to_string(),
-                count: -3
-            }
-        );
+    }
+
+    #[test]
+    fn c4id_lists_use_cpp_separators_cursor_and_stop_on_invalid_id() {
+        let component = |id: &str, count| DefComponent {
+            id: id.to_string(),
+            count,
+        };
+        for (source, expected) in [
+            ("Rock=1;LOAM=2", vec![]),
+            ("ROCK=1,LOAM=2", vec![component("ROCK", 1)]),
+            ("ROCK=x;", vec![component("ROCK", 0)]),
+            ("ROCKS=2", vec![component("ROCK", 0)]),
+            ("ROCK:2;LOAM=3", vec![component("ROCK", 0)]),
+            ("ROCK=12junk;LOAM=3", vec![component("ROCK", 12)]),
+            ("ROCK=x;LOAM=2", vec![component("ROCK", 0)]),
+            (
+                "ROCK=;LOAM=2",
+                vec![component("ROCK", 0), component("LOAM", 2)],
+            ),
+            ("ROCK=1;;LOAM=2", vec![component("ROCK", 1)]),
+            ("ROCK=1;Rock=2;LOAM=3", vec![component("ROCK", 1)]),
+            ("NONE=1;ROCK=2", vec![]),
+            ("0000=1;ROCK=2", vec![]),
+        ] {
+            assert_eq!(parse_components(source), expected, "{source}");
+        }
+
+        assert!(parse_id_list("Rock").is_empty());
+        assert_eq!(parse_id_list("REQ1;REQ2"), ["REQ1", "REQ2"]);
+        for source in ["REQ1,REQ2", "REQ1 REQ2", "REQ1;Rock;REQ2", "REQ1=7;REQ2"] {
+            assert_eq!(parse_id_list(source), ["REQ1"], "{source}");
+        }
     }
 
     #[test]
