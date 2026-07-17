@@ -55361,6 +55361,161 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
         gate
     }
 
+    fn persisted_mask_gate_definition() -> Definition {
+        let mut gate = Definition::from_script(
+            "SGAT",
+            "Saved gate",
+            r#"
+            #strict 2
+            public func ShiftMask() { return SetSolidMask(0, 0, 1, 1, 1, 0); }
+            public func OpenMask() { return SetSolidMask(0, 0, 0, 0); }
+            "#,
+        )
+        .expect("saved gate script compiles");
+        gate.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        gate.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        gate.set_sprite_image(Some(one_pixel_sprite(255)));
+        gate
+    }
+
+    #[test]
+    fn solid_mask_state_capture_cleans_and_restore_reputs_like_cpp() {
+        // Landscape persistence brackets Surface8 serialization with
+        // RemoveSolidMasks(false,false) / PutSolidMasks (C4Game.cpp:
+        // 4137-4147). The material buffer itself is NoSave; the object's
+        // effective SolidMask rect is saved and used to create a fresh bake.
+        let mut landscape = vehicle_grid_landscape(20, 20);
+        landscape.grid_write_byte(10, 10, 1);
+        landscape.grid_write_byte(11, 10, 1);
+
+        let mut engine = Engine::with_seed(27);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(persisted_mask_gate_definition())
+            .expect("saved gate registers");
+        let gate = engine
+            .spawn_object(
+                SpawnConfig::new("SGAT")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("saved gate spawns");
+        let gate_index = engine.find_object_index(gate).expect("saved gate exists");
+        engine.update_solid_mask(gate_index);
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+
+        engine
+            .call_object_function(gate_index, "ShiftMask", Vec::new())
+            .expect("gate mask shifts");
+        assert_eq!(vehicle_pixels(&engine), vec![(11, 10)]);
+
+        let rng_before = engine.debug_rng_clone();
+        let state = engine.capture_state();
+        let saved_landscape = state.landscape.as_ref().expect("landscape captured");
+        assert_eq!(saved_landscape.grid_byte_at(10, 10), Some(1));
+        assert_eq!(saved_landscape.grid_byte_at(11, 10), Some(1));
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(11, 10)],
+            "capture must not remove the live mask"
+        );
+        assert_eq!(engine.debug_rng_clone(), rng_before);
+
+        engine.restore_state(&state).expect("state restores");
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(11, 10)],
+            "restore must re-put the saved effective mask"
+        );
+        assert_eq!(engine.debug_rng_clone(), rng_before);
+
+        let gate_index = engine.find_object_index(gate).expect("gate restored");
+        engine
+            .call_object_function(gate_index, "OpenMask", Vec::new())
+            .expect("restored gate opens");
+        let restored = engine.landscape().expect("restored landscape");
+        assert_eq!(restored.grid_byte_at(10, 10), Some(1));
+        assert_eq!(restored.grid_byte_at(11, 10), Some(1));
+        assert!(vehicle_pixels(&engine).is_empty());
+    }
+
+    #[test]
+    fn restore_snapshot_does_not_reput_over_its_runtime_baked_landscape() {
+        // SimulationSnapshot is a live frame projection, not the C++
+        // landscape-persistence bracket: its plane already contains masks.
+        // Feeding it through restore_state must not put a second, default
+        // mask on top of an already-baked runtime override.
+        let mut landscape = vehicle_grid_landscape(20, 20);
+        landscape.grid_write_byte(10, 10, 1);
+        landscape.grid_write_byte(11, 10, 1);
+
+        let mut engine = Engine::with_seed(28);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(persisted_mask_gate_definition())
+            .expect("snapshot gate registers");
+        let gate = engine
+            .spawn_object(
+                SpawnConfig::new("SGAT")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("snapshot gate spawns");
+        let gate_index = engine.find_object_index(gate).expect("snapshot gate exists");
+        engine.update_solid_mask(gate_index);
+        engine
+            .call_object_function(gate_index, "ShiftMask", Vec::new())
+            .expect("snapshot gate mask shifts");
+        assert_eq!(vehicle_pixels(&engine), vec![(11, 10)]);
+
+        let snapshot = engine.snapshot();
+        engine
+            .restore_snapshot(&snapshot)
+            .expect("runtime snapshot restores");
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(11, 10)],
+            "restore_snapshot must not add the definition-default mask"
+        );
+    }
+
+    #[test]
+    fn solid_mask_restore_reputs_before_loaded_ocf_recomputation() {
+        // C4GameObjects::Load runs UpdateFaces (which puts masks) before
+        // SetOCF. A mask over sky therefore contributes OCF_InSolid to its
+        // own restored object even though the persisted plane is clean.
+        let mut engine = Engine::with_seed(29);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine
+            .register_definition(persisted_mask_gate_definition())
+            .expect("OCF gate registers");
+        let gate = engine
+            .spawn_object(
+                SpawnConfig::new("SGAT")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("OCF gate spawns");
+        let gate_index = engine.find_object_index(gate).expect("OCF gate exists");
+        engine.update_solid_mask(gate_index);
+
+        let state = engine.capture_state();
+        assert_eq!(
+            state
+                .landscape
+                .as_ref()
+                .expect("clean OCF landscape captured")
+                .grid_byte_at(10, 10),
+            Some(0)
+        );
+        engine.restore_state(&state).expect("OCF state restores");
+        assert_ne!(
+            engine.object_snapshot(gate).expect("OCF gate restores").ocf & ocf::IN_SOLID,
+            0,
+            "loaded SetOCF must see the re-put mask"
+        );
+    }
+
     #[test]
     fn set_solid_mask_callback_rebakes_the_landscape_like_cpp() {
         // FnSetSolidMask calls C4Object::SetSolidMask, which removes the old

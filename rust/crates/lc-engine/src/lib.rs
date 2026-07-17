@@ -8685,6 +8685,11 @@ pub struct PersistedObject {
     pub command_queue: Vec<QueuedCommand>,
     #[serde(default)]
     pub command_stack: CommandStackSnapshot,
+    /// C4Object::SolidMask is savegame state, while pSolidMaskData and its
+    /// material buffer are rebuilt after loading (C4Object.cpp:2797;
+    /// C4Object.h:177-178).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    solid_mask_override: Option<DefinitionTargetRect>,
     /// Dormant fixed C4Shape slots are stateful but intentionally absent
     /// from public/differential ObjectSnapshot. Persist only when the raw
     /// buffer cannot be reconstructed from the active vertex prefix.
@@ -8764,6 +8769,13 @@ pub struct EngineState {
     pub next_object_id: u64,
     #[serde(default)]
     pub landscape: Option<Landscape>,
+    /// True when `landscape` was captured with transient solid-mask pixels
+    /// removed and therefore needs masks re-put after object restoration.
+    /// Older EngineState JSON and SimulationSnapshot projections contain the
+    /// live baked plane and retain the old no-re-put behavior.
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[doc(hidden)]
+    pub solid_masks_removed_from_landscape: bool,
     /// Standalone Rust state files retain the active `Game.C4S` reflection
     /// view. C++ saves this beside Game.txt as Scenario.txt; `None` keeps the
     /// preloaded scenario when reading older Rust states.
@@ -8914,6 +8926,7 @@ impl EngineState {
                 snapshot: object.clone(),
                 command_queue: object.command_queue.clone(),
                 command_stack: object.command_stack.clone(),
+                solid_mask_override: None,
                 shape_vertices: None,
             });
         }
@@ -8981,6 +8994,7 @@ impl EngineState {
             play_list: None,
             next_object_id,
             landscape: snapshot.landscape.clone(),
+            solid_masks_removed_from_landscape: false,
             scenario_values: None,
             base_reject_entrance_enabled: None,
             objects,
@@ -15399,6 +15413,26 @@ impl SolidMaskBake {
         match self.rotated {
             None => self.mask_set(self.tx + local_x, self.ty + local_y),
             Some(_) => self.buffer[(local_y * self.width + local_x) as usize] != vehicle,
+        }
+    }
+
+    /// The raster half of C4SolidMask::Remove(false, false): restore only
+    /// mask-owned pixels that are still MCVehic. This deliberately has no
+    /// instability, overlap re-put, attachment, or live-object side effects;
+    /// capture uses it on a cloned landscape (C4SolidMask.cpp:240-259).
+    fn restore_background(&self, landscape: &mut Landscape, vehicle: u8) {
+        for cy in 0..self.height {
+            for cx in 0..self.width {
+                let saved = self.buffer[(cy * self.width + cx) as usize];
+                if saved == vehicle {
+                    continue;
+                }
+                let x = self.x + cx;
+                let y = self.y + cy;
+                if landscape.grid_byte_at(x, y) == Some(vehicle) {
+                    landscape.grid_write_byte(x, y, saved);
+                }
+            }
         }
     }
 }
@@ -30042,6 +30076,44 @@ impl Engine {
         }
     }
 
+    /// C4GameObjects::RemoveSolidMasks around landscape persistence, applied
+    /// to a clone so the running world's masks and their buffers stay put.
+    /// Rust's exec list is the reverse of C++'s master list, hence `rev()`
+    /// reproduces the C4GameObjects First->Next walk (C4GameObjects.cpp:
+    /// 296-303).
+    fn landscape_without_solid_masks(&self) -> Option<Landscape> {
+        let mut landscape = self.landscape.clone()?;
+        let Some(vehicle) = landscape.grid_vehicle_byte() else {
+            return Some(landscape);
+        };
+        for &id in self.exec_list.iter().rev() {
+            let Some(index) = self.find_object_index(id) else {
+                continue;
+            };
+            let object = &self.objects[index];
+            if object.state.status != ObjectStatus::Normal {
+                continue;
+            }
+            if let Some(bake) = &object.solid_mask_bake {
+                bake.restore_background(&mut landscape, vehicle);
+            }
+        }
+        Some(landscape)
+    }
+
+    /// C4GameObjects::PutSolidMasks after loading a persisted landscape.
+    fn put_all_solid_masks(&mut self) {
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        for id in master_order {
+            let Some(index) = self.find_object_index(id) else {
+                continue;
+            };
+            if self.objects[index].state.status == ObjectStatus::Normal {
+                self.put_solid_mask(index);
+            }
+        }
+    }
+
     pub fn capture_state(&self) -> EngineState {
         let objects = self
             .objects
@@ -30055,6 +30127,7 @@ impl Engine {
                     snapshot: object.snapshot(library),
                     command_queue: object.command_queue.iter().cloned().collect(),
                     command_stack: object.commands.snapshot(),
+                    solid_mask_override: object.state.solid_mask_override,
                     shape_vertices: (!object
                         .state
                         .shape_vertices
@@ -30144,7 +30217,8 @@ impl Engine {
             gamma: self.gamma,
             play_list: self.audio_registry.music_playlist().map(str::to_owned),
             next_object_id: self.next_object_id,
-            landscape: self.landscape.clone(),
+            landscape: self.landscape_without_solid_masks(),
+            solid_masks_removed_from_landscape: true,
             scenario_values: Some(self.scenario_values.as_ref().clone()),
             base_reject_entrance_enabled: Some(self.base_reject_entrance_enabled),
             objects,
@@ -30510,7 +30584,7 @@ impl Engine {
                     local_vars: snapshot.local_vars.clone(),
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
-                    solid_mask_override: None,
+                    solid_mask_override: persisted.solid_mask_override,
                     timer: snapshot.timer,
                     own_mass: snapshot.own_mass,
                     on_fire: snapshot.on_fire,
@@ -30694,6 +30768,14 @@ impl Engine {
         }
 
         self.restore_script_globals(&state.script_globals);
+
+        // Objects.Load updates faces (and thus masks) before SetOCF and
+        // FixObjectOrder (C4GameObjects.cpp:657-663). Snapshot projections
+        // and legacy Rust states carry a live baked landscape, so only clean
+        // capture_state/section states take this re-put path.
+        if state.solid_masks_removed_from_landscape {
+            self.put_all_solid_masks();
+        }
 
         // C++ recomputes OCF on load rather than persisting it
         // (C4Object.cpp:2863, savegame SetOCF).
@@ -58334,6 +58416,93 @@ protected func Departure(pContainer)
 }
 
 #[cfg(test)]
+mod solid_mask_state_regression {
+    use super::*;
+
+    #[test]
+    fn restore_reputs_overlapping_masks_in_master_object_order() {
+        let mut landscape = Landscape::new(20, vec![0; 20]).expect("landscape builds");
+        landscape.set_world_height(20);
+        landscape.set_pixel_grid(landscape::PixelGrid::new(
+            20,
+            20,
+            vec![0; 400],
+            vec![0, 100, 100],
+            vec![None, Some("Earth".into()), Some("Vehicle".into())],
+            vec![None; 3],
+        ));
+        landscape.grid_write_byte(10, 10, 1);
+
+        let mut mask = Definition::from_script("OMSK", "Ordered mask", "")
+            .expect("mask definition compiles");
+        mask.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        mask.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        mask.set_sprite_image(Some(DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0, 0, 0, 255]),
+            color_mask: None,
+        }));
+
+        let mut engine = Engine::with_seed(32);
+        engine.set_landscape(landscape);
+        engine.register_definition(mask).expect("mask registers");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("OMSK")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("first mask spawns");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("OMSK")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("second mask spawns");
+        for id in [first, second] {
+            let index = engine.find_object_index(id).expect("mask exists");
+            engine.update_solid_mask(index);
+        }
+
+        let state = engine.capture_state();
+        assert_eq!(state.object_order, vec![first, second]);
+        assert_eq!(
+            state
+                .landscape
+                .as_ref()
+                .expect("clean landscape captured")
+                .grid_byte_at(10, 10),
+            Some(1)
+        );
+
+        engine.restore_state(&state).expect("state restores");
+        assert_eq!(engine.exec_list, vec![first, second]);
+        let first_index = engine.find_object_index(first).expect("first restores");
+        let first_bake = engine.objects[first_index]
+            .solid_mask_bake
+            .as_ref()
+            .expect("first mask re-put");
+        let second_index = engine.find_object_index(second).expect("second restores");
+        let second_bake = engine.objects[second_index]
+            .solid_mask_bake
+            .as_ref()
+            .expect("second mask re-put");
+        assert_eq!(
+            second_bake.buffer,
+            vec![1],
+            "master First->Next starts with the reverse of Rust exec order"
+        );
+        assert_eq!(
+            first_bake.buffer,
+            vec![2],
+            "the later overlapping mask records MCVehic as an unused slot"
+        );
+    }
+}
+
+#[cfg(test)]
 mod scenario_section_random_regression {
     use super::*;
 
@@ -58350,6 +58519,33 @@ mod scenario_section_random_regression {
             environment: EnvironmentSettings::default(),
             base_reject_entrance_enabled: true,
             base_extinguish_enabled,
+        }
+    }
+
+    fn vehicle_section_landscape(width: u32, height: u32) -> Landscape {
+        let mut landscape = Landscape::new(width, vec![0; width as usize])
+            .expect("section landscape builds");
+        landscape.set_world_height(height as i32);
+        landscape.set_pixel_grid(landscape::PixelGrid::new(
+            width,
+            height,
+            vec![0; (width * height) as usize],
+            vec![0, 100, 100],
+            vec![None, Some("Earth".into()), Some("Vehicle".into())],
+            vec![None; 3],
+        ));
+        landscape
+    }
+
+    fn vehicle_section(name: &str, landscape: Landscape) -> scenario::ScenarioSectionSpec {
+        scenario::ScenarioSectionSpec {
+            name: name.to_string(),
+            landscape: Some(landscape),
+            objects: Vec::new(),
+            scenario_values: scenario::ScenarioValueStore::default(),
+            environment: EnvironmentSettings::default(),
+            base_reject_entrance_enabled: true,
+            base_extinguish_enabled: true,
         }
     }
 
@@ -58394,6 +58590,93 @@ mod scenario_section_random_regression {
         assert_eq!(
             engine.rng, expected,
             "post-landscape FixRandom restores hold, count, FRndBuf3, and FRndPtr3"
+        );
+    }
+
+    #[test]
+    fn section_save_landscape_removes_and_restore_reputs_solid_masks_like_cpp() {
+        // C4S_SAVE_LANDSCAPE serializes the plane only while every solid
+        // mask is temporarily removed (C4Game.cpp:4137-4147). Returning to
+        // the section loads that clean plane and re-puts the saved gate, so
+        // opening it later restores Earth rather than a permanent MCVehic.
+        let mut main_landscape = vehicle_section_landscape(20, 20);
+        main_landscape.grid_write_byte(10, 10, 1);
+        let next_landscape = vehicle_section_landscape(20, 20);
+
+        let mut gate = Definition::from_script(
+            "SCGT",
+            "Section gate",
+            r#"
+                #strict 2
+                public func OpenMask() { return SetSolidMask(0, 0, 0, 0); }
+            "#,
+        )
+        .expect("section gate compiles");
+        gate.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        gate.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        gate.set_sprite_image(Some(DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0, 0, 0, 255]),
+            color_mask: None,
+        }));
+
+        let mut engine = Engine::with_seed(31);
+        engine.configure_scenario_sections(&[
+            vehicle_section("main", main_landscape.clone()),
+            vehicle_section("next", next_landscape),
+        ]);
+        engine.set_landscape(main_landscape);
+        engine
+            .register_definition(gate)
+            .expect("section gate registers");
+        let gate = engine
+            .spawn_object(
+                SpawnConfig::new("SCGT")
+                    .with_position(Vector2::new(10, 10))
+                    .with_loaded(true),
+            )
+            .expect("section gate spawns");
+        let gate_index = engine.find_object_index(gate).expect("section gate exists");
+        engine.update_solid_mask(gate_index);
+        assert_eq!(
+            engine
+                .landscape()
+                .expect("main landscape")
+                .grid_byte_at(10, 10),
+            Some(2)
+        );
+
+        assert!(
+            engine
+                .load_scenario_section("next", 3, Vec::new())
+                .expect("next section loads")
+        );
+        assert!(
+            engine
+                .load_scenario_section("main", 3, Vec::new())
+                .expect("main section reloads")
+        );
+        assert_eq!(
+            engine
+                .landscape()
+                .expect("restored main landscape")
+                .grid_byte_at(10, 10),
+            Some(2),
+            "restored gate must be put over the clean section plane"
+        );
+
+        let gate_index = engine.find_object_index(gate).expect("saved gate restores");
+        engine
+            .call_object_function(gate_index, "OpenMask", Vec::new())
+            .expect("saved gate opens");
+        assert_eq!(
+            engine
+                .landscape()
+                .expect("opened main landscape")
+                .grid_byte_at(10, 10),
+            Some(1),
+            "opening the restored gate must reveal its original Earth byte"
         );
     }
 }
