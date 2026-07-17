@@ -3077,17 +3077,31 @@ fn fill_u32_array(value: &str, target: &mut [u32]) {
 }
 
 fn parse_int_array(value: &str) -> impl Iterator<Item = i32> {
+    let bytes = lc_script::c4_string_bytes(value);
     let mut values = Vec::new();
-    for part in value.split([',', ';']) {
-        let part = part.trim();
-        if part.is_empty() {
-            values.push(0);
-            continue;
+    let mut cursor = 0;
+    loop {
+        if !values.is_empty() {
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                cursor += 1;
+            }
+            if bytes.get(cursor) != Some(&b',') {
+                break;
+            }
+            cursor += 1;
         }
-        values.extend(
-            part.split_ascii_whitespace()
-                .map(|token| parse_i32(token).unwrap_or(0)),
-        );
+        if let Some((parsed, consumed)) = parse_action_i32_prefix(&bytes[cursor..]) {
+            values.push(parsed);
+            cursor += consumed;
+        } else {
+            // StdArrayDefaultAdapt installs this slot's default without
+            // advancing the compiler cursor. The next comma check therefore
+            // stops the remaining slots when garbage caused the failure.
+            values.push(0);
+        }
     }
     values.into_iter()
 }
@@ -4387,6 +4401,71 @@ Jump=40000junk
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("defaults parse");
         assert_eq!(defaulted.version, [0; 5]);
+    }
+
+    #[test]
+    fn def_core_integer_arrays_stop_on_cpp_separator_failure() {
+        let parsed = parse_def_core(
+            b"[DefCore]\n\
+              id=ARRY\n\
+              Version=4,9 5\n\
+              Width=10\n\
+              Height=20\n\
+              Offset=1;2\n\
+              Vertices=3\n\
+              VertexX=0 5 -5\n\
+              VertexY=1,x,3\n\
+              Entrance=7 8 9 10\n\
+              Picture=0 0 64 64\n",
+        )
+        .expect("array probe DefCore parses");
+
+        assert_eq!(parsed.version, [4, 9, 0, 0, 0]);
+        assert_eq!(
+            parsed
+                .vertex_slots
+                .iter()
+                .take(3)
+                .map(|vertex| vertex.x)
+                .collect::<Vec<_>>(),
+            [0, 0, 0]
+        );
+        assert_eq!(
+            parsed
+                .vertex_slots
+                .iter()
+                .take(3)
+                .map(|vertex| vertex.y)
+                .collect::<Vec<_>>(),
+            [1, 0, 0]
+        );
+        assert_eq!(
+            parsed.shape,
+            Some(PictureRect {
+                x: 1,
+                y: 0,
+                width: 10,
+                height: 20,
+            })
+        );
+        assert_eq!(
+            parsed.entrance,
+            Some(PictureRect {
+                x: 7,
+                y: 0,
+                width: 0,
+                height: 0,
+            })
+        );
+        assert_eq!(
+            parsed.picture,
+            Some(PictureRect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            })
+        );
     }
 
     #[test]
