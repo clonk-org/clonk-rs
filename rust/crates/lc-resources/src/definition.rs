@@ -92,7 +92,7 @@ impl Definition {
             core.name = Some(name);
         }
 
-        let mut script = load_scripts(group)?;
+        let mut script = load_scripts(group, languages)?;
 
         let action_map = match group.read_file("ActMap.txt") {
             Ok(bytes) => Some(parse_act_map(&bytes)?),
@@ -1645,34 +1645,52 @@ fn parse_line_connect(value: &str) -> u32 {
     ) as u32
 }
 
-fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
-    let mut files: Vec<DefinitionScriptFile> = Vec::new();
-    collect_script_files(group, Path::new(""), &mut files)?;
-
-    // Allow definitions without scripts (graphics-only, data-only, etc.)
-    // This matches C++ behavior which doesn't require scripts
-    if files.is_empty() {
-        return Ok(DefinitionScript {
-            files,
-            combined: String::new(),
-            definition_description: None,
-        });
+fn load_scripts<S: AsRef<str>>(
+    group: &Group,
+    languages: &[S],
+) -> Result<DefinitionScript, DefinitionError> {
+    // C4Def loads C4CFN_Script through C4ComponentHost::LoadAppend. That
+    // template has three top-level segments, and each localized segment
+    // independently takes the first match in language-sequence order.
+    let mut candidates = Vec::with_capacity(3);
+    if group.exists("Script.c") {
+        candidates.push("Script.c".to_string());
+    }
+    for stem in ["Script", "C4Script"] {
+        let candidate = if languages.is_empty() {
+            // SCopySegment("", 0, ...) yields one empty language code.
+            let candidate = format!("{stem}.c");
+            group.exists(&candidate).then_some(candidate)
+        } else {
+            languages
+                .iter()
+                .map(|language| format!("{stem}{}.c", language.as_ref()))
+                .find(|candidate| group.exists(candidate))
+        };
+        if let Some(candidate) = candidate {
+            candidates.push(candidate);
+        }
     }
 
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-
+    let mut files = Vec::with_capacity(candidates.len());
     let mut combined = String::new();
-    for file in &files {
-        if !combined.is_empty() {
-            combined.push('\n');
-        }
-        combined.push_str("//#file ");
-        combined.push_str(&file.path.to_string_lossy());
+    for candidate in candidates {
+        let data = group
+            .read_file(&candidate)
+            .map_err(DefinitionError::Resources)?;
+        // LoadAppend copies with SCopy: a NUL ends this component without
+        // suppressing later selected components.
+        let data = data.split(|byte| *byte == 0).next().unwrap_or_default();
+        let contents = lc_script::c4_string_from_bytes(data);
+
+        // LoadAppend prefixes every selected component, including the first
+        // and zero-byte components, with exactly one newline.
         combined.push('\n');
-        combined.push_str(&file.contents);
-        if !combined.ends_with('\n') {
-            combined.push('\n');
-        }
+        combined.push_str(&contents);
+        files.push(DefinitionScriptFile {
+            path: PathBuf::from(candidate),
+            contents,
+        });
     }
 
     Ok(DefinitionScript {
@@ -1680,53 +1698,6 @@ fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
         combined,
         definition_description: None,
     })
-}
-
-fn collect_script_files(
-    group: &Group,
-    prefix: &Path,
-    files: &mut Vec<DefinitionScriptFile>,
-) -> Result<(), DefinitionError> {
-    let entries = group.entries().map_err(DefinitionError::Resources)?;
-    for entry in entries {
-        let mut relative_path = PathBuf::from(prefix);
-        relative_path.push(&entry.relative_path);
-        if entry.is_directory {
-            let child = group
-                .open_child(&entry.relative_path)
-                .map_err(DefinitionError::Resources)?;
-            if child.exists("DefCore.txt") {
-                continue;
-            }
-            collect_script_files(&child, &relative_path, files)?;
-            continue;
-        }
-        if !is_script_file(&entry.relative_path) {
-            continue;
-        }
-        let data = group
-            .read_file(&entry.relative_path)
-            .map_err(DefinitionError::Resources)?;
-        // C4ComponentHost::LoadAppend copies each matching component with
-        // SCopy, so a NUL terminates this file but does not suppress later
-        // Script*.c components appended to the same host.
-        let data = data.split(|byte| *byte == 0).next().unwrap_or_default();
-        files.push(DefinitionScriptFile {
-            path: relative_path,
-            contents: lc_script::c4_string_from_bytes(data),
-        });
-    }
-    Ok(())
-}
-
-fn is_script_file(path: &Path) -> bool {
-    let Some(extension) = path.extension() else {
-        return false;
-    };
-    if extension.eq_ignore_ascii_case("c") {
-        return true;
-    }
-    false
 }
 
 fn ini_section_name(line: &str) -> Option<&str> {
@@ -4885,7 +4856,7 @@ Default=Ghost
     }
 
     #[test]
-    fn load_definition_collects_scripts_from_nested_groups() {
+    fn definition_script_does_not_recurse_into_subgroups() {
         let temp = tempdir().unwrap();
         let def_dir = temp.path().join("Nested.ocd");
         fs::create_dir(&def_dir).unwrap();
@@ -4898,41 +4869,191 @@ Category=C4D_Object
 "#,
         )
         .unwrap();
-        let script_dir = def_dir.join("Script.c4d");
+        fs::write(def_dir.join("Script.c"), b"func Root() {}").unwrap();
+        let script_dir = def_dir.join("Helpers");
         fs::create_dir(&script_dir).unwrap();
-        fs::write(script_dir.join("Main.c"), b"func Main() {}\n").unwrap();
-        let helpers_dir = script_dir.join("Helpers");
-        fs::create_dir(&helpers_dir).unwrap();
-        fs::write(helpers_dir.join("Util.c"), b"func Util() {}\n").unwrap();
+        fs::write(
+            script_dir.join("ScriptUS.c"),
+            b"func NestedLocalized() {}",
+        )
+        .unwrap();
+        fs::write(script_dir.join("Other.c"), b"func NestedOther() {}").unwrap();
 
         let group = Group::open(&def_dir).unwrap();
-        let definition = Definition::load(&group).expect("definition load succeeds");
-        assert!(definition
+        let definition = Definition::load_with_languages(&group, &["US"])
+            .expect("definition load succeeds");
+        let paths = definition
             .script
             .files()
             .iter()
-            .any(|file| file.path == Path::new("Script.c4d").join("Main.c")));
-        assert!(definition
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec![Path::new("Script.c")]);
+        assert_eq!(definition.script.combined(), "\nfunc Root() {}");
+        assert!(!definition.script.combined().contains("NestedLocalized"));
+        assert!(!definition.script.combined().contains("NestedOther"));
+    }
+
+    #[test]
+    fn definition_script_selects_fixed_components_in_cpp_order() {
+        let temp = tempdir().unwrap();
+        let def_dir = temp.path().join("Scripts.ocd");
+        fs::create_dir(&def_dir).unwrap();
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=SCRP\n").unwrap();
+        fs::write(def_dir.join("Script.c"), b"func Base() {}").unwrap();
+        fs::write(
+            def_dir.join("ScriptUS.c"),
+            b"func Localized() {}\n",
+        )
+        .unwrap();
+        fs::write(def_dir.join("ScriptDE.c"), b"func German() {}").unwrap();
+        fs::write(def_dir.join("C4ScriptUS.c"), b"func Legacy() {}").unwrap();
+        fs::write(def_dir.join("ScriptOld.c"), b"func Obsolete() {}").unwrap();
+        fs::write(def_dir.join("Other.c"), b"func Other() {}").unwrap();
+
+        let definition = Definition::load_with_languages(
+            &Group::open(&def_dir).unwrap(),
+            &["US", "DE"],
+        )
+        .expect("definition load succeeds");
+        let paths = definition
             .script
             .files()
             .iter()
-            .any(|file| file.path == Path::new("Script.c4d").join("Helpers").join("Util.c")));
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                Path::new("Script.c"),
+                Path::new("ScriptUS.c"),
+                Path::new("C4ScriptUS.c"),
+            ]
+        );
+        assert_eq!(
+            definition.script.combined(),
+            "\nfunc Base() {}\nfunc Localized() {}\n\nfunc Legacy() {}"
+        );
+        assert!(!definition.script.combined().contains("//#file"));
+        assert!(!definition.script.combined().contains("German"));
+        assert!(!definition.script.combined().contains("Obsolete"));
+        assert!(!definition.script.combined().contains("Other"));
+    }
+
+    #[test]
+    fn definition_script_restarts_language_order_for_each_segment() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("ScriptDE.c"), b"func German() {}").unwrap();
+        fs::write(
+            temp.path().join("C4ScriptUS.c"),
+            b"func LegacyUS() {}",
+        )
+        .unwrap();
+
+        let script = load_scripts(&Group::open(temp.path()).unwrap(), &["US", "DE"])
+            .expect("script components load");
+        let paths = script
+            .files()
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![Path::new("ScriptDE.c"), Path::new("C4ScriptUS.c")]
+        );
+        assert_eq!(
+            script.combined(),
+            "\nfunc German() {}\nfunc LegacyUS() {}"
+        );
+    }
+
+    #[test]
+    fn definition_script_loads_c4script_localization_without_script_component() {
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("C4ScriptUS.c"),
+            b"func LegacyOnly() {}",
+        )
+        .unwrap();
+
+        let script = load_scripts(&Group::open(temp.path()).unwrap(), &["US"])
+            .expect("script component loads");
+        assert_eq!(script.files().len(), 1);
+        assert_eq!(script.files()[0].path, Path::new("C4ScriptUS.c"));
+        assert_eq!(script.combined(), "\nfunc LegacyOnly() {}");
+    }
+
+    #[test]
+    fn definition_script_empty_language_sequence_uses_one_empty_cpp_segment() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("Script.c"), b"func Base() {}").unwrap();
+        fs::write(temp.path().join("C4Script.c"), b"func Legacy() {}").unwrap();
+        let languages: [&str; 0] = [];
+
+        let script = load_scripts(&Group::open(temp.path()).unwrap(), &languages)
+            .expect("script components load");
+        let paths = script
+            .files()
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                Path::new("Script.c"),
+                Path::new("Script.c"),
+                Path::new("C4Script.c"),
+            ]
+        );
+        assert_eq!(
+            script.combined(),
+            "\nfunc Base() {}\nfunc Base() {}\nfunc Legacy() {}"
+        );
+    }
+
+    #[test]
+    fn shipped_map_screen_excludes_obsolete_script_old() {
+        let directory = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../content/Hazard.c4d/Structural.c4d/Deco.c4d/Screens.c4d/MapScreen.c4d"
+        ));
+        if !directory.is_dir() {
+            return;
+        }
+
+        let definition = Definition::load_with_languages(
+            &Group::open(directory).expect("open shipped MapScreen definition"),
+            &["US", "DE"],
+        )
+        .expect("load shipped MapScreen definition");
+        let paths = definition
+            .script
+            .files()
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec![Path::new("Script.c")]);
+        assert!(definition.script.combined().contains("Initialized"));
+        assert!(definition.script.combined().contains("MAP_MasterScreen"));
+        assert!(!definition.script.combined().contains("InitScreens"));
+        assert!(!definition.script.combined().contains("FxMapTimer"));
     }
 
     #[test]
     fn script_component_nul_truncates_only_its_own_file() {
         let temp = tempdir().unwrap();
         fs::write(
-            temp.path().join("A.c"),
+            temp.path().join("Script.c"),
             b"func Before() {}\0func Hidden() {}",
         )
         .unwrap();
-        fs::write(temp.path().join("B.c"), b"func After() {}\n").unwrap();
+        fs::write(temp.path().join("ScriptUS.c"), b"func After() {}\n").unwrap();
 
         let group = Group::open(temp.path()).unwrap();
-        let script = load_scripts(&group).expect("script components load");
+        let script = load_scripts(&group, &["US"]).expect("script components load");
         let combined = lc_script::c4_string_bytes(script.combined());
 
+        assert_eq!(combined, b"\nfunc Before() {}\nfunc After() {}\n");
         assert!(combined
             .windows(b"func Before() {}".len())
             .any(|window| window == b"func Before() {}"));
