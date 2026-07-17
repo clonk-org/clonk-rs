@@ -1740,6 +1740,19 @@ impl From<RasterChangeRect> for PixelGridDirtyRect {
 pub enum LandscapeError {
     #[error("height map length {found} does not match width {width}")]
     InvalidHeightMap { width: u32, found: usize },
+    #[error("landscape has no Surface8 pixel grid")]
+    MissingPixelGrid,
+    #[error("initial landscape snapshot has not been captured")]
+    MissingInitialPixels,
+    #[error(
+        "initial landscape snapshot {initial_width}x{initial_height} does not match Surface8 {width}x{height}"
+    )]
+    InitialPixelDimensions {
+        initial_width: u32,
+        initial_height: u32,
+        width: u32,
+        height: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1766,6 +1779,29 @@ pub(crate) enum InsertMaterialDestination {
     Column,
     Grid { x: i32, y: i32 },
 }
+
+/// C4Landscape::pInitial — the raw Surface8 plane captured after base
+/// landscape creation and before DiffLandscape.bmp is applied. Arc preserves
+/// the native copy semantics cheaply because later PixelGrid writes are COW.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LandscapeInitialPixels {
+    width: u32,
+    height: u32,
+    bytes: Arc<Vec<u8>>,
+}
+
+/// Runtime-only C4Landscape::pInitial storage. It is deliberately ignored by
+/// Landscape equality just like other non-serialized load/save helpers.
+#[derive(Debug, Clone, Default)]
+struct RuntimeInitialPixels(Option<LandscapeInitialPixels>);
+
+impl PartialEq for RuntimeInitialPixels {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RuntimeInitialPixels {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Landscape {
@@ -1833,6 +1869,10 @@ pub struct Landscape {
     /// material raster writes. Old saves and synthetic landscapes omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     raster_state: Option<LandscapeRasterState>,
+    /// Raw base Surface8 used by SaveDiff. This is C++'s runtime-only
+    /// `pInitial`; legacy scenario loading recreates it before ApplyDiff.
+    #[serde(skip)]
+    initial_pixels: RuntimeInitialPixels,
 }
 
 fn default_top_open() -> bool {
@@ -2042,6 +2082,7 @@ impl Landscape {
             bottom_open: false,
             vehicle_material: None,
             raster_state: None,
+            initial_pixels: RuntimeInitialPixels::default(),
         })
     }
 
@@ -2094,7 +2135,122 @@ impl Landscape {
     }
 
     pub fn set_pixel_grid(&mut self, grid: PixelGrid) {
+        self.initial_pixels = RuntimeInitialPixels::default();
         self.pixels = Some(grid);
+    }
+
+    /// Capture C4Landscape::pInitial after the base Surface8 has been built
+    /// and before DiffLandscape.bmp is applied.
+    pub fn save_initial(&mut self) -> Result<(), LandscapeError> {
+        let grid = self
+            .pixels
+            .as_ref()
+            .ok_or(LandscapeError::MissingPixelGrid)?;
+        self.initial_pixels.0 = Some(LandscapeInitialPixels {
+            width: grid.width,
+            height: grid.height,
+            bytes: Arc::clone(&grid.bytes),
+        });
+        Ok(())
+    }
+
+    /// Build the legacy DiffLandscape.bmp index plane. This mirrors C++'s
+    /// `fSyncSave` flag exactly: false masks unchanged pixels with 0xff,
+    /// while true retains the complete current Surface8 plane. The save
+    /// caller passes `!IsSynced()`.
+    pub fn save_diff(
+        &self,
+        sync_save: bool,
+    ) -> Result<Option<lc_resources::bitmap::IndexedBitmap>, LandscapeError> {
+        let grid = self
+            .pixels
+            .as_ref()
+            .ok_or(LandscapeError::MissingPixelGrid)?;
+        let initial = self
+            .initial_pixels
+            .0
+            .as_ref()
+            .ok_or(LandscapeError::MissingInitialPixels)?;
+        if (initial.width, initial.height) != (grid.width, grid.height)
+            || initial.bytes.len() != grid.bytes.len()
+        {
+            return Err(LandscapeError::InitialPixelDimensions {
+                initial_width: initial.width,
+                initial_height: initial.height,
+                width: grid.width,
+                height: grid.height,
+            });
+        }
+
+        if sync_save {
+            return Ok(Some(lc_resources::bitmap::IndexedBitmap {
+                width: grid.width,
+                height: grid.height,
+                indices: grid.bytes.as_ref().clone(),
+            }));
+        }
+
+        let mut changed = false;
+        let indices = grid
+            .bytes
+            .iter()
+            .zip(initial.bytes.iter())
+            .map(|(&current, &original)| {
+                if current == original {
+                    0xff
+                } else {
+                    changed = true;
+                    current
+                }
+            })
+            .collect();
+        Ok(changed.then_some(lc_resources::bitmap::IndexedBitmap {
+            width: grid.width,
+            height: grid.height,
+            indices,
+        }))
+    }
+
+    /// Overlay a legacy DiffLandscape.bmp through C4Landscape::SetPix
+    /// semantics. The reserved 0xff byte preserves the current pixel; bytes
+    /// outside an undersized diff read as zero like CSurface8::GetPix.
+    pub fn apply_diff(
+        &mut self,
+        diff: &lc_resources::bitmap::IndexedBitmap,
+    ) -> Result<(), LandscapeError> {
+        let grid = self
+            .pixels
+            .as_mut()
+            .ok_or(LandscapeError::MissingPixelGrid)?;
+        let width = grid.width;
+        let height = grid.height;
+        let diff_width = diff.width as usize;
+        let mut first_changed = width;
+        let mut last_changed = None;
+
+        for y in 0..height {
+            for x in 0..width {
+                let byte = if x < diff.width && y < diff.height {
+                    diff.indices
+                        .get(y as usize * diff_width + x as usize)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                if byte == 0xff || grid.byte_at(x as i32, y as i32) == Some(byte) {
+                    continue;
+                }
+                grid.set_byte(x as i32, y as i32, byte);
+                first_changed = first_changed.min(x);
+                last_changed = Some(last_changed.map_or(x, |last: u32| last.max(x)));
+            }
+        }
+
+        if let Some(last_changed) = last_changed {
+            self.refresh_raster_columns(first_changed as usize..last_changed as usize + 1);
+        }
+        Ok(())
     }
 
     pub fn pixel_grid(&self) -> Option<&PixelGrid> {
@@ -6263,6 +6419,105 @@ mod tests {
         assert!(
             serialized.get("raster_state").is_none(),
             "absent state stays omitted from old/save fixture shapes"
+        );
+    }
+
+    #[test]
+    fn legacy_landscape_diff_round_trip_uses_set_pix_path() {
+        let original = vec![
+            0, 0, 0, //
+            0, 1, 0, //
+            1, 1, 1,
+        ];
+        let mut changed = raster_grid_landscape(3, 3, original.clone());
+        changed.save_initial().expect("initial Surface8 captures");
+        assert_eq!(
+            changed.save_diff(false).expect("unchanged diff builds"),
+            None,
+            "a masked diff is omitted until Surface8 changes"
+        );
+        assert_eq!(
+            changed
+                .save_diff(true)
+                .expect("unchanged full diff builds")
+                .expect("a full diff is always emitted")
+                .indices,
+            original,
+            "the full variant is not gated on a changed pixel"
+        );
+
+        changed.grid_set_byte(0, 0, 1);
+        changed.grid_set_byte(1, 1, 3);
+        changed.refresh_all_raster_columns();
+        let current = changed
+            .pixel_grid()
+            .expect("changed Surface8")
+            .bytes()
+            .to_vec();
+        let masked = changed
+            .save_diff(false)
+            .expect("masked diff builds")
+            .expect("changed diff is emitted");
+        assert_eq!(
+            masked.indices,
+            vec![
+                1, 0xff, 0xff, //
+                0xff, 3, 0xff, //
+                0xff, 0xff, 0xff,
+            ]
+        );
+        assert_eq!(
+            changed
+                .save_diff(true)
+                .expect("full diff builds")
+                .expect("full diff is always emitted")
+                .indices,
+            current
+        );
+
+        let encoded = masked.encode().expect("masked diff encodes as BMP");
+        let decoded = lc_resources::bitmap::IndexedBitmap::decode(&encoded)
+            .expect("encoded masked diff decodes");
+        assert_eq!(decoded, masked);
+
+        changed.finish_surface32_draw();
+        let serialized = serde_json::to_string(&changed).expect("landscape serializes");
+        let restored: Landscape = serde_json::from_str(&serialized).expect("landscape restores");
+        assert_eq!(
+            restored, changed,
+            "runtime-only pInitial does not break native state equality"
+        );
+        assert!(matches!(
+            restored.save_diff(false),
+            Err(LandscapeError::MissingInitialPixels)
+        ));
+
+        let mut reloaded = raster_grid_landscape(3, 3, original);
+        reloaded.save_initial().expect("reload initial captures");
+        assert!(reloaded.set_surface32_pixel(0, 0, 0x0011_2233));
+        let revision = reloaded.pixel_grid().expect("reload Surface8").revision();
+        reloaded.apply_diff(&decoded).expect("diff applies");
+
+        assert_eq!(
+            reloaded.pixel_grid().expect("reload Surface8").bytes(),
+            current,
+            "base plus masked diff reproduces the changed Surface8 byte-for-byte"
+        );
+        assert_eq!(
+            reloaded.pixel_grid().expect("reload Surface8").revision(),
+            revision + 2,
+            "each differing byte passes through SetPix bookkeeping"
+        );
+        assert_eq!(
+            reloaded.surface32_pixel_at(0, 0),
+            None,
+            "SetPix schedules the stale presentation pixel for relighting"
+        );
+        assert_eq!(reloaded.surface(), changed.surface());
+        assert_eq!(reloaded.liquids(), changed.liquids());
+        assert_eq!(
+            reloaded.save_diff(false).expect("round-trip diff builds"),
+            Some(masked)
         );
     }
 

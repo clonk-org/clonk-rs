@@ -8858,6 +8858,30 @@ fn load_legacy_landscape(
     )? else {
         return Ok(None);
     };
+    // C4Landscape::Init captures pInitial before attempting to load the
+    // optional legacy diff. ApplyDiff failure is non-fatal, including a
+    // missing or unreadable DiffLandscape.bmp.
+    let diff = if let Some(bytes) =
+        try_read_group_file_case_insensitive(group, "DiffLandscape.bmp")
+            .ok()
+            .flatten()
+    {
+        lc_resources::bitmap::IndexedBitmap::decode(&bytes).ok()
+    } else {
+        None
+    };
+    if landscape.pixel_grid().is_some() {
+        landscape
+            .save_initial()
+            .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
+        if let Some(diff) = diff.as_ref() {
+            let _ = landscape.apply_diff(diff);
+        }
+    } else if diff.is_some() {
+        return Err(ScenarioError::InvalidLandscape(
+            "DiffLandscape.bmp requires a Surface8 pixel grid".to_string(),
+        ));
+    }
     // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73): the border-open
     // keys, then the AutoScanSideOpen side scan over the built landscape.
     let borders = &manifest.core.landscape;
@@ -24186,6 +24210,76 @@ public func ActualizePhase(pClonk)
                 .map()
                 .is_none(),
             "exact landscapes retain no Map/ChunkOZoom source surface"
+        );
+    }
+
+    #[test]
+    fn legacy_landscape_diff_is_applied_after_initial_snapshot() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("Diff.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Landscape]\nExactLandscape=1\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[1, 2, 3], &[4, 5, 6]]),
+        )
+        .expect("write base landscape");
+        let expected_diff = vec![
+            0xff, 7, 0xff, // preserve, change, preserve
+            0, 0xff, 8, // zero is a change, preserve, change
+        ];
+        std::fs::write(
+            scenario_dir.join("dIfFlAnDsCaPe.BmP"),
+            encode_indexed_bmp(&[&[0xff, 7, 0xff], &[0, 0xff, 8]]),
+        )
+        .expect("write mixed-case diff landscape");
+
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\n")
+            .expect("scenario core parses");
+        let mut densities = [0i32; 128];
+        let mut names = vec![None; 128];
+        let mut shapes = vec![None; 128];
+        for slot in 1..=8 {
+            densities[slot] = 100;
+            names[slot] = Some("Earth".into());
+            shapes[slot] = Some(crate::chunky::ChunkShape::Flat);
+        }
+        let mut classifier =
+            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
+        let mut callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
+
+        let landscape = load_legacy_landscape(
+            &group,
+            &manifest,
+            Some(&mut classifier),
+            0,
+            1,
+            &HashSet::new(),
+            &mut callbacks,
+        )
+        .expect("legacy landscape loads")
+        .expect("legacy landscape exists");
+
+        assert_eq!(
+            landscape
+                .pixel_grid()
+                .expect("loaded Surface8")
+                .bytes(),
+            &[1, 7, 3, 0, 5, 8],
+            "0xff preserves the base while every other differing byte applies"
+        );
+        let saved = landscape
+            .save_diff(false)
+            .expect("masked diff rebuilds")
+            .expect("loaded changes emit a diff");
+        assert_eq!(
+            saved.indices, expected_diff,
+            "SaveInitial ran before ApplyDiff, preserving the original comparison plane"
         );
     }
 

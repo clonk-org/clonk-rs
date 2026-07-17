@@ -18,6 +18,19 @@ pub enum BitmapError {
     Compression(u32),
     #[error("invalid BMP dimensions {width}x{height}")]
     Dimensions { width: i32, height: i32 },
+    #[error("indexed bitmap dimensions {width}x{height} cannot be encoded as BMP")]
+    EncodeDimensions { width: u32, height: u32 },
+    #[error(
+        "indexed bitmap has {found} bytes, but dimensions {width}x{height} require {expected}"
+    )]
+    IndexCount {
+        width: u32,
+        height: u32,
+        expected: usize,
+        found: usize,
+    },
+    #[error("encoded BMP exceeds the 32-bit file-size limit")]
+    EncodeTooLarge,
 }
 
 /// An 8-bit indexed bitmap: palette-index bytes in top-down row-major
@@ -83,6 +96,72 @@ impl IndexedBitmap {
             height,
             indices,
         })
+    }
+
+    /// Encode the exact palette-index plane as an uncompressed, bottom-up
+    /// 8-bit BMP. DiffLandscape.bmp consumes only these indices; its palette
+    /// entries are therefore left zeroed.
+    pub fn encode(&self) -> Result<Vec<u8>, BitmapError> {
+        if self.width == 0
+            || self.height == 0
+            || self.width > i32::MAX as u32
+            || self.height > i32::MAX as u32
+        {
+            return Err(BitmapError::EncodeDimensions {
+                width: self.width,
+                height: self.height,
+            });
+        }
+        let expected = (self.width as usize)
+            .checked_mul(self.height as usize)
+            .ok_or(BitmapError::EncodeTooLarge)?;
+        if self.indices.len() != expected {
+            return Err(BitmapError::IndexCount {
+                width: self.width,
+                height: self.height,
+                expected,
+                found: self.indices.len(),
+            });
+        }
+
+        let row_width = self.width as usize;
+        let stride = row_width
+            .checked_add(3)
+            .map(|width| width & !3)
+            .ok_or(BitmapError::EncodeTooLarge)?;
+        let data_offset = 14usize + 40 + 256 * 4;
+        let pixel_bytes = stride
+            .checked_mul(self.height as usize)
+            .ok_or(BitmapError::EncodeTooLarge)?;
+        let file_size = data_offset
+            .checked_add(pixel_bytes)
+            .filter(|&size| u32::try_from(size).is_ok())
+            .ok_or(BitmapError::EncodeTooLarge)?;
+
+        let mut bytes = Vec::with_capacity(file_size);
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&(file_size as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(data_offset as u32).to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&(self.width as i32).to_le_bytes());
+        bytes.extend_from_slice(&(self.height as i32).to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&256u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.resize(data_offset, 0);
+
+        for row in (0..self.height as usize).rev() {
+            let start = row * row_width;
+            bytes.extend_from_slice(&self.indices[start..start + row_width]);
+            bytes.resize(bytes.len() + stride - row_width, 0);
+        }
+        Ok(bytes)
     }
 
     pub fn index_at(&self, x: u32, y: u32) -> Option<u8> {
@@ -157,6 +236,17 @@ mod tests {
         let bytes = encode_bmp(&[&[9, 8], &[7, 6], &[5, 4]], false);
         let bitmap = IndexedBitmap::decode(&bytes).expect("decodes");
         assert_eq!(bitmap.indices, vec![9, 8, 7, 6, 5, 4]);
+    }
+
+    #[test]
+    fn encoded_index_plane_round_trips_with_row_padding() {
+        let bitmap = IndexedBitmap {
+            width: 3,
+            height: 2,
+            indices: vec![0xff, 2, 3, 4, 0, 6],
+        };
+        let encoded = bitmap.encode().expect("encodes");
+        assert_eq!(IndexedBitmap::decode(&encoded).expect("decodes"), bitmap);
     }
 
     #[test]
