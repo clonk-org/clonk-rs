@@ -5971,14 +5971,28 @@ func CatchBlow(level, by)
         // C4Weather::Execute creates METO at y=-20 with zero ydir when
         // Landscape.TopOpen, but at y=5 with itofix(2) ydir in a closed cave.
         // The shared r2/r1 draws still precede object creation in both cases
-        // (C4Weather.cpp:104-120).
+        // (C4Weather.cpp:104-120). C4Object::Init installs those dirs and
+        // marks the meteor Mobile before Construction/Initialize run.
         let spawn = |top_open: bool| {
             let mut engine = Engine::with_seed(18);
             let mut landscape = Landscape::flat(64, 40);
             landscape.set_border_open(0, 0, top_open, false);
             engine.set_landscape(landscape);
+            let mut meteor_definition = Definition::from_script(
+                "METO",
+                "Meteor",
+                r#"#strict 2
+local construction_xdir, initialize_xdir;
+protected func Construction() { construction_xdir = GetXDir(); }
+protected func Initialize() { initialize_xdir = GetXDir(); }
+"#,
+            )
+            .expect("meteor definition compiles");
+            meteor_definition.set_category(CATEGORY_OBJECT);
+            meteor_definition.set_rotateable(1);
+            meteor_definition.set_c4_callback_convention(true);
             engine
-                .register_definition(simple_definition("METO"))
+                .register_definition(meteor_definition)
                 .expect("meteor definition registers");
             let mut environment = engine.environment();
             environment.meteorite = 100;
@@ -5993,22 +6007,55 @@ func CatchBlow(level, by)
             engine
                 .tick_weather_events(10)
                 .expect("weather tick launches meteor");
+            let expected_xdir = C4Fixed::from_raw(itofix(r2 - 50).val() / 10);
+            let expected_ydir = if top_open {
+                C4Fixed::ZERO
+            } else {
+                itofix(2)
+            };
+            let expected_rdir = C4Fixed::from_raw(itofix(1).val() / 5);
             let meteor = engine
                 .objects
                 .iter()
                 .find(|object| object.definition_id == "METO")
                 .expect("meteor spawned");
+            let meteor_id = meteor.id;
             assert_eq!(meteor.state.position.x, x);
             assert_eq!(meteor.state.owner, OWNER_NONE);
+            assert_eq!(meteor.fixed_velocity.x, expected_xdir);
+            assert_eq!(meteor.rotation_velocity, expected_rdir);
             assert_eq!(
-                meteor.fixed_velocity.x,
-                C4Fixed::from_raw(itofix(r2 - 50).val() / 10)
+                engine.debug_object_motion(meteor_id.as_u64()),
+                Some((expected_xdir.val(), expected_ydir.val(), true)),
+                "meteor has its C4Object::Init motion on the spawn frame"
             );
-            assert_eq!(
-                meteor.rotation_velocity,
-                C4Fixed::from_raw(itofix(1).val() / 5)
-            );
-            (meteor.state.position.y, meteor.fixed_velocity.y)
+            for callback_local in ["construction_xdir", "initialize_xdir"] {
+                assert!(
+                    matches!(
+                        meteor.state.local_vars.get(callback_local),
+                        Some(Value::Int(value)) if *value != 0
+                    ),
+                    "{callback_local} must observe the initial nonzero xdir"
+                );
+            }
+
+            let initial_fixed_y = meteor.fixed_position.y;
+            let result = (meteor.state.position.y, meteor.fixed_velocity.y);
+            if top_open {
+                for _ in 0..5 {
+                    engine.tick().expect("meteor movement frame succeeds");
+                }
+                let meteor = engine
+                    .objects
+                    .iter()
+                    .find(|object| object.id == meteor_id)
+                    .expect("meteor remains after the short motion trace");
+                assert!(
+                    meteor.fixed_position.y > initial_fixed_y,
+                    "open-top meteor falls under gravity before the next Tick10 pulse"
+                );
+            }
+            result
         };
 
         assert_eq!(spawn(true), (-20, C4Fixed::ZERO));

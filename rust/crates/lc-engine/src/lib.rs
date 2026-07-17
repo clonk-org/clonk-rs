@@ -26035,21 +26035,18 @@ impl Engine {
         } else {
             (5, itofix(2))
         };
-        let config =
-            SpawnConfig::new(METEOR_DEFINITION).with_position(Vector2::new(x.max(0), y));
+        let xdir = C4Fixed::from_raw(itofix(r2 - 50).val() / 10);
+        let rdir = C4Fixed::from_raw(itofix(1).val() / 5);
+        let config = SpawnConfig::new(METEOR_DEFINITION)
+            .with_position(Vector2::new(x.max(0), y))
+            .with_fixed_velocity(FixedVec2::new(xdir, ydir))
+            .with_rotation_velocity(rdir);
         let meteor_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(false),
             Err(err) => return Err(err),
         };
-        let Some(index) = self.find_object_index(meteor_id) else {
-            return Ok(false);
-        };
-        let object = &mut self.objects[index];
-        object.fixed_velocity =
-            FixedVec2::new(C4Fixed::from_raw(itofix(r2 - 50).val() / 10), ydir);
-        object.rotation_velocity = C4Fixed::from_raw(itofix(1).val() / 5);
-        Ok(true)
+        Ok(self.find_object_index(meteor_id).is_some())
     }
 
     /// `LaunchEarthquake` (C4Weather.cpp:196-203): FXQ1 + Activate().
