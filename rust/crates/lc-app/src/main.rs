@@ -38140,11 +38140,18 @@ fn is_rejected_install_definition_error(error: &ResourceDefinitionError) -> bool
     )
 }
 
-/// Composes the language fallback sequence like the C++ frontend
-/// (C4StartupOptionsDlg::UpdateLanguage, C4StartupOptionsDlg.cpp:1211-1231):
-/// the configured codes (Config `LanguageEx`/`Language`, else the
-/// environment locale) followed by the internal "US"/"DE" fallbacks.
+/// With available configuration, uses the component-language sequence
+/// materialized by `C4ConfigGeneral::DefaultLanguage`; any US/DE fallbacks
+/// then exist only when the options dialog persisted them into `LanguageEx`.
 fn startup_language_sequence(paths: Option<&AppPaths>) -> Vec<String> {
+    if let Some(paths) = paths {
+        if let Ok(codes) = classic_loader_language_sequence(paths) {
+            return codes;
+        }
+    }
+
+    // Retain the historical best-effort bootstrap when no strict loader
+    // configuration is available (including pathless test/dev contexts).
     let mut codes: Vec<String> = Vec::new();
     let push_code = |codes: &mut Vec<String>, segment: &str| {
         let code: String = segment
@@ -54773,6 +54780,100 @@ public func Grant(password) { return GainMissionAccess(password); }
         let head = load_classic_scenario_loader_head(&scenario_group, &paths)
             .expect("configured loader title");
         assert_eq!(head.scenario_title(), "Head fallback");
+    }
+
+    #[test]
+    fn frontend_and_loader_titles_share_fresh_primary_language_sequence() {
+        let root = tempdir().expect("fresh language config fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        paths.ensure_user_dirs().expect("config directory");
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguage=DE - Deutsch\n",
+        )
+        .expect("fresh language config");
+        let scenario_path = content.join("FreshLanguage.c4s");
+        fs::create_dir_all(&scenario_path).expect("scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Head fallback\n",
+        )
+        .expect("scenario core");
+        fs::write(scenario_path.join("Title.txt"), "US:English title\n")
+            .expect("US-only title");
+        let scenario_group = Group::open(&scenario_path).expect("scenario group");
+
+        let loader_title = load_classic_scenario_loader_head(&scenario_group, &paths)
+            .expect("loader head")
+            .scenario_title()
+            .to_string();
+        let frontend_title = load_frontend_scenarios()
+            .into_iter()
+            .find(|scenario| scenario.identifier.ends_with("FreshLanguage.c4s"))
+            .expect("frontend scenario")
+            .title;
+
+        assert_eq!(
+            (
+                startup_language_sequence(Some(&paths)),
+                classic_loader_language_sequence(&paths).expect("loader language sequence"),
+                frontend_title,
+                loader_title,
+            ),
+            (
+                vec!["DE".to_string()],
+                vec!["DE".to_string()],
+                "Head fallback".to_string(),
+                "Head fallback".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn frontend_and_loader_titles_share_persisted_language_ex_sequence() {
+        let root = tempdir().expect("persisted LanguageEx fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        paths.ensure_user_dirs().expect("config directory");
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguage=DE - Deutsch\nLanguageEx=DE,US\n",
+        )
+        .expect("persisted language config");
+        let scenario_path = content.join("PersistedLanguage.c4s");
+        fs::create_dir_all(&scenario_path).expect("scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Head fallback\n",
+        )
+        .expect("scenario core");
+        fs::write(scenario_path.join("Title.txt"), "US:English title\n")
+            .expect("US-only title");
+        let scenario_group = Group::open(&scenario_path).expect("scenario group");
+
+        let loader_title = load_classic_scenario_loader_head(&scenario_group, &paths)
+            .expect("loader head")
+            .scenario_title()
+            .to_string();
+        let frontend_title = load_frontend_scenarios()
+            .into_iter()
+            .find(|scenario| scenario.identifier.ends_with("PersistedLanguage.c4s"))
+            .expect("frontend scenario")
+            .title;
+
+        assert_eq!(
+            (
+                startup_language_sequence(Some(&paths)),
+                classic_loader_language_sequence(&paths).expect("loader language sequence"),
+                frontend_title,
+                loader_title,
+            ),
+            (
+                vec!["DE".to_string(), "US".to_string()],
+                vec!["DE".to_string(), "US".to_string()],
+                "English title".to_string(),
+                "English title".to_string(),
+            )
+        );
     }
 
     #[test]
