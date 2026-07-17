@@ -1357,16 +1357,20 @@ impl RuntimeTexMapState {
     /// rejects every safely representable insertion index before mutation.
     /// Its remaining 126/127 paths write beyond `Entry[126]`; keep those
     /// undefined cases contained instead of reproducing memory corruption.
+    /// The optional index pair describes the defined retained-map rewrite.
     pub(crate) fn set_texture_index(
         &mut self,
         material_texture: &str,
         new_index: u8,
         insert: bool,
-    ) -> bool {
+    ) -> (bool, Option<(u8, u8)>) {
         if insert {
             // At 127, the empty-input native path returns true before its
             // out-of-bounds MoveIndex arms. Preserve that defined no-op.
-            return new_index == C4M_MAX_TEX_INDEX as u8 && material_texture.is_empty();
+            return (
+                new_index == C4M_MAX_TEX_INDEX as u8 && material_texture.is_empty(),
+                None,
+            );
         }
 
         let new_slot = usize::from(new_index);
@@ -1378,7 +1382,7 @@ impl RuntimeTexMapState {
                 .and_then(Option::as_ref)
                 .is_some()
         {
-            return false;
+            return (false, None);
         }
 
         let (material, texture) = match material_texture.split_once('-') {
@@ -1387,7 +1391,7 @@ impl RuntimeTexMapState {
         };
         let old_slot = usize::from(self.get_index(material, texture, false));
         if old_slot == 0 {
-            return false;
+            return (false, None);
         }
 
         self.densities[new_slot] = self.densities[old_slot];
@@ -1395,7 +1399,7 @@ impl RuntimeTexMapState {
         self.texture_names[new_slot] = self.texture_names[old_slot].clone();
         self.match_texture_names[new_slot] = self.match_texture_names[old_slot].clone();
         self.shapes[new_slot] = self.shapes[old_slot];
-        true
+        (true, Some((old_slot as u8, new_index)))
     }
 
     /// C4Landscape::RemoveUnusedTexMapEntries clears every texture-map entry
@@ -1569,6 +1573,20 @@ impl LandscapeRasterState {
             return None;
         }
         Some((self.map_width, self.map_height, &mut self.map_indices))
+    }
+
+    /// C4Landscape::ReplaceMapColor rewrites the retained editor map only;
+    /// Surface8 and its Pix2* caches stay unchanged until MapToLandscape
+    /// performs a later static redraw.
+    fn replace_map_color(&mut self, old_index: u8, new_index: u8) {
+        let Some((_, _, indices)) = self.map_mut() else {
+            return;
+        };
+        for byte in indices {
+            if *byte & 0x7f == old_index {
+                *byte = (*byte & 0x80) + new_index;
+            }
+        }
     }
 
     pub(crate) fn map_creator(&self) -> Option<&crate::map_creator_s2::MapCreatorS2State> {
@@ -2091,16 +2109,19 @@ impl Landscape {
         true
     }
 
-    /// Replace only the live `C4TextureMap::Entry` model. Pure
-    /// SetTextureIndex moves do not call `HandleTexMapUpdate`, so C++ leaves
-    /// Surface8 and its cached Pix2Mat/Pix2Dens tables untouched.
-    pub(crate) fn replace_runtime_texmap_entries_only(
+    /// Apply C4Landscape::SetTextureIndex's ReplaceMapColor + MoveIndex pair.
+    /// Neither arm calls `HandleTexMapUpdate`, so Surface8 and its cached
+    /// Pix2Mat/Pix2Dens tables remain untouched.
+    pub(crate) fn apply_runtime_texture_index_move(
         &mut self,
         texmap: RuntimeTexMapState,
+        old_index: u8,
+        new_index: u8,
     ) -> bool {
         let Some(state) = self.raster_state.as_mut() else {
             return false;
         };
+        state.replace_map_color(old_index, new_index);
         *state.texmap_mut() = texmap;
         true
     }
@@ -5732,16 +5753,18 @@ impl crate::Engine {
         landscape.replace_runtime_texmap_state(texmap)
     }
 
-    /// Fold a pure SetTextureIndex MoveIndex copy without the
-    /// HandleTexMapUpdate work that C++ deliberately omits.
-    pub(crate) fn replace_runtime_texmap_entries_only(
+    /// Fold SetTextureIndex's retained-map rewrite and MoveIndex copy without
+    /// the HandleTexMapUpdate work that C++ deliberately omits.
+    pub(crate) fn apply_runtime_texture_index_move(
         &mut self,
         texmap: RuntimeTexMapState,
+        old_index: u8,
+        new_index: u8,
     ) -> bool {
         let Some(landscape) = self.landscape.as_mut() else {
             return false;
         };
-        landscape.replace_runtime_texmap_entries_only(texmap)
+        landscape.apply_runtime_texture_index_move(texmap, old_index, new_index)
     }
 
     pub(crate) fn remove_unused_runtime_texmap_entries(&mut self) -> bool {

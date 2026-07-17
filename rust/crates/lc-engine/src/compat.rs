@@ -2946,11 +2946,19 @@ impl HostWorldContext {
                 };
                 let _ = landscape.replace_runtime_texmap_state(texmap.clone());
             }
-            LandscapeOperation::SetTextureIndex { texmap } => {
+            LandscapeOperation::SetTextureIndex {
+                texmap,
+                old_index,
+                new_index,
+            } => {
                 let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
                     return;
                 };
-                let _ = landscape.replace_runtime_texmap_entries_only(texmap.clone());
+                let _ = landscape.apply_runtime_texture_index_move(
+                    texmap.clone(),
+                    *old_index,
+                    *new_index,
+                );
             }
             LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } => {
                 let Some(landscape) = self.landscape.as_mut().map(Rc::make_mut) else {
@@ -17474,11 +17482,14 @@ pub enum LandscapeOperation {
     SyncRuntimeTexMap {
         texmap: crate::landscape::RuntimeTexMapState,
     },
-    /// FnSetTextureIndex -> C4Landscape::SetTextureIndex. Pure MoveIndex
-    /// copies mutate C4TextureMap entries without refreshing Surface8's
-    /// cached material tables (C4Landscape.cpp:2733-2808).
+    /// FnSetTextureIndex -> C4Landscape::SetTextureIndex. ReplaceMapColor
+    /// rewrites the retained editor map before MoveIndex copies the entry;
+    /// neither action refreshes Surface8's cached material tables
+    /// (C4Landscape.cpp:2710-2731,2733-2808).
     SetTextureIndex {
         texmap: crate::landscape::RuntimeTexMapState,
+        old_index: u8,
+        new_index: u8,
     },
     /// FnRemoveUnusedTexMapEntries scans Surface8 and clears unreferenced
     /// C4TextureMap entries without refreshing the Pix2* caches. The slots
@@ -27162,17 +27173,19 @@ fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(texmap) = context.runtime_texmap.as_mut() else {
             return Ok(Value::Int(0));
         };
-        let before = texmap.clone();
-        let succeeded = texmap.set_texture_index(
+        let (succeeded, moved_indices) = texmap.set_texture_index(
             &material_texture,
             new_index as u8,
             insert,
         );
-        let changed = *texmap != before;
         let texmap = texmap.clone();
 
-        if changed {
-            let operation = LandscapeOperation::SetTextureIndex { texmap };
+        if let Some((old_index, new_index)) = moved_indices {
+            let operation = LandscapeOperation::SetTextureIndex {
+                texmap,
+                old_index,
+                new_index,
+            };
             // C++ changes the live TextureMap before returning. Keep this
             // callback's COW world coherent and carry the captured state to
             // later effect callbacks and the authoritative fold.
@@ -56995,6 +57008,16 @@ public func RejectConstruction(x, y, builder)
                         Value::Bool(false),
                     ])?,
                     set_texture_index(&[
+                        Value::String("Earth-Rough".to_string()),
+                        Value::Int(1),
+                        Value::Bool(false),
+                    ])?,
+                    set_texture_index(&[
+                        Value::String("Missing-Rough".to_string()),
+                        Value::Int(2),
+                        Value::Bool(false),
+                    ])?,
+                    set_texture_index(&[
                         Value::String("Earth-Ridge".to_string()),
                         Value::Int(2),
                         Value::Bool(true),
@@ -57019,6 +57042,8 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(0),
                 Value::Int(0),
                 Value::Int(0),
+                Value::Int(0),
+                Value::Int(0),
                 Value::Int(1),
                 Value::Nil,
             ])
@@ -57029,15 +57054,38 @@ public func RejectConstruction(x, y, builder)
     #[test]
     fn set_texture_index_remap_is_live_copied_and_threaded_between_callbacks() {
         // Slot 2 is deliberately absent from the texmap but present in
-        // Surface8 at (2,2). A successful MoveIndex makes GetTexture observe
-        // Earth-Rough there immediately, while both Surface8 bytes and the
-        // source slot stay unchanged (C4Landscape.cpp:2710-2731,2787-2808;
-        // C4Texture.cpp:313-317).
-        let mut replay_world = draw_map_world(8, 7, 3, false);
+        // Surface8 at (2,2). A successful ReplaceMapColor + MoveIndex makes
+        // GetTexture observe Earth-Rough there immediately and rewrites only
+        // the retained editor map; Surface8, Pix2* caches, and the source slot
+        // stay unchanged until a static redraw (C4Landscape.cpp:2710-2731,
+        // 2787-2808; C4Texture.cpp:313-317).
+        let mut replay_world = draw_map_world(8, 7, 1, false);
+        let mut retained_indices = vec![0; 8 * 7];
+        retained_indices[..6].copy_from_slice(&[1, 0x81, 3, 0x83, 0, 0x80]);
+        let retained_map = lc_resources::bitmap::IndexedBitmap {
+            width: 8,
+            height: 7,
+            indices: retained_indices,
+        };
+        let replay_landscape = replay_world
+            .landscape
+            .as_mut()
+            .map(Rc::make_mut)
+            .expect("landscape exists");
+        assert!(replay_landscape.set_mode(crate::landscape::LANDSCAPE_MODE_STATIC));
+        replay_landscape
+            .raster_state_mut()
+            .expect("raster state exists")
+            .set_map(&retained_map);
         let initial_landscape = replay_world
             .landscape_ref()
             .expect("landscape exists")
             .clone();
+        let initial_grid = initial_landscape.pixel_grid().expect("pixel grid exists");
+        let initial_surface = initial_grid.bytes().to_vec();
+        let initial_revision = initial_grid.revision();
+        let initial_material_names = initial_grid.material_names().to_vec();
+        let initial_texture_names = initial_grid.texture_names().to_vec();
         let (result, outcome) =
             with_effect_context(None, &[], replay_world.clone(), 1, || {
                 Ok::<_, RuntimeError>(Value::Array(vec![
@@ -57068,9 +57116,15 @@ public func RejectConstruction(x, y, builder)
             ])
         );
         assert_eq!(outcome.landscape.len(), 1);
-        let LandscapeOperation::SetTextureIndex { texmap } = &outcome.landscape[0] else {
+        let LandscapeOperation::SetTextureIndex {
+            texmap,
+            old_index,
+            new_index,
+        } = &outcome.landscape[0]
+        else {
             panic!("unexpected landscape operation: {:?}", outcome.landscape[0]);
         };
+        assert_eq!((*old_index, *new_index), (1, 2));
         for slot in [1, 2] {
             assert_eq!(texmap.material_names[slot].as_deref(), Some("Earth"));
             assert_eq!(texmap.texture_names[slot].as_deref(), Some("Rough"));
@@ -57084,9 +57138,23 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(texmap.default_material_entry("Earth"), Some(1));
 
         // Effect callbacks are separate host contexts. Threading the first
-        // callback's captured entry state must make slot 2 visible to the
-        // next one before the authoritative Engine fold.
+        // callback's captured entry state and map-color delta must make slot
+        // 2 visible to the next one before the authoritative Engine fold.
         replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
+        let preview_landscape = replay_world.landscape_ref().expect("preview landscape exists");
+        assert_eq!(
+            preview_landscape
+                .raster_state()
+                .and_then(|state| state.map())
+                .expect("preview retained map")
+                .indices[..6],
+            [2, 0x82, 3, 0x83, 0, 0x80]
+        );
+        let preview_grid = preview_landscape.pixel_grid().expect("preview pixel grid");
+        assert_eq!(preview_grid.bytes(), initial_surface);
+        assert_eq!(preview_grid.revision(), initial_revision);
+        assert_eq!(preview_grid.material_names(), initial_material_names);
+        assert_eq!(preview_grid.texture_names(), initial_texture_names);
         let (replayed, replayed_outcome) =
             with_effect_context(None, &[], replay_world, 1, || {
                 Ok::<_, RuntimeError>((
@@ -57107,13 +57175,31 @@ public func RejectConstruction(x, y, builder)
         let mut engine = crate::Engine::new();
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(outcome.landscape);
-        let landscape = engine.landscape().expect("folded landscape exists");
-        assert_eq!(landscape.grid_byte_at(1, 2), Some(1 | 0x80));
-        assert_eq!(landscape.grid_byte_at(2, 2), Some(2));
-        let folded = landscape.raster_state().expect("raster state").texmap();
-        assert_eq!(folded.material_names[1].as_deref(), Some("Earth"));
-        assert_eq!(folded.material_names[2].as_deref(), Some("Earth"));
-        assert_eq!(folded.default_material_entry("Earth"), Some(1));
+        {
+            let landscape = engine.landscape().expect("folded landscape exists");
+            assert_eq!(landscape.grid_byte_at(1, 2), Some(1 | 0x80));
+            assert_eq!(landscape.grid_byte_at(2, 2), Some(2));
+            let grid = landscape.pixel_grid().expect("folded pixel grid");
+            assert_eq!(grid.bytes(), initial_surface);
+            assert_eq!(grid.revision(), initial_revision);
+            assert_eq!(grid.material_names(), initial_material_names);
+            assert_eq!(grid.texture_names(), initial_texture_names);
+            let raster = landscape.raster_state().expect("raster state");
+            assert_eq!(
+                raster.map().expect("folded retained map").indices[..6],
+                [2, 0x82, 3, 0x83, 0, 0x80]
+            );
+            let folded = raster.texmap();
+            assert_eq!(folded.material_names[1].as_deref(), Some("Earth"));
+            assert_eq!(folded.material_names[2].as_deref(), Some("Earth"));
+            assert_eq!(folded.default_material_entry("Earth"), Some(1));
+        }
+
+        engine.set_editor_landscape_mode(crate::landscape::LANDSCAPE_MODE_EXACT);
+        engine.set_editor_landscape_mode(crate::landscape::LANDSCAPE_MODE_STATIC);
+        let redrawn = engine.landscape().expect("redrawn landscape exists");
+        assert_eq!(redrawn.grid_byte_at(0, 0), Some(2));
+        assert_eq!(redrawn.grid_byte_at(1, 0), Some(0x82));
     }
 
     #[test]

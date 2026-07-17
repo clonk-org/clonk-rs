@@ -48421,8 +48421,16 @@ impl Engine {
                 LandscapeOperation::SyncRuntimeTexMap { texmap } => {
                     let _ = self.replace_runtime_texmap(texmap);
                 }
-                LandscapeOperation::SetTextureIndex { texmap } => {
-                    let _ = self.replace_runtime_texmap_entries_only(texmap);
+                LandscapeOperation::SetTextureIndex {
+                    texmap,
+                    old_index,
+                    new_index,
+                } => {
+                    let _ = self.apply_runtime_texture_index_move(
+                        texmap,
+                        old_index,
+                        new_index,
+                    );
                 }
                 LandscapeOperation::RemoveUnusedTexMapEntries { .. } => {
                     let _ = self.remove_unused_runtime_texmap_entries();
