@@ -6903,17 +6903,19 @@ fn validate_subpath_filename(mut value: String) -> String {
 }
 
 fn find_entry(entries: &[(String, String)], key: &str) -> Option<String> {
+    find_entry_including_empty(entries, key)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn find_entry_including_empty<'a>(
+    entries: &'a [(String, String)],
+    key: &str,
+) -> Option<&'a str> {
     entries
         .iter()
         .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
-        .and_then(|(_, value)| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        })
+        .map(|(_, value)| value.trim())
 }
 
 fn normalize_definition_path(raw: &str) -> String {
@@ -8421,8 +8423,8 @@ fn legacy_map_zoom(
 fn legacy_map_zoom_value(section: Option<&Vec<(String, String)>>) -> LegacyC4SVal {
     let default = LegacyC4SVal::new(10, 0, 5, 15);
     section
-        .and_then(|entries| find_entry(entries, "mapzoom"))
-        .and_then(|raw| parse_legacy_c4s_value("MapZoom", &raw, default).ok())
+        .and_then(|entries| find_entry_including_empty(entries, "mapzoom"))
+        .and_then(|raw| parse_legacy_c4s_value("MapZoom", raw, default).ok())
         .unwrap_or(default)
 }
 
@@ -9524,8 +9526,8 @@ fn legacy_c4s_value(
     key: &str,
     defaults: LegacyC4SVal,
 ) -> Result<LegacyC4SVal, ScenarioError> {
-    match entries.and_then(|entries| find_entry(entries, key)) {
-        Some(raw) => parse_legacy_c4s_value(key, &raw, defaults),
+    match entries.and_then(|entries| find_entry_including_empty(entries, key)) {
+        Some(raw) => parse_legacy_c4s_value(key, raw, defaults),
         None => Ok(defaults),
     }
 }
@@ -23117,6 +23119,55 @@ public func ActualizePhase(pClonk)
 
         let weather = derive_legacy_weather_init(&manifest).expect("weather derives");
         assert_eq!(weather.precipitation, "AcidRain");
+    }
+
+    #[test]
+    fn empty_c4sval_keys_match_core_component_defaults_at_runtime() {
+        let manifest = parse_legacy_scenario_text(
+            "[Head]\nTitle=Empty C4SVal\n\n[Landscape]\nGravity=\nMapZoom=\n\n[Weather]\nClimate=\n",
+        )
+        .expect("scenario parses");
+
+        let expected_gravity = LegacyC4SVal::new(0, 0, 10, 200);
+        let expected_map_zoom = LegacyC4SVal::new(0, 0, 5, 15);
+        let expected_climate = LegacyC4SVal::new(0, 10, 0, 100);
+        assert_eq!(manifest.core.landscape.gravity, expected_gravity);
+        assert_eq!(manifest.core.landscape.map_zoom, expected_map_zoom);
+        assert_eq!(manifest.core.weather.climate, expected_climate);
+
+        let (physics, gravity) = derive_legacy_physics(&manifest).expect("physics derives");
+        assert_eq!(gravity, expected_gravity);
+        assert_eq!(
+            physics.expect("Landscape section yields physics").gravity,
+            10,
+            "empty Gravity evaluates/clamps to the C++ minimum"
+        );
+        assert_eq!(
+            legacy_map_zoom_value(manifest.sections.get("landscape")),
+            expected_map_zoom
+        );
+
+        let weather = derive_legacy_weather_init(&manifest).expect("weather derives");
+        assert_eq!(weather.climate, expected_climate);
+        let environment = derive_legacy_environment(&manifest).expect("environment derives");
+        assert_eq!(environment.climate, 50);
+
+        let absent = parse_legacy_scenario_text(
+            "[Head]\nTitle=Absent C4SVal\n\n[Landscape]\nMapWidth=64\n\n[Weather]\nNoGamma=1\n",
+        )
+        .expect("absent-key scenario parses");
+        let (physics, gravity) = derive_legacy_physics(&absent).expect("physics derives");
+        assert_eq!(gravity, LegacyC4SVal::new(100, 0, 10, 200));
+        assert_eq!(
+            physics.expect("Landscape section yields physics").gravity,
+            100
+        );
+        assert_eq!(
+            legacy_map_zoom_value(absent.sections.get("landscape")),
+            LegacyC4SVal::new(10, 0, 5, 15)
+        );
+        let weather = derive_legacy_weather_init(&absent).expect("weather derives");
+        assert_eq!(weather.climate, LegacyC4SVal::new(50, 10, 0, 100));
     }
 
     #[test]
