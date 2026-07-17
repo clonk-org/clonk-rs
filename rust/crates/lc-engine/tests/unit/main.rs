@@ -7862,6 +7862,68 @@ func ReadWind()
         assert_eq!(settings.base_wind, 0);
     }
 
+    #[test]
+    fn scenario_wind_c4sval_tick1000_uses_raw_rnd_and_bounds() {
+        // C4Weather::Execute re-evaluates the scenario C4SVal verbatim on
+        // Tick1000. Rnd=70 therefore means Random(141), even though the
+        // [-30,30] bounds make the effective spread much smaller.
+        let mut settings = EnvironmentSettings::new(0).with_wind_variation(70, 2_000);
+        settings.wind_min = -30;
+        settings.wind_max = 30;
+        let mut rng = LcgRng::seed_from_u64(0xC4);
+        let mut mirror = rng.clone();
+
+        for frame in [1_000, 2_000, 3_000] {
+            let raw = mirror.random(141) - 70;
+            let expected = if raw < -30 {
+                -30
+            } else if raw > 30 {
+                30
+            } else {
+                raw
+            };
+
+            settings.advance_frame(&mut rng, frame);
+
+            assert_eq!(settings.wind_target, expected, "frame {frame}");
+            assert_eq!(rng, mirror, "one Random(141) draw at frame {frame}");
+        }
+    }
+
+    #[test]
+    fn scenario_wind_c4sval_tick10_clamps_after_set_wind() {
+        // Wind=(50,10,0,20) always evaluates to the Max bound. SetWind uses
+        // its own hard [-100,100] clamp and sets both runtime fields; the
+        // next Tick10 step then applies the narrower scenario bounds.
+        let mut settings = EnvironmentSettings::new(50).with_wind_variation(10, 2_000);
+        settings.wind_min = 0;
+        settings.wind_max = 20;
+        let mut delta = lc_engine::compat::EnvironmentDelta::default();
+        delta.wind = Some(-50);
+        delta.apply(&mut settings);
+        assert_eq!((settings.wind, settings.wind_target), (-50, -50));
+        let mut rng = LcgRng::seed_from_u64(0xC4);
+        let before_tick10 = rng.clone();
+
+        settings.advance_frame(&mut rng, 10);
+
+        assert_eq!(settings.wind, 0, "scenario Min clamps the SetWind value");
+        assert_eq!(settings.wind_target, -50, "Tick10 does not reroll target");
+        assert_eq!(rng, before_tick10, "Tick10 consumes no wind RNG");
+
+        let mut mirror = rng.clone();
+        let _ = mirror.random(21);
+
+        settings.advance_frame(&mut rng, 1_000);
+
+        assert_eq!(settings.wind_target, 20, "Std 50 always bounds to Max 20");
+        assert_eq!(
+            settings.wind, 1,
+            "Tick1000 rerolls to 20, then steps once up from the Min bound"
+        );
+        assert_eq!(rng, mirror, "Tick1000 preserves the one-draw ledger");
+    }
+
     const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {

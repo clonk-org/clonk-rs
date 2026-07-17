@@ -6640,15 +6640,6 @@ impl LegacyC4SVal {
             value
         }
     }
-
-    fn variation_extent(self) -> i32 {
-        let base = self.base();
-        let (min, max) = ordered_bounds(self.min, self.max);
-        let positive = max.saturating_sub(base).max(0);
-        let negative = base.saturating_sub(min).max(0);
-        let range = positive.max(negative);
-        range.min(self.rnd.abs())
-    }
 }
 
 const fn ordered_bounds(a: i32, b: i32) -> (i32, i32) {
@@ -9186,13 +9177,8 @@ fn derive_legacy_environment(
 
     let wind_defaults = LegacyC4SVal::new(0, 70, -100, 100);
     let wind = legacy_c4s_value(weather_entries, "wind", wind_defaults)?;
-    let base_wind = wind.base();
-    let wind_variation = wind.variation_extent();
-
-    let mut environment = EnvironmentSettings::new(base_wind);
-    if wind_variation > 0 {
-        environment = environment.with_wind_variation(wind_variation, 2000);
-    }
+    let mut environment = EnvironmentSettings::new(wind.base());
+    environment.set_legacy_wind_value(wind.std, wind.rnd, wind.min, wind.max);
 
     let climate_defaults = LegacyC4SVal::new(50, 10, 0, 100);
     let climate_value = legacy_c4s_value(weather_entries, "climate", climate_defaults)?;
@@ -21577,6 +21563,58 @@ public func ActualizePhase(pClonk)
 
         let weather = derive_legacy_weather_init(&manifest).expect("weather derives");
         assert_eq!(weather.precipitation, "AcidRain");
+    }
+
+    #[test]
+    fn legacy_scenario_wind_c4sval_fields_are_retained_verbatim() {
+        for (source, expected) in [
+            ("0,70,-30,30", LegacyC4SVal::new(0, 70, -30, 30)),
+            ("50,10,0,20", LegacyC4SVal::new(50, 10, 0, 20)),
+            ("50,0,0,20", LegacyC4SVal::new(50, 0, 0, 20)),
+        ] {
+            let manifest = parse_legacy_scenario_text(&format!(
+                "[Head]\nTitle=Wind\n\n[Weather]\nWind={source}\n"
+            ))
+            .expect("scenario parses");
+            let weather = derive_legacy_weather_init(&manifest).expect("weather derives");
+            let environment = derive_legacy_environment(&manifest).expect("environment derives");
+
+            assert_eq!(weather.wind, expected);
+            assert_eq!(environment.wind, expected.base());
+            assert_eq!(environment.base_wind, expected.std);
+            assert_eq!(environment.wind_variation, expected.rnd);
+            assert_eq!(environment.wind_min, expected.min);
+            assert_eq!(environment.wind_max, expected.max);
+
+            let mut runtime = environment;
+            let mut rng = crate::rng::LcgRng::seed_from_u64(0xC4);
+            let mut mirror = rng.clone();
+            let range = expected.rnd.wrapping_mul(2).wrapping_add(1);
+            let raw = expected
+                .std
+                .wrapping_add(mirror.random(range))
+                .wrapping_sub(expected.rnd);
+            let bounded = if raw < expected.min {
+                expected.min
+            } else if raw > expected.max {
+                expected.max
+            } else {
+                raw
+            };
+            runtime.advance_frame(&mut rng, 1_000);
+            assert_eq!(runtime.wind_target, bounded);
+            assert_eq!(rng, mirror);
+            assert_eq!(runtime.base_wind, expected.std);
+
+            let encoded = serde_json::to_string(&environment).expect("environment serializes");
+            let mut restored: EnvironmentSettings =
+                serde_json::from_str(&encoded).expect("environment restores");
+            restored.refresh_runtime_fields();
+            assert_eq!(restored.base_wind, expected.std);
+            assert_eq!(restored.wind_variation, expected.rnd);
+            assert_eq!(restored.wind_min, expected.min);
+            assert_eq!(restored.wind_max, expected.max);
+        }
     }
 
     #[test]

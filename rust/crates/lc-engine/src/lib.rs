@@ -2966,6 +2966,30 @@ impl EnvironmentSettings {
         self
     }
 
+    /// Preserve the scenario `Weather.Wind` C4SVal verbatim. Runtime
+    /// `C4Weather::Execute` re-evaluates these exact Std/Rnd/Min/Max fields;
+    /// deriving a smaller variation from the bounded initial value changes
+    /// both the RNG range and the resulting target wind.
+    pub(crate) fn set_legacy_wind_value(
+        &mut self,
+        std: i32,
+        rnd: i32,
+        min: i32,
+        max: i32,
+    ) {
+        self.base_wind = std;
+        self.wind_variation = rnd;
+        self.wind_period = if rnd == 0 { 0 } else { 2_000 };
+        self.wind_update_interval = if rnd == 0 {
+            0
+        } else {
+            Self::default_wind_update_interval(self.wind_period)
+        };
+        self.wind_update_timer = 0;
+        self.wind_min = min;
+        self.wind_max = max;
+    }
+
     pub fn with_temperature(mut self, temperature: i32) -> Self {
         self.temperature = temperature;
         self
@@ -3250,13 +3274,19 @@ impl EnvironmentSettings {
             None
         };
         if frame % 1000 == 0 {
-            let rnd = self.wind_variation.max(0);
-            self.wind_target = (self.base_wind + rng.random(2 * rnd + 1) - rnd)
-                .clamp(self.wind_min, self.wind_max);
+            let rnd = self.wind_variation;
+            let range = rnd.wrapping_mul(2).wrapping_add(1);
+            let target = self
+                .base_wind
+                .wrapping_add(rng.random(range))
+                .wrapping_sub(rnd);
+            self.wind_target = bound_by_ordered(target, self.wind_min, self.wind_max);
         }
         if frame % 10 == 0 {
-            self.wind = (self.wind + (self.wind_target - self.wind).signum())
-                .clamp(self.wind_min, self.wind_max);
+            let stepped = self
+                .wind
+                .wrapping_add(self.wind_target.wrapping_sub(self.wind).signum());
+            self.wind = bound_by_ordered(stepped, self.wind_min, self.wind_max);
         }
         self.advance_time_of_day();
         self.update_precipitation_runtime();
@@ -3394,6 +3424,16 @@ fn default_wind_min() -> i32 {
 
 fn default_wind_max() -> i32 {
     100
+}
+
+fn bound_by_ordered(value: i32, minimum: i32, maximum: i32) -> i32 {
+    if value < minimum {
+        minimum
+    } else if value > maximum {
+        maximum
+    } else {
+        value
+    }
 }
 
 fn default_owner() -> i32 {
@@ -41517,6 +41557,12 @@ impl Engine {
         let season = init.season.evaluate(&mut self.rng);
         let year_speed = init.year_speed.evaluate(&mut self.rng);
         let climate = 100 - init.climate.evaluate(&mut self.rng) - 50;
+        self.environment.set_legacy_wind_value(
+            init.wind.std,
+            init.wind.rnd,
+            init.wind.min,
+            init.wind.max,
+        );
         let wind = init.wind.evaluate(&mut self.rng);
         // Evaluate already applies the scenario C4SVal bounds; C++ stores
         // those results directly without another hard-coded clamp.
