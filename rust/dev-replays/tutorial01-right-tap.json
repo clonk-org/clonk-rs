@@ -48,11 +48,11 @@
   "checkpoints": [
     {
       "frame": 0,
-      "snapshot_hash": "f069e787b34d2b07"
+      "snapshot_hash": "5d0d6382c37d88e8"
     },
     {
       "frame": 2,
-      "snapshot_hash": "f8d91a766932984e"
+      "snapshot_hash": "58e3895ea2aa7be5"
     }
   ]
 }

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const C4D_MAX_VERTEX: usize = 30;
+const C4D_SORT_LIMIT: i32 = (1 << 5) - 1;
+const C4D_CREW_MEMBER: i32 = 1 << 18;
 
 /// C4AllowPictureStack bits (src/C4Constants.h:301-309).
 pub const APS_COLOR: i32 = 1 << 0;
@@ -646,7 +648,19 @@ impl DefCore {
             GroupError::EntryNotFound(_) => DefinitionError::DefCoreMissing,
             other => DefinitionError::Resources(other),
         })?;
-        parse_def_core(&bytes)
+        let mut core = parse_def_core(&bytes)?;
+
+        // C4DefCore::Load adjusts the compiled Category in this order: a
+        // signed nonzero CrewMember adds C4D_CrewMember, then a category with
+        // no low-five sort bit receives C4D_StaticBack (C4Def.cpp:206-233).
+        if core.crew_member != 0 {
+            core.category |= C4D_CREW_MEMBER;
+        }
+        if core.category & C4D_SORT_LIMIT == 0 {
+            core.category = (core.category & !C4D_SORT_LIMIT) | 1;
+        }
+
+        Ok(core)
     }
 }
 
@@ -3565,6 +3579,44 @@ Entrance=1,2,,4
         let raw_crew = parse_def_core(b"[DefCore]\nid=CREW\nCrewMember=-2\n")
             .expect("raw crew value parses");
         assert_eq!(raw_crew.crew_member, -2);
+    }
+
+    #[test]
+    fn def_core_load_adjusts_crew_category_before_sort_default_like_cpp() {
+        let temp = tempdir().expect("tempdir");
+        let load = |directory: &str, source: &str| {
+            let path = temp.path().join(directory);
+            fs::create_dir(&path).expect("definition directory");
+            fs::write(path.join("DefCore.txt"), source).expect("write DefCore");
+            let group = Group::open(&path).expect("open definition group");
+            DefCore::load(&group).expect("load DefCore")
+        };
+
+        let ordinary = load(
+            "Ordinary.c4d",
+            "[DefCore]\nid=ORDN\nCategory=C4D_Living\nCrewMember=0\n",
+        );
+        assert_eq!(ordinary.category, 1 << 3, "CrewMember=0 changes nothing");
+
+        let derived = load(
+            "Derived.c4d",
+            "[DefCore]\nid=CREW\nCrewMember=-2\n",
+        );
+        assert_eq!(
+            derived.category,
+            C4D_CREW_MEMBER | 1,
+            "the crew bit is present before the missing sort bit defaults to StaticBack"
+        );
+
+        let explicit = load(
+            "Explicit.c4d",
+            "[DefCore]\nid=EXPL\nCategory=C4D_CrewMember|C4D_Object\nCrewMember=0\n",
+        );
+        assert_eq!(
+            explicit.category,
+            C4D_CREW_MEMBER | (1 << 4),
+            "CrewMember=0 never clears an explicit category bit"
+        );
     }
 
     #[test]

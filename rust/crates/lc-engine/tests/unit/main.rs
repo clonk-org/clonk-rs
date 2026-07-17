@@ -22171,6 +22171,73 @@ func Trigger() {
     }
 
     #[test]
+    fn real_clonk_category_agrees_across_definition_object_and_reflection() {
+        // C4DefCore::Load adds C4D_CrewMember for any nonzero CrewMember
+        // before validating the low-five-bit sort category (C4Def.cpp:
+        // 206-233). The shipped CLNK is Living + SelectHomebase in text, so
+        // every runtime and reflection view must expose the derived bit too.
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..");
+        let group = lc_resources::Group::open(
+            repository.join("content/Objects.c4d/Crew.c4d/Clonk.c4d"),
+        )
+        .expect("open shipped Clonk definition");
+        let resource =
+            ResourceDefinitionData::load(&group).expect("load shipped Clonk definition");
+        let expected = CATEGORY_LIVING | (1 << 11) | (1 << 18);
+        assert_eq!(resource.core.category, expected);
+
+        let clonk_definition =
+            Definition::from_resource(&resource).expect("compile shipped Clonk definition");
+        assert_eq!(clonk_definition.category(), expected);
+        let probe_definition = Definition::from_script(
+            "CATP",
+            "Category probe",
+            r#"#strict 2
+func Probe(object target)
+{
+    return [GetCategory(target), GetCategory(nil, CLNK), GetDefCoreVal("Category", "DefCore", CLNK)];
+}
+"#,
+        )
+        .expect("category probe compiles");
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(clonk_definition)
+            .expect("Clonk definition registers");
+        engine
+            .register_definition(probe_definition)
+            .expect("probe definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK").with_loaded(true))
+            .expect("loaded Clonk spawns");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("CATP").with_loaded(true))
+            .expect("loaded probe spawns");
+
+        assert_eq!(
+            engine.object_snapshot(clonk).expect("Clonk exists").category,
+            expected
+        );
+        let probe_index = engine.find_object_index(probe).expect("probe exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    probe_index,
+                    "Probe",
+                    vec![Value::Object(clonk.as_u64())],
+                )
+                .expect("category probe succeeds"),
+            Value::Array(vec![
+                Value::Int(expected),
+                Value::Int(expected),
+                Value::Int(expected),
+            ])
+        );
+    }
+
+    #[test]
     fn knight_include_chain_inherits_clonk_rank_strip_and_base_count() {
         // C4Def::IncludeDefinition forwards non-owned rank graphics through
         // CLNK -> KNIG -> KING. The two shipped ImgRank menus in Kingdoms use
