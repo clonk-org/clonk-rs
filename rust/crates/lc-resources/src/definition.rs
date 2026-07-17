@@ -1026,6 +1026,11 @@ fn parse_c4_id_token(value: &str) -> String {
 fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let text = String::from_utf8_lossy(bytes);
     let mut current_section: Option<String> = None;
+    // StdCompilerINIRead compiles each named section and value once, using
+    // the first matching node and leaving later duplicates unused.
+    let mut current_section_is_first = true;
+    let mut seen_sections = HashSet::new();
+    let mut seen_values = HashSet::new();
 
     let mut id: Option<String> = None;
     let mut version = [0; 5];
@@ -1153,20 +1158,28 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         }
 
         if line.starts_with('[') && line.ends_with(']') {
-            current_section = Some(line[1..line.len() - 1].trim().to_ascii_lowercase());
+            let section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            current_section_is_first = seen_sections.insert(section.clone());
+            current_section = Some(section);
             continue;
         }
 
         let Some((raw_key, raw_value)) = line.split_once('=') else {
             continue;
         };
-        let key = raw_key.trim();
+        if !current_section_is_first {
+            continue;
+        }
+        let key = raw_key.trim().to_ascii_lowercase();
         let value = raw_value.trim();
 
         let section = current_section.as_deref().unwrap_or("defcore");
+        if !seen_values.insert((section.to_string(), key.clone())) {
+            continue;
+        }
 
         if section == "physical" {
-            physical.set_by_name(&key.to_ascii_lowercase(), parse_i32(value).unwrap_or(0));
+            physical.set_by_name(&key, parse_i32(value).unwrap_or(0));
             continue;
         }
 
@@ -1174,7 +1187,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             continue;
         }
 
-        match key.to_ascii_lowercase().as_str() {
+        match key.as_str() {
             "id" => {
                 if !value.is_empty() {
                     id = Some(parse_c4_id_token(value));
@@ -4697,6 +4710,32 @@ NextAction=Dup
         let mut above = 120_000;
         PhysicalInfo::train_value(&mut above, 100, C4_MAX_PHYSICAL);
         assert_eq!(above, 120_000, "never decreased by training");
+    }
+
+    #[test]
+    fn def_core_duplicate_values_and_sections_use_the_first_occurrence() {
+        let parsed = parse_def_core(
+            br#"[DefCore]
+id=DUPL
+Mass=100
+Mass=5
+[Physical]
+Walk=35000
+[Physical]
+Walk=1
+Jump=25000
+[DefCore]
+Mass=7
+Value=9
+"#,
+        )
+        .expect("duplicate DefCore entries parse");
+
+        assert_eq!(parsed.id, "DUPL");
+        assert_eq!(parsed.mass, 100);
+        assert_eq!(parsed.physical.walk, 35_000);
+        assert_eq!(parsed.physical.jump, 0);
+        assert_eq!(parsed.value, 0);
     }
 
     #[test]
