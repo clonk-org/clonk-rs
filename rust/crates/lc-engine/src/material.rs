@@ -157,6 +157,15 @@ impl MaterialReaction {
             insertion_check: true,
         }
     }
+
+    fn masked_user_noop() -> Self {
+        Self {
+            kind: MaterialReactionKind::None,
+            user_defined: true,
+            // C++ rejects ExecMask before it reaches CheckSlide.
+            insertion_check: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1127,15 +1136,21 @@ fn build_custom_reactions(
 
             for target in targets {
                 for event in MaterialInteractionEvent::ALL {
-                    if exec_mask & event.mask() == 0 {
-                        continue;
-                    }
+                    // C++ stores one event-agnostic user-reaction pointer in
+                    // the shared pair table. mrfUserCheck turns a masked
+                    // event into a no-op; it must not expose the builtin
+                    // reaction that occupied the slot before this definition.
+                    let event_reaction = if exec_mask & event.mask() == 0 {
+                        MaterialReaction::masked_user_noop()
+                    } else {
+                        reaction
+                    };
                     set_custom_reaction(
                         &mut entries[event.index()],
                         width,
                         Some(pxs_id),
                         target,
-                        reaction,
+                        event_reaction,
                         reverse,
                     );
                 }
@@ -1750,24 +1765,38 @@ mod tests {
     }
 
     #[test]
-    fn custom_reaction_exec_mask_without_pxs_move_is_ignored() {
+    fn custom_reaction_exec_mask_without_pxs_move_occupies_slot_with_noop() {
         let set = build_material_set(
             r#"
             [Material Mist]
             Name=Mist
-            Density=5
+            Density=25
 
             [Reaction]
             Type=Poof
-            TargetSpec=Sky
+            TargetSpec=Water
             ExecMask=1
+
+            [Material Water]
+            Name=Water
+            Density=25
             "#,
         );
         let mist = set.id_of("Mist").expect("mist material");
-        assert_eq!(
-            set.reaction(Some(mist), None).kind,
-            MaterialReactionKind::None,
-            "reaction without PXSMove bit should not apply to particle movement",
+        let water = set.id_of("Water").expect("water material");
+        let reaction = set.reaction_for_event(
+            Some(mist),
+            Some(water),
+            MaterialInteractionEvent::PxsMove,
+        );
+        assert_eq!(reaction.kind, MaterialReactionKind::None);
+        assert!(
+            reaction.user_defined,
+            "the masked event still occupies the pair slot instead of falling back to builtin Insert"
+        );
+        assert!(
+            !reaction.insertion_check,
+            "ExecMask rejection precedes CheckSlide in C++"
         );
     }
 
@@ -1781,21 +1810,34 @@ mod tests {
 
             [Reaction]
             Type=Poof
-            TargetSpec=Sky
+            TargetSpec=Water
             ExecMask=4
+
+            [Material Water]
+            Name=Water
+            Density=25
             "#,
         );
         let mist = set.id_of("Mist").expect("mist material");
-        assert_eq!(
-            set.reaction(Some(mist), None).kind,
-            MaterialReactionKind::None,
-            "mass-move-only reaction should not affect PXSMove lookups",
+        let water = set.id_of("Water").expect("water material");
+        let pxs_move = set.reaction_for_event(
+            Some(mist),
+            Some(water),
+            MaterialInteractionEvent::PxsMove,
         );
+        assert_eq!(pxs_move.kind, MaterialReactionKind::None);
+        assert!(
+            pxs_move.user_defined,
+            "masked PXSMove must not fall through to builtin Insert"
+        );
+        assert!(!pxs_move.insertion_check);
+        let mass_move =
+            set.reaction_for_event(Some(mist), Some(water), MaterialInteractionEvent::MassMove);
         assert_eq!(
-            set.reaction_for_event(Some(mist), None, MaterialInteractionEvent::MassMove)
-                .kind,
+            mass_move.kind,
             MaterialReactionKind::Poof,
             "mass-move exec mask should be available to mass movers",
         );
+        assert!(mass_move.user_defined);
     }
 }

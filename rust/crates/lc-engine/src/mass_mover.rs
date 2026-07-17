@@ -1297,6 +1297,75 @@ mod tests {
     }
 
     #[test]
+    fn exec_masked_mass_move_occupies_slot_without_poof_or_rng() {
+        // Water+Lava naturally selects builtin Poof. The custom pair entry
+        // replaces that shared C++ table slot, but ExecMask=2 excludes
+        // meeMassMove: the blocked mover gets an unhandled no-op, not the
+        // builtin fallback (which would extract both pixels and draw Rnd3).
+        let materials = materials(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Instable=1
+            MaxSlide=0
+            Extinguisher=1
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Lava
+            ExecMask=2
+
+            [Material Lava]
+            Name=Lava
+            Density=50
+            Incindiary=1
+            "#,
+        );
+        let water = materials.id_of("Water").expect("water material");
+        let lava = materials.id_of("Lava").expect("lava material");
+        let reaction = materials.reaction_for_event(
+            Some(water),
+            Some(lava),
+            MaterialInteractionEvent::MassMove,
+        );
+        assert_eq!(reaction.kind, crate::material::MaterialReactionKind::None);
+        assert!(reaction.user_defined, "masked MassMove still owns the pair slot");
+
+        let mut landscape = Landscape::flat_with_material(3, 5, Some(lava));
+        landscape.set_default_liquid_material(Some(water));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(4, 4, Some(water))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        assert!(engine.mass_mover_create(1, 4, false));
+        let mirror = engine.rng.clone();
+
+        engine.tick_mass_movers();
+
+        assert_eq!(engine.rng, mirror, "masked MassMove draws no reaction RNG");
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(1, 4)),
+            Some(water),
+            "the mover material is not extracted"
+        );
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(1, 5)),
+            Some(lava),
+            "the contacted landscape material is not poofed"
+        );
+        assert_eq!(engine.pxs_system.count(), 0);
+        assert_eq!(engine.mass_movers.live_movers(), 0, "blocked mover simply ceases");
+    }
+
+    #[test]
     fn pxs_move_corrode_clears_in_place_and_fires_instability() {
         // mrfCorrode on meePXSMove (C4Material.cpp:731-733): ClearBackPix
         // (= ClearPix, C4Wrappers.h:92) clears the landscape pixel IN

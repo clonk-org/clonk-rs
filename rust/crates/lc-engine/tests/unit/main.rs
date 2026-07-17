@@ -6409,6 +6409,84 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     }
 
     #[test]
+    fn masked_pxs_move_custom_reaction_keeps_pxs_moving_without_insert_or_rng() {
+        // C++ installs one custom-reaction slot for the pair. ExecMask=4
+        // excludes meePXSMove, so mrfUserCheck returns false and the PXS
+        // continues through Water. Falling back to the natural equal-density
+        // Insert reaction would instead kill the PXS and write Mist at y=2.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Mist]
+            Name=Mist
+            Density=25
+            Friction=0
+            MaxSlide=0
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Water
+            ExecMask=4
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            MaxSlide=0
+            "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mist = materials.id_of("Mist").expect("Mist exists");
+        let water = materials.id_of("Water").expect("Water exists");
+        let reaction = materials.reaction_for_event(
+            Some(mist),
+            Some(water),
+            material::MaterialInteractionEvent::PxsMove,
+        );
+        assert_eq!(reaction.kind, material::MaterialReactionKind::None);
+        assert!(reaction.user_defined, "the masked pair slot remains occupied");
+
+        let mut densities = vec![0i32; 128];
+        densities[10] = 25;
+        densities[20] = 25;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[10] = Some("Water".into());
+        names[20] = Some("Mist".into());
+        let mut bytes = vec![0u8; 7 * 8];
+        bytes[3 * 7 + 3] = 10;
+        let grid = landscape::PixelGrid::new(7, 8, bytes, densities, names, vec![None; 128]);
+        let mut world = Landscape::new(7, vec![8; 7]).expect("landscape builds");
+        world.set_world_height(8);
+        world.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(22);
+        engine.set_materials(materials);
+        engine.set_landscape(world);
+        engine.set_physics(PhysicsSettings::new(0, 12, -20));
+        assert!(engine.pxs_system.create(
+            mist,
+            itofix(3),
+            itofix(2),
+            C4Fixed::ZERO,
+            itofix(1),
+        ));
+        let mirror = engine.rng.clone();
+
+        engine.tick_pxs();
+
+        let survivors = engine.pxs_system.iter().copied().collect::<Vec<_>>();
+        assert_eq!(survivors.len(), 1, "masked reaction keeps the PXS alive");
+        assert_eq!(survivors[0].mat, mist);
+        assert_eq!((fixtoi(survivors[0].x), fixtoi(survivors[0].y)), (3, 3));
+        assert_eq!(engine.rng, mirror, "masked mrfUserCheck draws no RNG");
+        let world = engine.landscape().expect("landscape remains set");
+        assert_eq!(world.material_at(3, 2), None, "no builtin InsertMaterial");
+        assert_eq!(world.grid_byte_at(3, 2), Some(0));
+        assert_eq!(world.material_at(3, 3), Some(water));
+        assert_eq!(world.grid_byte_at(3, 3), Some(10));
+    }
+
+    #[test]
     fn failed_pxs_corrosion_uses_full_insert_material_slide_like_cpp() {
         // C++ mrfCorrode's failed-corrosion branch calls the full
         // C4Landscape::InsertMaterial routine (C4Material.cpp:737-740).
