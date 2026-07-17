@@ -57346,28 +57346,130 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
         assert_eq!(vehicle_pixels(&engine), Vec::<(i32, i32)>::new());
     }
 
+    const GRAPHICS_BOUNDS_REFLECTION_SCRIPT: &[u8] = br#"#strict 2
+func ProbeGraphicsBounds() {
+    return [
+        GetDefCoreVal("SolidMask", "DefCore", nil, 0),
+        GetDefCoreVal("SolidMask", "DefCore", nil, 1),
+        GetDefCoreVal("SolidMask", "DefCore", nil, 2),
+        GetDefCoreVal("SolidMask", "DefCore", nil, 3),
+        GetDefCoreVal("SolidMask", "DefCore", nil, 4),
+        GetDefCoreVal("SolidMask", "DefCore", nil, 5),
+        GetDefCoreVal("TopFace", "DefCore", nil, 0),
+        GetDefCoreVal("TopFace", "DefCore", nil, 1),
+        GetDefCoreVal("TopFace", "DefCore", nil, 2),
+        GetDefCoreVal("TopFace", "DefCore", nil, 3),
+        GetDefCoreVal("TopFace", "DefCore", nil, 4),
+        GetDefCoreVal("TopFace", "DefCore", nil, 5)
+    ];
+}
+"#;
+
     #[test]
-    fn invalid_base_defcore_solid_mask_is_disabled_before_object_init_like_cpp() {
-        // C4Def::Load validates DefCore SolidMask against the base bitmap and
-        // clears an overflowing rect before C4Object::Init gets a chance to
-        // copy/check it (C4Def.cpp:727-733). Runtime object rects still use
-        // CheckSolidMaskRect's clipping behavior.
+    fn invalid_base_defcore_graphics_bounds_clear_runtime_and_reflection_like_cpp(
+    ) -> Result<(), EngineError> {
+        // C4Def::Load validates the raw SolidMask against bitmap pixels and
+        // TopFace against bitmap/Scale logical coordinates, defaulting all
+        // six reflected fields before objects or the renderer see either
+        // invalid rectangle (C4Def.cpp:727-741).
         let temp = tempfile::tempdir().expect("tempdir");
-        let def_dir = temp.path().join("InvalidMask.ocd");
+        let def_dir = temp.path().join("InvalidGraphicsBounds.ocd");
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=IMSK\nName=Invalid mask\nShape=0,0,4,2\nSolidMask=0,0,4,2,0,0\n",
+            b"[DefCore]\nid=BADS\nName=Invalid graphics bounds\nCategory=C4D_Object\nShape=0,0,64,64\nScale=200\nSolidMask=0,0,9999,9999,9,10\nTopFace=31,0,2,1,7,8\n",
         )
         .expect("write DefCore");
-        image::RgbaImage::from_pixel(3, 2, image::Rgba([255, 255, 255, 255]))
+        std::fs::write(
+            def_dir.join("Script.c"),
+            GRAPHICS_BOUNDS_REFLECTION_SCRIPT,
+        )
+        .expect("write reflection script");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]))
             .save(def_dir.join("Graphics.png"))
             .expect("write graphics");
 
         let group = lc_resources::Group::open(&def_dir).expect("open definition group");
         let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
-        let definition = Definition::from_resource(&resource).expect("convert definition");
+        let definition = Definition::from_resource(&resource)?;
         assert_eq!(definition.solid_mask(), None);
+        assert_eq!(definition.top_face(), None);
+
+        let mut engine = Engine::with_seed(41);
+        engine.set_landscape(vehicle_grid_landscape(128, 128));
+        engine.register_definition(definition)?;
+        assert_eq!(engine.definition_top_face("BADS"), None);
+        let object = engine.spawn_object(
+            SpawnConfig::new("BADS")
+                .with_position(Vector2::new(64, 64))
+                .with_loaded(true),
+        )?;
+        let index = engine.find_object_index(object).expect("object exists");
+        assert_eq!(
+            engine.call_object_function(index, "ProbeGraphicsBounds", Vec::new())?,
+            Value::Array(vec![Value::Int(0); 12])
+        );
+        assert!(vehicle_pixels(&engine).is_empty());
+        assert_eq!(engine.debug_solid_mask_buffer(object.as_u64()), None);
+        Ok(())
+    }
+
+    #[test]
+    fn valid_base_defcore_graphics_bounds_preserve_exact_edges_like_cpp(
+    ) -> Result<(), EngineError> {
+        // SolidMask uses raw bitmap pixels, while TopFace uses logical
+        // bitmap/Scale coordinates. C++ accepts exact right/bottom edges.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("ValidGraphicsBounds.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=EDGE\nName=Exact graphics edges\nCategory=C4D_Object\nShape=0,0,64,64\nScale=200\nSolidMask=0,0,64,64,9,10\nTopFace=0,0,32,32,7,8\n",
+        )
+        .expect("write DefCore");
+        std::fs::write(
+            def_dir.join("Script.c"),
+            GRAPHICS_BOUNDS_REFLECTION_SCRIPT,
+        )
+        .expect("write reflection script");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]))
+            .save(def_dir.join("Graphics.png"))
+            .expect("write graphics");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+        assert_eq!(
+            definition.solid_mask(),
+            Some(DefinitionTargetRect::new(0, 0, 64, 64, 9, 10))
+        );
+        assert_eq!(
+            definition.top_face(),
+            Some(DefinitionTargetRect::new(0, 0, 32, 32, 7, 8))
+        );
+
+        let mut engine = Engine::with_seed(42);
+        engine.register_definition(definition)?;
+        let object = engine.spawn_object(SpawnConfig::new("EDGE"))?;
+        let index = engine.find_object_index(object).expect("object exists");
+        assert_eq!(
+            engine.call_object_function(index, "ProbeGraphicsBounds", Vec::new())?,
+            Value::Array(vec![
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(64),
+                Value::Int(64),
+                Value::Int(9),
+                Value::Int(10),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(32),
+                Value::Int(32),
+                Value::Int(7),
+                Value::Int(8),
+            ])
+        );
+        Ok(())
     }
 
     #[test]

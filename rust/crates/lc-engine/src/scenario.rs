@@ -3249,7 +3249,7 @@ impl Scenario {
                 DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())
             });
             compiled.set_sprite_image(sprite_image);
-            compiled.validate_base_solid_mask();
+            compiled.validate_base_graphics_rects();
             if !definition.additional_graphics.is_empty() {
                 let mut variants = HashMap::with_capacity(definition.additional_graphics.len());
                 for (key, variant) in &definition.additional_graphics {

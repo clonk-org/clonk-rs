@@ -10742,7 +10742,7 @@ impl Definition {
             let mask = resource.color_by_owner_mask.as_ref();
             definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image, mask)));
         }
-        definition.validate_base_solid_mask();
+        definition.validate_base_graphics_rects();
         if !resource.additional_graphics.is_empty() {
             let mut variants = HashMap::with_capacity(resource.additional_graphics.len());
             for (key, variant) in &resource.additional_graphics {
@@ -11502,22 +11502,40 @@ impl Definition {
         self.rebuild_solid_mask_pixels();
     }
 
-    /// C4Def::Load clears an invalid BASE DefCore SolidMask before any
-    /// object copies and runtime-clamps it (C4Def.cpp:727-733).
-    pub(crate) fn validate_base_solid_mask(&mut self) {
-        let invalid = self
-            .solid_mask
-            .zip(self.sprite_image.as_ref())
-            .is_some_and(|(solid_mask, image)| {
-                solid_mask.x < 0
-                    || solid_mask.y < 0
-                    || i64::from(solid_mask.x) + i64::from(solid_mask.width)
-                        > i64::from(image.width)
-                    || i64::from(solid_mask.y) + i64::from(solid_mask.height)
-                        > i64::from(image.height)
-            });
-        if invalid {
+    /// C4Def::Load clears invalid BASE DefCore graphics rectangles before
+    /// objects copy them or the renderer sees TopFace (C4Def.cpp:727-741).
+    pub(crate) fn validate_base_graphics_rects(&mut self) {
+        let Some(image) = self.sprite_image.as_ref() else {
+            return;
+        };
+        let image_width = i64::from(image.width);
+        let image_height = i64::from(image.height);
+
+        let invalid_solid_mask = self.def_core_solid_mask.is_some_and(|solid_mask| {
+            solid_mask.x < 0
+                || solid_mask.y < 0
+                || i64::from(solid_mask.x) + i64::from(solid_mask.width) > image_width
+                || i64::from(solid_mask.y) + i64::from(solid_mask.height) > image_height
+        });
+        if invalid_solid_mask {
             self.set_solid_mask(None);
+        }
+
+        let logical_width = image_width as f32 / self.graphics_scale;
+        let logical_height = image_height as f32 / self.graphics_scale;
+        let invalid_top_face = self.def_core_top_face.is_some_and(|top_face| {
+            top_face.x < 0
+                || top_face.y < 0
+                || (i64::from(top_face.x) + i64::from(top_face.width)) as f32 > logical_width
+                || (i64::from(top_face.y) + i64::from(top_face.height)) as f32 > logical_height
+        });
+        if invalid_top_face {
+            tracing::warn!(
+                definition = %self.id,
+                name = %self.name,
+                "invalid TopFace; cleared"
+            );
+            self.set_top_face(None);
         }
     }
 
