@@ -3236,7 +3236,6 @@ impl EnvironmentSettings {
     /// (C4SVal::Evaluate, C4Scenario.cpp:43-46); the wind itself steps ±1
     /// toward the target on Tick10 frames.
     pub fn advance_frame(&mut self, rng: &mut LcgRng, frame: u64) -> Option<[u32; 3]> {
-        self.refresh_runtime_fields();
         let season_gamma_update = if frame % 35 == 0 {
             let season_changed = self.update_season();
             // C4Weather::Execute refreshes the season curve inside the
@@ -3346,6 +3345,9 @@ impl EnvironmentSettings {
         }
     }
 
+    /// Normalize deprecated JSON-fixture scheduler fields. C++ weather does
+    /// not have this scheduler, and its persisted Wind/TargetWind plus the
+    /// scenario Wind.Std (`base_wind`) must remain untouched here.
     pub fn refresh_runtime_fields(&mut self) {
         if self.wind_update_interval == 0 && self.wind_variation > 0 {
             self.wind_update_interval = Self::default_wind_update_interval(self.wind_period);
@@ -3354,7 +3356,6 @@ impl EnvironmentSettings {
         if self.wind_variation == 0 {
             self.wind_update_interval = 0;
             self.wind_update_timer = 0;
-            self.wind_target = self.wind;
         } else {
             if self.wind_update_interval == 0 {
                 self.wind_update_interval = 1;
@@ -3362,13 +3363,6 @@ impl EnvironmentSettings {
             if self.wind_update_timer >= self.wind_update_interval {
                 self.wind_update_timer %= self.wind_update_interval;
             }
-            if self.wind_target == 0 && self.wind != 0 {
-                self.wind_target = self.wind;
-            }
-        }
-
-        if self.wind_variation == 0 {
-            self.base_wind = self.wind;
         }
     }
 }

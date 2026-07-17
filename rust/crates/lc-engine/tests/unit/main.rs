@@ -7796,6 +7796,72 @@ func ReadWind()
         assert_eq!(rng, probe, "Tick1000 consumes exactly one synced draw");
     }
 
+    #[test]
+    fn zero_tick1000_wind_target_is_not_rewritten_during_decay() {
+        // Seed 57's first post-Randomize3 draw is 70 in range 141, so the
+        // scenario value 0 ± 70 evaluates to exactly zero on Tick1000.
+        let mut settings = EnvironmentSettings::new(0).with_wind_variation(70, 1_000);
+        settings.wind = 40;
+        settings.wind_target = 40;
+        let mut rng = LcgRng::seed_from_u64(57);
+        let mut probe = rng.clone();
+        assert_eq!(probe.random(141), 70, "fixture evaluates TargetWind to zero");
+
+        settings.advance_frame(&mut rng, 1_000);
+        assert_eq!(settings.wind_target, 0, "Tick1000 replaces TargetWind");
+        assert_eq!(settings.wind, 39, "coincident Tick10 uses the new target");
+        assert_eq!(settings.base_wind, 0, "scenario Wind.Std stays immutable");
+        assert_eq!(rng, probe, "Tick1000 consumes exactly one synced draw");
+
+        for frame in 1_001..=1_390 {
+            // Engine construction, replacement, and restore normalize legacy
+            // fixture fields here. They must not repair a legitimate zero
+            // TargetWind back to the current Wind.
+            settings.refresh_runtime_fields();
+            assert_eq!(settings.wind_target, 0, "TargetWind before frame {frame}");
+            assert_eq!(settings.base_wind, 0, "Wind.Std before frame {frame}");
+
+            let previous_wind = settings.wind;
+            settings.advance_frame(&mut rng, frame);
+            if frame % 10 == 0 {
+                assert_eq!(settings.wind, previous_wind - 1, "Tick10 frame {frame}");
+            } else {
+                assert_eq!(settings.wind, previous_wind, "off-gate frame {frame}");
+            }
+            assert_eq!(settings.wind_target, 0, "TargetWind on frame {frame}");
+            assert_eq!(settings.base_wind, 0, "Wind.Std on frame {frame}");
+        }
+        assert_eq!(settings.wind, 0, "Wind decays all the way to TargetWind");
+    }
+
+    #[test]
+    fn fixed_scenario_wind_std_survives_script_wind_and_drives_decay() {
+        // C4Weather::SetWind changes Wind and TargetWind, never the scenario
+        // C4S.Weather.Wind.Std. The next Tick1000 evaluation therefore
+        // restores TargetWind to Std and Tick10 begins the decay immediately.
+        let mut settings = EnvironmentSettings::new(0);
+        settings.wind = 80;
+        settings.wind_target = 80;
+        settings.refresh_runtime_fields();
+        assert_eq!(settings.base_wind, 0, "script wind cannot replace scenario Std");
+        assert_eq!(settings.wind_target, 80, "normalization preserves TargetWind");
+
+        let mut rng = LcgRng::seed_from_u64(9_001);
+        settings.advance_frame(&mut rng, 1_000);
+        assert_eq!(settings.wind_target, 0, "Tick1000 evaluates scenario Std");
+        assert_eq!(settings.wind, 79, "Tick10 starts decay on the same frame");
+
+        for frame in 1_001..=1_790 {
+            settings.refresh_runtime_fields();
+            assert_eq!(settings.base_wind, 0, "Wind.Std before frame {frame}");
+            assert_eq!(settings.wind_target, 0, "TargetWind before frame {frame}");
+            settings.advance_frame(&mut rng, frame);
+        }
+        assert_eq!(settings.wind, 0, "script Wind decays back to scenario Std");
+        assert_eq!(settings.wind_target, 0);
+        assert_eq!(settings.base_wind, 0);
+    }
+
     const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
