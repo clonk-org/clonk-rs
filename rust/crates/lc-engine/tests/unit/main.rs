@@ -30553,6 +30553,7 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         });
 
         let mut engine = Engine::new();
+        engine.set_use_fair_crew(true);
         engine
             .register_definition(definition)
             .expect("ranked definition registers");
@@ -30602,6 +30603,11 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         let crew_index = engine.find_object_index(crew).expect("crew exists");
 
         engine.set_fair_crew_strength(500);
+        let base_boundary = engine.object_physical(crew_index);
+        assert_eq!(base_boundary.magic, 46_007);
+        assert_eq!(base_boundary.energy, 55_000);
+
+        engine.set_fair_crew_strength(1_000);
         let physical = engine.object_physical(crew_index);
         assert_eq!(physical.magic, 46_007);
         assert_eq!(physical.energy, 55_000);
@@ -45721,11 +45727,14 @@ func AwardSelf(int amount) {
         let mut crew = Definition::from_script("CREW", "Crew", script)
             .expect("experience probe compiles");
         crew.set_crew_member(true);
-        crew.set_rank_names(Some(vec![
-            "Recruit".to_string(),
-            "Custom One".to_string(),
-            "Custom Two".to_string(),
-        ]));
+        crew.set_rank_system(
+            Some(vec![
+                "Recruit".to_string(),
+                "Custom One".to_string(),
+                "Custom Two".to_string(),
+            ]),
+            Some(500),
+        );
         engine.register_definition(crew).expect("crew registers");
 
         let mut start = PlayerStart::default();
@@ -45789,7 +45798,21 @@ func AwardSelf(int amount) {
 
         assert_eq!(
             engine
-                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(8_000)])
+                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(500)])
+                .expect("custom-base threshold probe succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Int(0),
+                Value::String("Recruit".to_string()),
+                Value::Int(500),
+            ]),
+            "DoExperience waits for the global base-1000 curve even when the definition uses base 500"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(crew_index, "AwardSelf", vec![Value::Int(7_500)])
                 .expect("large award succeeds"),
             Value::Array(vec![
                 Value::Bool(true),
