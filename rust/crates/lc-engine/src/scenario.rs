@@ -4827,39 +4827,71 @@ fn is_std_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
 }
 
-fn parse_legacy_name_list(field: &str, raw: &str) -> Result<LegacyNameList, ScenarioError> {
+fn consume_name_list_separator(
+    raw: &str,
+    position: &mut Option<usize>,
+    reenter: &mut Option<usize>,
+    separator: u8,
+) -> bool {
+    // StdCompilerINIRead::Separator parks a mismatched cursor in pReenter;
+    // the next separator attempt restores it, even after a defaulted value.
+    if let Some(saved) = reenter.take() {
+        *position = Some(saved);
+    }
+    let Some(mut cursor) = *position else {
+        return false;
+    };
+    skip_std_whitespace(raw, &mut cursor);
+    if raw.as_bytes().get(cursor) != Some(&separator) {
+        *reenter = Some(cursor);
+        *position = None;
+        return false;
+    }
+    *position = Some(cursor + 1);
+    true
+}
+
+fn parse_legacy_name_list(_field: &str, raw: &str) -> Result<LegacyNameList, ScenarioError> {
+    const C4_MAX_NAME_LIST: usize = 10;
+    const C4_MAX_NAME: usize = 30;
+
     let mut entries = Vec::new();
-    for token in raw.split(';') {
-        let trimmed = token.trim();
-        if trimmed.is_empty() {
-            continue;
+    let mut position = Some(0);
+    let mut reenter = None;
+    for index in 0..C4_MAX_NAME_LIST {
+        if index != 0 {
+            consume_name_list_separator(raw, &mut position, &mut reenter, b';');
         }
-        let mut parts = trimmed.splitn(2, '=');
-        let name_part = parts.next().unwrap().trim();
-        if name_part.is_empty() {
-            return Err(ScenarioError::LegacyParse(format!(
-                "missing name in `{field}` entry `{trimmed}`"
-            )));
-        }
-        let count = match parts.next() {
-            Some(value_part) => {
-                let value_trimmed = value_part.trim();
-                if value_trimmed.is_empty() {
-                    None
-                } else {
-                    Some(parse_i32(value_trimmed).map_err(|err| {
-                        ScenarioError::LegacyParse(format!(
-                            "invalid count `{value_trimmed}` for `{field}` entry `{trimmed}`: {err}"
-                        ))
-                    })?)
-                }
+
+        let name = if let Some(cursor) = position.as_mut() {
+            skip_std_whitespace(raw, cursor);
+            let name_start = *cursor;
+            while *cursor < raw.len()
+                && *cursor - name_start < C4_MAX_NAME
+                && is_std_identifier_byte(raw.as_bytes()[*cursor])
+            {
+                *cursor += 1;
             }
-            None => None,
+            raw[name_start..*cursor].to_string()
+        } else {
+            String::new()
         };
-        entries.push(LegacyNameEntry {
-            name: name_part.to_string(),
-            count,
-        });
+        let has_count =
+            consume_name_list_separator(raw, &mut position, &mut reenter, b'=');
+        let count = if has_count {
+            position
+                .as_mut()
+                .and_then(|cursor| parse_std_i32_prefix_at(raw, cursor))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if !name.is_empty() {
+            entries.push(LegacyNameEntry {
+                name,
+                count: has_count.then_some(count),
+            });
+        }
     }
     Ok(entries)
 }
@@ -5332,7 +5364,7 @@ impl LegacyGame {
                     self.clear_objects = parse_legacy_id_list(key, raw)?;
                 }
                 "clearmaterials" => {
-                    self.clear_materials = parse_legacy_name_list(key, raw)?;
+                    self.clear_materials = parse_legacy_name_list(key, value)?;
                 }
                 "valuegain" => {
                     self.value_gain = parse_i32(raw).map_err(|err| {
@@ -5566,7 +5598,7 @@ impl LegacyLandscape {
                     self.map_player_extend = parse_bool_field(key, raw)?;
                 }
                 "layers" => {
-                    self.layers = parse_legacy_name_list(key, raw)?;
+                    self.layers = parse_legacy_name_list(key, value)?;
                 }
                 "gravity" => {
                     self.gravity =
@@ -15557,6 +15589,69 @@ RandomTeamCount=2
             manifest.core.landscape.map_width,
             LegacyC4SVal::new(101, 0, 64, 250)
         );
+    }
+
+    #[test]
+    fn scenario_name_lists_match_c4namelist_bounds_and_identifier_tokens() {
+        let layers = (1..=11)
+            .map(|index| format!("Layer{index}=50"))
+            .collect::<Vec<_>>()
+            .join(";");
+        let manifest = parse_legacy_scenario_text(&format!(
+            "[Game]\nClearMaterials={layers}\n[Landscape]\nLayers={layers}\n"
+        ))
+        .expect("bounded C4NameList fields parse");
+        assert_eq!(manifest.core.game.clear_materials.len(), 10);
+        assert_eq!(manifest.core.landscape.layers.len(), 10);
+        assert_eq!(manifest.core.landscape.layers[0].name, "Layer1");
+        assert_eq!(manifest.core.landscape.layers[9].name, "Layer10");
+
+        let malformed = parse_legacy_scenario_text(concat!(
+            "[Game]\n",
+            "ClearMaterials=ABCDEFGHIJKLMNOPQRSTUVWXYZ12345=2;Gold=3\n",
+            "[Landscape]\n",
+            "Layers=My Rock=2;Earth=3\n",
+        ))
+        .expect("truncated name lists use compiler defaults");
+        assert_eq!(
+            malformed
+                .core
+                .game
+                .clear_materials
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.count.unwrap_or(0)))
+                .collect::<Vec<_>>(),
+            [("ABCDEFGHIJKLMNOPQRSTUVWXYZ1234", 0)]
+        );
+        assert_eq!(
+            malformed
+                .core
+                .landscape
+                .layers
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.count.unwrap_or(0)))
+                .collect::<Vec<_>>(),
+            [("My", 0)]
+        );
+
+        let reentered = parse_legacy_scenario_text(concat!(
+            "[Game]\n",
+            "ClearMaterials=A=1=2;B=3\n",
+            "[Landscape]\n",
+            "Layers=\u{a0}Gold=1\n",
+        ))
+        .expect("separator reentry and raw identifier bytes parse");
+        assert_eq!(
+            reentered
+                .core
+                .game
+                .clear_materials
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.count.unwrap_or(0)))
+                .collect::<Vec<_>>(),
+            [("A", 1), ("B", 3)]
+        );
+        assert!(reentered.core.landscape.layers.is_empty());
     }
 
     #[test]
