@@ -1027,6 +1027,33 @@ fn parse_c4_id_token(value: &str) -> String {
         .collect()
 }
 
+fn is_physical_compiler_key(name: &str) -> bool {
+    matches!(
+        name,
+        "Energy"
+            | "Breath"
+            | "Walk"
+            | "Jump"
+            | "Scale"
+            | "Hangle"
+            | "Dig"
+            | "Swim"
+            | "Throw"
+            | "Push"
+            | "Fight"
+            | "Magic"
+            | "Float"
+            | "CanScale"
+            | "CanHangle"
+            | "CanDig"
+            | "CanConstruct"
+            | "CanChop"
+            | "CanFly"
+            | "CorrosionResist"
+            | "BreatheWater"
+    )
+}
+
 fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let text = String::from_utf8_lossy(bytes);
     let mut current_section: Option<String> = None;
@@ -1152,7 +1179,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     // StdCompiler::CreateNameTree terminates a line on either byte, not only
     // LF/CRLF. Old packed groups can therefore contain valid CR-only INI.
     for raw_line in text.split(['\r', '\n']) {
-        let line = raw_line.trim();
+        let line = raw_line.trim_start_matches([' ', '\t']);
         if line.is_empty()
             || line.starts_with(';')
             || line.starts_with('#')
@@ -1161,114 +1188,117 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             continue;
         }
 
-        if line.starts_with('[') && line.ends_with(']') {
-            let section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+        if let Some(section) = ini_section_name(line) {
+            let section = section.to_string();
             current_section_is_first = seen_sections.insert(section.clone());
             current_section = Some(section);
             continue;
         }
 
-        let Some((raw_key, raw_value)) = line.split_once('=') else {
+        let Some((key, raw_value)) = ini_value(line) else {
             continue;
         };
         if !current_section_is_first {
             continue;
         }
-        let key = raw_key.trim().to_ascii_lowercase();
         let value = raw_value.trim();
 
-        let section = current_section.as_deref().unwrap_or("defcore");
-        if !seen_values.insert((section.to_string(), key.clone())) {
+        let Some(section) = current_section.as_deref() else {
+            continue;
+        };
+        if !seen_values.insert((section.to_string(), key.to_string())) {
             continue;
         }
 
-        if section == "physical" {
-            physical.set_by_name(&key, parse_i32(value).unwrap_or(0));
+        if section == "Physical" {
+            if is_physical_compiler_key(key) {
+                physical.set_by_name(key, parse_i32(value).unwrap_or(0));
+            }
             continue;
         }
 
-        if section != "defcore" {
+        if section != "DefCore" {
             continue;
         }
 
-        match key.as_str() {
+        match key {
             "id" => {
                 if !value.is_empty() {
                     id = Some(parse_c4_id_token(value));
                 }
             }
-            "version" => {
+            "Version" => {
                 fill_i32_array(value, &mut version);
             }
-            "name" => {
+            "Name" => {
                 if !value.is_empty() {
                     name = Some(value.to_string());
                 }
             }
-            "requiredef" => {
+            "RequireDef" => {
                 require_defs = parse_id_list(value);
             }
-            "maxuserselect" => {
+            "MaxUserSelect" => {
                 max_user_select = parse_i32(value).unwrap_or(0);
             }
-            "value" => {
+            "Value" => {
                 object_value = reflected_int!("Value", parse_i32(value).unwrap_or(0));
             }
-            "rebuy" => {
+            "Rebuy" => {
                 rebuyable = reflected_int!("Rebuy", parse_reflected_int(value)) != 0;
             }
-            "baseautosell" => {
+            "BaseAutoSell" => {
                 base_auto_sell = parse_bool(raw_value);
             }
-            "nosell" => {
+            "NoSell" => {
                 no_sell = parse_i32(value).unwrap_or(0);
             }
-            "mass" => {
+            "Mass" => {
                 object_mass = parse_i32(value).unwrap_or(0).max(0);
             }
-            "movetorange" => {
+            "MoveToRange" => {
                 move_to_range = parse_i32(value).unwrap_or(0);
             }
-            "pathfinder" => {
+            "Pathfinder" => {
                 pathfinder = parse_i32(value).unwrap_or(0);
             }
-            "notransferzones" => {
+            "NoTransferZones" => {
                 no_transfer_zones = parse_i32(value).unwrap_or(0);
             }
-            "nopushenter" => {
+            "NoPushEnter" => {
                 no_push_enter = parse_i32(value).unwrap_or(0);
             }
-            "dragimagepicture" => {
+            "DragImagePicture" => {
                 drag_image_picture = parse_i32(value).unwrap_or(0);
             }
-            "category" => {
+            "Category" => {
                 category = parse_category(value);
                 category_set = true;
             }
-            "crewmember" => {
+            "CrewMember" => {
                 crew_member = parse_i32(value).unwrap_or(0);
             }
-            "nostandardcrew" => {
+            "NoStandardCrew" => {
                 no_standard_crew = parse_i32(value).unwrap_or(0);
             }
             // C4DefCore::CompileFunc names CanBeBase as "Base"
             // (C4Def.cpp:317). Keep the descriptive alias for fixtures.
-            "base" | "canbebase" => {
+            "Base" | "CanBeBase" => {
                 can_be_base = reflected_int!("Base", parse_reflected_int(value)) != 0;
             }
-            "picture" => {
+            "Picture" => {
                 if let Some(rect) = parse_rect(value) {
                     picture = Some(rect);
                 }
             }
-            "colorbyowner" => {
+            "ColorByOwner" => {
                 color_by_owner =
                     reflected_int!("ColorByOwner", parse_reflected_int(value)) != 0;
             }
-            "colorbymaterial" => {
+            "ColorByMaterial" => {
                 color_by_material = value.chars().take(15).collect();
             }
-            "allowpicturestack" => {
+            "AllowPictureStack" => {
                 // StdBitfieldAdapt over the APS_* table
                 // (src/C4Def.cpp:419-429); numeric values pass through.
                 allow_picture_stack = parse_named_bitfield(
@@ -1281,127 +1311,127 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     ],
                 );
             }
-            "scale" => {
+            "Scale" => {
                 let raw = parse_u32(value).unwrap_or(100);
                 reflected_ints.insert("Scale".to_string(), raw as i32);
                 graphics_scale = raw;
             }
-            "blitmode" => {
+            "BlitMode" => {
                 blit_mode = parse_i32(value).unwrap_or(0) as u32;
             }
-            "shape" => {
+            "Shape" => {
                 shape = parse_rect(value);
             }
             // C4Def::CompileFunc maps Width/Height/Offset straight into
             // Shape.Wdt/Hgt/x/y (C4Def.cpp) — CR DefCores never carry a
             // combined Shape= key.
-            "width" => {
+            "Width" => {
                 shape_width = parse_i32(value);
             }
-            "height" => {
+            "Height" => {
                 shape_height = parse_i32(value);
             }
-            "offset" => {
+            "Offset" => {
                 let mut parts = parse_int_array(value);
                 shape_offset = Some((
                     parts.next().unwrap_or(0),
                     parts.next().unwrap_or(0),
                 ));
             }
-            "firetop" => {
+            "FireTop" => {
                 fire_top = parse_i32(value).unwrap_or(0);
             }
-            "lifttop" => {
+            "LiftTop" => {
                 lift_top = parse_i32(value).unwrap_or(0);
             }
-            "solidmask" => {
+            "SolidMask" => {
                 solid_mask = parse_target_rect(value);
             }
-            "topface" => {
+            "TopFace" => {
                 top_face = parse_target_rect(value);
             }
-            "vertices" => {
+            "Vertices" => {
                 let raw = reflected_int!("Vertices", parse_i32(value).unwrap_or(0));
                 vertex_count = raw.clamp(0, C4D_MAX_VERTEX as i32) as usize;
             }
-            "vertexx" => {
+            "VertexX" => {
                 fill_i32_array(value, &mut vertex_x);
             }
-            "vertexy" => {
+            "VertexY" => {
                 fill_i32_array(value, &mut vertex_y);
             }
-            "vertexcnat" => {
+            "VertexCNAT" => {
                 fill_u32_array(value, &mut vertex_cnat);
             }
-            "vertexfriction" => {
+            "VertexFriction" => {
                 fill_i32_array(value, &mut vertex_friction);
             }
-            "contactdensity" => {
+            "ContactDensity" => {
                 contact_density = parse_i32(value).unwrap_or(C4M_SOLID);
             }
-            "contactcalls" => {
+            "ContactCalls" => {
                 contact_function_calls =
                     reflected_int!("ContactCalls", parse_reflected_int(value)) != 0;
             }
-            "collection" => {
+            "Collection" => {
                 collection = parse_rect(value);
             }
-            "fragile" => {
+            "Fragile" => {
                 fragile = reflected_int!("Fragile", parse_reflected_int(value)) != 0;
             }
-            "projectile" => {
+            "Projectile" => {
                 projectile = parse_i32(value).unwrap_or(0);
             }
-            "explosive" => {
+            "Explosive" => {
                 explosive = parse_i32(value).unwrap_or(0);
             }
-            "contactincinerate" => {
+            "ContactIncinerate" => {
                 let raw = reflected_int!("ContactIncinerate", parse_i32(value).unwrap_or(0));
                 contact_incinerate = raw.max(0);
             }
-            "blastincinerate" => {
+            "BlastIncinerate" => {
                 blast_incinerate = parse_i32(value).unwrap_or(0);
             }
-            "containblast" => {
+            "ContainBlast" => {
                 contain_blast = parse_i32(value).unwrap_or(0);
             }
-            "closedcontainer" => {
+            "ClosedContainer" => {
                 closed_container = parse_i32(value).unwrap_or(0);
             }
-            "horizontalfix" => {
+            "HorizontalFix" => {
                 no_horizontal_move = parse_i32(value).unwrap_or(0);
             }
-            "noburndecay" => {
+            "NoBurnDecay" => {
                 no_burn_decay =
                     reflected_int!("NoBurnDecay", parse_reflected_int(value)) != 0;
             }
-            "nobreath" => {
+            "NoBreath" => {
                 no_breath = reflected_int!("NoBreath", parse_reflected_int(value)) != 0;
             }
-            "temporarycrew" => {
+            "TemporaryCrew" => {
                 temporary_crew = parse_i32(value).unwrap_or(0);
             }
-            "smokerate" => {
+            "SmokeRate" => {
                 smoke_rate = parse_i32(value).unwrap_or(100);
             }
-            "line" => {
+            "Line" => {
                 line_type = parse_line_type(value);
             }
-            "lineintersect" => {
+            "LineIntersect" => {
                 line_intersect = parse_i32(value).unwrap_or(0);
             }
-            "float" => {
+            "Float" => {
                 float_line = parse_i32(value).unwrap_or(0);
             }
-            "grab" => {
+            "Grab" => {
                 let raw = reflected_int!("Grab", parse_i32(value).unwrap_or(0));
                 grab = raw.max(0);
             }
-            "vehiclecontrol" => {
+            "VehicleControl" => {
                 // Plain integer compile (src/C4Def.cpp:398).
                 vehicle_control = parse_i32(value).unwrap_or(0);
             }
-            "grabputget" => {
+            "GrabPutGet" => {
                 // StdBitfieldAdapt over C4D_GrabPut/C4D_GrabGet tokens
                 // (src/C4Def.cpp:364-373); numeric values pass through.
                 grab_put_get = parse_named_bitfield(
@@ -1409,16 +1439,16 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     &[("C4D_GrabGet", 2), ("C4D_GrabPut", 1)],
                 );
             }
-            "noburndamage" => {
+            "NoBurnDamage" => {
                 no_burn_damage =
                     reflected_int!("NoBurnDamage", parse_reflected_int(value)) != 0;
             }
-            "burnto" | "burnturnto" => {
+            "BurnTo" | "BurnTurnTo" => {
                 if !value.is_empty() {
                     burn_turn_to = Some(value.to_string());
                 }
             }
-            "constructto" => {
+            "ConstructTo" => {
                 if !value.is_empty()
                     && !value.eq_ignore_ascii_case("NONE")
                     && value != "0000"
@@ -1426,90 +1456,90 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     build_turn_to = Some(value.to_string());
                 }
             }
-            "incompleteactivity" => {
+            "IncompleteActivity" => {
                 incomplete_activity =
                     reflected_int!("IncompleteActivity", parse_reflected_int(value)) != 0;
             }
-            "collectionlimit" => {
+            "CollectionLimit" => {
                 let raw = reflected_int!("CollectionLimit", parse_i32(value).unwrap_or(0));
                 collection_limit = (raw > 0).then_some(raw as u32);
             }
-            "collectible" => {
+            "Collectible" => {
                 collectible =
                     reflected_int!("Collectible", parse_reflected_int(value)) != 0;
             }
-            "noget" => {
+            "NoGet" => {
                 no_get = reflected_int!("NoGet", parse_i32(value).unwrap_or(0));
             }
-            "construction" => {
+            "Construction" => {
                 constructable =
                     reflected_int!("Construction", parse_reflected_int(value)) != 0;
             }
-            "consizeoff" => {
+            "ConSizeOff" => {
                 let raw = reflected_int!("ConSizeOff", parse_i32(value).unwrap_or(0));
                 con_size_off = raw.max(0);
             }
-            "stretchgrowth" => {
+            "StretchGrowth" => {
                 stretch_growth =
                     reflected_int!("StretchGrowth", parse_reflected_int(value)) != 0;
             }
-            "oversize" => {
+            "Oversize" => {
                 // C4Compiler stores this BOOL through an integer adapter;
                 // every nonzero value is true, not just the conventional 1.
                 oversize = reflected_int!("Oversize", parse_reflected_int(value)) != 0;
             }
-            "placement" => {
+            "Placement" => {
                 placement = parse_i32(value).unwrap_or(0);
             }
-            "growth" => {
+            "Growth" => {
                 growth = parse_i32(value).unwrap_or(0);
             }
-            "basement" => {
+            "Basement" => {
                 let raw = reflected_int!("Basement", parse_i32(value).unwrap_or(0));
                 basement = raw.max(0);
             }
-            "rotate" => {
+            "Rotate" => {
                 let raw = reflected_int!("Rotate", parse_i32(value).unwrap_or(0));
                 rotateable = raw.max(0);
             }
-            "borderbound" => {
+            "BorderBound" => {
                 let raw = reflected_int!("BorderBound", parse_i32(value).unwrap_or(0));
                 border_bound = raw.max(0);
             }
-            "uprightattach" => {
+            "UprightAttach" => {
                 let raw = reflected_int!("UprightAttach", parse_i32(value).unwrap_or(0));
                 upright_attach = raw.max(0) as u32;
             }
-            "rotatedsolidmasks" => {
+            "RotatedSolidmasks" => {
                 rotated_solid_masks =
                     reflected_int!("RotatedSolidmasks", parse_reflected_int(value)) != 0;
             }
-            "autocontextmenu" => {
+            "AutoContextMenu" => {
                 auto_context_menu =
                     reflected_int!("AutoContextMenu", parse_reflected_int(value)) != 0;
             }
-            "neededgfxmode" => {
+            "NeededGfxMode" => {
                 needed_gfx_mode = parse_i32(value).unwrap_or(0);
             }
-            "silentcommands" => {
+            "SilentCommands" => {
                 silent_commands =
                     reflected_int!("SilentCommands", parse_reflected_int(value)) != 0;
             }
-            "nocomponentmass" => {
+            "NoComponentMass" => {
                 no_component_mass =
                     reflected_int!("NoComponentMass", parse_reflected_int(value)) != 0;
             }
-            "nostabilize" => {
+            "NoStabilize" => {
                 no_stabilize =
                     reflected_int!("NoStabilize", parse_reflected_int(value)) != 0;
             }
-            "hidehudbars" => {
+            "HideHUDBars" => {
                 hide_hud_bars = parse_named_bitfield(
                     value,
                     &[("Energy", 1), ("MagicEnergy", 2), ("Breath", 4), ("All", 7)],
                 );
             }
-            "hidehudelements" => {
+            "HideHUDElements" => {
                 hide_hud_elements = parse_named_bitfield(
                     value,
                     &[
@@ -1523,45 +1553,45 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     ],
                 );
             }
-            "timer" => {
+            "Timer" => {
                 timer = parse_i32(value).unwrap_or(35);
             }
-            "timercall" => {
+            "TimerCall" => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
                     timer_call = Some(trimmed.chars().take(29).collect());
                 }
             }
-            "components" => {
+            "Components" => {
                 components = parse_components(value);
             }
-            "lineconnect" => {
+            "LineConnect" => {
                 line_connect = parse_line_connect(value);
             }
             // C4Object::SetOCF DefCore inputs (C4Def.cpp:309-413).
-            "entrance" => {
+            "Entrance" => {
                 entrance = parse_rect(value);
             }
-            "rotatedentrance" => {
+            "RotatedEntrance" => {
                 rotated_entrance = parse_i32(value).unwrap_or(0);
             }
-            "exclusive" => {
+            "Exclusive" => {
                 exclusive = reflected_int!("Exclusive", parse_reflected_int(value)) != 0;
             }
-            "prey" => {
+            "Prey" => {
                 prey = reflected_int!("Prey", parse_reflected_int(value)) != 0;
             }
-            "edible" => {
+            "Edible" => {
                 edible = reflected_int!("Edible", parse_reflected_int(value)) != 0;
             }
-            "chop" => {
+            "Chop" => {
                 chopable = reflected_int!("Chop", parse_reflected_int(value)) != 0;
             }
-            "attractlightning" => {
+            "AttractLightning" => {
                 attract_lightning =
                     reflected_int!("AttractLightning", parse_reflected_int(value)) != 0;
             }
-            "nofight" => {
+            "NoFight" => {
                 no_fight = reflected_int!("NoFight", parse_reflected_int(value)) != 0;
             }
             _ => {}
@@ -4499,7 +4529,7 @@ Jump=40000junk
     fn parse_def_core_no_sell_preserves_signed_value_and_default() {
         // C4DefCore::CompileFunc stores NoSell as int32_t with zero as its
         // default; SellFromBase treats either sign of a nonzero value as set.
-        let parsed = parse_def_core(b"[DefCore]\nid=LOCK\nnOsElL=-2\n")
+        let parsed = parse_def_core(b"[DefCore]\nid=LOCK\nNoSell=-2\n")
             .expect("NoSell DefCore parses");
         assert_eq!(parsed.no_sell, -2);
 
@@ -4952,6 +4982,26 @@ Value=9
         assert_eq!(parsed.physical.walk, 35_000);
         assert_eq!(parsed.physical.jump, 0);
         assert_eq!(parsed.value, 0);
+    }
+
+    #[test]
+    fn parse_def_core_uses_create_name_tree_tokenization() {
+        let parsed = parse_def_core(
+            b"id=ROOT\n[DefCore] ; comment\nid=TOKN\nMASS=1000\nMass =100\n\
+[Physical]\t# x\nEnergy=123\n[1Extra]\nJump=456\n[PHYSICAL]\nWalk=789\n",
+        )
+        .expect("tokenized DefCore parses");
+
+        assert_eq!(parsed.id, "TOKN", "pre-section id stays at the tree root");
+        assert_eq!(parsed.mass, 0, "case and trailing key spaces are exact");
+        assert_eq!(parsed.physical.energy, 123, "section trailing text is ignored");
+        assert_eq!(parsed.physical.jump, 456, "non-alpha section lines are inert");
+        assert_eq!(parsed.physical.walk, 0, "section names are case-sensitive");
+
+        assert!(matches!(
+            parse_def_core(b"id=XYZ1\nMass=100\n"),
+            Err(DefinitionError::MissingDefCoreField("id"))
+        ));
     }
 
     #[test]
@@ -5670,9 +5720,8 @@ Default=Ghost
     #[test]
     fn parse_def_core_auto_context_menu_flag_like_cpp() {
         // Mirrors src/C4Def.cpp:416: DefCore `AutoContextMenu` compiles as
-        // an integer flag. StdCompilerINIRead matches field names without
-        // regard to case, so a value of 1 enables the flag.
-        let parsed = parse_def_core(b"[DefCore]\nid=HUT3\naUtOcOnTeXtMeNu=1\n")
+        // an integer flag.
+        let parsed = parse_def_core(b"[DefCore]\nid=HUT3\nAutoContextMenu=1\n")
             .expect("defcore parsed");
 
         assert!(parsed.auto_context_menu);
@@ -5707,7 +5756,7 @@ Default=Ghost
     fn parse_def_core_construct_to_as_build_turn_to_like_cpp() {
         // C4Def::CompileFunc exposes the BuildTurnTo field under the legacy
         // DefCore key `ConstructTo` (src/C4Def.cpp:361).
-        let parsed = parse_def_core(b"[DefCore]\nid=SITE\ncOnStRuCtTo=DONE\n")
+        let parsed = parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=DONE\n")
             .expect("defcore parsed");
         assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
 
