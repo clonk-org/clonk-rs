@@ -14072,6 +14072,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("PlrMessage", plr_message);
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
+    script.register_host_function("FatalError", fatal_error);
     script.register_host_function("LocateFunc", locate_func);
     script.register_host_function("StartCallTrace", start_call_trace);
     script.register_host_function("StartScriptProfiler", start_script_profiler);
@@ -14897,6 +14898,17 @@ fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
     log_internal("DebugLog", args, LogLevel::Debug)
+}
+
+/// `FnFatalError` (C4Script.cpp:5962-5965): throw a user-framed script
+/// execution error. A missing or nil native string pointer uses the C++
+/// fallback text.
+fn fatal_error(args: &[Value]) -> Result<Value, RuntimeError> {
+    let message = parse_native_c4_string_argument(args.first(), "FatalError", "message")?;
+    Err(RuntimeError::new(format!(
+        "User error: {}",
+        message.as_deref().unwrap_or("(no error)")
+    )))
 }
 
 /// FnStartCallTrace (C4Script.cpp:5967-5971). The execution-local controller
@@ -47304,6 +47316,7 @@ mod tests {
         "Extinguish",
         "ExtractLiquid",
         "ExtractMaterialAmount",
+        "FatalError",
         "FightWith",
         "FindBase",
         "FindConstructionSite",
@@ -47664,6 +47677,34 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn fatal_error_aborts_with_cpp_user_error_framing() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func StringError() { FatalError(\"boom\"); return true; }\n\
+                 func NilError() { FatalError(nil); return true; }\n\
+                 func MissingError() { FatalError(); return true; }",
+            )
+            .expect("FatalError probes compile");
+
+        for (function, expected) in [
+            ("StringError", "runtime error: User error: boom"),
+            ("NilError", "runtime error: User error: (no error)"),
+            ("MissingError", "runtime error: User error: (no error)"),
+        ] {
+            assert_eq!(
+                script
+                    .call(function, &[])
+                    .expect_err("FatalError must abort its caller")
+                    .to_string(),
+                expected
+            );
+        }
     }
 
     fn scenario_section_world_object(id: u64, status: ObjectStatus) -> HostWorldObject {
