@@ -8549,8 +8549,9 @@ impl MapPixelClassifier {
 /// C4Game::InitMaterialTexture loads the scenario group first, then each
 /// external source admitted by the preceding TexMap's independent
 /// OverloadMaterials/OverloadTextures flags (C4Game.cpp:901-977).
-/// `None` when the first source has no TexMap.txt — the loader then falls
-/// back to the sky-pixel heuristic.
+/// `None` only when there is no material source at all. A first source
+/// without TexMap.txt still builds from an empty table before
+/// CrossMapMaterials allocates its dynamic entries.
 pub(crate) fn build_map_pixel_classifier(
     group: &Group,
     resolver: &impl LegacyDefinitionResolver,
@@ -8705,11 +8706,11 @@ pub(crate) fn build_map_pixel_classifier(
         library.sort_enumeration(enumeration)?;
     }
 
-    // A missing first TexMap still loads/validates materials and MatMap in
-    // C++, but leaves no raster classifier for Rust's map fallback.
-    let Some(texmap) = texmap else {
-        return Ok(None);
-    };
+    // LoadMap returns zero for a missing first TexMap, but C++ retains the
+    // empty C4TextureMap and still runs Init + CrossMapMaterials. Parsing an
+    // empty source gives the normal 128-slot table with both overload flags
+    // false, without changing the independent resource-chain decisions above.
+    let texmap = texmap.unwrap_or_else(|| lc_resources::texmap::TextureMap::parse(""));
     let overload_materials = texmap.overload_materials;
     let overload_textures = texmap.overload_textures;
 
@@ -24279,6 +24280,106 @@ public func ActualizePhase(pClonk)
             .push(crossmap_entry);
         assert_eq!(crossmap_entry, 30);
         assert_eq!(classifier.state.material_crossmap_entries, vec![30]);
+    }
+
+    #[test]
+    fn missing_first_texmap_builds_dynamic_slots_and_stops_resource_chain() {
+        // LoadMap failing on the first group leaves an empty table in C++;
+        // it does not skip TextureMap.Init or CrossMapMaterials. Because this
+        // group loads both materials and textures, the two independent
+        // zero-count fallbacks stay closed and the installed group is ignored.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("NoTexMap.c4s");
+        let local = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&local).expect("local materials dir");
+        for (file, name, density, overlay) in [
+            ("A-Wet.c4m", "Wet", 25, "Liquid"),
+            ("B-Rock.c4m", "Rock", 70, "Smooth"),
+        ] {
+            std::fs::write(
+                local.join(file),
+                format!(
+                    "[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"
+                ),
+            )
+            .expect("write local material");
+        }
+        write_test_texture(&local, "Liquid");
+        write_test_texture(&local, "Smooth");
+
+        let installed_root = dir.path().join("Installed");
+        let installed = installed_root.join("Material.c4g");
+        std::fs::create_dir_all(&installed).expect("installed materials dir");
+        std::fs::write(installed.join("TexMap.txt"), "1=Global-Rough\n")
+            .expect("write installed texmap");
+        std::fs::write(
+            installed.join("Global.c4m"),
+            "[Material]\nName=Global\nDensity=100\nTextureOverlay=Rough\n",
+        )
+        .expect("write installed material");
+        write_test_texture(&installed, "Rough");
+
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let resolver = FileSystemResolver {
+            roots: vec![installed_root],
+        };
+        let classifier = build_map_pixel_classifier(&group, &resolver)
+            .expect("classifier load succeeds")
+            .expect("a missing first TexMap still builds a classifier");
+
+        let library = classifier.material_library().expect("local materials load");
+        let material_order = library
+            .iter()
+            .map(|material| (material.name(), material.int("Density").unwrap_or(0)))
+            .collect::<Vec<_>>();
+        assert_eq!(material_order.len(), 2);
+        assert!(material_order.iter().any(|(name, _)| *name == "Wet"));
+        assert!(material_order.iter().any(|(name, _)| *name == "Rock"));
+        assert!(library.get("Global").is_none());
+        assert!(classifier.texture_exists("Liquid"));
+        assert!(classifier.texture_exists("Smooth"));
+        assert!(!classifier.texture_exists("Rough"));
+
+        assert_eq!(classifier.state.default_material_entry("Global"), None);
+        for (offset, (name, density)) in material_order.iter().enumerate() {
+            let slot = offset + 1;
+            let expected_texture = if *name == "Wet" { "Liquid" } else { "Smooth" };
+            assert_eq!(
+                classifier.state.default_material_entry(name),
+                Some(slot as u8)
+            );
+            assert_eq!(classifier.state.material_names[slot].as_deref(), Some(*name));
+            assert_eq!(
+                classifier.state.match_texture_names[slot].as_deref(),
+                Some(expected_texture)
+            );
+            assert_eq!(classifier.density(slot as u8), *density);
+        }
+        assert!(classifier.state.material_names[0].is_none());
+        assert!(classifier.state.material_names[3].is_none());
+
+        let bitmap = lc_resources::bitmap::IndexedBitmap {
+            width: 3,
+            height: 1,
+            indices: vec![1, 2, 3],
+        };
+        let landscape = exact_classified_landscape(&bitmap, &classifier, 0)
+            .expect("indexed map classifies");
+        assert_eq!(
+            (0..3)
+                .map(|x| landscape.grid_byte_at(x, 0))
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3)]
+        );
+        for (offset, (name, _)) in material_order.iter().enumerate() {
+            if *name == "Wet" {
+                assert!(landscape.is_liquid_at(offset as i32, 0));
+            } else {
+                assert!(landscape.is_solid_at(offset as i32, 0));
+            }
+        }
+        assert!(!landscape.is_liquid_at(2, 0));
+        assert!(!landscape.is_solid_at(2, 0));
     }
 
     #[test]
