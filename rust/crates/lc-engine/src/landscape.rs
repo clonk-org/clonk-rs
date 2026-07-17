@@ -2992,7 +2992,12 @@ impl Landscape {
         let Some(state) = self.raster_state.as_mut() else {
             return false;
         };
-        state.texmap_mut().clear_entries(slots);
+        let texmap = state.texmap_mut();
+        texmap.clear_entries(slots);
+        // RemoveUnusedTexMapEntries sets fEntriesAdded even when its scan
+        // clears nothing. Preserve that sticky bit in callback-local replay
+        // so a later operation carrying the full texmap cannot erase it.
+        texmap.entries_added = true;
         true
     }
 

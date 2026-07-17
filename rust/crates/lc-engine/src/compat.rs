@@ -57520,6 +57520,60 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn remove_unused_texmap_dirty_flag_survives_later_full_state_operation() {
+        // Effect callbacks thread a COW preview before their operations fold
+        // into the authoritative engine. RemoveUnused's fEntriesAdded bit
+        // must survive a later operation that carries the whole texmap.
+        let mut replay_world = draw_volcano_branch_world();
+        let initial_landscape = replay_world
+            .landscape_ref()
+            .expect("landscape exists")
+            .clone();
+        assert!(!initial_landscape.texture_map_entries_added());
+
+        let (removed, mut removed_outcome) =
+            with_effect_context(None, &[], replay_world.clone(), 1, || {
+                remove_unused_texmap_entries(&[])
+            });
+        assert_eq!(removed.expect("RemoveUnused succeeds"), Value::Nil);
+        assert_eq!(removed_outcome.landscape.len(), 1);
+        replay_world.preview_runtime_landscape_operation(&removed_outcome.landscape[0]);
+
+        // Slot 5 already contains Earth-Smooth and is protected as Earth's
+        // default. Zero chunk count therefore allocates nothing and draws no
+        // pixels, but DrawMatChunks still captures the complete texmap.
+        let chunk_args = [
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(8),
+            Value::Int(6),
+            Value::Int(0),
+            Value::Int(0),
+            Value::String("Earth".to_string()),
+            Value::String("Smooth".to_string()),
+            Value::Bool(false),
+        ];
+        let (drew, chunks_outcome) =
+            with_effect_context(None, &[], replay_world, 1, || draw_mat_chunks(&chunk_args));
+        assert_eq!(drew.expect("DrawMatChunks succeeds"), Value::Int(1));
+        assert_eq!(chunks_outcome.landscape.len(), 1);
+
+        removed_outcome
+            .landscape
+            .extend(chunks_outcome.landscape);
+        let mut engine = crate::Engine::new();
+        engine.set_landscape(initial_landscape);
+        engine.apply_landscape_operations(removed_outcome.landscape);
+        assert!(
+            engine
+                .landscape()
+                .expect("folded landscape exists")
+                .texture_map_entries_added(),
+            "the later full-state fold must not clear RemoveUnused's sticky flag"
+        );
+    }
+
+    #[test]
     fn draw_map_clips_before_rounding_and_resolves_retained_template() {
         // FnDrawMap passes GLOBAL coordinates through unchanged
         // (C4Script.cpp:4851-4855). DrawMap first ClipRects the requested
