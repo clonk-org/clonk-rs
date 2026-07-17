@@ -141,7 +141,7 @@ impl Definition {
         let action_map = load_optional_entry_string(group, "ActMap.txt")?
             .map(|bytes| parse_act_map(&bytes))
             .transpose()?;
-        script.definition_description = load_definition_description(components)?;
+        script.definition_description = load_definition_description(components, languages)?;
 
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner)?;
@@ -214,17 +214,28 @@ impl Definition {
     }
 }
 
-/// Loads the default US entry from `C4CFN_DefDesc = "Desc{}.txt"`.
-///
-/// The C++ runtime receives a language sequence and ultimately falls back to
-/// US (`C4Language::LoadLanguage`, C4Language.cpp:250-263). Resource loading
-/// does not yet carry a locale, so selecting that hardcoded fallback keeps the
-/// retained description deterministic.
-fn load_definition_description(
+/// Selects the first `C4CFN_DefDesc = "Desc{}.txt"` component admitted by
+/// the exact language sequence. Unlike Names/Rank, this pattern has no plain
+/// fallback segment; only an explicitly empty language code selects Desc.txt.
+fn load_definition_description<S: AsRef<str>>(
     components: &ComponentGroups,
+    languages: &[S],
 ) -> Result<Option<String>, DefinitionError> {
-    const DESCRIPTION: &str = "DescUS.txt";
-    let Some(component) = components.read(DESCRIPTION)? else {
+    let mut selected = None;
+    if languages.is_empty() {
+        selected = components.read("Desc.txt")?;
+    } else {
+        for language in languages {
+            let code = lc_script::c4_string_bytes(language.as_ref());
+            let code = lc_script::c4_string_from_bytes(&code[..code.len().min(2)]);
+            let candidate = format!("Desc{code}.txt");
+            if let Some(component) = components.read(candidate)? {
+                selected = Some(component);
+                break;
+            }
+        }
+    }
+    let Some(component) = selected else {
         return Ok(None);
     };
 
@@ -4668,15 +4679,91 @@ HideHUDElements=Portrait|Bogus|Inventory
     }
 
     #[test]
-    fn definition_loads_hardcoded_us_description_from_language_pack() {
-        // Locale selection remains the existing hardcoded US compatibility
-        // boundary, but C4Language::LoadComponentHost searches pack groups.
+    fn definition_description_follows_language_order_without_plain_fallback() {
+        let temp = tempdir().expect("tempdir");
+        let both_dir = temp.path().join("Both.c4d");
+        fs::create_dir(&both_dir).expect("both-language definition directory");
+        fs::write(both_dir.join("DefCore.txt"), b"[DefCore]\nid=BOTH\n")
+            .expect("DefCore");
+        fs::write(both_dir.join("DescDE.txt"), b"  Deutsche Beschreibung  ")
+            .expect("German description");
+        fs::write(both_dir.join("DescUS.txt"), b"English description")
+            .expect("US description");
+        let both = Group::open(&both_dir).expect("open both-language definition");
+        let german = Definition::load_with_languages(&both, &["DE", "US"])
+            .expect("load German-first definition");
+        assert_eq!(german.description(), Some("Deutsche Beschreibung"));
+
+        let de_only_dir = temp.path().join("GermanOnly.c4d");
+        fs::create_dir(&de_only_dir).expect("German-only definition directory");
+        fs::write(de_only_dir.join("DefCore.txt"), b"[DefCore]\nid=DEON\n")
+            .expect("DefCore");
+        fs::write(de_only_dir.join("DescDE.txt"), b"Nur Deutsch")
+            .expect("German description");
+        fs::write(de_only_dir.join("Desc.txt"), b"Plain fallback must not load")
+            .expect("plain description");
+        let de_only = Group::open(&de_only_dir).expect("open German-only definition");
+        let us_only = Definition::load_with_languages(&de_only, &["US"])
+            .expect("load US-only sequence");
+        assert_eq!(us_only.description(), None);
+        let german_fallback = Definition::load_with_languages(&de_only, &["US", "DE"])
+            .expect("load German second candidate");
+        assert_eq!(german_fallback.description(), Some("Nur Deutsch"));
+    }
+
+    #[test]
+    fn definition_description_preserves_componenthost_empty_candidate_rules() {
+        let temp = tempdir().expect("tempdir");
+
+        let advancing_dir = temp.path().join("Advancing.c4d");
+        fs::create_dir(&advancing_dir).expect("advancing definition directory");
+        fs::write(advancing_dir.join("DefCore.txt"), b"[DefCore]\nid=ADVN\n")
+            .expect("DefCore");
+        fs::write(advancing_dir.join("DescUS.txt"), []).expect("empty US description");
+        fs::write(advancing_dir.join("descde.TXT"), b"Gemischte Schreibweise")
+            .expect("mixed-case German description");
+        let advancing = Group::open(&advancing_dir).expect("open advancing definition");
+        let definition = Definition::load_with_languages(&advancing, &["US", "DE"])
+            .expect("zero-byte candidate advances");
+        assert_eq!(definition.description(), Some("Gemischte Schreibweise"));
+
+        let blocking_dir = temp.path().join("Blocking.c4d");
+        fs::create_dir(&blocking_dir).expect("blocking definition directory");
+        fs::write(blocking_dir.join("DefCore.txt"), b"[DefCore]\nid=BLOK\n")
+            .expect("DefCore");
+        fs::write(blocking_dir.join("DescUS.txt"), b" \r\n\t")
+            .expect("whitespace US description");
+        fs::write(blocking_dir.join("DescDE.txt"), b"Must not load")
+            .expect("German description");
+        let blocking = Group::open(&blocking_dir).expect("open blocking definition");
+        let definition = Definition::load_with_languages(&blocking, &["US", "DE"])
+            .expect("whitespace candidate loads then trims");
+        assert_eq!(definition.description(), None);
+
+        let plain_dir = temp.path().join("Plain.c4d");
+        fs::create_dir(&plain_dir).expect("plain definition directory");
+        fs::write(plain_dir.join("DefCore.txt"), b"[DefCore]\nid=PLAN\n")
+            .expect("DefCore");
+        fs::write(plain_dir.join("Desc.txt"), b"Explicit empty-code description")
+            .expect("plain description");
+        let plain = Group::open(&plain_dir).expect("open plain definition");
+        let definition = Definition::load_with_languages(&plain, &[] as &[&str])
+            .expect("empty language sequence tries one empty code");
+        assert_eq!(definition.description(), Some("Explicit empty-code description"));
+    }
+
+    #[test]
+    fn definition_loads_first_language_description_from_language_pack() {
+        // Candidate language order precedes local-or-pack group priority in
+        // C4ComponentHost::LoadEx.
         let temp = tempdir().expect("tempdir");
         let content = temp.path().join("content");
         let def_dir = content.join("Hut3.c4d");
         fs::create_dir_all(&def_dir).expect("definition directory");
         fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n")
             .expect("DefCore");
+        fs::write(def_dir.join("DescUS.txt"), b"Local English description")
+            .expect("local US description");
 
         let language_container = temp.path().join("Language.c4g");
         let pack_def = language_container.join("Pack.c4g/Hut3.c4d");
@@ -4699,7 +4786,7 @@ HideHUDElements=Portrait|Bogus|Inventory
         )
         .expect("load pack-described definition");
 
-        assert_eq!(definition.description(), Some("Packed home base."));
+        assert_eq!(definition.description(), Some("Falsche Sprache"));
     }
 
     #[test]
