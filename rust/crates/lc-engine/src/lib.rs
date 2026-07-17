@@ -14730,6 +14730,26 @@ impl Default for MissionAccessStore {
     }
 }
 
+/// One-shot process-local request to enable `Config.Graphics.ShowCommands`.
+///
+/// Fresh engines owned by one app share this store. It stays outside
+/// [`EngineState`], and draining it lets a later user toggle remain off until
+/// another SetPlrShowCommand call.
+#[derive(Clone, Debug, Default)]
+pub struct ShowCommandsRequestStore {
+    inner: Rc<std::cell::Cell<bool>>,
+}
+
+impl ShowCommandsRequestStore {
+    pub fn request_enable(&self) {
+        self.inner.set(true);
+    }
+
+    pub fn take_enable_request(&self) -> bool {
+        self.inner.replace(false)
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn mission_access_store_can_be_shared_across_engines() {
@@ -15062,6 +15082,8 @@ pub struct Engine {
     /// Engine-held mission-password surrogate for process config. This stays
     /// outside EngineState/save serialization, like C++ Config.
     mission_access: MissionAccessStore,
+    /// FnSetPlrShowCommand's process-local ShowCommands enable request.
+    show_commands_requests: ShowCommandsRequestStore,
     scoreboard: Rc<RefCell<ScoreboardState>>,
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
 }
@@ -17078,6 +17100,7 @@ impl Engine {
             pending_menu_requests: Vec::new(),
             messages: MessageManager::new(),
             mission_access: MissionAccessStore::default(),
+            show_commands_requests: ShowCommandsRequestStore::default(),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
             scoreboard_presentations: Rc::new(RefCell::new(ScoreboardPresentationSink::default())),
         };
@@ -17342,6 +17365,11 @@ impl Engine {
     /// fresh game engines.
     pub fn set_mission_access_store(&mut self, store: MissionAccessStore) {
         self.mission_access = store;
+    }
+
+    /// Attach the embedding app's process-local ShowCommands request latch.
+    pub fn set_show_commands_request_store(&mut self, store: ShowCommandsRequestStore) {
+        self.show_commands_requests = store;
     }
 
     /// Installs the frontend's process-local control-binding display names.
@@ -32795,6 +32823,12 @@ impl Engine {
                 PlayerCommand::SetShowControl { player_id, mask } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.show_control = mask;
+                    }
+                }
+                PlayerCommand::SetShowCommand { player_id, command } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_flash_command(command);
+                        self.show_commands_requests.request_enable();
                     }
                 }
                 PlayerCommand::SetHostility {

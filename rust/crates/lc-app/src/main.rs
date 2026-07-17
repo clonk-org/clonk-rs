@@ -90,8 +90,9 @@ use lc_engine::{
     MouseDragSource,
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
-    ScoreboardPresentationRequest, ScriptControlPolicy, SimulationSnapshot, SkyConfig, SpawnConfig,
-    SyncCheckPacket, TeamConfiguration, Vector2, MessageControlData,
+    MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
+    ShowCommandsRequestStore, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
+    TeamConfiguration, Vector2,
     MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
     MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
 };
@@ -7170,6 +7171,9 @@ struct GameApp {
     needed_material_none: String,
     /// Process-local Config.General.MissionAccess shared across fresh games.
     mission_access: MissionAccessStore,
+    /// Process-local Config.Graphics.ShowCommands enable requests shared
+    /// across fresh engines.
+    show_commands_requests: ShowCommandsRequestStore,
     input: InputDispatcher,
     bindings: KeyboardBindings,
     gamepad_bindings: GamepadBindings,
@@ -14285,8 +14289,10 @@ impl GameApp {
             })
             .unwrap_or_default();
         let bindings = KeyboardBindings::load(paths);
+        let show_commands_requests = ShowCommandsRequestStore::default();
         let mut engine = Engine::new();
         engine.set_mission_access_store(mission_access.clone());
+        engine.set_show_commands_request_store(show_commands_requests.clone());
         engine.set_control_key_names(configured_control_key_names(&bindings));
         engine.set_smoke_level(graphics_smoke_level);
         engine.set_control_host(!matches!(
@@ -14394,6 +14400,7 @@ impl GameApp {
             needed_material_need,
             needed_material_none,
             mission_access,
+            show_commands_requests,
             input: InputDispatcher::new(),
             bindings,
             gamepad_bindings: GamepadBindings::load(paths),
@@ -14864,6 +14871,8 @@ impl GameApp {
         self.engine
             .set_mission_access_store(self.mission_access.clone());
         self.engine
+            .set_show_commands_request_store(self.show_commands_requests.clone());
+        self.engine
             .set_control_key_names(configured_control_key_names(&self.bindings));
         self.engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
@@ -14880,6 +14889,7 @@ impl GameApp {
 
     fn apply_material_library_to(&self, engine: &mut Engine) {
         engine.set_mission_access_store(self.mission_access.clone());
+        engine.set_show_commands_request_store(self.show_commands_requests.clone());
         engine.set_control_key_names(configured_control_key_names(&self.bindings));
         engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
@@ -31322,7 +31332,14 @@ impl GameApp {
         Ok(())
     }
 
+    fn apply_show_commands_enable_request(&mut self) {
+        if self.show_commands_requests.take_enable_request() {
+            self.display_flags.show_commands = true;
+        }
+    }
+
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
+        self.apply_show_commands_enable_request();
         self.reject_classic_global_gui_bootstrap()?;
         self.preflight_visible_gui_overlay_resources()?;
         if self.game_over_dialog.is_some() {
@@ -31419,6 +31436,12 @@ impl GameApp {
                     .find(|player| player.id == self.local_owner)
                     .and_then(|player| player.cursor);
                 if let Some(cursor_id) = cursor_id {
+                    let flash_command = self
+                        .snapshot
+                        .object(cursor_id)
+                        .and_then(|cursor| self.engine.player(cursor.owner))
+                        .map(|player| player.flash_command())
+                        .unwrap_or(0);
                     let ctx = AppCommandContext {
                         engine: &self.engine,
                         bindings: &self.bindings,
@@ -31431,6 +31454,9 @@ impl GameApp {
                         .find(|player| player.owner == self.local_owner)
                     {
                         overlay.commands = commands;
+                        // C4Object::DrawCommand looks up FlashCom through the
+                        // command-producing object's Owner, not Controller.
+                        overlay.flash_command = flash_command;
                     }
                 }
             }
@@ -35734,6 +35760,10 @@ fn collect_player_overlays(
             control_key_labels,
             crew,
             commands: Vec::new(),
+            flash_command: engine
+                .player(player.owner)
+                .map(|player| player.flash_command())
+                .unwrap_or(0),
         });
     }
     players
@@ -83542,6 +83572,21 @@ protected func InputCallback(string answer, int player)
             material_value_array::<4>(Some(vec![255, 256, -1, 511])),
             [255, 0, 255, 255],
         );
+    }
+
+    #[test]
+    fn set_plr_show_command_request_force_enables_display_once() {
+        let mut app = new_menu_app(320, 200);
+        app.display_flags.show_commands = false;
+        app.show_commands_requests.request_enable();
+        app.apply_show_commands_enable_request();
+        assert!(app.display_flags.show_commands);
+
+        // The native call writes true once; a later user toggle remains off
+        // until another SetPlrShowCommand call.
+        app.display_flags.show_commands = false;
+        app.apply_show_commands_enable_request();
+        assert!(!app.display_flags.show_commands);
     }
 
     fn cleanup_quicksave_file() {

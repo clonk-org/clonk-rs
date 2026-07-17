@@ -1164,6 +1164,8 @@ pub enum PlayerCommand {
     SetShowControlPosition { player_id: i32, position: i32 },
     /// FnSetPlrShowControl's validated, StringBitEval-encoded ShowControl write.
     SetShowControl { player_id: i32, mask: i32 },
+    /// FnSetPlrShowCommand's runtime-only C4Player::FlashCom write.
+    SetShowCommand { player_id: i32, command: i32 },
     /// `FnSetHostility`'s validated `C4Player::Hostility` update. Callback
     /// rejection and same-call visibility are resolved before this command is
     /// emitted; the engine applies the surviving declaration afterward.
@@ -5424,6 +5426,38 @@ fn set_plr_show_control(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         player.show_control = mask;
         context.record_player_command(PlayerCommand::SetShowControl { player_id, mask });
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnSetPlrShowCommand (C4Script.cpp:2553-2559): set the exact command key
+/// that blinks for a live player. The engine fold also requests the local
+/// Config.Graphics.ShowCommands enable after this validated call.
+fn set_plr_show_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetPlrShowCommand expects at most 2 arguments: player, command",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPlrShowCommand",
+        "player",
+    )?;
+    let command = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "SetPlrShowCommand",
+        "command",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if context.player_state(player_id).is_none() {
+            return Ok(Value::Bool(false));
+        }
+        context.record_player_command(PlayerCommand::SetShowCommand { player_id, command });
         Ok(Value::Bool(true))
     })
 }
@@ -14066,6 +14100,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
     script.register_host_function("SetPlrMagic", set_plr_magic);
     script.register_host_function("SetPlrShowControl", set_plr_show_control);
+    script.register_host_function("SetPlrShowCommand", set_plr_show_command);
     script.register_host_function("SetPlrShowControlPos", set_plr_show_control_pos);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetBridgeActionData", set_bridge_action_data);
@@ -47885,6 +47920,7 @@ mod tests {
         "SetPlrExtraData",
         "SetPlrKnowledge",
         "SetPlrMagic",
+        "SetPlrShowCommand",
         "SetPlrShowControl",
         "SetPlrShowControlPos",
         "SetPlrView",
@@ -59196,6 +59232,43 @@ public func Probe()
                 mask: 9,
             }]
         ));
+    }
+
+    #[test]
+    fn set_plr_show_command_validates_player_and_keeps_raw_command() {
+        // FnSetPlrShowCommand accepts any int command, writes only for an
+        // existing player, and returns bool (C4Script.cpp:2553-2559).
+        let player = PlayerState {
+            id: 0,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>((
+                set_plr_show_command(&[Value::Int(0), Value::Int(17)])?,
+                set_plr_show_command(&[Value::Int(99), Value::Int(23)])?,
+            ))
+        });
+
+        assert_eq!(
+            result.expect("SetPlrShowCommand calls run"),
+            (Value::Bool(true), Value::Bool(false))
+        );
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [PlayerCommand::SetShowCommand {
+                player_id: 0,
+                command: 17,
+            }]
+        ));
+        assert_eq!(
+            set_plr_show_command(&[Value::Int(0), Value::Int(5)])
+                .expect("a missing host context is not a script error"),
+            Value::Bool(false)
+        );
     }
 
     #[test]

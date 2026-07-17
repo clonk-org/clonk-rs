@@ -954,6 +954,8 @@ pub struct PlayerOverlay {
     /// (C4Object::DrawCommands, src/C4Object.cpp:2940-3098), resolved by
     /// the app; drawn into the viewport command rows when ShowCommands.
     pub commands: Vec<CommandIcon>,
+    /// C4Player::FlashCom for the owner of the object producing `commands`.
+    pub flash_command: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4896,6 +4898,8 @@ impl GraphicsSystem {
                     rect,
                     &player.commands,
                     self.show_command_keys,
+                    player.flash_command,
+                    frame,
                     gamma,
                 );
             }
@@ -11699,6 +11703,7 @@ mod tests {
                 control_key_labels: Vec::new(),
                 crew: Vec::new(),
                 commands: Vec::new(),
+                flash_command: 0,
             }],
             game_time_seconds: 0,
             message_board_line: None,
@@ -13823,6 +13828,7 @@ mod tests {
                 inventory: Vec::new(),
             }],
             commands: Vec::new(),
+            flash_command: 0,
         }];
         graphics.update_overlay(&GraphicsOverlay {
             frame_text: "",

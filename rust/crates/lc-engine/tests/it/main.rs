@@ -63,6 +63,7 @@ mod set_landscape_pixel;
 mod set_mat_adjust;
 mod set_material_color;
 mod set_picture;
+mod set_plr_show_command;
 mod sim_flight;
 mod surplus_host_args;
 mod swim_movement;

@@ -791,6 +791,9 @@ pub struct Player {
     force_fog_of_war: bool,
     pub(crate) show_control_position: i32,
     pub(crate) show_control: i32,
+    /// C4Player::FlashCom (NoSave): the exact contextual command whose key
+    /// cell blinks in C4Object::DrawCommand.
+    flash_command: i32,
     hostility: HashSet<i32>,
     hostility_entries: Vec<(i32, i32)>,
     /// The indexed player color chosen at ScenarioInit
@@ -881,6 +884,7 @@ impl Player {
             force_fog_of_war: false,
             show_control_position: 0,
             show_control: 0,
+            flash_command: 0,
             hostility: HashSet::new(),
             hostility_entries: Vec::new(),
             color_index: -1,
@@ -1175,6 +1179,7 @@ impl Player {
             force_fog_of_war: false,
             show_control_position: 0,
             show_control: 0,
+            flash_command: 0,
             hostility: HashSet::new(),
             hostility_entries: Vec::new(),
             color_index: -1,
@@ -1363,6 +1368,7 @@ impl Player {
             force_fog_of_war,
             show_control_position,
             show_control,
+            flash_command: 0,
             hostility,
             hostility_entries,
             color_index: color_index.unwrap_or(-1),
@@ -1586,6 +1592,14 @@ impl Player {
 
     pub fn force_fog_of_war(&self) -> bool {
         self.force_fog_of_war
+    }
+
+    pub fn flash_command(&self) -> i32 {
+        self.flash_command
+    }
+
+    pub(crate) fn set_flash_command(&mut self, command: i32) {
+        self.flash_command = command;
     }
 
     /// Explicitly enable or disable fog of war. Unlike automatic mouse-control

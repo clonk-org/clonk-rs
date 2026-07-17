@@ -1178,6 +1178,8 @@ pub fn draw_commands(
         viewport,
         icons,
         show_command_keys,
+        0,
+        0,
         None,
     );
 }
@@ -1251,6 +1253,8 @@ pub(crate) fn draw_commands_with_gamma(
     viewport: SurfaceRect,
     icons: &[CommandIcon],
     show_command_keys: bool,
+    flash_command: i32,
+    frame: u64,
     gamma: Option<&GammaRamp>,
 ) {
     // `if (cgo.Hgt > C4SymbolSize)` (src/C4Viewport.cpp:950).
@@ -1300,16 +1304,20 @@ pub(crate) fn draw_commands_with_gamma(
         };
 
         draw_command_image_cell_with_gamma(surface, hud, image_cell, &icon.image, gamma);
-        draw_command_key_cell(
-            surface,
-            key_font,
-            hud,
-            key_cell,
-            icon.com,
-            &icon.key_label,
-            show_command_keys,
-            gamma,
-        );
+        // C4Object::DrawCommand keeps the image and region present, but the
+        // exact FlashCom key cell blinks off for Tick35 0..=15.
+        if i32::from(icon.com) != flash_command || frame % 35 > 15 {
+            draw_command_key_cell(
+                surface,
+                key_font,
+                hud,
+                key_cell,
+                icon.com,
+                &icon.key_label,
+                show_command_keys,
+                gamma,
+            );
+        }
     }
 }
 
@@ -2008,6 +2016,63 @@ mod tests {
                 &icons,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn flash_command_blinks_only_the_matching_key_cell() {
+        // C4Object::DrawCommand keeps the command image and hit region while
+        // hiding the exact FlashCom key for Tick35 0..=15, then drawing it
+        // for 16..=34 (src/C4Object.cpp:4043-4047,4084-4091).
+        let hud = HudGraphics {
+            control: Some(control_sheet()),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let icons = vec![CommandIcon {
+            com: 5,
+            key_label: String::new(),
+            side: false,
+            image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
+        }];
+        let render = |frame| {
+            let mut target = surface(200, 100);
+            draw_commands_with_gamma(
+                &mut target,
+                &HudFont::Fallback(&font),
+                &hud,
+                SurfaceRect::new(0, 0, 200, 100),
+                &icons,
+                false,
+                5,
+                frame,
+                None,
+            );
+            target
+        };
+
+        for frame in [0, 15] {
+            let target = render(frame);
+            assert_eq!(target.get_pixel(160, 88), Some(Color::opaque(0, 0, 0)));
+            assert_eq!(
+                target.get_pixel(188, 88),
+                Some(Color::opaque(200, 20, 20)),
+                "command image remains visible at frame {frame}"
+            );
+        }
+        assert_eq!(
+            render(16).get_pixel(160, 88),
+            Some(Color::opaque(10, 10, 200)),
+            "matching key returns for Tick35 16"
+        );
+        assert_eq!(
+            command_region_index(
+                SurfaceRect::new(0, 0, 200, 100),
+                lc_gui::Point::new(160.0, 88.0),
+                &icons,
+            ),
+            Some(0),
+            "blinking never removes the command region"
         );
     }
 
