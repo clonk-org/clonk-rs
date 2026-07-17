@@ -6352,6 +6352,185 @@ func CatchBlow(level, by)
         assert_eq!(engine.pxs_system.count(), 0);
     }
 
+    fn insert_material_convert_fixture(convert_to: &str) -> (Engine, MaterialId, MaterialId) {
+        let library = MaterialLibrary::parse(&format!(
+            r#"
+            [Material Snow]
+            Name=Snow
+            Density=25
+            Friction=0
+            MaxSlide=0
+            InMatConvert=Water
+            InMatConvertTo={convert_to}
+            InMatConvertDepth=2
+
+            [Material Water]
+            Name=Water
+            Density=100
+            Friction=0
+            MaxSlide=0
+            "#
+        ))
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let snow = materials.id_of("Snow").expect("snow exists");
+        let water = materials.id_of("Water").expect("water exists");
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+        engine.set_physics(PhysicsSettings::new(1, 12, -20));
+
+        // Insert at (3,5): Water below selects the reaction and Water at
+        // y-depth satisfies hardcoded InMatConvert's depth check.
+        let mut densities = vec![0i32; 128];
+        densities[10] = 25;
+        densities[20] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[10] = Some("Snow".into());
+        names[20] = Some("Water".into());
+        let mut bytes = vec![0u8; 7 * 10];
+        bytes[3 * 7 + 3] = 20;
+        bytes[6 * 7 + 3] = 20;
+        let grid = landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
+        let mut world = Landscape::new(7, vec![10; 7]).expect("landscape builds");
+        world.set_world_height(10);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        (engine, snow, water)
+    }
+
+    #[test]
+    fn insert_material_convert_writes_back_material_before_dead_pixel_insert() {
+        // mrfConvert returns false after changing iPxsMat, so InsertMaterial's
+        // final SetPix must use the converted material passed back by ref
+        // (C4Landscape.cpp:1198-1218; C4Material.cpp:636-660).
+        let (mut engine, snow, water) = insert_material_convert_fixture("Water");
+        let mirror = engine.rng.clone();
+        engine.apply_landscape_operations(vec![LandscapeOperation::InsertMaterial {
+            material: snow.index() as i32,
+            position: Vector2::new(3, 5),
+            velocity: Vector2::new(0, 0),
+        }]);
+
+        let world = engine.landscape().expect("landscape remains set");
+        assert_eq!(world.material_at(3, 5), Some(water));
+        assert_eq!(world.grid_byte_at(3, 5), Some(20), "Water default mattex byte");
+        assert_eq!(engine.pxs_system.count(), 0, "converted material is dead-inserted");
+        assert_eq!(engine.rng, mirror, "conversion and write-back draw no RNG");
+    }
+
+    #[test]
+    fn insert_material_script_writes_back_position_before_dead_pixel_insert() {
+        // A falsy mrfScript result keeps the material but writes X/Y back by
+        // reference before InsertMaterial captures omat and calls SetPix.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Sand]
+            Name=Sand
+            Density=25
+            Friction=0
+            MaxSlide=0
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=MoveInsertedMaterial
+            TargetSpec=Earth
+            CheckSlide=0
+            ExecMask=1
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=0
+            MaxSlide=0
+
+            [Material Old]
+            Name=Old
+            Density=25
+            Friction=0
+            MaxSlide=0
+            "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let sand = materials.id_of("Sand").expect("sand exists");
+        let old = materials.id_of("Old").expect("old material exists");
+        let mut engine = Engine::with_seed(22);
+        engine.set_materials(materials);
+        engine.set_physics(PhysicsSettings::new(1, 12, -20));
+        engine.set_landscape_insert_thrust(true);
+        engine
+            .install_scenario_script(
+                "Scenario",
+                r#"
+                global func MoveInsertedMaterial(&x, &y, lsx, lsy, &xdir, &ydir, &pxs_mat, ls_mat, event)
+                {
+                    if (event == 0) { x = 4; y = 4; }
+                    return 0;
+                }
+                "#,
+            )
+            .expect("scenario script installs");
+
+        let mut densities = vec![0i32; 128];
+        densities[10] = 25;
+        densities[20] = 25;
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[10] = Some("Sand".into());
+        names[20] = Some("Old".into());
+        names[30] = Some("Earth".into());
+        let mut bytes = vec![0u8; 7 * 10];
+        bytes[6 * 7 + 2] = 30;
+        bytes[4 * 7 + 4] = 20;
+        let grid = landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
+        let mut world = Landscape::new(7, vec![10; 7]).expect("landscape builds");
+        world.set_world_height(10);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+        let mirror = engine.rng.clone();
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::InsertMaterial {
+            material: sand.index() as i32,
+            position: Vector2::new(2, 5),
+            velocity: Vector2::new(0, 0),
+        }]);
+
+        let world = engine.landscape().expect("landscape remains set");
+        assert_eq!(world.material_at(2, 5), None, "original position stays empty");
+        assert_eq!(world.grid_byte_at(2, 5), Some(0));
+        assert_eq!(world.material_at(4, 4), Some(sand));
+        assert_eq!(world.grid_byte_at(4, 4), Some(10), "Sand default mattex byte");
+        assert_eq!(
+            world.material_at(4, 3),
+            Some(old),
+            "thrust captures old material at the script-assigned destination"
+        );
+        assert_eq!(engine.pxs_system.count(), 0, "script result is dead-inserted");
+        assert_eq!(engine.rng, mirror, "falsy script write-back draws no RNG");
+    }
+
+    #[test]
+    fn insert_material_convert_to_unloaded_or_sky_kills_without_dead_insert() {
+        // An unloaded/Sky conversion target makes mrfConvert return true;
+        // InsertMaterial must exit before the dead-pixel write.
+        for convert_to in ["Sky", "Missing"] {
+            let (mut engine, snow, _water) = insert_material_convert_fixture(convert_to);
+            let mirror = engine.rng.clone();
+            engine.apply_landscape_operations(vec![LandscapeOperation::InsertMaterial {
+                material: snow.index() as i32,
+                position: Vector2::new(3, 5),
+                velocity: Vector2::new(0, 0),
+            }]);
+
+            let world = engine.landscape().expect("landscape remains set");
+            assert_eq!(world.material_at(3, 5), None, "target {convert_to}");
+            assert_eq!(world.grid_byte_at(3, 5), Some(0), "target {convert_to}");
+            assert_eq!(engine.pxs_system.count(), 0, "target {convert_to}");
+            assert_eq!(engine.rng, mirror, "target {convert_to} draws no RNG");
+        }
+    }
+
     fn pxs_pos_material_refresh_engine(
         reaction: &str,
         trigger_at_pixel: bool,

@@ -48895,7 +48895,14 @@ impl Engine {
     /// kept flying in C++ but died in the old rust column stub), then
     /// the reaction with the material below (meePXSPos), then the dead-
     /// material write with the insert-thrust recursion.
-    fn insert_material(&mut self, mat: MaterialId, tx: i32, ty: i32, vx: i32, vy: i32) -> bool {
+    fn insert_material(
+        &mut self,
+        mut mat: MaterialId,
+        tx: i32,
+        ty: i32,
+        vx: i32,
+        vy: i32,
+    ) -> bool {
         if std::env::var("LC_RUST_RNG_TRACE").is_ok() && (15..=19).contains(&self.frame) {
             crate::rng::rng_trace_line(&format!(
                 "INSMAT {} {tx} {ty} {vx} {vy} {}",
@@ -49001,6 +49008,12 @@ impl Engine {
                 // material reaction in gravity direction
                 return true;
             }
+            // InsertMaterial passes tx, ty and mat by reference. A false
+            // reaction result keeps the material alive with every write-back
+            // applied before the dead-pixel SetPix (C4Landscape.cpp:1198-1218).
+            tx = rx;
+            ty = ry;
+            mat = probe.mat;
         }
         // Insert dead material, keeping the current pixel's IFT
         // (C4Landscape.cpp:1211-1218); the displaced material thrusts up
@@ -49010,7 +49023,7 @@ impl Engine {
             landscape.insert_material_pix(tx, ty, mat);
         }
         if let Some(old_mat) = old_mat {
-            self.insert_material(old_mat, tx, ty - 1, 0, 0);
+            self.insert_material(old_mat, tx, ty.wrapping_sub(1), 0, 0);
         }
         true
     }
