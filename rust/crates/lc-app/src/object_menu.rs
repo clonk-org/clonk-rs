@@ -14,7 +14,7 @@ use lc_gui::ImageData;
 
 use crate::ingame_menu::{
     IngameMenuGraphics, draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region,
-    draw_image_region_aspect, draw_ok_cancel, draw_tooltip,
+    draw_image_region_aspect, draw_ok_cancel, draw_tooltip, tooltip_position, tooltip_wrap_width,
 };
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
@@ -51,7 +51,6 @@ const CLASSIC_SELECTION_COLOR: Color = Color::opaque(0xc8, 0, 0);
 const CLASSIC_EXTRA_FRAME_COLOR: Color = Color::opaque(0x44, 0, 0);
 const CLASSIC_CAPTION_COLOR: Color = Color::opaque(0xff, 0xff, 0xff);
 const CLASSIC_CLOSE_ICON: u8 = 34;
-const CLASSIC_TOOLTIP_MAX_WIDTH: i32 = 256;
 const CLASSIC_TOOLTIP_BG_COLOR: Color = Color::opaque(0xf1, 0xea, 0x78);
 const CLASSIC_TOOLTIP_TEXT_COLOR: Color = Color::opaque(0x48, 0x32, 0x22);
 const CLASSIC_TOOLTIP_FRAME_COLOR: Color = Color::new(0, 0, 0, 255 - 0x7f);
@@ -1164,6 +1163,7 @@ fn render_text_spec(
 fn draw_text_spec_tooltip(
     surface: &mut Surface,
     font: &HudFont<'_>,
+    facet: Rect,
     x: i32,
     y: i32,
     text: &str,
@@ -1174,20 +1174,15 @@ fn draw_text_spec_tooltip(
         .iter()
         .any(|token| matches!(token, InfoTextToken::Image { .. }))
     {
-        draw_tooltip(surface, font, x, y, text, gamma);
+        draw_tooltip(surface, font, facet, x, y, text, gamma);
         return;
     }
-    let layout = layout_info_text(font, text, CLASSIC_TOOLTIP_MAX_WIDTH, images);
+    let layout = layout_info_text(font, text, tooltip_wrap_width(facet), images);
     let text_width = layout.width;
     let text_height = font.line_height() * layout.lines.len() as i32;
     let width = text_width + 6;
     let height = text_height + 4;
-    let tooltip_y = if y < height + 5 {
-        y + 5
-    } else {
-        y - height - 5
-    };
-    let tooltip_x = (x - width / 2).clamp(0, (surface.width() as i32 - width).max(0));
+    let (tooltip_x, tooltip_y) = tooltip_position(facet, x, y, width, height);
     fill_rect(
         surface,
         Rect::new(
@@ -2337,6 +2332,7 @@ fn render_engine_normal_menu(
             draw_text_spec_tooltip(
                 surface,
                 font,
+                area,
                 cell_x,
                 cell_y,
                 &info_caption,

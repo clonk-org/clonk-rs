@@ -6,6 +6,7 @@
 
 use crate::classic_gui::{draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect};
 use crate::clonk_fonts::NativeClonkFont;
+use crate::hud::HudFont;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::Result;
 use lc_graphics::clonk_font::{
@@ -1097,6 +1098,24 @@ pub fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
     break_message_impl(font, text, max_width, None)
 }
 
+/// [`CStdFont::BreakMessage`](../../../../src/StdFont.cpp) using the in-game
+/// HUD font abstraction. Inline images have no provider on this path and
+/// therefore occupy zero width, matching an unhooked C++ font image source.
+pub fn break_hud_message(font: &HudFont<'_>, text: &str, max_width: i32) -> String {
+    break_message_in_units(
+        text,
+        max_width.max(1),
+        |character| {
+            if character >= ' ' {
+                font.character_advance(character)
+            } else {
+                0
+            }
+        },
+        |_| 0,
+    )
+}
+
 pub fn break_message_with_images(
     font: &ClonkFont,
     text: &str,
@@ -1668,6 +1687,38 @@ mod tests {
                 .all(|line| font.measure(line, true).0 <= 5),
             "every broken line fits when measured with the rendered fallback"
         );
+    }
+
+    #[test]
+    fn hud_break_message_matches_clonk_adapter() {
+        let fonts = endeavour_font_set();
+        let hud = HudFont::Clonk(&fonts.text);
+        let (single_width, _) = fonts.text.measure("W", true);
+        let dash_width = "AAAA-"
+            .chars()
+            .map(|character| hud.character_advance(character))
+            .sum();
+        for (text, width) in [
+            ("AAA   BBB", i32::MAX),
+            ("AAAA-BBBB", dash_width),
+            ("WWW", single_width),
+            ("<i>AAA BBB</i>", single_width * 3),
+        ] {
+            assert_eq!(
+                break_hud_message(&hud, text, width),
+                break_message(&fonts.text, text, width),
+                "{text:?} at width {width}"
+            );
+        }
+        assert_eq!(
+            break_hud_message(&hud, "AAA   BBB", i32::MAX),
+            "AAA   BBB"
+        );
+        assert_eq!(
+            break_hud_message(&hud, "AAAA-BBBB", dash_width),
+            "AAAA-\nBBBB"
+        );
+        assert_eq!(break_hud_message(&hud, "WWW", single_width), "W\nWW");
     }
 
     #[test]

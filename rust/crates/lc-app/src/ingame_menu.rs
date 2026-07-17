@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use lc_engine::{CommandKind, ControlCommand};
-use lc_frontend::{hud::HudFont, GuiPoint, HudGraphics};
+use lc_frontend::{hud::HudFont, message_dialog::break_hud_message, GuiPoint, HudGraphics};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, GammaRamp, Rect, Surface};
 use lc_gui::ImageData;
@@ -54,7 +54,7 @@ const TOOLTIP_BG_COLOR: Color = Color::opaque(0xf1, 0xea, 0x78);
 const TOOLTIP_FRAME_ALPHA: u8 = 255 - 0x7f;
 const TOOLTIP_TEXT_COLOR: Color = Color::opaque(0x48, 0x32, 0x22);
 /// `C4GUI_MaxToolTipWdt` (C4Gui.h): maximum tooltip line width.
-const MAX_TOOLTIP_WDT: i32 = 256;
+const MAX_TOOLTIP_WDT: i32 = 500;
 
 /// `C4GUI::Icons` indices into GUIIcons.png (C4Gui.h:670-731), 40x40 cells
 /// (C4Gui.cpp:1094-1095), 6 per row (C4GuiLabels.cpp:441-450).
@@ -1000,7 +1000,7 @@ impl IngameMenuState {
         gamma: Option<&GammaRamp>,
     ) {
         let layout = self.layout(area, font, gfx);
-        draw_menu(self, &layout, surface, font, tiny_font, gfx, gamma);
+        draw_menu(self, &layout, surface, area, font, tiny_font, gfx, gamma);
     }
 
     /// Hit-tests the externally drawn dialog inside its associated viewport.
@@ -1219,6 +1219,7 @@ fn draw_menu(
     menu: &IngameMenuState,
     layout: &MenuLayout,
     surface: &mut Surface,
+    area: Rect,
     font: &HudFont<'_>,
     tiny_font: Option<&HudFont<'_>>,
     gfx: &IngameMenuGraphics,
@@ -1374,7 +1375,7 @@ fn draw_menu(
             let row = menu.selection().saturating_sub(layout.scroll);
             let item_x = client_x;
             let item_y = client_y + row as i32 * layout.item_height;
-            draw_tooltip(surface, font, item_x, item_y, info, gamma);
+            draw_tooltip(surface, font, area, item_x, item_y, info, gamma);
         }
     }
 }
@@ -1443,23 +1444,18 @@ pub(crate) fn draw_ok_cancel(
 pub(crate) fn draw_tooltip(
     surface: &mut Surface,
     font: &HudFont<'_>,
+    facet: Rect,
     x: i32,
     y: i32,
     text: &str,
     gamma: Option<&GammaRamp>,
 ) {
-    let area_w = surface.width() as i32;
-    let lines = break_message(font, text, MAX_TOOLTIP_WDT);
-    let text_w = lines
-        .iter()
-        .map(|line| font.text_width(line))
-        .max()
-        .unwrap_or(0);
-    let text_h = font.line_height() * lines.len() as i32;
+    let broken = break_hud_message(font, text, tooltip_wrap_width(facet));
+    let text_w = font.text_width_markup(&broken);
+    let text_h = font.line_height() * broken.split('\n').count() as i32;
     let w = text_w + 6;
     let h = text_h + 4;
-    let ty = if y < h + 5 { y + 5 } else { y - h - 5 };
-    let tx = (x - w / 2).clamp(0, (area_w - w).max(0));
+    let (tx, ty) = tooltip_position(facet, x, y, w, h);
     fill_rect(
         surface,
         Rect::new(tx, ty, w as u32, (h - 1) as u32),
@@ -1472,44 +1468,37 @@ pub(crate) fn draw_tooltip(
         Color::new(0, 0, 0, TOOLTIP_FRAME_ALPHA),
         gamma,
     );
-    for (index, line) in lines.iter().enumerate() {
-        font.draw_with_gamma(
-            surface,
-            tx + 3,
-            ty + 1 + index as i32 * font.line_height(),
-            line,
-            TOOLTIP_TEXT_COLOR,
-            TextAlign::Left,
-            gamma,
-        );
-    }
+    font.draw_markup_with_gamma(
+        surface,
+        tx + 3,
+        ty + 1,
+        &broken,
+        TOOLTIP_TEXT_COLOR,
+        TextAlign::Left,
+        gamma,
+    );
 }
 
-/// Simple word wrap in the spirit of `CStdFont::BreakMessage`
-/// (StdFont.cpp): greedy fill by word up to `max_width` pixels.
-fn break_message(font: &HudFont<'_>, text: &str, max_width: i32) -> Vec<String> {
-    let mut lines = Vec::new();
-    for raw_line in text.split(['\n', '|']) {
-        let mut current = String::new();
-        for word in raw_line.split_whitespace() {
-            let candidate = if current.is_empty() {
-                word.to_string()
-            } else {
-                format!("{current} {word}")
-            };
-            if !current.is_empty() && font.text_width(&candidate) > max_width {
-                lines.push(std::mem::take(&mut current));
-                current = word.to_string();
-            } else {
-                current = candidate;
-            }
-        }
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+pub(crate) fn tooltip_wrap_width(facet: Rect) -> i32 {
+    MAX_TOOLTIP_WDT.min((facet.width as i32).max(50))
+}
+
+pub(crate) fn tooltip_position(
+    facet: Rect,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> (i32, i32) {
+    let bottom = facet.y.saturating_add(facet.height as i32);
+    let tooltip_y = if y < facet.y.saturating_add(height).saturating_add(5) {
+        (y + 5).min(bottom - height)
+    } else {
+        y - height - 5
+    };
+    let right = facet.x.saturating_add(facet.width as i32);
+    let max_x = (right - width).max(facet.x);
+    ((x - width / 2).clamp(facet.x, max_x), tooltip_y)
 }
 
 /// `C4GUI::Element::Draw3DFrame` (C4Gui.cpp:264-279) with the default border
@@ -2159,6 +2148,21 @@ mod tests {
         assert_eq!(layout.bounds.height as i32, expected_height);
         assert_eq!(layout.lines, 7);
         assert_eq!(layout.scroll, 0);
+    }
+
+    #[test]
+    fn tooltip_geometry_uses_facet_width_and_bottom_clamp() {
+        assert_eq!(tooltip_wrap_width(Rect::new(0, 0, 20, 100)), 50);
+        assert_eq!(tooltip_wrap_width(Rect::new(0, 0, 320, 100)), 320);
+        assert_eq!(tooltip_wrap_width(Rect::new(0, 0, 800, 100)), 500);
+
+        let facet = Rect::new(100, 20, 320, 50);
+        assert_eq!(tooltip_position(facet, 200, 40, 80, 40), (160, 30));
+        assert_eq!(
+            tooltip_position(facet, 200, facet.y + 40 + 5, 80, 40),
+            (160, 20),
+            "equality uses the above-pointer branch"
+        );
     }
 
     #[test]
