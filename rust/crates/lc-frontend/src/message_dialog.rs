@@ -8,7 +8,10 @@ use crate::classic_gui::{draw_facet_stretch, ClassicButtonState, ClassicGuiSkin,
 use crate::clonk_fonts::NativeClonkFont;
 use crate::{expand_hotkey_markup, ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use anyhow::Result;
-use lc_graphics::clonk_font::{ClonkFont, TextAlign};
+use lc_graphics::clonk_font::{
+    font_image_lookup_tag, inline_image_token, scaled_font_image_width, ClonkFont,
+    FontImageProvider, TextAlign,
+};
 use lc_graphics::{GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 use std::ops::{BitOr, BitOrAssign};
@@ -1050,6 +1053,7 @@ enum MessageToken {
         raw: String,
         width: i32,
         break_kind: Option<bool>,
+        line_character: bool,
     },
     HardBreak,
 }
@@ -1074,42 +1078,101 @@ impl MessageToken {
             output.push_str(raw);
         }
     }
+
+    fn is_line_character(&self) -> bool {
+        matches!(
+            self,
+            Self::Text {
+                line_character: true,
+                ..
+            }
+        )
+    }
 }
 
 /// `CStdFont::BreakMessage`'s character-level line breaking for ordinary GUI
 /// labels. Valid color/italic tags are widthless and their state naturally
 /// persists across the inserted newline in `ClonkFont::draw_with_gamma`.
 pub fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
-    break_message_in_units(text, max_width.max(1), |character| {
-        if character >= ' ' {
-            font.glyph(character)
-                .map_or(0, |glyph| glyph.width)
-                .saturating_add(font.h_space)
-        } else {
-            0
-        }
-    })
+    break_message_impl(font, text, max_width, None)
+}
+
+pub fn break_message_with_images(
+    font: &ClonkFont,
+    text: &str,
+    max_width: i32,
+    images: &dyn FontImageProvider,
+) -> String {
+    break_message_impl(font, text, max_width, Some(images))
+}
+
+fn break_message_impl(
+    font: &ClonkFont,
+    text: &str,
+    max_width: i32,
+    images: Option<&dyn FontImageProvider>,
+) -> String {
+    break_message_in_units(
+        text,
+        max_width.max(1),
+        |character| {
+            if character >= ' ' {
+                font.glyph(character)
+                    .map_or(0, |glyph| glyph.width)
+                    .saturating_add(font.h_space)
+            } else {
+                0
+            }
+        },
+        |tag| {
+            images
+                .and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
+                .map_or(0, |image| scaled_font_image_width(font.cell_height, image))
+        },
+    )
 }
 
 /// Scale-native `CStdFont::BreakMessage`. Character widths stay in physical
 /// numerator units until the comparison against the GUI-unit width, matching
 /// C++'s float accumulation without prematurely truncating each glyph.
-pub fn break_native_message(
+pub fn break_native_message(font: &NativeClonkFont, text: &str, max_width: i32) -> String {
+    break_native_message_impl(font, text, max_width, None)
+}
+
+pub fn break_native_message_with_images(
     font: &NativeClonkFont,
     text: &str,
     max_width: i32,
+    images: &dyn FontImageProvider,
+) -> String {
+    break_native_message_impl(font, text, max_width, Some(images))
+}
+
+fn break_native_message_impl(
+    font: &NativeClonkFont,
+    text: &str,
+    max_width: i32,
+    images: Option<&dyn FontImageProvider>,
 ) -> String {
     let units_per_pixel = font.message_width_units_per_gui_pixel();
     let max_width_units = max_width.max(1).saturating_mul(units_per_pixel);
-    break_message_in_units(text, max_width_units, |character| {
-        font.message_character_advance_units(character)
-    })
+    break_message_in_units(
+        text,
+        max_width_units,
+        |character| font.message_character_advance_units(character),
+        |tag| {
+            images
+                .and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
+                .map_or(0, |image| font.message_image_advance_units(image))
+        },
+    )
 }
 
 fn break_message_in_units(
     text: &str,
     max_width: i32,
     mut character_width: impl FnMut(char) -> i32,
+    mut image_width: impl FnMut(&str) -> i32,
 ) -> String {
     let mut tokens = Vec::new();
     let mut rest = text;
@@ -1123,11 +1186,22 @@ fn break_message_in_units(
                         raw: raw.to_string(),
                         width: 0,
                         break_kind: None,
+                        line_character: false,
                     });
                     rest = &rest[end + 1..];
                     continue;
                 }
             }
+        }
+        if let Some((tag, advance)) = inline_image_token(rest) {
+            tokens.push(MessageToken::Text {
+                raw: rest[..advance].to_string(),
+                width: image_width(tag),
+                break_kind: None,
+                line_character: true,
+            });
+            rest = &rest[advance..];
+            continue;
         }
         let character = rest.chars().next().expect("non-empty message");
         rest = &rest[character.len_utf8()..];
@@ -1147,6 +1221,7 @@ fn break_message_in_units(
             raw: character.to_string(),
             width,
             break_kind,
+            line_character: true,
         });
     }
 
@@ -1165,8 +1240,9 @@ fn break_message_in_units(
         }
         let width = token.width();
         let token_break = token.break_kind();
+        let line_character = token.is_line_character();
         line.push(token);
-        if width == 0 {
+        if !line_character {
             continue;
         }
         line_width = line_width.saturating_add(width);
@@ -1239,6 +1315,20 @@ mod tests {
     use crate::classic_gui::blacken_transparent_pixels;
     use crate::test_support::{endeavour_font_set, load_graphics_png, standard_gamma};
     use lc_graphics::{Color, PixelFormat};
+
+    struct TestFontImages {
+        image: ImageData,
+    }
+
+    impl FontImageProvider for TestFontImages {
+        fn font_image(&self, tag: &str) -> Option<lc_graphics::clonk_font::FontImageRef<'_>> {
+            (tag == "FLAM").then_some(lc_graphics::clonk_font::FontImageRef {
+                width: self.image.width(),
+                height: self.image.height(),
+                rgba: self.image.pixels(),
+            })
+        }
+    }
 
     fn ok_dialog(message: &str) -> MessageDialogState {
         MessageDialogState::regular_ok(message, "Cannot join game", MessageDialogIcon::ERROR)
@@ -1545,6 +1635,38 @@ mod tests {
         let fonts = endeavour_font_set();
         let (single_width, _) = fonts.text.measure("W", true);
         assert_eq!(break_message(&fonts.text, "WWW", single_width), "W\nWW");
+    }
+
+    #[test]
+    fn break_message_counts_inline_image_as_one_aspect_scaled_token() {
+        let mut font = ClonkFont::new(3);
+        font.add_glyph(
+            'A',
+            lc_graphics::clonk_font::GlyphCell {
+                width: 5,
+                pixels: vec![Color::opaque(255, 255, 255); 5 * 4],
+            },
+        );
+        font.add_glyph(
+            'B',
+            lc_graphics::clonk_font::GlyphCell {
+                width: 4,
+                pixels: vec![Color::opaque(255, 255, 255); 4 * 4],
+            },
+        );
+        let images = TestFontImages {
+            image: ImageData::new(2, 1, vec![255; 2 * 4]),
+        };
+
+        assert_eq!(
+            break_message_with_images(&font, "A{{FLAM}}B", 12, &images),
+            "A{{FLAM}}\nB"
+        );
+        assert_eq!(
+            break_message_with_images(&font, "A{{MISS}}B", 7, &images),
+            "A{{MISS}}B",
+            "an unresolved image is a zero-width atomic character"
+        );
     }
 
     #[test]

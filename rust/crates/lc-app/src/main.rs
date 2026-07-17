@@ -133,6 +133,9 @@ use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
     Transform, TrueTypeFont,
 };
+use lc_graphics::clonk_font::{
+    FontImageProvider, FontImageRef, font_image_lookup_tag, inline_image_token,
+};
 use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{ClientId, ParticipantKind, Tick};
 use lc_platform::{AppPaths, PathsError};
@@ -31469,6 +31472,11 @@ impl GameApp {
                             ImageData::from_arc(width, height, image.into_pixels())
                         })
                 });
+                let font_images = resolve_message_font_images(
+                    &self.engine,
+                    message,
+                    ScriptTextSpecResources::from_assets(&self.assets),
+                );
                 game_message::draw_global_message_native(
                     &mut surface,
                     &fonts.text,
@@ -31479,6 +31487,7 @@ impl GameApp {
                     message.frame_decoration.as_ref(),
                     decoration_image.as_ref(),
                     portrait.as_ref(),
+                    &font_images,
                     Some(gamma),
                 )
                 .map_err(|detail| anyhow!("native C4GameMessage render failed: {detail}"))?;
@@ -32208,6 +32217,11 @@ impl GameApp {
                             ImageData::from_arc(width, height, image.into_pixels())
                         })
                 });
+                let font_images = resolve_message_font_images(
+                    &self.engine,
+                    message,
+                    ScriptTextSpecResources::from_assets(&self.assets),
+                );
                 game_message::draw_global_message(
                     self.graphics.surface_mut(),
                     &fonts.text,
@@ -32216,6 +32230,7 @@ impl GameApp {
                     message.frame_decoration.as_ref(),
                     decoration_image.as_ref(),
                     portrait.as_ref(),
+                    &font_images,
                     Some(gamma),
                 )
                 .map_err(|detail| anyhow!("classic C4GameMessage render failed: {detail}"))?;
@@ -35798,6 +35813,49 @@ fn resolve_script_font_image(
             TextSpecIcon::Settlement => resources.score.cloned(),
         },
     }
+}
+
+#[derive(Default)]
+struct MessageFontImages(HashMap<String, ImageData>);
+
+impl FontImageProvider for MessageFontImages {
+    fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+        let image = self.0.get(tag)?;
+        Some(FontImageRef {
+            width: image.width(),
+            height: image.height(),
+            rgba: image.pixels(),
+        })
+    }
+}
+
+fn resolve_message_font_images(
+    engine: &Engine,
+    message: &lc_engine::MessageSnapshot,
+    resources: ScriptTextSpecResources<'_>,
+) -> MessageFontImages {
+    let mut images = HashMap::new();
+    for line in &message.lines {
+        let mut text = line.as_str();
+        while !text.is_empty() {
+            if let Some((spec, advance)) = inline_image_token(text) {
+                let tag = font_image_lookup_tag(spec);
+                if !images.contains_key(tag) {
+                    if let Some(image) = resolve_script_font_image(engine, tag, 0xff, resources) {
+                        images.insert(tag.to_string(), image);
+                    }
+                }
+                text = &text[advance..];
+            } else {
+                let character = text
+                    .chars()
+                    .next()
+                    .expect("nonempty message font image scan");
+                text = &text[character.len_utf8()..];
+            }
+        }
+    }
+    MessageFontImages(images)
 }
 
 fn resolve_script_menu_font_images(

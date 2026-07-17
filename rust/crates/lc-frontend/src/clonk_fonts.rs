@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
 use lc_graphics::clonk_font::{
-    compose_glyph_cell, line_height_for, ClonkFont, GlyphCell, TextAlign,
+    compose_glyph_cell, line_height_for, scaled_font_image_width, ClonkFont, FontImageProvider,
+    FontImageRef, GlyphCell, TextAlign,
 };
 use lc_graphics::{Color, GammaRamp, Surface};
 use std::collections::BTreeSet;
@@ -59,6 +60,10 @@ impl NativeClonkFont {
             .saturating_add(self.raster.h_space)
     }
 
+    pub(crate) fn message_image_advance_units(&self, image: FontImageRef<'_>) -> i32 {
+        scaled_font_image_width(self.raster.cell_height, image)
+    }
+
     /// CStdFont's internal `iLineHgt`, in physical atlas pixels.
     pub fn raster_line_height(&self) -> i32 {
         self.raster.line_height
@@ -82,7 +87,28 @@ impl NativeClonkFont {
     /// the scaled shadow and physical spacing; one final integer division is
     /// equivalent to C++'s per-glyph float division for an integer scale.
     pub fn measure(&self, text: &str, markup: bool) -> (i32, i32) {
-        let (width, height) = self.raster.measure(text, markup);
+        self.measure_impl(text, markup, None)
+    }
+
+    pub fn measure_with_images(
+        &self,
+        text: &str,
+        markup: bool,
+        images: &dyn FontImageProvider,
+    ) -> (i32, i32) {
+        self.measure_impl(text, markup, Some(images))
+    }
+
+    fn measure_impl(
+        &self,
+        text: &str,
+        markup: bool,
+        images: Option<&dyn FontImageProvider>,
+    ) -> (i32, i32) {
+        let (width, height) = images.map_or_else(
+            || self.raster.measure(text, markup),
+            |images| self.raster.measure_with_images(text, markup, images),
+        );
         let scale = self.scale as i32;
         let lines = if self.raster.line_height > 0 {
             height / self.raster.line_height
@@ -137,13 +163,70 @@ impl NativeClonkFont {
         physical_offset: (i32, i32),
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_to_physical_surface_with_offset_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            physical_offset,
+            gamma,
+            None,
+        );
+    }
+
+    /// [`Self::draw_to_physical_surface_with_offset`] with custom images.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_to_physical_surface_with_offset_and_images(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        physical_offset: (i32, i32),
+        gamma: Option<&GammaRamp>,
+        images: &dyn FontImageProvider,
+    ) {
+        self.draw_to_physical_surface_with_offset_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            physical_offset,
+            gamma,
+            Some(images),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_to_physical_surface_with_offset_impl(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        physical_offset: (i32, i32),
+        gamma: Option<&GammaRamp>,
+        images: Option<&dyn FontImageProvider>,
+    ) {
         let scale = self.scale as i32;
         let line_height = self.logical_line_height();
         let origins = text
             .split(|character: char| character == '\n' || (markup && character == '|'))
             .enumerate()
             .map(|(line_index, line)| {
-                let logical_width = self.measure(line, markup).0;
+                let logical_width = self.measure_impl(line, markup, images).0;
                 let logical_left = x.saturating_sub(match align {
                     TextAlign::Left => 0,
                     TextAlign::Center => logical_width / 2,
@@ -161,9 +244,14 @@ impl NativeClonkFont {
                 )
             })
             .collect::<Vec<_>>();
-        self.raster.draw_lines_at_origins_with_gamma(
-            surface, &origins, text, color, markup, gamma,
-        );
+        if let Some(images) = images {
+            self.raster.draw_lines_at_origins_with_gamma_and_images(
+                surface, &origins, text, color, markup, gamma, images,
+            );
+        } else {
+            self.raster
+                .draw_lines_at_origins_with_gamma(surface, &origins, text, color, markup, gamma);
+        }
     }
 
     /// `CStdDDraw::StringOut` variant. Alignment uses `GetTextExtent` (where

@@ -14,8 +14,6 @@
 //! - `<i>`/`</i>` italics: the C++ applies a shear transform
 //!   (`src/StdMarkup.cpp:24-28`); we track the tag for nesting/closing
 //!   semantics but render unsheared (no transform support).
-//! - `{{id}}` inline images (`src/StdFont.cpp:601-622,870-897`): need a font
-//!   image provider which is wired elsewhere; such sequences render literally.
 //! - FreeType rasterization: callers supply the 8-bit coverage bitmap.
 
 use crate::{Color, Surface};
@@ -165,6 +163,51 @@ pub struct GlyphCell {
     pub pixels: Vec<Color>,
 }
 
+/// Borrowed RGBA image returned by a [`FontImageProvider`].
+#[derive(Debug, Clone, Copy)]
+pub struct FontImageRef<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: &'a [u8],
+}
+
+/// Dynamic source for `{{image spec}}` runs in `CStdFont` text.
+///
+/// The provider is deliberately supplied per operation rather than stored in
+/// [`ClonkFont`]: C++ points FontRegular at the live definition list, while
+/// Rust shares immutable font atlases across scenarios.
+pub trait FontImageProvider {
+    fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>>;
+}
+
+/// Parse one C++ `{{image spec}}` token at the beginning of `text`.
+///
+/// The third opening brace suppresses recognition for this position, so
+/// `{{{ID}}` is a literal `{` followed by the `{{ID}}` token on the next
+/// parser step. Empty, malformed and unclosed tokens are ordinary text.
+pub fn inline_image_token(text: &str) -> Option<(&str, usize)> {
+    let after_open = text.strip_prefix("{{")?;
+    if after_open.is_empty() || after_open.starts_with('{') {
+        return None;
+    }
+    let close = after_open.find('}')?;
+    if close == 0 || after_open.as_bytes().get(close + 1) != Some(&b'}') {
+        return None;
+    }
+    Some((&after_open[..close], 2 + close + 2))
+}
+
+/// C++ copies at most 100 bytes of an inline image spec into its lookup
+/// buffer while consuming the complete source token. Keep Rust strings valid
+/// by backing up to the preceding UTF-8 boundary for non-legacy input.
+pub fn font_image_lookup_tag(tag: &str) -> &str {
+    let mut end = tag.len().min(100);
+    while !tag.is_char_boundary(end) {
+        end -= 1;
+    }
+    &tag[..end]
+}
+
 /// Horizontal alignment for [`ClonkFont::draw`], mirroring
 /// `STDFONT_CENTERED`/`STDFONT_RIGHTALGN` (`src/StdFont.h:30-31`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +290,25 @@ impl ClonkFont {
     /// valid tags are skipped (`src/StdFont.cpp:590`) and `'|'` breaks lines
     /// (`src/StdFont.cpp:596`).
     pub fn measure(&self, text: &str, markup: bool) -> (i32, i32) {
+        self.measure_impl(text, markup, None)
+    }
+
+    /// [`Self::measure`] with FontRegular's live custom-image provider.
+    pub fn measure_with_images(
+        &self,
+        text: &str,
+        markup: bool,
+        images: &dyn FontImageProvider,
+    ) -> (i32, i32) {
+        self.measure_impl(text, markup, Some(images))
+    }
+
+    fn measure_impl(
+        &self,
+        text: &str,
+        markup: bool,
+        images: Option<&dyn FontImageProvider>,
+    ) -> (i32, i32) {
         let mut rest = text;
         let mut row_width: i32 = 0;
         let mut width: i32 = 0;
@@ -254,6 +316,23 @@ impl ClonkFont {
         loop {
             if markup {
                 rest = skip_tags(rest); // src/StdFont.cpp:590
+            }
+            if markup {
+                if let Some((tag, advance)) = inline_image_token(rest) {
+                    let image_width = images
+                        .and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
+                        .map_or(0, |image| scaled_font_image_width(self.cell_height, image));
+                    row_width = row_width.saturating_add(image_width);
+                    rest = &rest[advance..];
+                    // GetTextExtent applies iHSpace after every recognized
+                    // token with raw text remaining, even an unresolved image
+                    // (StdFont.cpp:625-630).
+                    if !rest.is_empty() {
+                        row_width = row_width.saturating_add(self.h_space);
+                    }
+                    width = width.max(row_width);
+                    continue;
+                }
             }
             let mut chars = rest.chars();
             let Some(c) = chars.next() else { break }; // src/StdFont.cpp:592-594
@@ -310,6 +389,22 @@ impl ClonkFont {
         self.draw_with_gamma(surface, x, y, text, color, align, markup, None);
     }
 
+    /// [`Self::draw`] with FontRegular's live custom-image provider.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_images(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        images: &dyn FontImageProvider,
+    ) {
+        self.draw_with_gamma_and_images(surface, x, y, text, color, align, markup, None, images);
+    }
+
     /// [`ClonkFont::draw`] with the blit shader's per-fragment gamma lookup
     /// (StdGL.cpp:1082-1086) applied to the modulated glyph color before
     /// blending, exactly like the C++ GL pipeline.
@@ -325,10 +420,55 @@ impl ClonkFont {
         markup: bool,
         gamma: Option<&crate::GammaRamp>,
     ) {
+        self.draw_with_gamma_impl(surface, x, y, text, color, align, markup, gamma, None);
+    }
+
+    /// [`Self::draw_with_gamma`] with FontRegular's custom images.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_gamma_and_images(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        images: &dyn FontImageProvider,
+    ) {
+        self.draw_with_gamma_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            gamma,
+            Some(images),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_with_gamma_impl(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        images: Option<&dyn FontImageProvider>,
+    ) {
         let mut stack: Vec<MarkupTag> = Vec::new(); // src/StdDDraw2.cpp:1037
         let mut line_y = y;
         for line in text.split(|c: char| c == '\n' || (markup && c == '|')) {
-            self.draw_line(surface, x, line_y, line, color, align, markup, &mut stack, gamma);
+            self.draw_line(
+                surface, x, line_y, line, color, align, markup, &mut stack, gamma, images,
+            );
             // iTy += fZoom * GetLineHeight() per line (src/StdDDraw2.cpp:1039).
             line_y = line_y.saturating_add(self.line_height);
         }
@@ -349,10 +489,51 @@ impl ClonkFont {
         markup: bool,
         gamma: Option<&crate::GammaRamp>,
     ) {
+        self.draw_lines_at_origins_with_gamma_impl(
+            surface, origins, text, color, markup, gamma, None,
+        );
+    }
+
+    /// [`Self::draw_lines_at_origins_with_gamma`] with custom images.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_lines_at_origins_with_gamma_and_images(
+        &self,
+        surface: &mut Surface,
+        origins: &[(i32, i32)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        images: &dyn FontImageProvider,
+    ) {
+        self.draw_lines_at_origins_with_gamma_impl(
+            surface,
+            origins,
+            text,
+            color,
+            markup,
+            gamma,
+            Some(images),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_lines_at_origins_with_gamma_impl(
+        &self,
+        surface: &mut Surface,
+        origins: &[(i32, i32)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+        images: Option<&dyn FontImageProvider>,
+    ) {
         let mut stack: Vec<MarkupTag> = Vec::new();
-        for ((x, y), line) in origins.iter().copied().zip(
-            text.split(|character: char| character == '\n' || (markup && character == '|')),
-        ) {
+        for ((x, y), line) in origins
+            .iter()
+            .copied()
+            .zip(text.split(|character: char| character == '\n' || (markup && character == '|')))
+        {
             self.draw_line(
                 surface,
                 x,
@@ -363,6 +544,7 @@ impl ClonkFont {
                 markup,
                 &mut stack,
                 gamma,
+                images,
             );
         }
     }
@@ -380,10 +562,11 @@ impl ClonkFont {
         markup: bool,
         stack: &mut Vec<MarkupTag>,
         gamma: Option<&crate::GammaRamp>,
+        images: Option<&dyn FontImageProvider>,
     ) {
         // Alignment uses the markup-aware extent of this line
         // (src/StdFont.cpp:826-839); sx / 2 is integer division.
-        let (sx, _) = self.measure(line, markup);
+        let (sx, _) = self.measure_impl(line, markup, images);
         let mut pen_x = x - match align {
             TextAlign::Left => 0,
             TextAlign::Center => sx / 2, // src/StdFont.cpp:831
@@ -404,6 +587,39 @@ impl ClonkFont {
                     continue;
                 }
                 // Invalid tag: fall through and render '<' as text.
+            }
+            if markup && c == '{' {
+                if let Some((tag, advance)) = inline_image_token(rest) {
+                    rest = &rest[advance..];
+                    let Some(image) =
+                        images.and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
+                    else {
+                        // DrawText consumes unresolved tags without blitting
+                        // or advancing the pen (StdFont.cpp:884-892).
+                        continue;
+                    };
+                    if image.height == 0 {
+                        // A zero-height facet is the C++ provider's
+                        // unresolved sentinel and neither blits nor advances.
+                        continue;
+                    }
+                    let image_width = scaled_font_image_width(self.cell_height, image);
+                    blit_font_image(
+                        surface,
+                        image,
+                        image_width,
+                        self.cell_height,
+                        pen_x,
+                        y,
+                        image_modulation_rgb(stack, color),
+                        color[3],
+                        gamma,
+                    );
+                    pen_x = pen_x
+                        .saturating_add(image_width)
+                        .saturating_add(self.h_space);
+                    continue;
+                }
             }
             rest = after;
             let cell = self.rendered_glyph(c);
@@ -576,6 +792,127 @@ fn parse_color_tag(pars: &str) -> Option<u32> {
         })
         .map(|clr| if len <= 6 { clr | 0xff00_0000 } else { clr })
         .map(|clr| (clr & 0x00ff_ffff) | ((255 - (clr >> 24)) << 24))
+}
+
+/// Aspect-scaled width of an inline font image at `iGfxLineHgt`.
+pub fn scaled_font_image_width(cell_height: i32, image: FontImageRef<'_>) -> i32 {
+    if cell_height <= 0 || image.height == 0 {
+        return 0;
+    }
+    (i64::from(image.width) * i64::from(cell_height) / i64::from(image.height))
+        .try_into()
+        .unwrap_or(i32::MAX)
+}
+
+fn image_modulation_rgb(stack: &[MarkupTag], color: [u8; 4]) -> [u8; 3] {
+    if stack
+        .iter()
+        .any(|tag| matches!(tag, MarkupTag::TextColor(_)))
+    {
+        modulation_rgb(stack, color)
+    } else {
+        // CStdFont disables ordinary text-color modulation for custom images;
+        // only active markup or alpha fadeout affects them (StdFont.cpp:893-915).
+        [255, 255, 255]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_font_image(
+    surface: &mut Surface,
+    image: FontImageRef<'_>,
+    width: i32,
+    height: i32,
+    x: i32,
+    y: i32,
+    mod_rgb: [u8; 3],
+    color_alpha: u8,
+    gamma: Option<&crate::GammaRamp>,
+) {
+    if width <= 0 || height <= 0 || image.width == 0 || image.height == 0 {
+        return;
+    }
+    for row in 0..height as usize {
+        for col in 0..width as usize {
+            let sample_x = (col as f32 + 0.5) * image.width as f32 / width as f32 - 0.5;
+            let sample_y = (row as f32 + 0.5) * image.height as f32 / height as f32 - 0.5;
+            let sample = bilinear_font_image_sample(image, sample_x, sample_y);
+            let out_a = sample[3] * f32::from(color_alpha) / 255.0;
+            if out_a <= 0.0 {
+                continue;
+            }
+            let (Some(dx), Some(dy)) = (offset_coord(x, col), offset_coord(y, row)) else {
+                continue;
+            };
+            let Some(dst) = surface.get_pixel(dx, dy) else {
+                continue;
+            };
+            let alpha = out_a / 255.0;
+            let source = |channel: crate::gamma::GammaChannel, value: f32, modulation: u8| {
+                let value = value * f32::from(modulation) / 255.0;
+                gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value))
+            };
+            let blend = |source: f32, destination: u8| {
+                (source * alpha + f32::from(destination) * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            let blended = Color::new(
+                blend(
+                    source(crate::gamma::GammaChannel::Red, sample[0], mod_rgb[0]),
+                    dst.r,
+                ),
+                blend(
+                    source(crate::gamma::GammaChannel::Green, sample[1], mod_rgb[1]),
+                    dst.g,
+                ),
+                blend(
+                    source(crate::gamma::GammaChannel::Blue, sample[2], mod_rgb[2]),
+                    dst.b,
+                ),
+                blend(out_a, dst.a),
+            );
+            let _ = surface.set_pixel(dx, dy, blended);
+        }
+    }
+}
+
+fn bilinear_font_image_sample(image: FontImageRef<'_>, sample_x: f32, sample_y: f32) -> [f32; 4] {
+    let texel = |x: i32, y: i32| {
+        if image.width == 0 || image.height == 0 {
+            return [0.0; 4];
+        }
+        // GL_CLAMP_TO_EDGE clamps the bilinear footprint at a facet's outer
+        // edge rather than mixing it with transparent pixels.
+        let x = x.clamp(0, image.width as i32 - 1) as u32;
+        let y = y.clamp(0, image.height as i32 - 1) as u32;
+        let index = ((y * image.width + x) * 4) as usize;
+        image
+            .rgba
+            .get(index..index + 4)
+            .map(|pixel| {
+                [
+                    f32::from(pixel[0]),
+                    f32::from(pixel[1]),
+                    f32::from(pixel[2]),
+                    f32::from(pixel[3]),
+                ]
+            })
+            .unwrap_or([0.0; 4])
+    };
+    let x0 = sample_x.floor() as i32;
+    let y0 = sample_y.floor() as i32;
+    let fraction_x = sample_x - x0 as f32;
+    let fraction_y = sample_y - y0 as f32;
+    let top_left = texel(x0, y0);
+    let top_right = texel(x0 + 1, y0);
+    let bottom_left = texel(x0, y0 + 1);
+    let bottom_right = texel(x0 + 1, y0 + 1);
+    std::array::from_fn(|channel| {
+        let top = top_left[channel] * (1.0 - fraction_x) + top_right[channel] * fraction_x;
+        let bottom = bottom_left[channel] * (1.0 - fraction_x) + bottom_right[channel] * fraction_x;
+        top * (1.0 - fraction_y) + bottom * fraction_y
+    })
 }
 
 /// Blit one glyph cell at `(x, y)`, mirroring the GL character blit
@@ -770,6 +1107,23 @@ mod tests {
         font
     }
 
+    struct TestImages {
+        tag: &'static str,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
+    impl FontImageProvider for TestImages {
+        fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+            (tag == self.tag).then_some(FontImageRef {
+                width: self.width,
+                height: self.height,
+                rgba: &self.rgba,
+            })
+        }
+    }
+
     #[test]
     fn font_metrics_follow_shadow_rules() {
         let font = test_font();
@@ -800,6 +1154,45 @@ mod tests {
         // Without markup, tag characters are unknown glyphs (width 0) whose
         // h_space pulls the row negative; the max stays 0.
         assert_eq!(font.measure("<c ffffff7f>A</c>B", false), (0, 3));
+    }
+
+    #[test]
+    fn inline_images_measure_missing_provider_aspect_and_escape_like_cpp() {
+        let mut font = test_font();
+        font.add_glyph(
+            '{',
+            GlyphCell {
+                width: 2,
+                pixels: vec![Color::opaque(255, 255, 255); 2 * 4],
+            },
+        );
+        let images = TestImages {
+            tag: "FLAM",
+            width: 6,
+            height: 3,
+            rgba: vec![255; 6 * 3 * 4],
+        };
+
+        assert_eq!(font.measure_with_images("{{FLAM}}", true, &images), (8, 3));
+        assert_eq!(
+            font.measure_with_images("{{{FLAM}}", true, &images),
+            (2 + font.h_space + 8, 3),
+            "the first of three braces is literal"
+        );
+        assert_eq!(
+            font.measure("A{{MISS}}B", true).0,
+            font.measure("AB", true).0 + font.h_space,
+            "GetTextExtent applies spacing even after an unresolved image"
+        );
+
+        // With spacing neutralized, the ticket's zero-width formulation is
+        // visible directly: the missing token contributes no image width.
+        let mut no_spacing = font;
+        no_spacing.h_space = 0;
+        assert_eq!(
+            no_spacing.measure("A{{MISS}}B", true),
+            no_spacing.measure("AB", true)
+        );
     }
 
     #[test]
@@ -890,6 +1283,61 @@ mod tests {
         assert_eq!(px(&sfc, 8, 0).a, 0);
         assert_eq!(px(&sfc, 0, 3), Color::new(255, 255, 255, 255)); // cell row 3
         assert_eq!(px(&sfc, 0, 4).a, 0); // below cell_height
+    }
+
+    #[test]
+    fn draw_inline_image_scales_to_gfx_height_and_advances_pen() {
+        let font = test_font();
+        let images = TestImages {
+            tag: "FLAM",
+            width: 2,
+            height: 1,
+            rgba: [255, 0, 0, 255, 255, 0, 0, 255].to_vec(),
+        };
+        let mut sfc = surface();
+        font.draw_with_images(
+            &mut sfc,
+            0,
+            0,
+            "{{FLAM}}A",
+            WHITE,
+            TextAlign::Left,
+            true,
+            &images,
+        );
+
+        assert_eq!(px(&sfc, 0, 0), Color::opaque(255, 0, 0));
+        assert_eq!(px(&sfc, 6, 0), Color::opaque(255, 0, 0));
+        assert_eq!(px(&sfc, 7, 0), Color::opaque(255, 255, 255));
+        assert_eq!(px(&sfc, 11, 0), Color::opaque(255, 255, 255));
+        assert_eq!(px(&sfc, 12, 0).a, 0);
+        assert!(px(&sfc, 0, 3).r > 0);
+        assert_eq!(px(&sfc, 0, 4).a, 0);
+    }
+
+    #[test]
+    fn draw_zero_height_inline_image_is_unresolved_without_advance() {
+        let font = test_font();
+        let images = TestImages {
+            tag: "FLAM",
+            width: 2,
+            height: 0,
+            rgba: Vec::new(),
+        };
+        let mut sfc = surface();
+        font.draw_with_images(
+            &mut sfc,
+            0,
+            0,
+            "{{FLAM}}A",
+            WHITE,
+            TextAlign::Left,
+            true,
+            &images,
+        );
+
+        assert_eq!(px(&sfc, 4, 0), Color::opaque(255, 255, 255));
+        assert_eq!(px(&sfc, 5, 0).a, 0);
     }
 
     #[test]

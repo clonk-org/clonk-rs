@@ -13,7 +13,7 @@ use lc_engine::{
 };
 use lc_frontend::clonk_fonts::NativeClonkFont;
 use lc_frontend::ImageData;
-use lc_graphics::clonk_font::{ClonkFont, TextAlign};
+use lc_graphics::clonk_font::{ClonkFont, FontImageProvider, TextAlign};
 use lc_graphics::{GammaRamp, Rect, Surface};
 use lc_gui::Rect as GuiRect;
 
@@ -27,19 +27,21 @@ enum MessageFontMetrics<'font> {
 }
 
 impl MessageFontMetrics<'_> {
-    fn measure(&self, text: &str) -> (i32, i32) {
+    fn measure(&self, text: &str, images: &dyn FontImageProvider) -> (i32, i32) {
         match self {
-            Self::Logical(font) => font.measure(text, true),
-            Self::Native(font) => font.measure(text, true),
+            Self::Logical(font) => font.measure_with_images(text, true, images),
+            Self::Native(font) => font.measure_with_images(text, true, images),
         }
     }
 
-    fn break_message(&self, text: &str, width: i32) -> String {
+    fn break_message(&self, text: &str, width: i32, images: &dyn FontImageProvider) -> String {
         match self {
-            Self::Logical(font) => lc_frontend::message_dialog::break_message(font, text, width),
-            Self::Native(font) => {
-                lc_frontend::message_dialog::break_native_message(font, text, width)
+            Self::Logical(font) => {
+                lc_frontend::message_dialog::break_message_with_images(font, text, width, images)
             }
+            Self::Native(font) => lc_frontend::message_dialog::break_native_message_with_images(
+                font, text, width, images,
+            ),
         }
     }
 
@@ -65,7 +67,7 @@ pub(crate) fn is_supported(message: &MessageSnapshot) -> bool {
     matches!(
         message.kind,
         MessageKind::Global | MessageKind::GlobalPlayer
-    ) && !message_text(message).contains("{{")
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -77,6 +79,7 @@ pub(crate) fn draw_global_message(
     decoration: Option<&ObjectMenuFrameDecoration>,
     decoration_image: Option<&ImageData>,
     portrait: Option<&ImageData>,
+    images: &dyn FontImageProvider,
     gamma: Option<&GammaRamp>,
 ) -> Result<(), &'static str> {
     let layout = layout_global_message(
@@ -84,6 +87,7 @@ pub(crate) fn draw_global_message(
         viewport,
         message,
         decoration,
+        images,
     )?;
     draw_logical_layout(
         surface,
@@ -94,6 +98,7 @@ pub(crate) fn draw_global_message(
         decoration_image,
         portrait,
         true,
+        images,
         gamma,
     );
     Ok(())
@@ -115,6 +120,7 @@ pub(crate) fn draw_global_message_native(
     decoration: Option<&ObjectMenuFrameDecoration>,
     decoration_image: Option<&ImageData>,
     portrait: Option<&ImageData>,
+    images: &dyn FontImageProvider,
     gamma: Option<&GammaRamp>,
 ) -> Result<(), &'static str> {
     let layout = layout_global_message(
@@ -122,6 +128,7 @@ pub(crate) fn draw_global_message_native(
         viewport,
         message,
         decoration,
+        images,
     )?;
     let previous_clip = surface.clip();
     let viewport_clip = physical_rect(viewport, scale, physical_offset);
@@ -141,7 +148,7 @@ pub(crate) fn draw_global_message_native(
         let rect = physical_gui_rect(rect, scale, physical_offset);
         lc_frontend::draw_image_bilinear(surface, &rect, portrait, gamma);
     }
-    native_font.draw_to_physical_surface_with_offset(
+    native_font.draw_to_physical_surface_with_offset_and_images(
         surface,
         layout.text_x,
         layout.text_y,
@@ -151,6 +158,7 @@ pub(crate) fn draw_global_message_native(
         true,
         physical_offset,
         gamma,
+        images,
     );
     restore_clip(surface, previous_clip);
     Ok(())
@@ -161,6 +169,7 @@ fn layout_global_message(
     viewport: Rect,
     message: &MessageSnapshot,
     decoration: Option<&ObjectMenuFrameDecoration>,
+    images: &dyn FontImageProvider,
 ) -> Result<GlobalMessageLayout, &'static str> {
     if !matches!(
         message.kind,
@@ -169,9 +178,6 @@ fn layout_global_message(
         return Err("target C4GameMessage requires the target renderer");
     }
     let text = message_text(message);
-    if text.contains("{{") {
-        return Err("C4GameMessage inline font images are not implemented");
-    }
 
     let viewport_width = extent_i32(viewport.width);
     let viewport_height = extent_i32(viewport.height);
@@ -195,20 +201,20 @@ fn layout_global_message(
         .as_deref()
         .is_some_and(|spec| !spec.is_empty());
     let (draw_text, text_width, text_height) = if message.flags & FLAG_NO_BREAK != 0 {
-        let extent = metrics.measure(&text);
+        let extent = metrics.measure(&text, images);
         (text, extent.0, extent.1)
     } else {
         if portrait_requested {
             if width == 0 {
                 width = bound_by(viewport_width / 2, 50, 500.min(viewport_width - 10));
             }
-            width = width.min(metrics.measure(&text).0.saturating_add(10));
+            width = width.min(metrics.measure(&text, images).0.saturating_add(10));
         } else if width == 0 {
             width = bound_by(viewport_width - 50, 50, 500);
         } else {
             width = bound_by(width, 10, viewport_width - 10);
         }
-        let broken = metrics.break_message(&text, width);
+        let broken = metrics.break_message(&text, width, images);
         let line_count = i32::try_from(broken.split(['\n', '|']).count()).unwrap_or(i32::MAX);
         let height = metrics.break_line_height().saturating_mul(line_count);
         (broken, width, height)
@@ -311,6 +317,7 @@ fn draw_logical_layout(
     decoration_image: Option<&ImageData>,
     portrait: Option<&ImageData>,
     draw_text: bool,
+    images: &dyn FontImageProvider,
     gamma: Option<&GammaRamp>,
 ) {
     let previous_clip = surface.clip();
@@ -325,7 +332,7 @@ fn draw_logical_layout(
         lc_frontend::draw_image_bilinear(surface, rect, portrait, gamma);
     }
     if draw_text {
-        font.draw_with_gamma(
+        font.draw_with_gamma_and_images(
             surface,
             layout.text_x,
             layout.text_y,
@@ -334,6 +341,7 @@ fn draw_logical_layout(
             layout.alignment,
             true,
             gamma,
+            images,
         );
     }
     restore_clip(surface, previous_clip);
@@ -577,6 +585,23 @@ mod tests {
     use super::*;
     use lc_engine::{Vector2, FLAG_LEFT, FLAG_TOP};
 
+    #[derive(Default)]
+    struct TestFontImages {
+        rgba: Vec<u8>,
+    }
+
+    impl FontImageProvider for TestFontImages {
+        fn font_image(&self, tag: &str) -> Option<lc_graphics::clonk_font::FontImageRef<'_>> {
+            (tag == "Ico:Test" && !self.rgba.is_empty()).then_some(
+                lc_graphics::clonk_font::FontImageRef {
+                    width: 2,
+                    height: 1,
+                    rgba: &self.rgba,
+                },
+            )
+        }
+    }
+
     #[test]
     fn scale_three_tutorial01_layout_uses_native_cpp_metrics() {
         // C4GameMessage::Draw asks scale-native FontRegular for the extent and
@@ -621,12 +646,14 @@ mod tests {
             frame_decoration: Some(decoration.clone()),
             portrait: Some("Portrait:SCLK::0000ff::1".to_string()),
         };
+        let images = TestFontImages::default();
 
         let layout = layout_global_message(
             MessageFontMetrics::Native(&fonts.text),
             Rect::new(0, 0, 320, 200),
             &message,
             Some(&decoration),
+            &images,
         )
         .expect("layout Tutorial01 message");
 
@@ -642,13 +669,51 @@ mod tests {
             Rect::new(216, 56, 720, 560),
             &message,
             Some(&decoration),
+            &images,
         )
         .expect("layout Tutorial01 at the reported 1152x644 logical surface");
-        assert_eq!(
-            reported_layout.frame,
-            Some(Rect::new(576, 106, 280, 64))
-        );
+        assert_eq!(reported_layout.frame, Some(Rect::new(576, 106, 280, 64)));
         assert_eq!((reported_layout.text_x, reported_layout.text_y), (650, 106));
         assert_eq!(reported_layout.text, "Welcome to the world of Clonk.");
+    }
+
+    #[test]
+    fn tagged_global_message_is_supported_and_draws_inline_image() {
+        let message = MessageSnapshot {
+            id: 7,
+            kind: MessageKind::Global,
+            lines: vec!["{{Ico:Test}}".to_string()],
+            target: None,
+            player: None,
+            offset: Vector2::new(0, 0),
+            color: 0xffff_ffff,
+            flags: FLAG_NO_BREAK | FLAG_ALIGN_LEFT,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        };
+        assert!(is_supported(&message));
+
+        let images = TestFontImages {
+            rgba: vec![255, 0, 0, 255, 255, 0, 0, 255],
+        };
+        let font = ClonkFont::new(3);
+        let mut surface = Surface::new(64, 64, lc_graphics::PixelFormat::Rgba8888);
+        draw_global_message(
+            &mut surface,
+            &font,
+            Rect::new(0, 0, 64, 64),
+            &message,
+            None,
+            None,
+            None,
+            &images,
+            None,
+        )
+        .expect("draw tagged global message");
+
+        let pixel = surface.get_pixel(32, 57).expect("drawn image pixel");
+        assert!(pixel.r > 0 && pixel.a > 0, "inline image was not drawn");
     }
 }
