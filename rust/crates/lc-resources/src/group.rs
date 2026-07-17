@@ -1080,20 +1080,43 @@ fn sanitize_group_entry_filename_bytes(name: &[u8]) -> Vec<u8> {
 
 /// On-disk C4Group files are gzip streams whose two magic bytes are
 /// replaced with `{0x1E, 0x8C}` so stock tools leave them alone
-/// (StdGzCompressedFile.h:34, StdGzCompressedFile.cpp:62-95). Restore the
-/// real magic and inflate; `MultiGzDecoder` accepts the concatenated
-/// members C4Group appends on update.
+/// (StdGzCompressedFile.h:34, StdGzCompressedFile.cpp:62-95). C++ checks
+/// and restores those bytes at the start of every concatenated member.
 const C4GROUP_GZ_MAGIC: [u8; 2] = [0x1E, 0x8C];
 const GZ_MAGIC: [u8; 2] = [0x1F, 0x8B];
 
 fn decompress_group(mut compressed: Vec<u8>) -> Result<Vec<u8>, GroupError> {
-    compressed[0] = GZ_MAGIC[0];
-    compressed[1] = GZ_MAGIC[1];
-    let mut decoder = flate2::read::MultiGzDecoder::new(Cursor::new(compressed));
     let mut data = Vec::new();
-    decoder
-        .read_to_end(&mut data)
-        .map_err(|error| GroupError::InvalidGroup(format!("gzip decompression failed: {error}")))?;
+    let mut offset = 0;
+
+    while offset < compressed.len() {
+        match compressed.get(offset..offset + GZ_MAGIC.len()) {
+            Some(magic) if magic == C4GROUP_GZ_MAGIC => {
+                compressed[offset..offset + GZ_MAGIC.len()].copy_from_slice(&GZ_MAGIC);
+            }
+            Some(magic) if magic == GZ_MAGIC => {}
+            _ => {
+                return Err(GroupError::InvalidGroup(
+                    "gzip decompression failed: invalid gzip header".to_string(),
+                ));
+            }
+        }
+
+        let input_len = compressed.len() - offset;
+        let mut decoder = flate2::bufread::GzDecoder::new(&compressed[offset..]);
+        decoder.read_to_end(&mut data).map_err(|error| {
+            GroupError::InvalidGroup(format!("gzip decompression failed: {error}"))
+        })?;
+        let remaining = decoder.into_inner().len();
+        let consumed = input_len - remaining;
+        if consumed == 0 {
+            return Err(GroupError::InvalidGroup(
+                "gzip decompression failed: decoder made no progress".to_string(),
+            ));
+        }
+        offset += consumed;
+    }
+
     Ok(data)
 }
 
@@ -1392,6 +1415,34 @@ mod tests {
             image.extend_from_slice(data);
         }
         image
+    }
+
+    fn gzip_member(data: &[u8], magic: [u8; 2]) -> Vec<u8> {
+        let mut compressed = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap();
+        }
+        compressed[..2].copy_from_slice(&magic);
+        compressed
+    }
+
+    #[test]
+    fn decompress_group_accepts_scrambled_magic_on_every_gzip_member() {
+        let mut compressed = gzip_member(b"first", C4GROUP_GZ_MAGIC);
+        compressed.extend(gzip_member(b"second", C4GROUP_GZ_MAGIC));
+
+        assert_eq!(decompress_group(compressed).unwrap(), b"firstsecond");
+    }
+
+    #[test]
+    fn decompress_group_accepts_standard_multi_member_gzip() {
+        let mut compressed = gzip_member(b"first", GZ_MAGIC);
+        compressed.extend(gzip_member(b"second", GZ_MAGIC));
+
+        assert_eq!(decompress_group(compressed).unwrap(), b"firstsecond");
     }
 
     #[test]
