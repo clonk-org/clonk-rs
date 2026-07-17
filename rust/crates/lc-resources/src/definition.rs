@@ -5074,6 +5074,55 @@ Value=9
     }
 
     #[test]
+    fn def_core_duplicate_mass_keeps_the_first_value() {
+        let parsed = parse_def_core(b"[DefCore]\nid=DUPE\nMass=125\nMass=7\n")
+            .expect("duplicate Mass entries parse");
+
+        assert_eq!(parsed.mass, 125);
+    }
+
+    #[test]
+    fn def_core_key_and_physical_section_names_are_case_sensitive() {
+        let parsed = parse_def_core(
+            br#"[DefCore]
+id=CASE
+mass=125
+[physical]
+Energy=50000
+"#,
+        )
+        .expect("case-mismatched names remain inert");
+
+        assert_eq!(parsed.mass, 0, "lowercase mass is not the Mass field");
+        assert_eq!(
+            parsed.physical.energy, 0,
+            "lowercase [physical] is not the [Physical] section"
+        );
+    }
+
+    #[test]
+    fn def_core_category_tokens_are_case_sensitive() {
+        let parsed =
+            parse_def_core(b"[DefCore]\nid=BITS\nCategory=C4D_Structure|c4d_goal\n")
+                .expect("an unknown category token only warns");
+
+        assert_eq!(
+            parsed.category,
+            1 << 1,
+            "the mismatched token contributes no category bits"
+        );
+    }
+
+    #[test]
+    fn def_core_dollar_prefixed_numbers_use_field_defaults() {
+        let parsed = parse_def_core(b"[DefCore]\nid=NUMS\nMass=$FF\nScale=$80\n")
+            .expect("invalid numeric prefixes use field defaults");
+
+        assert_eq!(parsed.mass, 0);
+        assert_eq!(parsed.graphics_scale, 100);
+    }
+
+    #[test]
     fn parse_def_core_uses_create_name_tree_tokenization() {
         let parsed = parse_def_core(
             b"id=ROOT\n[DefCore] ; comment\nid=TOKN\nMASS=1000\nMass =100\n\
