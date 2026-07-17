@@ -2003,6 +2003,62 @@ impl Default for CrewInfoCoreFields {
     }
 }
 
+/// Output projection of `C4ObjectInfoCore::GetNextRankInfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrewNextRankInfo<'a> {
+    /// `None` means native lookup would leave the optional name output
+    /// untouched; `Some("")` represents a found or stored empty name.
+    pub name: Option<&'a str>,
+    pub experience: i32,
+}
+
+impl CrewNextRankInfo<'_> {
+    /// Native code treats only `EXP_NoPromotion` (-1) as exhausted; other
+    /// negative persisted values still report that promotion is possible.
+    pub fn promotion_possible(&self) -> bool {
+        self.experience != -1
+    }
+}
+
+impl CrewInfoCoreFields {
+    /// Resolve stored custom progression or project the supplied default rank
+    /// system at `rank + 1`, without rewriting the persisted next-rank fields.
+    pub fn next_rank_info<'a, S: AsRef<str>>(
+        &'a self,
+        rank: i32,
+        default_rank_names: &'a [S],
+        default_rank_base: i32,
+    ) -> CrewNextRankInfo<'a> {
+        if self.next_rank_exp != 0 {
+            return CrewNextRankInfo {
+                name: Some(&self.next_rank_name),
+                experience: self.next_rank_exp,
+            };
+        }
+
+        let Some(next_rank) = rank.checked_add(1) else {
+            return CrewNextRankInfo {
+                name: None,
+                experience: -1,
+            };
+        };
+        let Some(name) = usize::try_from(next_rank)
+            .ok()
+            .and_then(|rank| default_rank_names.get(rank))
+            .map(AsRef::as_ref)
+        else {
+            return CrewNextRankInfo {
+                name: None,
+                experience: -1,
+            };
+        };
+        CrewNextRankInfo {
+            name: Some(name),
+            experience: rank_experience(next_rank, default_rank_base),
+        }
+    }
+}
+
 /// One resolved C4ObjectInfo portrait. Definition-backed portraits retain
 /// their source ID; owned/custom graphics deliberately do not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7710,11 +7766,15 @@ fn fair_crew_rank(experience: i32, rank_base: i32) -> i32 {
 /// with `RankBase=1000` (C4RankSystem.cpp:226-229; C4Game.cpp:3518-3524).
 /// `C4Object::DoExperience` deliberately uses this system for the promotion
 /// threshold even when the crew definition supplies custom rank names.
-pub(crate) fn crew_rank_experience(rank: i32) -> i32 {
+fn rank_experience(rank: i32, rank_base: i32) -> i32 {
     if rank < 0 {
         return 0;
     }
-    ((rank as f64).powf(1.5) * 1000.0) as i32
+    ((rank as f64).powf(1.5) * f64::from(rank_base)) as i32
+}
+
+pub(crate) fn crew_rank_experience(rank: i32) -> i32 {
+    rank_experience(rank, 1_000)
 }
 
 /// `C4ObjectInfoCore::UpdateCustomRanks`' finite-table projection. `None`

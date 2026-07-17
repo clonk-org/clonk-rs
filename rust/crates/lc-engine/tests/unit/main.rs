@@ -45811,6 +45811,95 @@ func RemoveAndRecruit(object target) {
         }
     }
 
+    const DEFAULT_CREW_RANKS: [&str; 11] = [
+        "Clonk",
+        "Ensign",
+        "Lieutenant",
+        "Captain",
+        "Major",
+        "Lieutenant Colonel",
+        "Colonel",
+        "Brigade General",
+        "Major General",
+        "Lieutenant General",
+        "General",
+    ];
+
+    #[test]
+    fn next_rank_info_nonzero_stored_values_bypass_the_default_ranks() {
+        for (name, experience, promotion_possible) in [
+            ("Custom", 2_500, true),
+            ("", 2_500, true),
+            ("Custom", -1, false),
+            ("Odd sentinel", -2, true),
+        ] {
+            let core = CrewInfoCoreFields {
+                next_rank_name: name.to_string(),
+                next_rank_exp: experience,
+                ..CrewInfoCoreFields::default()
+            };
+            let before = core.clone();
+
+            let next = core.next_rank_info(0, &DEFAULT_CREW_RANKS, 1_000);
+
+            assert_eq!(next.name, Some(name));
+            assert_eq!(next.experience, experience);
+            assert_eq!(next.promotion_possible(), promotion_possible);
+            assert_eq!(core, before, "the query must not rewrite persisted fields");
+        }
+    }
+
+    #[test]
+    fn next_rank_info_zero_falls_back_to_default_rank_plus_one() {
+        let core = CrewInfoCoreFields {
+            next_rank_name: "persisted zero-tag name".to_string(),
+            next_rank_exp: 0,
+            ..CrewInfoCoreFields::default()
+        };
+        let before = core.clone();
+
+        let rank_zero = core.next_rank_info(0, &DEFAULT_CREW_RANKS, 1_000);
+        assert_eq!(rank_zero.name, Some("Ensign"));
+        assert_eq!(rank_zero.experience, 1_000);
+        assert!(rank_zero.promotion_possible());
+
+        let negative_rank = core.next_rank_info(-1, &DEFAULT_CREW_RANKS, 1_000);
+        assert_eq!(negative_rank.name, Some("Clonk"));
+        assert_eq!(negative_rank.experience, 0);
+        assert!(
+            negative_rank.promotion_possible(),
+            "zero experience is still a successful rank-zero fallback"
+        );
+
+        let found_empty = core.next_rank_info(-1, &[""], 1_000);
+        assert_eq!(found_empty.name, Some(""));
+        assert_eq!(found_empty.experience, 0);
+        assert!(found_empty.promotion_possible());
+        assert_eq!(core, before, "fallback lookup must remain output-only");
+    }
+
+    #[test]
+    fn next_rank_info_exhausted_default_reports_no_promotion_without_mutation() {
+        let core = CrewInfoCoreFields {
+            next_rank_name: "untouched output-only source".to_string(),
+            next_rank_exp: 0,
+            ..CrewInfoCoreFields::default()
+        };
+        let before = core.clone();
+
+        let next = core.next_rank_info(10, &DEFAULT_CREW_RANKS, 1_000);
+
+        assert_eq!(next.name, None);
+        assert_eq!(next.experience, -1);
+        assert!(!next.promotion_possible());
+
+        let overflow = core.next_rank_info(i32::MAX, &DEFAULT_CREW_RANKS, 1_000);
+        assert_eq!(overflow.name, None);
+        assert_eq!(overflow.experience, -1);
+        assert!(!overflow.promotion_possible());
+        assert_eq!(core, before, "exhaustion must not persist fallback output");
+    }
+
     #[test]
     fn object_info_core_reflects_fresh_custom_progression_and_all_scalar_fields() {
         let script = r#"#strict 2
