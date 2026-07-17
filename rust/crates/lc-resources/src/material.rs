@@ -1,6 +1,5 @@
 use crate::{Group, GroupError};
-use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -128,12 +127,21 @@ impl MaterialLibrary {
 
     pub fn from_group(group: &Group) -> Result<Self, MaterialError> {
         let mut collected = Vec::new();
-        let mut visited = HashSet::new();
-        collect_materials_recursive(group, &mut collected, &mut visited)?;
+        for entry in group.entries()? {
+            if !is_material_file_name(&entry.name_bytes) {
+                continue;
+            }
+            let bytes = group.read_entry_bytes_exact(&entry)?;
+            let text = match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(error) => String::from_utf8_lossy(&error.into_bytes()).into_owned(),
+            };
+            collected.push(MaterialParser::new(&text).parse_first()?);
+        }
         if collected.is_empty() {
             return Err(MaterialError::NotFound);
         }
-        Self::from_definitions(collected)
+        Ok(Self::from_definitions_allow_duplicates(collected))
     }
 
     /// C4MaterialMap::Load overload semantics (C4Material.cpp:263-299):
@@ -157,7 +165,7 @@ impl MaterialLibrary {
                 .collect();
             merged.splice(0..0, fresh);
         }
-        Self::from_definitions(merged)
+        Ok(Self::from_definitions_allow_duplicates(merged))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &MaterialDefinition> {
@@ -203,13 +211,7 @@ impl MaterialLibrary {
             });
 
         // Keep name lookup coherent even on the fatal partial-sort path.
-        self.by_name.clear();
-        self.by_name.extend(
-            self.materials
-                .iter()
-                .enumerate()
-                .map(|(index, material)| (normalize_key(material.name()), index)),
-        );
+        self.by_name = first_name_indices(&self.materials);
         result
     }
 
@@ -226,6 +228,26 @@ impl MaterialLibrary {
             by_name,
         })
     }
+
+    fn from_definitions_allow_duplicates(definitions: Vec<MaterialDefinition>) -> Self {
+        let by_name = first_name_indices(&definitions);
+        Self {
+            materials: definitions,
+            by_name,
+        }
+    }
+}
+
+fn first_name_indices(definitions: &[MaterialDefinition]) -> HashMap<String, usize> {
+    let mut by_name = HashMap::with_capacity(definitions.len());
+    for (index, material) in definitions.iter().enumerate() {
+        by_name.entry(normalize_key(material.name())).or_insert(index);
+    }
+    by_name
+}
+
+fn is_material_file_name(name: &[u8]) -> bool {
+    name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".c4m")
 }
 
 #[derive(Debug, Clone)]
@@ -387,31 +409,79 @@ impl<'a> MaterialParser<'a> {
 
         let mut definitions = Vec::with_capacity(self.records.len());
         for (index, record) in self.records.into_iter().enumerate() {
-            let mut name = record.name_hint.clone();
-            if let Some(values) = record.properties.get("name") {
-                if let Some(first) = values.first() {
-                    if !first.trim().is_empty() {
-                        name = Some(first.trim().to_string());
-                    }
-                }
-            }
-            let Some(name) = name else {
-                return Err(MaterialError::MissingName { index });
-            };
-            let reactions = record
-                .reactions
-                .into_iter()
-                .map(|reaction| MaterialReactionDefinition {
-                    properties: reaction.properties,
-                })
-                .collect();
-            definitions.push(MaterialDefinition {
-                name,
-                properties: record.properties,
-                reactions,
-            });
+            definitions.push(material_definition_from_record(record, index)?);
         }
         Ok(definitions)
+    }
+
+    /// C4MaterialCore compiles one `Material` namespace per `.c4m` file.
+    /// Later material namespaces are ignored, while every root `Reaction`
+    /// namespace still belongs to that single core.
+    fn parse_first(self) -> Result<MaterialDefinition, MaterialError> {
+        let mut first_material = None;
+        let mut in_first_material = false;
+        let mut reactions = Vec::new();
+        let mut current_reaction = None;
+
+        for raw_line in self.source.lines() {
+            let mut line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            line = strip_comments(line);
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(section) = parse_section_header(line) {
+                if let Some(reaction) = current_reaction.take() {
+                    reactions.push(reaction);
+                }
+                match section {
+                    SectionHeader::Material(name_hint) => {
+                        if first_material.is_none() {
+                            first_material = Some(MaterialRecord {
+                                name_hint,
+                                properties: HashMap::new(),
+                                reactions: Vec::new(),
+                            });
+                            in_first_material = true;
+                        } else {
+                            in_first_material = false;
+                        }
+                    }
+                    SectionHeader::Reaction => {
+                        current_reaction = Some(ReactionRecord::default());
+                        in_first_material = false;
+                    }
+                }
+                continue;
+            }
+
+            if let Some((key, value)) = parse_key_value(line) {
+                let target = if let Some(reaction) = current_reaction.as_mut() {
+                    Some(&mut reaction.properties)
+                } else if in_first_material {
+                    first_material
+                        .as_mut()
+                        .map(|material| &mut material.properties)
+                } else {
+                    None
+                };
+                if let Some(target) = target {
+                    target
+                        .entry(normalize_key(key))
+                        .or_insert_with(Vec::new)
+                        .push(value.trim().to_string());
+                }
+            }
+        }
+        if let Some(reaction) = current_reaction {
+            reactions.push(reaction);
+        }
+        let mut material = first_material.ok_or(MaterialError::NotFound)?;
+        material.reactions = reactions;
+        material_definition_from_record(material, 0)
     }
 
     fn finish_current(&mut self) -> Result<(), MaterialError> {
@@ -434,52 +504,34 @@ impl<'a> MaterialParser<'a> {
     }
 }
 
-fn collect_materials_recursive(
-    group: &Group,
-    out: &mut Vec<MaterialDefinition>,
-    visited: &mut HashSet<PathBuf>,
-) -> Result<(), MaterialError> {
-    for entry in group.entries()? {
-        if entry.is_directory {
-            let child = group.open_child(&entry.relative_path)?;
-            collect_materials_recursive(&child, out, visited)?;
-            continue;
+fn material_definition_from_record(
+    record: MaterialRecord,
+    index: usize,
+) -> Result<MaterialDefinition, MaterialError> {
+    let MaterialRecord {
+        name_hint,
+        properties,
+        reactions,
+    } = record;
+    let mut name = name_hint;
+    if let Some(first) = properties.get("name").and_then(|values| values.first()) {
+        if !first.trim().is_empty() {
+            name = Some(first.trim().to_string());
         }
-        if is_group_container(&entry.relative_path) {
-            let child = group.open_child(&entry.relative_path)?;
-            collect_materials_recursive(&child, out, visited)?;
-            continue;
-        }
-        if !is_material_candidate(&entry.relative_path) {
-            continue;
-        }
-        let normalized = normalize_components(&entry.relative_path);
-        if !visited.insert(normalized.clone()) {
-            continue;
-        }
-        let bytes = group.read_file(&entry.relative_path)?;
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
-        };
-        let parser = MaterialParser::new(&text);
-        let definitions = parser.parse()?;
-        out.extend(definitions);
     }
-    Ok(())
-}
-
-fn is_material_candidate(path: &Path) -> bool {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("c4m") => return true,
-        Some(ext) if ext.eq_ignore_ascii_case("txt") => {}
-        _ => return false,
-    }
-    match path.file_stem().and_then(|stem| stem.to_str()) {
-        Some(stem) if stem.eq_ignore_ascii_case("material") => true,
-        Some(_) => false,
-        None => false,
-    }
+    let Some(name) = name else {
+        return Err(MaterialError::MissingName { index });
+    };
+    Ok(MaterialDefinition {
+        name,
+        properties,
+        reactions: reactions
+            .into_iter()
+            .map(|reaction| MaterialReactionDefinition {
+                properties: reaction.properties,
+            })
+            .collect(),
+    })
 }
 
 enum SectionHeader {
@@ -595,29 +647,6 @@ fn parse_bool_flag(value: &str) -> Option<bool> {
     parse_i32(trimmed).map(|num| num != 0)
 }
 
-fn normalize_components(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            other => result.push(other),
-        }
-    }
-    result
-}
-
-fn is_group_container(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase()),
-        Some(ext) if matches!(ext.as_str(), "c4g" | "c4d" | "ocg" | "c4f" | "c4p")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +695,112 @@ mod tests {
         let water = library.get("Water").expect("water");
         assert_eq!(water.int("friction"), Some(5));
         assert_eq!(water.strings("reaction"), &["Insert"]);
+    }
+
+    #[test]
+    fn group_loads_only_top_level_c4m_first_material_and_keeps_duplicates() {
+        let mut child = crate::MutableGroup::new("Child.c4g");
+        child
+            .add_file(
+                "Hidden.c4m",
+                b"[Material]\nName=Hidden\nDensity=99\n".to_vec(),
+            )
+            .expect("add nested material");
+
+        // Use a nonstandard logical filename so pack_raw preserves this
+        // explicit physical entry order instead of applying C4FLS_Material.
+        let mut packed = crate::MutableGroup::new("Unsorted.bin");
+        packed
+            .add_file(
+                "Z.c4m",
+                b"[Material]\nName=First\nDensity=11\n\
+                  [Material]\nName=Ignored\nDensity=99\n\
+                  [Reaction]\nType=Poof\n"
+                    .to_vec(),
+            )
+            .expect("add multi-material file");
+        packed
+            .add_child("Child.c4g", child)
+            .expect("add nested group");
+        packed
+            .add_file(
+                "Material.txt",
+                b"[Material]\nName=TextOnly\nDensity=98\n".to_vec(),
+            )
+            .expect("add ignored Material.txt");
+        packed
+            .add_file(
+                "A.C4M",
+                b"[Material]\nName=Dup\nDensity=21\n".to_vec(),
+            )
+            .expect("add first duplicate");
+        packed
+            .add_file(
+                "B.c4m",
+                b"[Material]\nName=dUp\nDensity=22\n".to_vec(),
+            )
+            .expect("add second duplicate");
+        let group = Group::from_raw_memory(
+            std::path::PathBuf::from("Material.c4g"),
+            packed.pack_raw().expect("pack material group"),
+        )
+        .expect("open material group");
+
+        let library = MaterialLibrary::from_group(&group).expect("load material group");
+        assert_eq!(
+            library
+                .iter()
+                .map(MaterialDefinition::name)
+                .collect::<Vec<_>>(),
+            vec!["First", "Dup", "dUp"]
+        );
+        let first = library.get("first").expect("first material wins");
+        assert_eq!(first.int("density"), Some(11));
+        assert_eq!(first.reactions().len(), 1);
+        assert_eq!(first.reactions()[0].value("type"), Some("Poof"));
+        assert_eq!(
+            library.get("DUP").and_then(|material| material.int("density")),
+            Some(21),
+            "case-insensitive lookup resolves the lower duplicate index"
+        );
+
+        let global = MaterialLibrary::parse("[Material]\nName=Global\nDensity=30\n")
+            .expect("global material parses");
+        let merged = MaterialLibrary::from_overloaded_loads(&[&library, &global])
+            .expect("duplicate-bearing overload chain merges");
+        assert_eq!(
+            merged
+                .iter()
+                .map(MaterialDefinition::name)
+                .collect::<Vec<_>>(),
+            vec!["Global", "First", "Dup", "dUp"]
+        );
+        assert_eq!(
+            merged.get("dup").and_then(|material| material.int("density")),
+            Some(21)
+        );
+
+        let mut enumerated = library.clone();
+        enumerated
+            .sort_enumeration(&MaterialEnumeration::from_names(["dUp"]))
+            .expect("duplicate enumeration sorts");
+        assert_eq!(
+            enumerated
+                .get("dup")
+                .and_then(|material| material.int("density")),
+            Some(22),
+            "lookup follows the lower duplicate after enumeration swaps"
+        );
+    }
+
+    #[test]
+    fn aggregate_parse_keeps_duplicate_name_validation() {
+        assert!(matches!(
+            MaterialLibrary::parse(
+                "[Material]\nName=Same\n\n[Material]\nName=sAmE\n"
+            ),
+            Err(MaterialError::DuplicateName(name)) if name == "sAmE"
+        ));
     }
 
     #[test]

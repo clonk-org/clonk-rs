@@ -21605,13 +21605,15 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&materials).expect("materials dir");
         std::fs::write(materials.join("TexMap.txt"), "# dynamic slots only\n")
             .expect("write texmap");
-        std::fs::write(
-            materials.join("All.c4m"),
-            "[Material A]\nName=A\nDensity=60\nTextureOverlay=Smooth\n\n\
-             [Material B]\nName=B\nDensity=70\nTextureOverlay=Smooth\n\n\
-             [Material C]\nName=C\nDensity=80\nTextureOverlay=Smooth\n",
-        )
-        .expect("write materials");
+        for (name, density) in [("A", 60), ("B", 70), ("C", 80)] {
+            std::fs::write(
+                materials.join(format!("{name}.c4m")),
+                format!(
+                    "[Material]\nName={name}\nDensity={density}\nTextureOverlay=Smooth\n"
+                ),
+            )
+            .expect("write material");
+        }
         write_test_texture(&materials, "Smooth");
         if let Some(mat_map) = mat_map {
             std::fs::write(dir.path().join("MatMap.txt"), mat_map).expect("write MatMap");
@@ -23049,6 +23051,92 @@ public func ActualizePhase(pClonk)
             "global Water.c4m supplies slot 3 density through OverloadMaterials"
         );
         assert!(landscape.is_ift_at(5, 5));
+    }
+
+    #[test]
+    fn same_group_duplicate_materials_retain_slots_across_overload_chain() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("DuplicateMaterials.c4s");
+        let local = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&local).expect("local materials dir");
+        std::fs::write(
+            local.join("TexMap.txt"),
+            "OverloadMaterials\nOverloadTextures\n",
+        )
+        .expect("write local texmap");
+        for (file, name, density, overlay) in [
+            ("A.c4m", "Dup", 10, "Rough"),
+            ("B.c4m", "dUp", 20, "Smooth"),
+            ("C.c4m", "LocalOnly", 30, "Rough"),
+        ] {
+            std::fs::write(
+                local.join(file),
+                format!(
+                    "[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"
+                ),
+            )
+            .expect("write local material");
+        }
+        write_test_texture(&local, "Rough");
+        write_test_texture(&local, "Smooth");
+
+        let installed_root = dir.path().join("Installed");
+        let installed = installed_root.join("Material.c4g");
+        std::fs::create_dir_all(&installed).expect("installed materials dir");
+        std::fs::write(installed.join("TexMap.txt"), "# installed\n")
+            .expect("write installed texmap");
+        std::fs::write(
+            installed.join("Global.c4m"),
+            "[Material]\nName=Global\nDensity=40\nTextureOverlay=Smooth\n",
+        )
+        .expect("write installed material");
+
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let resolver = FileSystemResolver {
+            roots: vec![installed_root],
+        };
+        let classifier = build_map_pixel_classifier(&group, &resolver)
+            .expect("classifier load succeeds")
+            .expect("local texmap builds classifier");
+        let library = classifier.material_library().expect("materials loaded");
+        assert_eq!(
+            library
+                .iter()
+                .map(|material| material.name())
+                .collect::<Vec<_>>(),
+            vec!["Global", "Dup", "dUp", "LocalOnly"]
+        );
+        assert_eq!(
+            library.get("dup").and_then(|material| material.int("density")),
+            Some(10),
+            "name lookup resolves the first same-load duplicate"
+        );
+
+        let materials = crate::MaterialSet::from_resource_library(library);
+        assert_eq!(materials.len(), 4, "duplicates retain numeric slots");
+        assert_eq!(materials.id_of("DUP").map(|id| id.index()), Some(1));
+        assert_eq!(
+            materials.iter().map(|material| material.name()).collect::<Vec<_>>(),
+            vec!["Global", "Dup", "dUp", "LocalOnly"]
+        );
+
+        let duplicate_defaults = classifier
+            .state
+            .default_material_entries
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("dup"))
+            .map(|(_, slot)| *slot)
+            .collect::<Vec<_>>();
+        assert_eq!(duplicate_defaults.len(), 2);
+        assert_eq!(classifier.state.default_material_entry("dup"), Some(duplicate_defaults[0]));
+        assert_eq!(
+            classifier.state.match_texture_names[usize::from(duplicate_defaults[0])].as_deref(),
+            Some("Rough")
+        );
+        assert_eq!(
+            classifier.state.match_texture_names[usize::from(duplicate_defaults[1])].as_deref(),
+            Some("Smooth")
+        );
     }
 
     #[test]

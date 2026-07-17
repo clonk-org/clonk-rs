@@ -749,10 +749,7 @@ impl MaterialSet {
             };
             let material = Material::new(id, definition.clone());
             let key = normalize_key(material.name());
-            if by_name.contains_key(&key) {
-                continue;
-            }
-            by_name.insert(key, id);
+            by_name.entry(key).or_insert(id);
             materials.push(material);
         }
         for material in &mut materials {

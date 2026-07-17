@@ -1471,17 +1471,12 @@ impl RuntimeTexMapState {
         self.default_material_entry(material_texture).unwrap_or(0)
     }
 
+    /// Append one C4Material::DefaultMatTex row. Same-load duplicate names
+    /// retain distinct material slots; name lookup below deliberately finds
+    /// the first/lower material index.
     pub(crate) fn set_default_material_entry(&mut self, name: &str, slot: u8) {
-        if let Some((_, entry)) = self
-            .default_material_entries
-            .iter_mut()
-            .find(|(material, _)| material.eq_ignore_ascii_case(name))
-        {
-            *entry = slot;
-        } else {
-            self.default_material_entries
-                .push((name.to_string(), slot));
-        }
+        self.default_material_entries
+            .push((name.to_string(), slot));
     }
 
     pub(crate) fn default_material_entry(&self, name: &str) -> Option<u8> {
