@@ -6714,6 +6714,18 @@ fn validate_name_ex_no_empty(mut value: String) -> Result<String, ScenarioError>
     Ok(value)
 }
 
+/// Splits legacy compiler input on LF, CRLF, or lone CR without changing the
+/// physical-line count of ordinary LF/CRLF files.
+fn legacy_ini_lines(source: &str) -> impl Iterator<Item = &str> {
+    // `str::lines` recognizes LF and CRLF, but not a lone CR. Split LF first
+    // to keep CRLF as one physical line, then split any remaining bare CRs.
+    source.split_inclusive('\n').flat_map(|line| {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        line.split('\r')
+    })
+}
+
 /// Reads the first exact `[Parameters] MaxPlayers` value. The compiler's
 /// scenario-derived default is `C4S.Head.MaxPlayer`; Parameters.txt may
 /// replace it before offline players are admitted (pristine 9ffa0a5d
@@ -6726,8 +6738,8 @@ fn parse_legacy_parameters_max_players(
     let mut in_parameters = false;
     let mut saw_parameters = false;
 
-    for raw_line in text.lines() {
-        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
+    for raw_line in legacy_ini_lines(&text) {
+        let mut line = raw_line.trim();
         if line.is_empty()
             || line.starts_with(';')
             || line.starts_with('#')
@@ -7468,7 +7480,7 @@ fn parse_legacy_team_metadata_source(
     let mut current_team: Option<LegacyTeamBuilder> = None;
     let mut unsupported_team_distribution = None;
 
-    for (index, raw_line) in source.lines().enumerate() {
+    for (index, raw_line) in legacy_ini_lines(source).enumerate() {
         let indent = raw_line
             .as_bytes()
             .iter()
@@ -7771,8 +7783,7 @@ impl LegacyIniTree {
             }],
         };
         let mut current = 0;
-        for raw_line in source.lines() {
-            let line = raw_line.trim_start_matches('\u{feff}');
+        for line in legacy_ini_lines(source) {
             let indent = line
                 .as_bytes()
                 .iter()
@@ -14968,6 +14979,67 @@ RandomTeamCount=2
     }
 
     #[test]
+    fn legacy_teams_bom_prefixed_root_header_is_skipped_like_cpp() {
+        let plain = parse_legacy_teams_source(
+            "[Teams]\nActive=0\nCustom=0\n  [Team]\n  id=7\n  Name=Visible\n",
+        );
+        assert!(!plain.active);
+        assert!(!plain.custom);
+        assert_eq!(plain.teams.len(), 1);
+        assert_eq!(plain.teams[0].id(), 7);
+
+        let bom = parse_legacy_teams_source(
+            "\u{feff}[Teams]\r\nActive=0\r\nCustom=0\r\n  [Team]\r\n  id=7\r\n  Name=Hidden\r\n",
+        );
+        assert!(bom.active, "the skipped root header keeps file defaults");
+        assert!(bom.custom);
+        assert!(bom.teams.is_empty());
+    }
+
+    #[test]
+    fn legacy_team_metadata_accepts_lf_crlf_and_cr_line_endings() {
+        let lf = concat!(
+            "[Teams]\n",
+            "Active=0\n",
+            "LastTeamID=7\n",
+            "  [Team]\n",
+            "  id=3\n",
+            "  Name=Third\n",
+            "  PlayerCount=2\n",
+            "  Players=9,4\n",
+        );
+        let crlf = lf.replace('\n', "\r\n");
+        let cr = lf.replace('\n', "\r");
+        let expected = parse_legacy_team_metadata_source(&crlf)
+            .expect("CRLF exact Teams.txt metadata parses");
+
+        for (label, source) in [("LF", lf), ("CR", cr.as_str())] {
+            let parsed = parse_legacy_team_metadata_source(source)
+                .unwrap_or_else(|error| panic!("{label} exact Teams.txt parses: {error}"));
+            assert_eq!(parsed.metadata, expected.metadata, "{label} metadata");
+            assert_eq!(parsed.random_color_team_id, expected.random_color_team_id);
+            assert_eq!(
+                parsed.unsupported_team_distribution,
+                expected.unsupported_team_distribution
+            );
+        }
+
+        let invalid_lf = "[Teams]\n  [Team]\n  id=broken\n";
+        for (label, source) in [
+            ("LF", invalid_lf.to_string()),
+            ("CRLF", invalid_lf.replace('\n', "\r\n")),
+            ("CR", invalid_lf.replace('\n', "\r")),
+        ] {
+            let error = parse_legacy_team_metadata_source(&source)
+                .expect_err("invalid team id must fail");
+            assert!(
+                error.to_string().contains("Teams.txt line 3:"),
+                "{label} diagnostics preserve physical line numbers: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_lobby_projection_keeps_scenario_parameter_and_team_boundaries() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
@@ -15533,6 +15605,36 @@ RandomTeamCount=2
     }
 
     #[test]
+    fn legacy_scenario_line_endings_match_cpp() {
+        let lf = concat!(
+            "[Head]\n",
+            "Title=Line Endings\n",
+            "MaxPlayer=4\n",
+            "\n",
+            "[Game]\n",
+            "Goals=MELE=1\n",
+            "\n",
+            "[Landscape]\n",
+            "MapWidth=80\n",
+            "MapHeight=20\n",
+            "MapZoom=3\n",
+        );
+        let crlf = lf.replace('\n', "\r\n");
+        let cr = lf.replace('\n', "\r");
+        let expected = parse_legacy_scenario_text(&crlf).expect("CRLF Scenario.txt parses");
+
+        for (label, source) in [("LF", lf), ("CR", cr.as_str())] {
+            let parsed = parse_legacy_scenario_text(source)
+                .unwrap_or_else(|error| panic!("{label} Scenario.txt parses: {error}"));
+            assert_eq!(parsed.sections, expected.sections, "{label} section tree");
+            assert_eq!(parsed.title.as_deref(), Some("Line Endings"));
+            assert_eq!(parsed.core.head.max_player, 4);
+            assert_eq!(parsed.core.landscape.map_width.std, 80);
+            assert_eq!(parsed.ground_height_hint, Some(60));
+        }
+    }
+
+    #[test]
     fn parameters_recover_containers_validate_clients_and_sort_by_id() {
         let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n")
             .expect("default core");
@@ -15567,6 +15669,30 @@ RandomTeamCount=2
         assert_eq!(parameters.clients()[1].id(), 9);
         assert_eq!(parameters.clients()[1].name(), "Unknown");
         assert_eq!(parameters.clients()[1].nick(), "Unknown");
+    }
+
+    #[test]
+    fn legacy_parameters_preflight_accepts_cpp_line_endings_and_rejects_bom_header() {
+        for source in [
+            "[Parameters]\nMaxPlayers=5\n",
+            "[Parameters]\r\nMaxPlayers=5\r\n",
+            "[Parameters]\rMaxPlayers=5\r",
+        ] {
+            assert_eq!(
+                parse_legacy_parameters_max_players(source.as_bytes(), 12)
+                    .expect("Parameters.txt preflight parses"),
+                5
+            );
+        }
+
+        assert_eq!(
+            parse_legacy_parameters_max_players(
+                "\u{feff}[Parameters]\rMaxPlayers=5\r".as_bytes(),
+                12,
+            )
+            .expect("BOM-prefixed Parameters.txt keeps the scenario default"),
+            12
+        );
     }
 
     #[test]
