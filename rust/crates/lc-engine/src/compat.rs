@@ -26857,9 +26857,10 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// FnGetTexture (C4Script.cpp:2222-2232): unlike GetMaterial/GBack*, x/y
 /// are GLOBAL even with an object context. PixCol2Tex strips IFT, then the
-/// live callback TextureMap supplies the exact texture name. Parser-time
-/// allocations are immediately visible; deferred DrawMap pixel writes remain
-/// the explicitly logged same-callback preview gap.
+/// live callback TextureMap supplies the raw entry texture name (presentation
+/// may resolve liquid Smooth through the Liquid image). Parser-time allocations
+/// are immediately visible; deferred DrawMap pixel writes remain the explicitly
+/// logged same-callback preview gap.
 fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetTexture", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "GetTexture", "y")?;
@@ -26888,7 +26889,7 @@ fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
         let texture = texmap
-            .texture_names
+            .match_texture_names
             .get(texture_index)
             .and_then(Option::as_deref)
             .unwrap_or_default();
@@ -56443,6 +56444,85 @@ public func RejectConstruction(x, y, builder)
             result.expect("GetTexture succeeds"),
             Value::Array(vec![
                 Value::String("Rough".to_string()),
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+    }
+
+    #[test]
+    fn get_texture_returns_raw_entry_name_without_changing_render_remap() {
+        // C4TexMapEntry::Init remaps liquid Smooth to the Liquid SURFACE but
+        // retains Texture="Smooth" for FnGetTexture (C4Texture.cpp:78-82;
+        // C4Script.cpp:2222-2232). An explicitly declared Liquid entry keeps
+        // that raw name, while sky and unmapped slots still return nil.
+        let mut densities = vec![0; 128];
+        densities[3] = 25;
+        densities[25] = 25;
+        let mut material_names = vec![None; 128];
+        material_names[3] = Some("Water".to_string());
+        material_names[25] = Some("Water".to_string());
+        let mut render_texture_names = vec![None; 128];
+        render_texture_names[3] = Some("Liquid".to_string());
+        render_texture_names[25] = Some("Liquid".to_string());
+        let mut raw_texture_names = vec![None; 128];
+        raw_texture_names[3] = Some("Liquid".to_string());
+        raw_texture_names[25] = Some("Smooth".to_string());
+        let texmap = crate::landscape::RuntimeTexMapState {
+            densities: densities.clone(),
+            material_names: material_names.clone(),
+            texture_names: render_texture_names.clone(),
+            match_texture_names: raw_texture_names,
+            shapes: vec![None; 128],
+            materials: Vec::new(),
+            texture_inventory: vec!["Liquid".to_string()],
+            default_material_entries: Vec::new(),
+            material_crossmap_entries: Vec::new(),
+        };
+        let mut landscape = Landscape::new(4, vec![1; 4]).expect("landscape builds");
+        landscape.set_world_height(1);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            4,
+            1,
+            vec![25, 3, 0, 7],
+            densities,
+            material_names,
+            render_texture_names,
+        ));
+        assert_eq!(
+            landscape
+                .pixel_grid()
+                .expect("pixel grid")
+                .texture_names()[25]
+                .as_deref(),
+            Some("Liquid"),
+            "the frontend still sees the remapped Liquid render surface"
+        );
+        landscape.set_raster_state(crate::landscape::LandscapeRasterState::new(1, 0, texmap));
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_texture(&[Value::Int(0), Value::Int(0)])?,
+                get_texture(&[Value::Int(1), Value::Int(0)])?,
+                get_texture(&[Value::Int(2), Value::Int(0)])?,
+                get_texture(&[Value::Int(3), Value::Int(0)])?,
+            ]))
+        });
+        assert_eq!(
+            result.expect("GetTexture succeeds"),
+            Value::Array(vec![
+                Value::String("Smooth".to_string()),
+                Value::String("Liquid".to_string()),
                 Value::Nil,
                 Value::Nil,
             ])
