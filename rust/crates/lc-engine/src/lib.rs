@@ -10642,6 +10642,7 @@ impl Definition {
         let mut definition =
             Definition::from_script(resource.core.id.clone(), name, resource.script.combined())?;
         definition.description = resource.description().map(str::to_owned);
+        definition.set_clonk_names(resource.clonk_names.clone());
         // Real content gets the C++ callback arguments (no parameters;
         // AbortCall gets the last phase — C4Object.cpp:4154-4182).
         definition.set_c4_callback_convention(true);

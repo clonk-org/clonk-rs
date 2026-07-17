@@ -138,6 +138,7 @@ struct ScenarioDefinition {
     id: String,
     name: Option<String>,
     description: Option<String>,
+    clonk_names: Option<String>,
     script: String,
     actions: Option<DefinitionActions>,
     crew_member: bool,
@@ -164,7 +165,6 @@ struct ScenarioDefinition {
     rank_base: Option<i32>,
     rank_symbol_count: Option<u32>,
     resource_group: Option<Group>,
-    resource_components: Option<ComponentGroups>,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
     /// DefCore shape vertices + rect (the spawn shape; task #15 carries
@@ -3184,11 +3184,10 @@ impl Scenario {
                         .collect(),
                 );
             }
-            // ClonkNames{lang}.txt|ClonkNames.txt (C4CFN_ClonkNames,
-            // C4Def.cpp:645-652): the language-suffixed list first, then
-            // the plain one. Only US is consulted until the language
-            // config is ported.
-            compiled.set_clonk_names(load_definition_clonk_names(definition));
+            // C4Def loads ClonkNames with the configured language sequence
+            // while loading the definition (C4Def.cpp:641-657). Keep that
+            // frozen selection instead of rereading resources at apply time.
+            compiled.set_clonk_names(definition.clonk_names.clone());
             compiled.set_movement_profile(definition.movement);
             compiled.set_category(definition.category);
             compiled.set_value(
@@ -3535,11 +3534,9 @@ impl Scenario {
                     match group.open_child(parent) {
                         Ok(def_group) => match ResourceDefinitionData::load(&def_group) {
                             Ok(resource) => {
-                                let components = ComponentGroups::local(&def_group);
                                 base_definition = Some(scenario_definition_from_resource(
                                     resource,
                                     Some(def_group),
-                                    Some(components),
                                 ));
                             }
                             Err(ResourceDefinitionError::DefCoreMissing) => {}
@@ -3564,6 +3561,7 @@ impl Scenario {
                     id: id.clone(),
                     name: name_override.clone(),
                     description: None,
+                    clonk_names: None,
                     script: script_source,
                     actions: None,
                     crew_member,
@@ -3587,7 +3585,6 @@ impl Scenario {
                     rank_base: None,
                     rank_symbol_count: None,
                     resource_group: None,
-                    resource_components: None,
                     components: Vec::new(),
                     line_connect: 0,
                     vertices: Vec::new(),
@@ -12185,11 +12182,8 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                 ) {
                     Ok(resource) => {
                         primary_definition = true;
-                        let mut definition = scenario_definition_from_resource(
-                            resource,
-                            Some(group.clone()),
-                            Some(components.clone()),
-                        );
+                        let mut definition =
+                            scenario_definition_from_resource(resource, Some(group.clone()));
                         definition.script = localize_script_source_with_components(
                             &components,
                             &definition.script,
@@ -12270,7 +12264,6 @@ fn warn_rejected_definition(group: &Group, error: &ResourceDefinitionError) {
 fn scenario_definition_from_resource(
     resource: ResourceDefinitionData,
     source_group: Option<Group>,
-    source_components: Option<ComponentGroups>,
 ) -> ScenarioDefinition {
     let description = resource.description().map(str::to_owned);
     let ResourceDefinitionData {
@@ -12290,6 +12283,7 @@ fn scenario_definition_from_resource(
         rank_names,
         rank_base,
         rank_symbol_count,
+        clonk_names,
     } = resource;
     let actions = action_map.map(|map| convert_action_map(&map));
     let full_core = core.clone();
@@ -12298,6 +12292,7 @@ fn scenario_definition_from_resource(
         id: core.id,
         name: core.name,
         description,
+        clonk_names,
         script: script.combined().to_string(),
         actions,
         crew_member: core.crew_member != 0,
@@ -12321,7 +12316,6 @@ fn scenario_definition_from_resource(
         rank_base,
         rank_symbol_count,
         resource_group: source_group,
-        resource_components: source_components,
         components: core
             .components
             .into_iter()
@@ -12335,38 +12329,6 @@ fn scenario_definition_from_resource(
         shape: core.shape,
         core: Some(full_core),
     }
-}
-
-/// C4Def first gates ClonkNames loading on a local
-/// `FindEntry("ClonkNames*.txt")`, then performs the selected component's
-/// `LoadEx` search across the local group and language packs
-/// (C4Def.cpp:642-655). Keep that seemingly redundant local marker gate:
-/// a pack-only ClonkNames component must not create an owned name list.
-fn load_definition_clonk_names(definition: &ScenarioDefinition) -> Option<String> {
-    let local = definition.resource_group.as_ref()?;
-    let has_local_marker = local.entries().ok()?.into_iter().any(|entry| {
-        if entry.is_directory || entry.relative_path.components().count() != 1 {
-            return false;
-        }
-        let name = entry
-            .relative_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        name.starts_with("clonknames") && name.ends_with(".txt")
-    });
-    if !has_local_marker {
-        return None;
-    }
-
-    let components = definition.resource_components.as_ref()?;
-    for candidate in ["ClonkNamesUS.txt", "ClonkNames.txt"] {
-        if let Ok(Some(component)) = components.read(candidate) {
-            return Some(String::from_utf8_lossy(&component.bytes).into_owned());
-        }
-    }
-    None
 }
 
 fn convert_action_map(map: &ResourceActionMap) -> DefinitionActions {
@@ -16883,6 +16845,7 @@ global func Step(state, frame, random)
                 id: "Mover".into(),
                 name: Some("Mover".into()),
                 description: None,
+                clonk_names: None,
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
@@ -16906,7 +16869,6 @@ global func Step(state, frame, random)
                 rank_base: None,
                 rank_symbol_count: None,
                 resource_group: None,
-                resource_components: None,
                 components: Vec::new(),
                 line_connect: 0,
                 vertices: Vec::new(),
@@ -17012,6 +16974,7 @@ global func Step(state, frame, random)
                 id: "Mover".into(),
                 name: Some("Mover".into()),
                 description: None,
+                clonk_names: None,
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
@@ -17035,7 +16998,6 @@ global func Step(state, frame, random)
                 rank_base: None,
                 rank_symbol_count: None,
                 resource_group: None,
-                resource_components: None,
                 components: Vec::new(),
                 line_connect: 0,
                 vertices: Vec::new(),
@@ -17706,12 +17668,17 @@ global func Step(state, frame, random)
             "Pack One\nPack Two\n",
         )
         .expect("pack ClonkNames component");
+        std::fs::write(
+            pack_definition.join("ClonkNamesDE.txt"),
+            b"Pack J\xfcrgen\n",
+        )
+        .expect("German pack ClonkNames component");
         let packs = LanguagePacks::discover(
             std::slice::from_ref(&language_container),
             &[dir.path().to_path_buf()],
         );
-        let load = || {
-            Scenario::load_from_path_with(
+        let load = |languages: &[&str]| {
+            Scenario::load_from_path_with_languages(
                 &scenario_dir,
                 &LanguagePackResolver {
                     filesystem: FileSystemResolver {
@@ -17719,12 +17686,13 @@ global func Step(state, frame, random)
                     },
                     language_packs: packs.clone(),
                 },
+                languages,
             )
             .expect("scenario loads")
         };
 
         let mut without_marker = Engine::with_seed(0);
-        load()
+        load(&["DE", "US"])
             .apply(&mut without_marker)
             .expect("pack-only ClonkNames scenario applies");
         assert_eq!(
@@ -17737,20 +17705,32 @@ global func Step(state, frame, random)
         );
 
         std::fs::write(
-            definition_dir.join("ClonkNamesDE.txt"),
+            definition_dir.join("ClonkNamesFI.txt"),
             "local marker for an unselected language\n",
         )
         .expect("local ClonkNames marker");
-        let mut with_marker = Engine::with_seed(0);
-        load()
-            .apply(&mut with_marker)
+        let mut us_first = Engine::with_seed(0);
+        load(&["US", "DE"])
+            .apply(&mut us_first)
             .expect("marker-enabled ClonkNames scenario applies");
         assert_eq!(
-            with_marker
+            us_first
                 .definitions
                 .get(&DefinitionId::from("GOOD"))
                 .and_then(|definition| definition.clonk_names()),
             Some("Pack One\nPack Two\n")
+        );
+
+        let mut de_first = Engine::with_seed(0);
+        load(&["DE", "US"])
+            .apply(&mut de_first)
+            .expect("German-first ClonkNames scenario applies");
+        assert_eq!(
+            de_first
+                .definitions
+                .get(&DefinitionId::from("GOOD"))
+                .and_then(|definition| definition.clonk_names()),
+            Some("Pack Jürgen\n")
         );
     }
 

@@ -70,6 +70,10 @@ pub struct Definition {
     /// default to 1000, matching `C4RankSystem`; invalid or absent components
     /// have no definition-local base.
     pub rank_base: Option<i32>,
+    /// Raw selected `ClonkNames{language}.txt|ClonkNames.txt` contents.
+    /// Loading remains gated by a local `ClonkNames*.txt` entry even when a
+    /// language-pack component wins the candidate search (C4Def.cpp:641-657).
+    pub clonk_names: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +146,11 @@ impl Definition {
             .map(|bytes| parse_act_map(&bytes))
             .transpose()?;
         script.definition_description = load_definition_description(components, languages)?;
+        let clonk_names = if has_local_clonk_name_file(group)? {
+            load_definition_clonk_names(components, languages)?
+        } else {
+            None
+        };
 
         let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner)?;
@@ -204,6 +213,7 @@ impl Definition {
             rank_symbol_count,
             rank_names,
             rank_base,
+            clonk_names,
         })
     }
 
@@ -226,8 +236,7 @@ fn load_definition_description<S: AsRef<str>>(
         selected = components.read("Desc.txt")?;
     } else {
         for language in languages {
-            let code = lc_script::c4_string_bytes(language.as_ref());
-            let code = lc_script::c4_string_from_bytes(&code[..code.len().min(2)]);
+            let code = component_language_code(language.as_ref());
             let candidate = format!("Desc{code}.txt");
             if let Some(component) = components.read(candidate)? {
                 selected = Some(component);
@@ -240,9 +249,45 @@ fn load_definition_description<S: AsRef<str>>(
     };
 
     let description = decode_legacy_script_text(&component.bytes)
-        .trim()
+        .trim_matches(|character: char| character.is_ascii_whitespace())
         .to_string();
     Ok((!description.is_empty()).then_some(description))
+}
+
+/// C4ComponentHost inserts at most two native bytes from each comma-separated
+/// language segment (`SCopySegment(..., 2)`, C4ComponentHost.cpp:70-79).
+fn component_language_code(language: &str) -> String {
+    let code = lc_script::c4_string_bytes(language);
+    let visible = code.iter().position(|byte| *byte == 0).unwrap_or(code.len());
+    lc_script::c4_string_from_bytes(&code[..visible.min(2)])
+}
+
+/// C4Def gates ClonkNames loading on a local `ClonkNames*.txt` wildcard
+/// match before `LoadEx` may cross-load the selected component from a pack.
+fn has_local_clonk_name_file(group: &Group) -> Result<bool, DefinitionError> {
+    const PREFIX: &[u8] = b"ClonkNames";
+    const SUFFIX: &[u8] = b".txt";
+
+    Ok(group.entries()?.into_iter().any(|entry| {
+        let name = entry.name_bytes;
+        name.len() >= PREFIX.len() + SUFFIX.len()
+            && name[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+            && name[name.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX)
+    }))
+}
+
+fn load_definition_clonk_names<S: AsRef<str>>(
+    components: &ComponentGroups,
+    languages: &[S],
+) -> Result<Option<String>, DefinitionError> {
+    Ok(first_localized_component(components, "ClonkNames", languages)?.map(|component| {
+        let visible = component
+            .bytes
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default();
+        decode_legacy_script_text(visible)
+    }))
 }
 
 /// C4Def performs this local wildcard probe before RankSystem::LoadEx. A
@@ -269,15 +314,22 @@ fn load_definition_name<S: AsRef<str>>(
         return Ok(None);
     };
     let text = decode_legacy_script_text(&component.bytes);
-    Ok(languages.iter().find_map(|language| {
-        let needle = format!("{}:", language.as_ref());
+    let localized_name = |code: &str| {
+        let needle = format!("{code}:");
         text.find(&needle).and_then(|position| {
             let value = &text[position + needle.len()..];
             let end = value.find(['\r', '\n']).unwrap_or(value.len());
             let value = value[..end].to_string();
             (!value.is_empty()).then_some(value)
         })
-    }))
+    };
+    if languages.is_empty() {
+        Ok(localized_name(""))
+    } else {
+        Ok(languages.iter().find_map(|language| {
+            localized_name(&component_language_code(language.as_ref()))
+        }))
+    }
 }
 
 /// Selects `Stem{language}.txt|Stem.txt` with the same filename-first,
@@ -290,7 +342,7 @@ fn first_localized_component<S: AsRef<str>>(
 ) -> Result<Option<LoadedComponent>, DefinitionError> {
     for candidate in languages
         .iter()
-        .map(|language| format!("{stem}{}.txt", language.as_ref()))
+        .map(|language| format!("{stem}{}.txt", component_language_code(language.as_ref())))
         .chain(std::iter::once_with(|| format!("{stem}.txt")))
     {
         if let Some(component) = components.read(candidate)? {
@@ -4678,6 +4730,13 @@ HideHUDElements=Portrait|Bogus|Inventory
         let definition = Definition::load(&group).expect("load definition");
 
         assert_eq!(definition.description(), Some("A safe home base."));
+
+        // StdStrBuf::TrimSpaces applies bytewise C-locale isspace; a CP1252
+        // non-breaking space survives even after EnsureUnicode converts it.
+        fs::write(def_dir.join("DescUS.txt"), b"\xa0Kept\xa0")
+            .expect("non-ASCII description whitespace");
+        let definition = Definition::load(&group).expect("reload definition");
+        assert_eq!(definition.description(), Some("\u{a0}Kept\u{a0}"));
     }
 
     #[test]
@@ -4711,6 +4770,55 @@ HideHUDElements=Portrait|Bogus|Inventory
         let german_fallback = Definition::load_with_languages(&de_only, &["US", "DE"])
             .expect("load German second candidate");
         assert_eq!(german_fallback.description(), Some("Nur Deutsch"));
+    }
+
+    #[test]
+    fn definition_clonk_names_follow_language_sequence_before_plain_fallback() {
+        // C4Def::Load gates on a local ClonkNames*.txt marker, then LoadEx
+        // tries ClonkNames{lang}.txt for each two-byte language code before
+        // the plain component (C4Def.cpp:641-657; C4ComponentHost.cpp:65-94).
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Crew.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=CREW\n")
+            .expect("DefCore");
+        fs::write(def_dir.join("ClonkNamesDE.txt"), b"J\xfcrgen\n")
+            .expect("German clonk names");
+        fs::write(def_dir.join("ClonkNamesUS.txt"), b"John\n")
+            .expect("US clonk names");
+        fs::write(def_dir.join("ClonkNamesD.txt"), b"Nul Code\n")
+            .expect("single-byte language code clonk names");
+        fs::write(def_dir.join("ClonkNames.txt"), b"Plain\n")
+            .expect("plain clonk names");
+        let group = Group::open(&def_dir).expect("open definition");
+
+        let german = Definition::load_with_languages(&group, &["DE", "US"])
+            .expect("load German-first definition");
+        assert_eq!(german.clonk_names.as_deref(), Some("Jürgen\n"));
+
+        let truncated = Definition::load_with_languages(&group, &["DE-extra"])
+            .expect("language code truncates to two native bytes");
+        assert_eq!(truncated.clonk_names.as_deref(), Some("Jürgen\n"));
+
+        let nul_code = Definition::load_with_languages(&group, &["D\0E"])
+            .expect("language code stops at its native NUL");
+        assert_eq!(nul_code.clonk_names.as_deref(), Some("Nul Code\n"));
+
+        let plain = Definition::load_with_languages(&group, &["FI"])
+            .expect("load plain fallback");
+        assert_eq!(plain.clonk_names.as_deref(), Some("Plain\n"));
+
+        fs::write(def_dir.join("ClonkNamesUS.txt"), b"Before\0After\n")
+            .expect("NUL-terminated clonk names");
+        let nul_terminated = Definition::load_with_languages(&group, &["US"])
+            .expect("load NUL-terminated component");
+        assert_eq!(nul_terminated.clonk_names.as_deref(), Some("Before"));
+
+        fs::write(def_dir.join("ClonkNamesUS.txt"), b"\0After")
+            .expect("leading-NUL clonk names");
+        let empty_owned = Definition::load_with_languages(&group, &["US"])
+            .expect("a nonzero component with an empty C string still loads");
+        assert_eq!(empty_owned.clonk_names.as_deref(), Some(""));
     }
 
     #[test]
@@ -4815,6 +4923,12 @@ HideHUDElements=Portrait|Bogus|Inventory
         let german = Definition::load_with_languages(&group, &["DE", "US"])
             .expect("load German definition name");
         assert_eq!(german.core.name.as_deref(), Some("Hütte"));
+        let truncated = Definition::load_with_languages(&group, &["DE-extra", "US"])
+            .expect("truncate the definition-name language code too");
+        assert_eq!(truncated.core.name.as_deref(), Some("Hütte"));
+        let empty = Definition::load_with_languages(&group, &[] as &[&str])
+            .expect("empty language sequence uses one empty code");
+        assert_eq!(empty.core.name.as_deref(), Some("Hütte"));
     }
 
     #[test]
