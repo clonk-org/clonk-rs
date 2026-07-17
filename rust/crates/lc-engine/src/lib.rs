@@ -26311,6 +26311,15 @@ impl Engine {
             .is_some_and(|definition| definition.stretch_growth())
     }
 
+    /// DefCore `Rotate` presentation metadata. Unlike OCF_Rotate this stays
+    /// true for construction values at or below 100, where C4Object still
+    /// rotates its live Shape (src/C4Object.cpp:336-340,576-580).
+    pub fn definition_rotateable(&self, definition_id: &str) -> bool {
+        self.definitions
+            .get(definition_id)
+            .is_some_and(|definition| definition.rotateable() > 0)
+    }
+
     pub fn definition_action_graphics(
         &self,
         definition_id: &str,

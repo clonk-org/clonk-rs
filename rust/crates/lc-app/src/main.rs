@@ -15673,7 +15673,11 @@ impl GameApp {
 
     fn rebuild_definition_sprites(&mut self) {
         let mut sprites = self.assets.base_sprite_map().clone();
+        let mut rotateable_definitions = HashSet::new();
         for definition_id in self.engine.definition_ids() {
+            if self.engine.definition_rotateable(definition_id) {
+                rotateable_definitions.insert(definition_id.to_string());
+            }
             let actions = self
                 .engine
                 .definition_action_graphics(definition_id)
@@ -15751,6 +15755,8 @@ impl GameApp {
                 }
             }
         }
+        self.graphics
+            .set_rotateable_definitions(rotateable_definitions);
         if sprites != self.object_sprites {
             self.object_sprites = sprites;
             self.update_sprite_cache();

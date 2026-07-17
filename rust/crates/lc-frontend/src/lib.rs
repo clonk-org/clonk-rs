@@ -2062,6 +2062,7 @@ pub struct GraphicsSystem {
     world_width: i32,
     world_height: i32,
     object_sprites: Arc<HashMap<String, DefinitionSprite>>,
+    rotateable_definitions: HashSet<DefinitionId>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
     active_viewports: Vec<ActiveViewport>,
@@ -2134,6 +2135,7 @@ impl GraphicsSystem {
             world_width: surface_width as i32,
             world_height: fallback_ground_height.max(surface_height as i32).max(0),
             object_sprites,
+            rotateable_definitions: HashSet::new(),
             cursor_atlas,
             hud_graphics,
             active_viewports: Vec::new(),
@@ -2152,6 +2154,10 @@ impl GraphicsSystem {
 
     pub fn set_object_sprites(&mut self, sprites: Arc<HashMap<String, DefinitionSprite>>) {
         self.object_sprites = sprites;
+    }
+
+    pub fn set_rotateable_definitions(&mut self, definitions: HashSet<DefinitionId>) {
+        self.rotateable_definitions = definitions;
     }
 
     pub fn set_world_width(&mut self, world_width: i32) {
@@ -3021,7 +3027,8 @@ impl GraphicsSystem {
         self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting, gamma);
         // C4D_Background objects live in Game.BackObjects and draw between
         // sky and landscape (C4Viewport.cpp:1051-1063).
-        self.draw_objects(
+        self.draw_objects_at_frame(
+            snapshot.frame,
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.definition_lines,
@@ -3056,7 +3063,8 @@ impl GraphicsSystem {
         // simulation creates rain/snow PXS; there is no procedural viewport
         // rain layer (C4Viewport.cpp:1056-1078; C4PXS.cpp:242-307).
         self.draw_pxs(&snapshot.particles, lighting, gamma);
-        self.draw_objects(
+        self.draw_objects_at_frame(
+            snapshot.frame,
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.definition_lines,
@@ -3067,7 +3075,8 @@ impl GraphicsSystem {
             ObjectRenderPass::Normal,
             gamma,
         );
-        self.draw_objects(
+        self.draw_objects_at_frame(
+            snapshot.frame,
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.definition_lines,
@@ -3078,12 +3087,8 @@ impl GraphicsSystem {
             ObjectRenderPass::ForegroundNonParallax,
             gamma,
         );
-        // C4Object::Draw attaches no energy/magic bars to world objects —
-        // energy presentation lives in the HUD corner (DrawCursorInfo,
-        // src/C4Viewport.cpp:920-945). The world-space fctEnergy bolt only
-        // blinks (`Tick35 > 12`) over NeedEnergy structures
-        // (src/C4Object.cpp:2505-2510); NeedEnergy is not modeled in the
-        // Rust engine yet, so nothing is drawn here.
+        // NeedEnergy bolts are emitted inside each object's base pass so
+        // background/foreground category layering matches C4Object::Draw.
         let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
         self.draw_selection_marks(
             snapshot,
@@ -3095,11 +3100,11 @@ impl GraphicsSystem {
             gamma,
         );
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
-
         // C4Viewport disables ClrModMap after world cursors and before the
         // custom parallax GUI/overlay pass.
         self.active_fog_map = None;
-        self.draw_objects(
+        self.draw_objects_at_frame(
+            snapshot.frame,
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.definition_lines,
@@ -4503,8 +4508,36 @@ impl GraphicsSystem {
         )
     }
 
+    #[cfg(test)]
     fn draw_objects(
         &mut self,
+        objects: &[ObjectSnapshot],
+        render_order: &[ObjectId],
+        definition_lines: &HashMap<DefinitionId, DefinitionLineMetadata>,
+        players: &[PlayerState],
+        for_player: i32,
+        lighting: f32,
+        owner_colors: &HashMap<i32, Color>,
+        pass: ObjectRenderPass,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        self.draw_objects_at_frame(
+            0,
+            objects,
+            render_order,
+            definition_lines,
+            players,
+            for_player,
+            lighting,
+            owner_colors,
+            pass,
+            gamma,
+        );
+    }
+
+    fn draw_objects_at_frame(
+        &mut self,
+        frame: u64,
         objects: &[ObjectSnapshot],
         render_order: &[ObjectId],
         definition_lines: &HashMap<DefinitionId, DefinitionLineMetadata>,
@@ -4606,6 +4639,9 @@ impl GraphicsSystem {
                 line,
                 gamma,
             );
+            if line == 0 {
+                self.paint_need_energy_bolt(object, frame, gamma);
+            }
             if suppress_fog {
                 self.fog_suppression_depth -= 1;
             }
@@ -4623,6 +4659,101 @@ impl GraphicsSystem {
                 gamma,
             );
         }
+    }
+
+    /// C4Object::Draw emits the global fctEnergy facet after the object's
+    /// face/overlays and before the list-wide TopFace pass. It is centered on
+    /// the live Con-scaled definition Shape. The facet itself ignores object
+    /// blit state, owner tint, rotation, and draw transforms
+    /// (src/C4Object.cpp:2518-2524).
+    fn paint_need_energy_bolt(
+        &mut self,
+        object: &ObjectSnapshot,
+        frame: u64,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        if !object.need_energy || frame % 35 <= 12 {
+            return;
+        }
+        let Some(energy) = self.hud_graphics.energy.clone() else {
+            return;
+        };
+        let Some(definition_sprite) = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+        else {
+            return;
+        };
+        let shape = self.live_object_shape(definition_sprite, object);
+        if !self.object_reaches_post_face_draw(object, definition_sprite, shape) {
+            return;
+        }
+        let width = energy.width() as i32;
+        let height = energy.height() as i32;
+        let x = object.position.x + shape.x + shape.width / 2 - width / 2;
+        let y = object.position.y + shape.y - height - 5;
+        let (target_x, target_y) = self.object_target_position(object);
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        draw_image_bilinear(
+            &mut self.surface,
+            &GuiRect::new(
+                (x as f32 - target_x) * zoom,
+                (y as f32 - target_y) * zoom,
+                width as f32 * zoom,
+                height as f32 * zoom,
+            ),
+            &energy,
+            gamma,
+        );
+    }
+
+    /// The output-boundary return precedes overlays, selection and fctEnergy
+    /// in C4Object::Draw (src/C4Object.cpp:2266-2283). Active non-rotated
+    /// facets use their own rectangle; stretched facets bypass the gate.
+    fn object_reaches_post_face_draw(
+        &self,
+        object: &ObjectSnapshot,
+        definition_sprite: &DefinitionSprite,
+        shape: DefinitionRect,
+    ) -> bool {
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let output_width = ((self.surface_width as f32 / zoom).ceil() as i32).max(1);
+        let output_height = ((self.surface_height as f32 / zoom).ceil() as i32).max(1);
+        let (target_x, target_y) = self.object_target_position(object);
+        let cox = object.position.x + shape.x - target_x as i32;
+        let coy = object.position.y + shape.y - target_y as i32;
+        let inside = |position: i32, size: i32, extent: i32| {
+            position >= 1 - size && position <= extent
+        };
+
+        if let Some(graphics) = Self::live_action_graphics(
+            &definition_sprite.actions,
+            &object.action,
+        ) {
+            if graphics.facet_target_stretch {
+                return true;
+            }
+            if object.rotation == 0
+                && !graphics.facet_base
+                && object.construction <= FULL_CON
+            {
+                let (x, y, width, height) = graphics
+                    .facet
+                    .as_ref()
+                    .map_or((0, 0, 0, 0), |facet| {
+                        (
+                            facet.target_x,
+                            facet.target_y,
+                            facet.width,
+                            facet.height,
+                        )
+                    });
+                return inside(cox + x, width, output_width)
+                    && inside(coy + y, height, output_height);
+            }
+        }
+
+        inside(cox, shape.width, output_width) && inside(coy, shape.height, output_height)
     }
 
     /// C4ObjectList draws every base before any TopFace
@@ -5070,6 +5201,34 @@ impl GraphicsSystem {
         scaled.y = scaled.y * percent / 100;
         scaled.height = scaled.height * percent / 100;
         scaled
+    }
+
+    /// Reconstruct the live C4Shape rect used for presentation. Shape::Rotate
+    /// replaces the Con-scaled rect with its legacy radius square whenever
+    /// the definition is Rotateable and the raw saved angle is nonzero
+    /// (src/C4Object.cpp:320-343; src/C4Shape.cpp:41-83).
+    fn live_object_shape(
+        &self,
+        sprite: &DefinitionSprite,
+        object: &ObjectSnapshot,
+    ) -> DefinitionRect {
+        let mut shape = Self::con_scaled_shape(
+            Self::sprite_def_shape(sprite),
+            object.construction.clamp(0, FULL_CON),
+            sprite.stretch_growth,
+        );
+        let rotateable = self
+            .rotateable_definitions
+            .contains(&object.definition_id)
+            || object.ocf & lc_engine::ocf::ROTATE != 0;
+        if rotateable && object.rotation != 0 {
+            let radius = ((i64::from(shape.x) * i64::from(shape.x)
+                + i64::from(shape.y) * i64::from(shape.y)) as f64)
+                .sqrt() as i32
+                + 2;
+            shape = DefinitionRect::new(-radius, -radius, 2 * radius, 2 * radius);
+        }
+        shape
     }
 
     /// The def Shape rect used for drawing; loader sprites without a def
@@ -16762,6 +16921,7 @@ mod tests {
         // structures, blinking on `Tick35 > 12` (src/C4Object.cpp:2505-2510)
         // — never as a persistent crew marker.
         let mut snapshot = make_snapshot();
+        snapshot.frame = 13;
         snapshot.objects[0].position = Vector2::new(40, 40);
         snapshot.objects[0].owner = 1;
         snapshot.objects[0].energy = 70;
@@ -16810,6 +16970,176 @@ mod tests {
                 "no floating bar backgrounds"
             );
         }
+    }
+
+    #[test]
+    fn need_energy_bolt_respects_tick35_flag_shape_and_viewport_projection() {
+        // C4Object::Draw centers the unscaled fctEnergy facet above the live
+        // Shape and shows it only while Tick35 > 12 (src/C4Object.cpp:2518-2524).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(64, 40);
+        snapshot.objects[0].crew_member = false;
+        snapshot.objects[0].need_energy = true;
+        snapshot.objects[0].blit_mode = C4GFXBLIT_ADDITIVE | C4GFXBLIT_MOD2;
+        snapshot.objects[0].color_modulation = 0xff00_ff00;
+        snapshot.objects[0].color = 0x00ff_0000;
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let shape = DefinitionRect::new(-3, -4, 6, 9);
+        let sprite = DefinitionSprite {
+            image: ImageData::new(6, 9, vec![0; 6 * 9 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(shape),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let sprites = Arc::new(HashMap::from([(
+            sprite_map_key("TestObject", None),
+            sprite,
+        )]));
+
+        let bolt = Color::opaque(231, 47, 113);
+        let bolt_image = ImageData::new(
+            5,
+            3,
+            [bolt.r, bolt.g, bolt.b, bolt.a].repeat(5 * 3),
+        );
+        let mut graphics = GraphicsSystem::new(
+            160,
+            120,
+            80,
+            "NeedEnergy",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            Arc::new(HudGraphics {
+                energy: Some(bolt_image),
+                ..HudGraphics::default()
+            }),
+        );
+        graphics.set_rotateable_definitions(HashSet::from(["TestObject".to_string()]));
+        let rendered_bolt = standard_gamma_color(bolt);
+        let mut hidden_frame = None;
+        let visible_pixels = 5 * 3 * 2 * 2;
+
+        for (
+            frame,
+            need_energy,
+            rotation,
+            construction,
+            expected_changed_pixels,
+            expected_origin,
+        ) in [
+            (12, true, 0, FULL_CON, 0, None),
+            (13, true, 0, FULL_CON, visible_pixels, Some((62, 28))),
+            (34, true, 0, FULL_CON, visible_pixels, Some((62, 28))),
+            (13, true, 90, FULL_CON, visible_pixels, Some((62, 25))),
+            (13, true, 360, FULL_CON, visible_pixels, Some((62, 25))),
+            (13, true, 90, 100, visible_pixels, Some((62, 27))),
+            (35, true, 0, FULL_CON, 0, None),
+            (13, false, 0, FULL_CON, 0, None),
+        ] {
+            snapshot.frame = frame;
+            snapshot.objects[0].need_energy = need_energy;
+            snapshot.objects[0].rotation = rotation;
+            snapshot.objects[0].construction = construction;
+            let viewport = ViewportInput::new(
+                0,
+                snapshot.objects[0].position,
+                2.0,
+                &snapshot.objects[0],
+            );
+            graphics.render_frame(&snapshot, &[viewport]);
+
+            let hidden_frame = hidden_frame
+                .get_or_insert_with(|| graphics.surface().pixels().to_vec());
+            let changed_pixels = graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .zip(hidden_frame.chunks_exact(4))
+                .filter(|(actual, hidden)| actual != hidden)
+                .count();
+            assert_eq!(
+                changed_pixels, expected_changed_pixels,
+                "NeedEnergy bolt footprint for frame={frame}, need_energy={need_energy}"
+            );
+
+            if expected_changed_pixels == 0 {
+                continue;
+            }
+            let projection = graphics.active_viewport_projections()[0];
+            let (logical_x, logical_y) =
+                expected_origin.expect("visible bolt has an oracle origin");
+            let logical_origin = Vector2::new(logical_x, logical_y);
+            let (output_x, output_y) = projection.logical_to_output(logical_origin);
+            let output_x = output_x.round() as u32;
+            let output_y = output_y.round() as u32;
+            let surface_width = graphics.surface().width();
+            let hidden_pixel = |x: u32, y: u32| {
+                let index = ((y * surface_width + x) * 4) as usize;
+                Color::new(
+                    hidden_frame[index],
+                    hidden_frame[index + 1],
+                    hidden_frame[index + 2],
+                    hidden_frame[index + 3],
+                )
+            };
+            for y in output_y..output_y + 6 {
+                for x in output_x..output_x + 10 {
+                    assert_ne!(
+                        graphics.surface().get_pixel(x, y),
+                        Some(hidden_pixel(x, y)),
+                        "bolt extent at ({x}, {y})"
+                    );
+                }
+            }
+            assert_eq!(
+                graphics.surface().get_pixel(output_x + 2, output_y + 2),
+                Some(rendered_bolt),
+                "an interior texel retains the Energy image color"
+            );
+            assert_eq!(
+                graphics.surface().get_pixel(output_x - 1, output_y),
+                Some(hidden_pixel(output_x - 1, output_y)),
+                "bolt starts at the exact Shape-centered x coordinate"
+            );
+            assert_eq!(
+                graphics.surface().get_pixel(output_x, output_y - 1),
+                Some(hidden_pixel(output_x, output_y - 1)),
+                "bolt starts exactly five logical pixels above the facet"
+            );
+        }
+
+        // C4Object::Draw's bounds return precedes NeedEnergy. Keep the
+        // structure body just below the view while its would-be bolt overlaps
+        // the bottom edge: neither the body nor the bolt may leak onscreen.
+        snapshot.frame = 13;
+        snapshot.objects[0].position = Vector2::new(64, 75);
+        snapshot.objects[0].rotation = 0;
+        snapshot.objects[0].construction = FULL_CON;
+        snapshot.objects[0].need_energy = true;
+        let mut focus = snapshot.objects[0].clone();
+        focus.id = ObjectId::new(2);
+        focus.position = Vector2::new(64, 40);
+        focus.need_energy = false;
+        snapshot.objects.push(focus);
+        let viewport = ViewportInput::new(
+            0,
+            snapshot.objects[1].position,
+            2.0,
+            &snapshot.objects[1],
+        );
+        graphics.render_frame(&snapshot, &[viewport]);
+        assert_eq!(
+            graphics.surface().pixels(),
+            hidden_frame
+                .as_deref()
+                .expect("frame 12 established the hidden reference"),
+            "an output-culled object cannot leak its NeedEnergy bolt"
+        );
     }
 
     #[test]
