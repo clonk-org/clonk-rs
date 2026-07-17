@@ -6354,10 +6354,11 @@ impl Object {
 
     fn advance_fixed_position_per_pixel(
         &mut self,
-        landscape: Option<&Landscape>,
+        landscape: Option<&mut Landscape>,
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
         mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        mut on_do_motion: impl FnMut(&mut Object, &mut Landscape) -> Result<(), EngineError>,
     ) -> Result<MovementStepOutcome, EngineError> {
         let Some(landscape) = landscape else {
             let previous_position = self.state.position;
@@ -6372,8 +6373,15 @@ impl Object {
         };
 
         if self.state.vertices.is_empty() {
-            self.advance_fixed_position_heightmap(landscape, materials);
-            return Ok(MovementStepOutcome::default());
+            let solid_mask_removed = self.advance_fixed_position_heightmap(
+                landscape,
+                materials,
+                &mut on_do_motion,
+            )?;
+            return Ok(MovementStepOutcome {
+                solid_mask_removed,
+                ..MovementStepOutcome::default()
+            });
         }
 
         if movement.attach != 0 {
@@ -6382,6 +6390,7 @@ impl Object {
                 materials,
                 movement,
                 &mut on_contact,
+                &mut on_do_motion,
             );
         }
 
@@ -6449,6 +6458,9 @@ impl Object {
                 apply_contact_friction(&mut self.fixed_velocity.y, contact.first_friction());
                 break;
             }
+            if !solid_mask_removed {
+                on_do_motion(self, landscape)?;
+            }
             self.state.position.x = next_x;
             solid_mask_removed = true;
         }
@@ -6508,6 +6520,9 @@ impl Object {
                 }
                 break;
             }
+            if !solid_mask_removed {
+                on_do_motion(self, landscape)?;
+            }
             self.state.position.y = next_y;
             solid_mask_removed = true;
         }
@@ -6517,7 +6532,13 @@ impl Object {
         Ok(outcome)
     }
 
-    fn advance_fixed_position_heightmap(&mut self, landscape: &Landscape, materials: &MaterialSet) {
+    fn advance_fixed_position_heightmap(
+        &mut self,
+        landscape: &mut Landscape,
+        materials: &MaterialSet,
+        on_do_motion: &mut impl FnMut(&mut Object, &mut Landscape) -> Result<(), EngineError>,
+    ) -> Result<bool, EngineError> {
+        let mut solid_mask_removed = false;
         self.fixed_position.x += self.fixed_velocity.x;
         let target_x = fixtoi(self.fixed_position.x);
         while self.state.position.x != target_x {
@@ -6532,7 +6553,11 @@ impl Object {
                 self.apply_landscape_contact_material(landscape, materials, candidate.x);
                 break;
             }
+            if !solid_mask_removed {
+                on_do_motion(self, landscape)?;
+            }
             self.state.position.x = next_x;
+            solid_mask_removed = true;
         }
 
         self.fixed_position.y += self.fixed_velocity.y;
@@ -6549,18 +6574,24 @@ impl Object {
                 self.apply_landscape_contact_material(landscape, materials, candidate.x);
                 break;
             }
+            if !solid_mask_removed {
+                on_do_motion(self, landscape)?;
+            }
             self.state.position.y = next_y;
+            solid_mask_removed = true;
         }
 
         self.state.velocity = self.velocity_pixels();
+        Ok(solid_mask_removed)
     }
 
     fn advance_attached_shape_position(
         &mut self,
-        landscape: &Landscape,
+        landscape: &mut Landscape,
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
         on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+        on_do_motion: &mut impl FnMut(&mut Object, &mut Landscape) -> Result<(), EngineError>,
     ) -> Result<MovementStepOutcome, EngineError> {
         self.fixed_position += self.fixed_velocity;
         let mut target_x = fixtoi(self.fixed_position.x);
@@ -6656,6 +6687,9 @@ impl Object {
                     "ATTOVR cand=({},{}) orig=({},{}) attach={}",
                     candidate.x, candidate.y, original.x, original.y, movement.attach
                 ));
+            }
+            if !solid_mask_removed {
+                on_do_motion(self, landscape)?;
             }
             self.state.position = candidate;
 
@@ -27485,21 +27519,15 @@ impl Engine {
                 self.copy_motion_from_container(idx);
             } else if !exec_movement_static_back {
                 if self.objects[idx].state.mobile {
-                    // The mover's own mask leaves the plane for its own
-                    // movement (C++ masks vanish/reappear through
-                    // UpdatePos; C4Movement.cpp:440 re-puts after).
-                    let mask_attachments = self.remove_solid_mask_for_movement(idx);
+                    // DoMovement itself owns the mask lifecycle: DigFree and
+                    // pre-motion contacts see the put mask, the first
+                    // DoMotion removes it, and the tail always re-puts it.
                     let movement_outcome = self.exec_object_movement(
                         idx,
                         &action_library,
                         &definition_id,
                         &solid_mask_indices,
                     )?;
-                    self.update_solid_mask(idx);
-                    self.restore_solid_mask_attachments(
-                        idx,
-                        movement_outcome.did_motion.then_some(mask_attachments).flatten(),
-                    );
                     if !movement_outcome.alive {
                         continue;
                     }
@@ -33993,11 +34021,11 @@ impl Engine {
         let mut contact_audio = self.audio_registry.clone();
         let mut contact_next_object_id = self.next_object_id;
         let contact_global_effects = self.global_effects.clone();
-        let mut contact_world = if movement.contact_function_calls {
+        let contact_world = RefCell::new(if movement.contact_function_calls {
             self.host_world_context()
         } else {
             HostWorldContext::default()
-        };
+        });
         let contact_physics = self.physics;
         let contact_environment = self.environment;
         let contact_frame = self.frame;
@@ -34010,6 +34038,7 @@ impl Engine {
         let contact_function_calls_enabled = movement.contact_function_calls;
         let contact_definitions = &self.definitions;
         let contact_material_capacity = self.materials.len();
+        let mut mask_attachments = None;
         let mut movement_outcome = {
             let definition_for_contact = definition_for_contact.as_ref();
             let mut run_contact_callback = |object: &mut Object,
@@ -34046,6 +34075,7 @@ impl Engine {
                     }
                     let state_snapshot = object.script_state_snapshot();
                     let world = contact_world
+                        .borrow()
                         .clone()
                         .with_next_object_id(contact_next_object_id);
                     let (value, mut outcome, audio_state, new_rng) = definition
@@ -34068,11 +34098,11 @@ impl Engine {
                     contact_next_object_id = outcome.next_object_id;
 
                     if let Some(preview) = outcome.host_raster_preview.clone() {
-                        contact_world.apply_host_raster_preview(preview);
+                        contact_world.borrow_mut().apply_host_raster_preview(preview);
                     } else {
-                        contact_world.preview_solid_mask_operations(
-                            &outcome.solid_mask_operations,
-                        );
+                        contact_world
+                            .borrow_mut()
+                            .preview_solid_mask_operations(&outcome.solid_mask_operations);
                     }
 
                     if let Some(update) = outcome.object_update.take() {
@@ -34154,17 +34184,54 @@ impl Engine {
                 }
                 Ok(())
             };
-            let landscape = self.landscape.as_ref();
+            let mut landscape = self.landscape.as_mut();
             let materials = &self.materials;
-            let object = &mut self.objects[idx];
+            let mass_movers = &mut self.mass_movers;
+            let (objects_before, objects_tail) = self.objects.split_at_mut(idx);
+            let (object, objects_after) = objects_tail.split_first_mut().expect("index checked");
+            let mut on_do_motion = |object: &mut Object,
+                                    landscape: &mut Landscape|
+             -> Result<(), EngineError> {
+                mask_attachments = Self::remove_solid_mask_from_fields(
+                    object,
+                    objects_before,
+                    objects_after,
+                    contact_definitions,
+                    materials,
+                    mass_movers,
+                    landscape,
+                    true,
+                    true,
+                );
+                if contact_function_calls_enabled {
+                    let bakes = objects_before
+                        .iter()
+                        .chain(std::iter::once(&*object))
+                        .chain(objects_after.iter())
+                        .filter_map(|object| {
+                            object
+                                .solid_mask_bake
+                                .clone()
+                                .map(|bake| (object.id, bake))
+                        })
+                        .collect();
+                    contact_world.borrow_mut().refresh_after_do_motion(
+                        object.id,
+                        landscape,
+                        bakes,
+                    );
+                }
+                Ok(())
+            };
             let mut outcome = object.advance_fixed_position_per_pixel(
-                landscape,
+                landscape.as_deref_mut(),
                 materials,
                 movement,
                 &mut run_contact_callback,
+                &mut on_do_motion,
             )?;
             let (rotation_contact, rotation_cnat) = object.advance_fixed_rotation(
-                landscape,
+                landscape.as_deref(),
                 materials,
                 movement,
                 outcome.no_attach,
@@ -34172,6 +34239,7 @@ impl Engine {
                 outcome.solid_mask_removed,
                 &mut run_contact_callback,
             )?;
+            drop(on_do_motion);
             outcome.any_contact |= rotation_contact;
             outcome.contact_cnat |= rotation_cnat;
             // DoMovement restores the accumulated iContacts after all
@@ -34228,6 +34296,16 @@ impl Engine {
                 false,
             )?;
         }
+        // DoMovement's unconditional UpdateSolidMask(true) tail precedes
+        // InLiquid, ContactAction, NoAttachAction, and Hit callbacks
+        // (C4Movement.cpp:443-478). With no DoMotion this performs the real
+        // remove(no backup)+put cycle; after motion it re-puts at the final
+        // position and translates the riders captured by the first removal.
+        self.update_solid_mask(idx);
+        self.restore_solid_mask_attachments(
+            idx,
+            did_motion.then_some(mask_attachments).flatten(),
+        );
         if self.objects[idx].destroyed
             || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
         {
@@ -44243,16 +44321,46 @@ impl Engine {
         if index >= self.objects.len() {
             return None;
         }
-        let Some(bake) = self.objects[index].solid_mask_bake.take() else {
+        let Some(landscape) = self.landscape.as_mut() else {
+            self.objects[index].solid_mask_bake.take();
             return None;
         };
-        let Some(vehicle) = self
-            .landscape
-            .as_ref()
-            .and_then(|landscape| landscape.grid_vehicle_byte())
-        else {
-            return None;
-        };
+        let definitions = &self.definitions;
+        let materials = &self.materials;
+        let mass_movers = &mut self.mass_movers;
+        let (before, tail) = self.objects.split_at_mut(index);
+        let (mover, after) = tail.split_first_mut().expect("index checked");
+        Self::remove_solid_mask_from_fields(
+            mover,
+            before,
+            after,
+            definitions,
+            materials,
+            mass_movers,
+            landscape,
+            cause_instability,
+            backup_attachments,
+        )
+    }
+
+    /// Field-split C4SolidMask::Remove used both by ordinary lifecycle
+    /// calls and by DoMotion's one-shot pre-move removal. Keeping the mover
+    /// separate lets the per-pixel walker remove its bake without borrowing
+    /// the whole Engine from inside the movement callback.
+    #[allow(clippy::too_many_arguments)]
+    fn remove_solid_mask_from_fields(
+        mover: &mut Object,
+        before: &mut [Object],
+        after: &mut [Object],
+        definitions: &HashMap<DefinitionId, Definition>,
+        materials: &MaterialSet,
+        mass_movers: &mut MassMoverSet,
+        landscape: &mut Landscape,
+        cause_instability: bool,
+        backup_attachments: bool,
+    ) -> Option<SolidMaskAttachmentBackup> {
+        let bake = mover.solid_mask_bake.take()?;
+        let vehicle = landscape.grid_vehicle_byte()?;
         for cy in 0..bake.height {
             for cx in 0..bake.width {
                 let saved = bake.buffer[(cy * bake.width + cx) as usize];
@@ -44261,22 +44369,20 @@ impl Engine {
                 }
                 let lx = bake.x + cx;
                 let ly = bake.y + cy;
-                if self
-                    .landscape
-                    .as_ref()
-                    .and_then(|landscape| landscape.grid_byte_at(lx, ly))
-                    == Some(vehicle)
-                {
-                    if let Some(landscape) = self.landscape.as_mut() {
-                        landscape.grid_write_byte(lx, ly, saved);
-                    }
+                if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
+                    landscape.grid_write_byte(lx, ly, saved);
                 }
                 // C++ probes every mask-used pixel when requested, whether
                 // or not the restore write happened. Object synchronization
                 // is the exceptional Remove(false, false) caller
                 // (C4SolidMask.cpp:244-257; C4GameObjects.cpp:296-303).
                 if cause_instability {
-                    self.check_instability_range(lx, ly);
+                    mass_movers.check_instability_range_for_landscape(
+                        landscape,
+                        materials,
+                        lx,
+                        ly,
+                    );
                 }
             }
         }
@@ -44284,28 +44390,29 @@ impl Engine {
         // removed inside the freed rect. C++ walks the live instance list
         // Last->Prev, i.e. newest construction first (C4SolidMask.cpp:
         // 263-274,395-400).
-        let mut overlapping_masks = (0..self.objects.len())
-            .filter(|&other| {
-                other != index
-                    && self.objects[other]
-                        .solid_mask_bake
-                        .as_ref()
-                        .is_some_and(|other_bake| other_bake.overlaps(&bake))
+        let mut overlapping_masks = before
+            .iter_mut()
+            .chain(after.iter_mut())
+            .filter(|other| {
+                other
+                    .solid_mask_bake
+                    .as_ref()
+                    .is_some_and(|other_bake| other_bake.overlaps(&bake))
             })
             .collect::<Vec<_>>();
-        overlapping_masks.sort_unstable_by(|&left, &right| {
-            let left = self.objects[left]
+        overlapping_masks.sort_unstable_by(|left, right| {
+            let left = left
                 .solid_mask_bake
                 .as_ref()
                 .map_or(0, |bake| bake.instance_sequence);
-            let right = self.objects[right]
+            let right = right
                 .solid_mask_bake
                 .as_ref()
                 .map_or(0, |bake| bake.instance_sequence);
             right.cmp(&left)
         });
         for other in overlapping_masks {
-            let Some(other_bake) = self.objects[other].solid_mask_bake.clone() else {
+            let Some(other_bake) = other.solid_mask_bake.clone() else {
                 continue;
             };
             let clip_x0 = bake.x.max(other_bake.x);
@@ -44313,7 +44420,6 @@ impl Engine {
             let clip_x1 = (bake.x + bake.width).min(other_bake.x + other_bake.width);
             let clip_y1 = (bake.y + bake.height).min(other_bake.y + other_bake.height);
             let mut updated = other_bake.clone();
-            let landscape = self.landscape.as_mut().expect("grid mode checked");
             for ly in clip_y0..clip_y1 {
                 for lx in clip_x0..clip_x1 {
                     let mx = updated.tx + (lx - updated.x);
@@ -44332,12 +44438,76 @@ impl Engine {
                     landscape.grid_write_byte(lx, ly, vehicle);
                 }
             }
-            self.objects[other].solid_mask_bake = Some(updated);
+            other.solid_mask_bake = Some(updated);
         }
 
-        backup_attachments
-            .then(|| self.capture_solid_mask_attachments(index, &bake, vehicle))
-            .flatten()
+        if !backup_attachments {
+            return None;
+        }
+        let object_ids = before
+            .iter()
+            .chain(after.iter())
+            .filter(|object| {
+                if object.state.status != ObjectStatus::Normal
+                    || object.state.category & (CATEGORY_STATIC_BACK | CATEGORY_STRUCTURE) != 0
+                    || object.state.container.is_some()
+                    || (object.state.category & CATEGORY_VEHICLE != 0
+                        && object.state.ocf & ocf::GRAB == 0)
+                {
+                    return false;
+                }
+                let Some(definition) = definitions.get(&object.definition_id) else {
+                    return false;
+                };
+                definition
+                    .action_library()
+                    .is_idle_state(&object.state.action)
+                    || definition
+                        .action_library()
+                        .procedure_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        )
+                        != ActionProcedure::Float
+            })
+            .filter(|object| {
+                !shape_contact_check(
+                    &object.state.vertices,
+                    object.state.position,
+                    landscape,
+                    materials,
+                    &[],
+                    None,
+                    object.state.contact_density,
+                )
+                .is_contact()
+            })
+            .filter(|object| {
+                let check_mask = object.frame_t_attach | CNAT_BOTTOM;
+                object.state.vertices.iter().any(|vertex| {
+                    if vertex.cnat & CNAT_NO_COLLISION != 0 {
+                        return false;
+                    }
+                    let x = object.state.position.x + vertex.x;
+                    let y = object.state.position.y + vertex.y;
+                    (check_mask & CNAT_CENTER != 0
+                        && bake.provides_attachment_density_at(vehicle, x, y))
+                        || (check_mask & CNAT_LEFT != 0
+                            && bake.provides_attachment_density_at(vehicle, x - 1, y))
+                        || (check_mask & CNAT_RIGHT != 0
+                            && bake.provides_attachment_density_at(vehicle, x + 1, y))
+                        || (check_mask & CNAT_TOP != 0
+                            && bake.provides_attachment_density_at(vehicle, x, y - 1))
+                        || (check_mask & CNAT_BOTTOM != 0
+                            && bake.provides_attachment_density_at(vehicle, x, y + 1))
+                })
+            })
+            .map(|object| object.id)
+            .collect();
+        Some(SolidMaskAttachmentBackup {
+            removal_position: mover.state.position,
+            object_ids,
+        })
     }
 
     /// The solid-mask half of `C4GameObjects::Synchronize`: first remove all

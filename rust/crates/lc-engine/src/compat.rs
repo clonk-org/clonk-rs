@@ -3229,6 +3229,22 @@ impl HostWorldContext {
         }
     }
 
+    /// Refresh the parts of a movement callback's world view changed by
+    /// C4Object::DoMotion removing its solid mask. Contact callbacks after
+    /// the first committed pixel must query the restored landscape rather
+    /// than the snapshot from DoMovement entry.
+    pub(crate) fn refresh_after_do_motion(
+        &mut self,
+        mover: ObjectId,
+        landscape: &Landscape,
+        bakes: Vec<(ObjectId, crate::SolidMaskBake)>,
+    ) {
+        self.landscape = Some(Rc::new(landscape.clone()));
+        Rc::make_mut(&mut self.movement_solid_masks)
+            .retain(|mask| mask.object_id != mover);
+        self.solid_mask_bakes = Rc::new(bakes);
+    }
+
     fn movement_density_at(&self, x: i32, y: i32) -> Option<i32> {
         Some(crate::movement_density_at(
             self.landscape_ref()?,

@@ -55574,6 +55574,381 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
         }
     }
 
+    fn movement_mask_definition(
+        id: &str,
+        width: i32,
+        contact_vertex_x: i32,
+    ) -> Definition {
+        let mut definition = simple_definition(id);
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, width, 1)));
+        definition.set_shape_vertices(vec![
+            ObjectVertex::new(contact_vertex_x, 0).with_cnat(CNAT_RIGHT),
+        ]);
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(
+            0, 0, width, 1, 0, 0,
+        )));
+        definition.set_contact_density(50);
+        definition
+    }
+
+    #[test]
+    fn dig_free_runs_before_movers_own_baked_mask_is_removed() {
+        // C4Object::DoMovement runs DigFree while the mover's mask is still
+        // put (C4Movement.cpp:227-245); MCVehic is non-diggable, and the
+        // saved Earth+IFT byte must survive the tail remove/re-put cycle.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+            DigFree=0
+        "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut landscape = vehicle_grid_landscape(20, 20);
+        landscape.grid_write_byte(10, 10, 0x81);
+        landscape.grid_write_byte(11, 10, 1);
+
+        let mut drill = movement_mask_definition("DRIL", 1, 0);
+        // The 2x1 DigFreeRect includes one unmasked Earth sentinel, proving
+        // the dig ran while only the mask-covered first pixel was shielded.
+        drill.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 1)));
+        drill.configure_actions(
+            Some("Drill".to_string()),
+            HashMap::from([(
+                "Drill".to_string(),
+                ActionSpec::default().with_dig_free(1),
+            )]),
+        );
+
+        let mut engine = Engine::with_seed(61);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(drill).expect("drill registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("DRIL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_action(ActionState::new("Drill"))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("drill spawns");
+        let index = engine.find_object_index(id).expect("drill exists");
+        engine.update_solid_mask(index);
+        assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()), Some(vec![0x81]));
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
+            Some(2)
+        );
+
+        engine.tick().expect("stationary dig frame succeeds");
+
+        let index = engine.find_object_index(id).expect("drill remains");
+        assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()), Some(vec![0x81]));
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
+            Some(2),
+            "DigFree must see the put Vehicle pixel"
+        );
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(11, 10)),
+            Some(0),
+            "the same DigFreeRect clears adjacent unmasked Earth"
+        );
+        engine.remove_solid_mask(index);
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
+            Some(0x81),
+            "mask removal restores the undug Earth byte with IFT"
+        );
+    }
+
+    #[test]
+    fn mover_contact_switches_own_mask_at_first_domotion() {
+        // Before the first successful DoMotion, ContactCheck sees the own
+        // bake. DoMotion removes it before changing x, so every later step
+        // in the same frame sees the restored background.
+        for (vertex_x, velocity, expected_x, expected_contact) in
+            [(-1, 1, 10, CNAT_RIGHT), (-2, 2, 12, 0)]
+        {
+            let mut engine = Engine::with_seed(62);
+            engine.set_landscape(vehicle_grid_landscape(24, 20));
+            engine.set_physics(PhysicsSettings::new(0, 20, -20));
+            engine
+                .register_definition(movement_mask_definition("MASK", 1, vertex_x))
+                .expect("mask mover registers");
+            let id = engine
+                .spawn_object(
+                    SpawnConfig::new("MASK")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(10, 10))
+                        .with_fixed_position(FixedVec2::from_ints(10, 10))
+                        .with_fixed_velocity(FixedVec2::new(
+                            itofix(velocity),
+                            C4Fixed::ZERO,
+                        ))
+                        .with_mobile(true)
+                        .with_loaded(true),
+                )
+                .expect("mask mover spawns");
+            let index = engine.find_object_index(id).expect("mask mover exists");
+            engine.update_solid_mask(index);
+
+            engine.tick().expect("movement frame succeeds");
+
+            let index = engine.find_object_index(id).expect("mask mover remains");
+            assert_eq!(engine.objects[index].state.position.x, expected_x);
+            assert_eq!(engine.objects[index].fixed_position.x, itofix(expected_x));
+            assert_eq!(
+                engine.objects[index].frame_t_contact & CNAT_RIGHT,
+                expected_contact,
+                "vertex={vertex_x}, velocity={velocity}"
+            );
+        }
+    }
+
+    #[test]
+    fn later_contact_callback_sees_background_restored_by_first_domotion() {
+        // The first candidate step is free and therefore removes the old
+        // solid-mask bake before committing x=11. The second candidate hits
+        // Earth through the +1 contact vertex at world x=13. ContactRight
+        // runs while the object is still at x=11, so its relative (-1,0)
+        // probe is exactly the old mask cell (10,10). C++ reads the live
+        // Surface8 there: sky, not the stale MCVehic byte from movement entry.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Vehicle]
+            Name=Vehicle
+            Density=100
+        "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut landscape = vehicle_grid_landscape(24, 20);
+        landscape.grid_write_byte(13, 10, 1);
+
+        let mut mover = Definition::from_script(
+            "CBMS",
+            "Callback mask mover",
+            r#"
+            #strict 2
+            local old_mask_solid, old_mask_material;
+            global func ContactRight()
+            {
+                old_mask_solid = GBackSolid(-1, 0);
+                old_mask_material = GetMaterial(-1, 0);
+                return 0;
+            }
+            "#,
+        )
+        .expect("mover script compiles");
+        mover.set_category(CATEGORY_OBJECT);
+        mover.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        mover.set_shape_vertices(vec![ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT)]);
+        mover.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        mover.set_contact_density(50);
+        mover.set_contact_function_calls(true);
+
+        let mut engine = Engine::with_seed(65);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(mover).expect("mover registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CBMS")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("mover spawns");
+        let index = engine.find_object_index(id).expect("mover exists");
+        engine.update_solid_mask(index);
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
+            Some(2),
+            "the old-position mask is baked before movement"
+        );
+
+        engine.tick().expect("two-step movement frame succeeds");
+
+        let object = engine.object_snapshot(id).expect("mover remains");
+        assert_eq!(object.position, Vector2::new(11, 10));
+        assert_eq!(
+            object.local_vars.get("old_mask_solid"),
+            Some(&Value::Bool(false)),
+            "GBackSolid in the later contact callback sees restored sky"
+        );
+        assert_eq!(
+            object.local_vars.get("old_mask_material"),
+            Some(&Value::Int(-1)),
+            "GetMaterial in the later contact callback sees MNone, not Vehicle"
+        );
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(10, 10)),
+            Some(0),
+            "the tail re-put leaves the old mask cell restored"
+        );
+        assert_eq!(
+            engine
+                .landscape()
+                .and_then(|landscape| landscape.grid_byte_at(11, 10)),
+            Some(2),
+            "the mask is re-put at the committed position"
+        );
+    }
+
+    #[test]
+    fn first_domotion_captures_riders_at_the_pre_motion_position() {
+        let mut platform = movement_mask_definition("PLAT", 3, -2);
+        platform.set_category(CATEGORY_OBJECT);
+        let mut rider = simple_definition("RIDE");
+        rider.set_category(CATEGORY_OBJECT);
+        rider.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        rider.set_shape_vertices(vec![
+            ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM),
+        ]);
+        rider.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(63);
+        engine.set_landscape(vehicle_grid_landscape(30, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(platform)
+            .expect("platform registers");
+        engine.register_definition(rider).expect("rider registers");
+        let platform = engine
+            .spawn_object(
+                SpawnConfig::new("PLAT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("platform spawns");
+        let platform_index = engine
+            .find_object_index(platform)
+            .expect("platform exists");
+        engine.update_solid_mask(platform_index);
+        let rider = engine
+            .spawn_object(
+                SpawnConfig::new("RIDE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 9))
+                    .with_fixed_position(FixedVec2::from_ints(10, 9))
+                    .with_loaded(true),
+            )
+            .expect("rider spawns");
+
+        engine.tick().expect("platform movement succeeds");
+
+        assert_eq!(
+            engine
+                .object_snapshot(platform)
+                .expect("platform remains")
+                .position,
+            Vector2::new(12, 10)
+        );
+        assert_eq!(
+            engine.object_snapshot(rider).expect("rider remains").position,
+            Vector2::new(12, 9),
+            "the first DoMotion backup translates the rider by the full delta"
+        );
+    }
+
+    #[test]
+    fn no_motion_frame_still_cycles_overlapping_solid_mask_bakes() {
+        let mut engine = Engine::with_seed(64);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(movement_mask_definition("MSKA", 1, 0))
+            .expect("first mask registers");
+        engine
+            .register_definition(movement_mask_definition("MSKB", 1, 0))
+            .expect("second mask registers");
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("MSKA")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("first mask spawns");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("MSKB")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_mobile(false)
+                    .with_loaded(true),
+            )
+            .expect("second mask spawns");
+        let first_index = engine.find_object_index(first).expect("first exists");
+        let second_index = engine.find_object_index(second).expect("second exists");
+        engine.remove_solid_mask(first_index);
+        engine.remove_solid_mask(second_index);
+        engine.update_solid_mask(first_index);
+        engine.update_solid_mask(second_index);
+        assert_eq!(engine.debug_solid_mask_buffer(first.as_u64()), Some(vec![0]));
+        assert_eq!(engine.debug_solid_mask_buffer(second.as_u64()), Some(vec![2]));
+
+        let definition_id = engine.objects[first_index].definition_id.clone();
+        let actions = engine
+            .definitions
+            .get(&definition_id)
+            .expect("first mask definition remains")
+            .action_library()
+            .clone();
+        let solid_mask_indices = (0..engine.objects.len()).collect::<Vec<_>>();
+        engine
+            .exec_object_movement(
+                first_index,
+                &actions,
+                &definition_id,
+                &solid_mask_indices,
+            )
+            .expect("no-motion DoMovement succeeds");
+
+        assert_eq!(engine.debug_solid_mask_buffer(first.as_u64()), Some(vec![2]));
+        assert_eq!(engine.debug_solid_mask_buffer(second.as_u64()), Some(vec![0]));
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+    }
+
     fn switching_mask_definition() -> Definition {
         let mut gate = Definition::from_script(
             "GATE",
