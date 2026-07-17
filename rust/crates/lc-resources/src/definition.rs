@@ -1122,6 +1122,92 @@ fn truncate_c4_string_bytes(value: &str, max_bytes: usize) -> String {
     lc_script::c4_string_from_bytes(&bytes[..bytes.len().min(max_bytes)])
 }
 
+fn parse_followed_physical(text: &str) -> PhysicalInfo {
+    struct NameNode<'a> {
+        name: &'a str,
+        value: Option<&'a str>,
+        parent: usize,
+        indent: usize,
+    }
+
+    let text = text.split_once('\0').map_or(text, |(head, _)| head);
+    let mut nodes = vec![NameNode {
+        name: "",
+        value: None,
+        parent: 0,
+        indent: 0,
+    }];
+    let mut current = 0;
+
+    // Reproduce the part of CreateNameTree that FollowName relies on:
+    // sections retain their indentation, while values are one level deeper.
+    for raw_line in text.split(['\r', '\n']) {
+        let indent = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let line = &raw_line[indent..];
+        let (name, value, node_indent, section) = if let Some(name) = ini_section_name(line) {
+            (name, None, indent, true)
+        } else if let Some((name, value)) = ini_value(line) {
+            (name, Some(value), indent.saturating_add(1), false)
+        } else {
+            continue;
+        };
+
+        while current != 0 && nodes[current].indent >= node_indent {
+            current = nodes[current].parent;
+        }
+        let parent = current;
+        nodes.push(NameNode {
+            name,
+            value,
+            parent,
+            indent: node_indent,
+        });
+        if section {
+            current = nodes.len() - 1;
+        }
+    }
+
+    let Some(def_core) = nodes
+        .iter()
+        .position(|node| node.parent == 0 && node.name == "DefCore")
+    else {
+        return PhysicalInfo::default();
+    };
+    let Some(next_sibling) = nodes
+        .iter()
+        .skip(def_core + 1)
+        .find(|node| node.parent == 0)
+    else {
+        return PhysicalInfo::default();
+    };
+    if next_sibling.name != "Physical" {
+        return PhysicalInfo::default();
+    }
+
+    // FollowName checks the adjacent node, removes DefCore, and then Name()
+    // selects the first matching sibling (which can be an earlier duplicate).
+    let physical_node = nodes
+        .iter()
+        .position(|node| node.parent == 0 && node.name == "Physical")
+        .expect("the accepted next sibling is a Physical node");
+    let mut physical = PhysicalInfo::default();
+    let mut seen_values = HashSet::new();
+    for node in nodes.iter().filter(|node| node.parent == physical_node) {
+        if !is_physical_compiler_key(node.name) || !seen_values.insert(node.name) {
+            continue;
+        }
+        let Some(value) = node.value else {
+            continue;
+        };
+        physical.set_by_name(node.name, parse_i32(value.trim()).unwrap_or(0));
+    }
+    physical
+}
+
 fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     // C4DefCore::Compile passes a native C string to StdCompilerINIRead.
     // Preserve every pre-NUL byte through the script string projection.
@@ -1198,7 +1284,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut burn_turn_to: Option<String> = None;
     let mut build_turn_to: Option<String> = None;
     let mut incomplete_activity = false;
-    let mut physical = PhysicalInfo::default();
+    let physical = parse_followed_physical(&text);
     let mut collectible = false;
     let mut grab_put_get: i32 = 0;
     let mut no_get: i32 = 0;
@@ -1282,13 +1368,6 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             continue;
         };
         if !seen_values.insert((section.to_string(), key.to_string())) {
-            continue;
-        }
-
-        if section == "Physical" {
-            if is_physical_compiler_key(key) {
-                physical.set_by_name(key, parse_i32(value).unwrap_or(0));
-            }
             continue;
         }
 
@@ -5253,6 +5332,82 @@ NextAction=Dup
         let mut above = 120_000;
         PhysicalInfo::train_value(&mut above, 100, C4_MAX_PHYSICAL);
         assert_eq!(above, 120_000, "never decreased by training");
+    }
+
+    #[test]
+    fn def_core_physical_after_an_intervening_section_is_ignored() {
+        let parsed = parse_def_core(
+            br#"[DefCore]
+id=GAP1
+[Foo]
+Energy=1
+[Physical]
+Energy=50000
+Walk=35000
+"#,
+        )
+        .expect("def core parses");
+
+        assert_eq!(parsed.physical, PhysicalInfo::default());
+    }
+
+    #[test]
+    fn def_core_physical_before_def_core_is_ignored() {
+        let parsed = parse_def_core(
+            br#"[Physical]
+Energy=50000
+Walk=35000
+[DefCore]
+id=PREV
+"#,
+        )
+        .expect("def core parses");
+
+        assert_eq!(parsed.physical, PhysicalInfo::default());
+    }
+
+    #[test]
+    fn def_core_nested_physical_section_is_ignored() {
+        let parsed = parse_def_core(
+            br#"[DefCore]
+id=NEST
+ [Physical]
+ Energy=50000
+ Walk=35000
+"#,
+        )
+        .expect("def core parses");
+
+        assert_eq!(parsed.physical, PhysicalInfo::default());
+    }
+
+    #[test]
+    fn def_core_nested_intervening_section_does_not_block_physical_follow_name() {
+        let parsed = parse_def_core(
+            br#"[DefCore]
+id=CHLD
+ [Foo]
+ Energy=1
+[Physical]
+Energy=50000
+"#,
+        )
+        .expect("def core parses");
+
+        assert_eq!(parsed.physical.energy, 50_000);
+    }
+
+    #[test]
+    fn def_core_physical_requires_exact_compiler_key_names() {
+        let mismatched = parse_def_core(
+            b"[DefCore]\nid=CASE\n[Physical]\nENERGY=50000\n",
+        )
+        .expect("case-mismatched physical parses");
+        assert_eq!(mismatched.physical, PhysicalInfo::default());
+
+        let exact = parse_def_core(b"[DefCore]\nid=GOOD\n[Physical]\nEnergy=50000\n")
+            .expect("well-formed physical parses");
+        assert_eq!(exact.physical.energy, 50_000);
     }
 
     #[test]
