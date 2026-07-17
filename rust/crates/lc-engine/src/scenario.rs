@@ -4688,6 +4688,25 @@ impl ScenarioValueStore {
         )
     }
 
+    /// Runtime `Game.C4S.Game.FoWColor`, retaining the packed unsigned C4
+    /// color bits even though `GetScenarioVal` exposes the primitive as an
+    /// `int32_t`.
+    pub(crate) fn fow_color(&self) -> u32 {
+        match self.get("FoWColor", Some("Game"), 0) {
+            Some(ScenarioValue::Int(value)) => *value as u32,
+            _ => 0,
+        }
+    }
+
+    /// Runtime `Game.C4S.Landscape.FoWRes`. The fully defaulted scenario
+    /// compiler stores `CClrModAddMap::iDefResolutionX` (64) here.
+    pub(crate) fn fow_resolution(&self) -> i32 {
+        match self.get("FoWRes", Some("Landscape"), 0) {
+            Some(ScenarioValue::Int(value)) => *value,
+            _ => crate::DEFAULT_FOW_RESOLUTION,
+        }
+    }
+
     /// Mirrors C4ValueGetCompiler's traversal: with no section, same-name
     /// fields in successive sections contribute to one primitive stream;
     /// with a section, only that named C4Scenario child is traversed.
@@ -16064,6 +16083,17 @@ RandomTeamCount=2
             values.get("FoWColor", Some("Game"), 0),
             Some(&ScenarioValue::Int(-1))
         );
+        assert_eq!(values.fow_color(), u32::MAX);
+        assert_eq!(values.fow_resolution(), 64);
+    }
+
+    #[test]
+    fn scenario_value_store_projects_fow_resolution_for_the_renderer() {
+        let manifest = parse_legacy_scenario_text("[Landscape]\nFoWRes=96\n")
+            .expect("FoWRes parses");
+        let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
+
+        assert_eq!(values.fow_resolution(), 96);
     }
 
     #[test]

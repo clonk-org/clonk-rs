@@ -273,7 +273,9 @@ impl ClonkFont {
         self.missing_glyph = Some(cell);
     }
 
-    fn rendered_glyph(&self, ch: char) -> Option<&GlyphCell> {
+    /// Resolve the cell DrawText uses, including the installed FreeType
+    /// glyph-zero fallback for a character absent from the direct map.
+    pub fn rendered_glyph(&self, ch: char) -> Option<&GlyphCell> {
         self.cells.get(&ch).or(self.missing_glyph.as_ref())
     }
 

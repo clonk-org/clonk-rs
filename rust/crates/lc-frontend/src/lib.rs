@@ -41,7 +41,7 @@ use lc_engine::{
     DefinitionTargetRect, Direction, DrawTransform, PHYSICAL_ACTION_GRAPHICS_MARKER,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GammaControlState, GraphicsOverlayMode,
     Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot,
-    PlayerState, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    PlayerState, RgbColor, SimulationSnapshot, SkyFrame, SkySettings, PLAYER_VIEW_MODE_TARGET,
     SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, FULL_CON, OWNER_NONE,
     physical_action_graphics_key,
 };
@@ -366,6 +366,7 @@ pub fn default_owner_color(owner: i32) -> Color {
 const CATEGORY_BACKGROUND_FLAG: i32 = 1 << 20;
 const CATEGORY_PARALLAX_FLAG: i32 = 1 << 21;
 const CATEGORY_FOREGROUND_FLAG: i32 = 1 << 23;
+const CATEGORY_IGNORE_FOW_FLAG: i32 = 1 << 25;
 const CATEGORY_MOUSE_IGNORE_FLAG: i32 = 1 << 24;
 
 #[derive(Clone, Copy)]
@@ -382,6 +383,10 @@ enum ObjectRenderPass {
 struct SpriteBlitState {
     mode: u32,
     modulation: Option<u32>,
+    /// Per-fragment value interpolated from the active ClrModMap vertices.
+    /// Kept separate from ColorMod so `C4GFXBLIT_CLRSFC_OWNCLR` can suppress
+    /// the object modulation without accidentally suppressing fog.
+    fog_modulation: Option<FogModulationSample>,
 }
 
 impl SpriteBlitState {
@@ -389,6 +394,7 @@ impl SpriteBlitState {
         Self {
             mode: 0,
             modulation: None,
+            fog_modulation: None,
         }
     }
 
@@ -397,7 +403,11 @@ impl SpriteBlitState {
         let modulation = (object.color_modulation != 0
             || mode & (C4GFXBLIT_MOD2 | C4GFXBLIT_CLRSFC_MOD2) != 0)
             .then_some(object.color_modulation);
-        Self { mode, modulation }
+        Self {
+            mode,
+            modulation,
+            fog_modulation: None,
+        }
     }
 
     fn for_overlay(object: &ObjectSnapshot, overlay: &ObjectGraphicsOverlay) -> Self {
@@ -408,6 +418,7 @@ impl SpriteBlitState {
             mode: overlay.blit_mode,
             modulation: (overlay.color_modulation != 0x00ff_ffff)
                 .then_some(overlay.color_modulation),
+            fog_modulation: None,
         }
     }
 }
@@ -517,6 +528,842 @@ fn split_c4_color(raw: u32) -> [u8; 4] {
     ]
 }
 
+/// CPU counterpart of `CClrModAddMap`'s modulation half. `dwAddClr` is
+/// retained nowhere because the native renderer never consumes it either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClrModMap {
+    resolution_x: i32,
+    resolution_y: i32,
+    width: i32,
+    height: i32,
+    origin_x: i32,
+    origin_y: i32,
+    fade_transparent: bool,
+    cells: Vec<u32>,
+}
+
+impl ClrModMap {
+    #[allow(clippy::too_many_arguments)]
+    fn reset(
+        resolution_x: i32,
+        resolution_y: i32,
+        width_px: i32,
+        height_px: i32,
+        target_x: i32,
+        target_y: i32,
+        output_x: i32,
+        output_y: i32,
+        background_color: u32,
+    ) -> Option<Self> {
+        if resolution_x <= 0 || resolution_y <= 0 || width_px <= 0 || height_px <= 0 {
+            return None;
+        }
+        // `%` and `/` deliberately retain Rust/C++ truncation toward zero.
+        let align_x = -(target_x % resolution_x);
+        let align_y = -(target_y % resolution_y);
+        let width = (width_px - align_x + resolution_x - 1) / resolution_x + 1;
+        let height = (height_px - align_y + resolution_y - 1) / resolution_y + 1;
+        let len = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        let fade_transparent = background_color != 0;
+        Some(Self {
+            resolution_x,
+            resolution_y,
+            width,
+            height,
+            origin_x: output_x + align_x,
+            origin_y: output_y + align_y,
+            fade_transparent,
+            cells: vec![if fade_transparent { 0xffff_ffff } else { 0 }; len],
+        })
+    }
+
+    fn reduce_modulation(&mut self, center_x: i32, center_y: i32, radius1: i32, radius2: i32) {
+        let radius1_sq = i64::from(radius1) * i64::from(radius1);
+        let radius2_sq = i64::from(radius2) * i64::from(radius2);
+        let denominator = radius2_sq - radius1_sq;
+        for row in 0..self.height {
+            let y = self.origin_y + row * self.resolution_y;
+            for column in 0..self.width {
+                let x = self.origin_x + column * self.resolution_x;
+                let dx = i64::from(x) - i64::from(center_x);
+                let dy = i64::from(y) - i64::from(center_y);
+                let distance = dx * dx + dy * dy;
+                if distance >= radius2_sq {
+                    continue;
+                }
+                let index = (row * self.width + column) as usize;
+                if distance < radius1_sq {
+                    self.cells[index] = 0x00ff_ffff;
+                    continue;
+                }
+                if denominator == 0 {
+                    continue;
+                }
+                let visibility = ((radius2_sq - distance) * 255 / denominator) as u32;
+                if self.fade_transparent {
+                    let transparency = (self.cells[index] >> 24).min(255 - visibility);
+                    self.cells[index] = 0x00ff_ffff | (transparency << 24);
+                } else {
+                    let gray = visibility * 0x0001_0101;
+                    self.cells[index] = self.cells[index].max(gray);
+                }
+            }
+        }
+    }
+
+    fn add_modulation(
+        &mut self,
+        center_x: i32,
+        center_y: i32,
+        radius1: i32,
+        radius2: i32,
+        transparency: u8,
+    ) {
+        let radius1_sq = i64::from(radius1) * i64::from(radius1);
+        let radius2_sq = i64::from(radius2) * i64::from(radius2);
+        let denominator = radius2_sq - radius1_sq;
+        for row in 0..self.height {
+            let y = self.origin_y + row * self.resolution_y;
+            for column in 0..self.width {
+                let x = self.origin_x + column * self.resolution_x;
+                let dx = i64::from(x) - i64::from(center_x);
+                let dy = i64::from(y) - i64::from(center_y);
+                let distance = dx * dx + dy * dy;
+                if distance >= radius2_sq {
+                    continue;
+                }
+                let index = (row * self.width + column) as usize;
+                if distance < radius1_sq && transparency == 0 {
+                    self.cells[index] = 0;
+                    continue;
+                }
+                if denominator == 0 {
+                    continue;
+                }
+                let falloff = ((radius2_sq - distance) * 255 / denominator).min(255);
+                let visibility = (255 - falloff + i64::from(transparency)).min(255) as u32;
+                if self.fade_transparent {
+                    let alpha = (self.cells[index] >> 24).max(255 - visibility);
+                    self.cells[index] = 0x00ff_ffff | (alpha << 24);
+                } else {
+                    let gray = visibility * 0x0001_0101;
+                    self.cells[index] = self.cells[index].min(gray);
+                }
+            }
+        }
+    }
+
+    fn get_mod_at(&self, x: i32, y: i32) -> u32 {
+        let x = x - self.origin_x;
+        let y = y - self.origin_y;
+        let column = (x / self.resolution_x).clamp(0, self.width - 1);
+        let row = (y / self.resolution_y).clamp(0, self.height - 1);
+        let column2 = (column + 1).min(self.width - 1);
+        let row2 = (row + 1).min(self.height - 1);
+        let at = |column: i32, row: i32| self.cells[(row * self.width + column) as usize];
+        let corners = [
+            at(column, row),
+            at(column2, row),
+            at(column, row2),
+            at(column2, row2),
+        ];
+        let local_x = i64::from(x - column * self.resolution_x);
+        let local_y = i64::from(y - row * self.resolution_y);
+        let width = i64::from(self.resolution_x);
+        let height = i64::from(self.resolution_y);
+        let mut result = 0u32;
+        for channel in 0..4 {
+            let shift = channel * 8;
+            let c0 = i64::from((corners[0] >> shift) & 0xff);
+            let cx = i64::from((corners[1] >> shift) & 0xff) - c0;
+            let cy = i64::from((corners[2] >> shift) & 0xff) - c0;
+            let corner = i64::from((corners[3] >> shift) & 0xff);
+            let mut value = c0 + cx * local_x / width + cy * local_y / height;
+            value += local_x * local_y * (corner - value) / (width * height);
+            result |= (value.clamp(0, 255) as u32) << shift;
+        }
+        result
+    }
+}
+
+#[derive(Clone)]
+struct FogDrawContext {
+    map: Arc<ClrModMap>,
+    zoom: f32,
+}
+
+impl FogDrawContext {
+    fn modulation_at_point(&self, x: f32, y: f32) -> u32 {
+        self.map
+            .get_mod_at((x / self.zoom) as i32, (y / self.zoom) as i32)
+    }
+
+    fn modulation_at(&self, x: i32, y: i32) -> u32 {
+        self.modulation_at_point(x as f32, y as f32)
+    }
+
+    fn blit_at(&self, mut blit: SpriteBlitState, x: i32, y: i32) -> SpriteBlitState {
+        blit.fog_modulation = Some(FogModulationSample::uniform(self.modulation_at(x, y)));
+        blit
+    }
+
+    fn color_at(&self, color: Color, x: i32, y: i32) -> Color {
+        modulate_surface_color(color, self.modulation_at(x, y))
+    }
+
+    fn color_at_point(&self, color: Color, x: f32, y: f32) -> Color {
+        modulate_surface_color(color, self.modulation_at_point(x, y))
+    }
+}
+
+/// One native sprite/landscape blit is subdivided along source texture
+/// coordinates into chunks no larger than 64 pixels. ClrModMap is sampled at
+/// each transformed chunk corner and GL smooth-shades the two strip
+/// triangles; it does not call `GetModAt` independently for every fragment.
+#[derive(Clone, Copy)]
+struct FogColorQuad {
+    x: (f32, f32),
+    y: (f32, f32),
+    modulation: [u32; 4], // top-left, top-right, bottom-left, bottom-right
+}
+
+/// ClrModMap values at one GL quad's vertices plus the fragment's triangle
+/// weights. Native combines the active object/global modulation with each
+/// vertex first, then interpolates; interpolating the raw fog color first can
+/// differ by a byte because ModulateClr uses integer `>> 8` arithmetic.
+#[derive(Clone, Copy)]
+struct FogModulationSample {
+    modulation: [u32; 4],
+    weights: [f32; 4],
+}
+
+impl FogModulationSample {
+    fn uniform(modulation: u32) -> Self {
+        Self {
+            modulation: [modulation; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    fn interpolate(self) -> u32 {
+        interpolate_packed_modulation(self.modulation, self.weights)
+    }
+
+    fn combine_with(self, base: u32) -> u32 {
+        interpolate_packed_modulation(
+            self.modulation.map(|fog| modulate_c4_colors(base, fog)),
+            self.weights,
+        )
+    }
+
+    fn combined_quad_is_nonzero(self, base: u32) -> bool {
+        self.modulation
+            .into_iter()
+            .any(|fog| modulate_c4_colors(base, fog) != 0)
+    }
+}
+
+fn interpolate_packed_modulation(modulation: [u32; 4], weights: [f32; 4]) -> u32 {
+    let mut result = 0u32;
+    for channel in 0..4 {
+        let shift = channel * 8;
+        let value = modulation
+            .iter()
+            .zip(weights)
+            .map(|(color, weight)| ((color >> shift) & 0xff) as f32 * weight)
+            .sum::<f32>()
+            .round()
+            .clamp(0.0, 255.0) as u32;
+        result |= value << shift;
+    }
+    result
+}
+
+struct FogSpriteSampler {
+    source_width: f32,
+    source_height: f32,
+    columns: usize,
+    x_ranges: Vec<(f32, f32)>,
+    y_ranges: Vec<(f32, f32)>,
+    quads: Vec<FogColorQuad>,
+}
+
+fn interpolate_quad_color(colors: [Color; 4], weights: [f32; 4]) -> Color {
+    let channel = |select: fn(Color) -> u8| {
+        colors
+            .iter()
+            .copied()
+            .zip(weights)
+            .map(|(color, weight)| f32::from(select(color)) * weight)
+            .sum::<f32>()
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::new(
+        channel(|color| color.r),
+        channel(|color| color.g),
+        channel(|color| color.b),
+        channel(|color| color.a),
+    )
+}
+
+impl FogSpriteSampler {
+    fn axis_ranges(origin: f32, extent: f32, chunk_size: f32, flipped: bool) -> Vec<(f32, f32)> {
+        let mut ranges = Vec::new();
+        let end = origin + extent;
+        let mut position = origin;
+        while position < end {
+            let mut next = ((position / chunk_size).floor() + 1.0) * chunk_size;
+            if next <= position {
+                // At very large f32 source coordinates a 64px increment can
+                // round back to the same value. Finish the remaining range
+                // instead of allowing malformed script geometry to loop.
+                next = end;
+            }
+            let next = next.min(end);
+            if next <= position {
+                break;
+            }
+            let (mut local_start, mut local_end) = (position - origin, next - origin);
+            if flipped {
+                (local_start, local_end) = (extent - local_end, extent - local_start);
+            }
+            ranges.push((local_start, local_end));
+            position = next;
+        }
+        ranges.sort_by(|left, right| left.0.total_cmp(&right.0));
+        ranges
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        fog: &FogDrawContext,
+        dest: (f32, f32, f32, f32),
+        source: (f32, f32, f32, f32),
+        image_size: (u32, u32),
+        flip_x: bool,
+        transform: impl Fn(f32, f32) -> (f32, f32),
+    ) -> Option<Self> {
+        let chunk_size = cpp_tex_size(image_size.0, image_size.1).min(64) as f32;
+        Self::new_with_chunks(
+            fog,
+            dest,
+            source,
+            (chunk_size, chunk_size),
+            flip_x,
+            transform,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_chunks(
+        fog: &FogDrawContext,
+        dest: (f32, f32, f32, f32),
+        source: (f32, f32, f32, f32),
+        chunk_size: (f32, f32),
+        flip_x: bool,
+        transform: impl Fn(f32, f32) -> (f32, f32),
+    ) -> Option<Self> {
+        let (dest_x, dest_y, dest_width, dest_height) = dest;
+        let (source_x, source_y, source_width, source_height) = source;
+        if ![
+            dest_x,
+            dest_y,
+            dest_width,
+            dest_height,
+            source_x,
+            source_y,
+            source_width,
+            source_height,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            || dest_width <= 0.0
+            || dest_height <= 0.0
+            || source_width <= 0.0
+            || source_height <= 0.0
+            || !chunk_size.0.is_finite()
+            || !chunk_size.1.is_finite()
+            || chunk_size.0 <= 0.0
+            || chunk_size.1 <= 0.0
+        {
+            return None;
+        }
+        let Some(estimated_columns) =
+            ((source_width / chunk_size.0).ceil() as usize).checked_add(2)
+        else {
+            return None;
+        };
+        let Some(estimated_rows) =
+            ((source_height / chunk_size.1).ceil() as usize).checked_add(2)
+        else {
+            return None;
+        };
+        if estimated_columns
+            .checked_mul(estimated_rows)
+            .is_none_or(|chunks| chunks > 1_000_000)
+        {
+            return None;
+        }
+        let x_ranges = Self::axis_ranges(source_x, source_width, chunk_size.0, flip_x);
+        let y_ranges = Self::axis_ranges(source_y, source_height, chunk_size.1, false);
+        if x_ranges.is_empty() || y_ranges.is_empty() {
+            return None;
+        }
+        let mut quads = Vec::with_capacity(x_ranges.len() * y_ranges.len());
+        for &(top, bottom) in &y_ranges {
+            for &(left, right) in &x_ranges {
+                let target = |local_x: f32, local_y: f32| {
+                    transform(
+                        dest_x + local_x / source_width * dest_width,
+                        dest_y + local_y / source_height * dest_height,
+                    )
+                };
+                let points = [
+                    target(left, top),
+                    target(right, top),
+                    target(left, bottom),
+                    target(right, bottom),
+                ];
+                if !points
+                    .iter()
+                    .all(|(x, y)| x.is_finite() && y.is_finite())
+                {
+                    return None;
+                }
+                quads.push(FogColorQuad {
+                    x: (left, right),
+                    y: (top, bottom),
+                    modulation: points.map(|(x, y)| fog.modulation_at_point(x, y)),
+                });
+            }
+        }
+        Some(Self {
+            source_width,
+            source_height,
+            columns: x_ranges.len(),
+            x_ranges,
+            y_ranges,
+            quads,
+        })
+    }
+
+    fn quad_and_weights(
+        &self,
+        normalized_x: f32,
+        normalized_y: f32,
+    ) -> (FogColorQuad, [f32; 4]) {
+        let local_x = normalized_x.clamp(0.0, 1.0) * self.source_width;
+        let local_y = normalized_y.clamp(0.0, 1.0) * self.source_height;
+        let column = self
+            .x_ranges
+            .iter()
+            .position(|range| local_x < range.1)
+            .unwrap_or(self.x_ranges.len() - 1);
+        let row = self
+            .y_ranges
+            .iter()
+            .position(|range| local_y < range.1)
+            .unwrap_or(self.y_ranges.len() - 1);
+        let quad = self.quads[row * self.columns + column];
+        let u = ((local_x - quad.x.0) / (quad.x.1 - quad.x.0)).clamp(0.0, 1.0);
+        let v = ((local_y - quad.y.0) / (quad.y.1 - quad.y.0)).clamp(0.0, 1.0);
+        let weights = if u + v <= 1.0 {
+            [1.0 - u - v, u, v, 0.0]
+        } else {
+            [0.0, 1.0 - v, 1.0 - u, u + v - 1.0]
+        };
+        (quad, weights)
+    }
+
+    fn modulation_at(&self, normalized_x: f32, normalized_y: f32) -> u32 {
+        self.modulation_sample(normalized_x, normalized_y).interpolate()
+    }
+
+    fn modulation_sample(
+        &self,
+        normalized_x: f32,
+        normalized_y: f32,
+    ) -> FogModulationSample {
+        let (quad, weights) = self.quad_and_weights(normalized_x, normalized_y);
+        FogModulationSample {
+            modulation: quad.modulation,
+            weights,
+        }
+    }
+
+    fn color_at(&self, color: Color, normalized_x: f32, normalized_y: f32) -> Color {
+        let (quad, weights) = self.quad_and_weights(normalized_x, normalized_y);
+        interpolate_quad_color(
+            quad.modulation
+                .map(|modulation| modulate_surface_color(color, modulation)),
+            weights,
+        )
+    }
+
+    fn vertical_color_at(
+        &self,
+        normalized_x: f32,
+        normalized_y: f32,
+        color_at_y: impl Fn(f32) -> Color,
+    ) -> Color {
+        let (quad, weights) = self.quad_and_weights(normalized_x, normalized_y);
+        let top = color_at_y(quad.y.0 / self.source_height);
+        let bottom = color_at_y(quad.y.1 / self.source_height);
+        interpolate_quad_color(
+            [
+                modulate_surface_color(top, quad.modulation[0]),
+                modulate_surface_color(top, quad.modulation[1]),
+                modulate_surface_color(bottom, quad.modulation[2]),
+                modulate_surface_color(bottom, quad.modulation[3]),
+            ],
+            weights,
+        )
+    }
+
+    fn blit_at(
+        &self,
+        mut blit: SpriteBlitState,
+        normalized_x: f32,
+        normalized_y: f32,
+    ) -> SpriteBlitState {
+        blit.fog_modulation = Some(self.modulation_sample(normalized_x, normalized_y));
+        blit
+    }
+}
+
+fn fog_sprite_blit_at(
+    sampler: Option<&FogSpriteSampler>,
+    fog: Option<&FogDrawContext>,
+    blit: SpriteBlitState,
+    normalized_x: f32,
+    normalized_y: f32,
+    target_x: i32,
+    target_y: i32,
+) -> SpriteBlitState {
+    if let Some(sampler) = sampler {
+        sampler.blit_at(blit, normalized_x, normalized_y)
+    } else if let Some(fog) = fog {
+        // A malformed/projective quad can fail sampler construction. Retain
+        // visibility rather than dropping modulation for the complete draw.
+        fog.blit_at(blit, target_x, target_y)
+    } else {
+        blit
+    }
+}
+
+/// TextOut submits one blit per rendered glyph while ClrModMap is active.
+/// Preserve those glyph-local modulation vertices for world-space cursor
+/// labels instead of applying one fog sample to the complete line.
+fn draw_fogged_cursor_text_line(
+    surface: &mut Surface,
+    font: &hud::HudFont<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: Color,
+    gamma: Option<&lc_graphics::GammaRamp>,
+    fog: &FogDrawContext,
+) {
+    let packed_color = (u32::from(255 - color.a) << 24)
+        | (u32::from(color.r) << 16)
+        | (u32::from(color.g) << 8)
+        | u32::from(color.b);
+    let base_blit = SpriteBlitState {
+        mode: 0,
+        modulation: Some(packed_color),
+        fog_modulation: None,
+    };
+
+    match font {
+        hud::HudFont::Clonk(font) => {
+            let mut pen_x = x - font.measure(text, false).0 / 2;
+            for character in text.chars() {
+                if character < ' ' {
+                    continue;
+                }
+                let cell = font.rendered_glyph(character);
+                if let Some(cell) = cell {
+                    let width = cell.width.max(0) as usize;
+                    let height = font.cell_height.max(0) as usize;
+                    let sampler = FogSpriteSampler::new(
+                        fog,
+                        (pen_x as f32, y as f32, width as f32, height as f32),
+                        (0.0, 0.0, width as f32, height as f32),
+                        (width as u32, height as u32),
+                        false,
+                        |x, y| (x, y),
+                    );
+                    for row in 0..height {
+                        for column in 0..width {
+                            let Some(&source_color) = cell
+                                .pixels
+                                .get(row.saturating_mul(width).saturating_add(column))
+                            else {
+                                continue;
+                            };
+                            if source_color.a == 0 {
+                                continue;
+                            }
+                            let target_x = pen_x.saturating_add(column as i32);
+                            let target_y = y.saturating_add(row as i32);
+                            let pixel_blit = fog_sprite_blit_at(
+                                sampler.as_ref(),
+                                Some(fog),
+                                base_blit,
+                                (column as f32 + 0.5) / width.max(1) as f32,
+                                (row as f32 + 0.5) / height.max(1) as f32,
+                                target_x,
+                                target_y,
+                            );
+                            let source =
+                                prepare_sprite_fragment(source_color, None, None, pixel_blit);
+                            if source.alpha() == 0 {
+                                continue;
+                            }
+                            let (Ok(target_x), Ok(target_y)) =
+                                (u32::try_from(target_x), u32::try_from(target_y))
+                            else {
+                                continue;
+                            };
+                            let Some(destination) = surface.get_pixel(target_x, target_y) else {
+                                continue;
+                            };
+                            let output = composite_sprite_fragment(
+                                source,
+                                destination,
+                                pixel_blit,
+                                gamma,
+                            );
+                            let _ = surface.set_pixel(target_x, target_y, output);
+                        }
+                    }
+                }
+                pen_x = pen_x
+                    .saturating_add(cell.map_or(0, |cell| cell.width))
+                    .saturating_add(font.h_space);
+            }
+        }
+        hud::HudFont::Fallback(fallback) => {
+            // The fallback has no exposed glyph atlas. Rasterize the line to
+            // a transparent white source and still split it into <=64px fog
+            // chunks, so modulation remains spatial rather than line-wide.
+            let width = font.text_width(text).max(1) as u32;
+            let height = font.line_height().max(1) as u32;
+            let origin_x = x - width as i32 / 2;
+            let mut source_surface = Surface::new(width, height, PixelFormat::Rgba8888);
+            fallback.draw_text(
+                &mut source_surface,
+                0.0,
+                0.0,
+                text,
+                14.0,
+                Color::opaque(255, 255, 255),
+            );
+            let sampler = FogSpriteSampler::new(
+                fog,
+                (
+                    origin_x as f32,
+                    y as f32,
+                    width as f32,
+                    height as f32,
+                ),
+                (0.0, 0.0, width as f32, height as f32),
+                (width, height),
+                false,
+                |x, y| (x, y),
+            );
+            for row in 0..height {
+                for column in 0..width {
+                    let Some(mut source_color) = source_surface.get_pixel(column, row) else {
+                        continue;
+                    };
+                    if source_color.a == 0 {
+                        continue;
+                    }
+                    // Drawing onto transparent black stores coverage in both
+                    // RGB and alpha. Recover a straight-alpha white glyph.
+                    let alpha = u32::from(source_color.a);
+                    let unpremultiply = |channel: u8| {
+                        ((u32::from(channel) * 255 + alpha / 2) / alpha).min(255) as u8
+                    };
+                    source_color.r = unpremultiply(source_color.r);
+                    source_color.g = unpremultiply(source_color.g);
+                    source_color.b = unpremultiply(source_color.b);
+                    let target_x = origin_x.saturating_add(column as i32);
+                    let target_y = y.saturating_add(row as i32);
+                    let pixel_blit = fog_sprite_blit_at(
+                        sampler.as_ref(),
+                        Some(fog),
+                        base_blit,
+                        (column as f32 + 0.5) / width as f32,
+                        (row as f32 + 0.5) / height as f32,
+                        target_x,
+                        target_y,
+                    );
+                    let source = prepare_sprite_fragment(source_color, None, None, pixel_blit);
+                    if source.alpha() == 0 {
+                        continue;
+                    }
+                    let (Ok(target_x), Ok(target_y)) =
+                        (u32::try_from(target_x), u32::try_from(target_y))
+                    else {
+                        continue;
+                    };
+                    let Some(destination) = surface.get_pixel(target_x, target_y) else {
+                        continue;
+                    };
+                    let output =
+                        composite_sprite_fragment(source, destination, pixel_blit, gamma);
+                    let _ = surface.set_pixel(target_x, target_y, output);
+                }
+            }
+        }
+    }
+}
+
+fn object_is_closed_to_fog(snapshot: &SimulationSnapshot, object: &ObjectSnapshot) -> bool {
+    object
+        .container
+        .and_then(|container| snapshot.object(container))
+        .and_then(|container| {
+            snapshot
+                .definition_closed_containers
+                .get(&container.definition_id)
+        })
+        .is_some_and(|closed| *closed == 1)
+}
+
+fn build_fog_modulation_map(
+    snapshot: &SimulationSnapshot,
+    owner: i32,
+    target_x: i32,
+    target_y: i32,
+    logical_width: i32,
+    logical_height: i32,
+) -> Option<ClrModMap> {
+    let player = snapshot
+        .players
+        .iter()
+        .find(|player| player.id == owner && player.fog_of_war)?;
+    let resolution = snapshot.environment.fow_resolution;
+    let mut map = ClrModMap::reset(
+        resolution,
+        resolution,
+        logical_width,
+        logical_height,
+        target_x,
+        target_y,
+        0,
+        0,
+        snapshot.environment.fow_color,
+    )?;
+
+    // Real engine snapshots carry the exact runtime link order. Legacy and
+    // hand-built presentation fixtures fall back to PlrFoWActualize's owner
+    // rule so they remain useful without fabricating a private player list.
+    let fow_player = snapshot.fow_players.get(&owner);
+    let view_objects = fow_player.map(|frame| frame.view_objects.clone()).unwrap_or_else(|| {
+        snapshot
+            .objects
+            .iter()
+            .filter(|object| {
+                object.status != ObjectStatus::Deleted
+                    && object.plr_view_range != 0
+                    && (object.owner == owner
+                        || !snapshot
+                            .players
+                            .iter()
+                            .any(|player| player.id == object.owner))
+            })
+            .map(|object| object.id)
+            .collect()
+    });
+
+    let offset_x = -target_x;
+    let offset_y = -target_y;
+    let mut has_generators = false;
+    for id in &view_objects {
+        let Some(object) = snapshot.object(*id) else {
+            continue;
+        };
+        if object_is_closed_to_fog(snapshot, object) {
+            continue;
+        }
+        if object.plr_view_range > 0 {
+            map.reduce_modulation(
+                object.position.x + offset_x,
+                object.position.y + offset_y,
+                object.plr_view_range * 2 / 3,
+                object.plr_view_range,
+            );
+        } else {
+            has_generators = true;
+        }
+    }
+
+    if player.view_mode == PLAYER_VIEW_MODE_TARGET {
+        if let Some(target) = player
+            .view_target
+            .or_else(|| fow_player.and_then(|frame| frame.view_target))
+            .and_then(|target| snapshot.object(target))
+            .filter(|target| !object_is_closed_to_fog(snapshot, target))
+        {
+            let mut range = target.plr_view_range;
+            if range == 0 {
+                range = player
+                    .cursor
+                    .and_then(|cursor| snapshot.object(cursor))
+                    .map_or(0, |cursor| cursor.plr_view_range);
+            }
+            if range == 0 {
+                range = 500;
+            }
+            map.reduce_modulation(
+                target.position.x + offset_x,
+                target.position.y + offset_y,
+                range * 2 / 3,
+                range,
+            );
+        }
+    }
+
+    if has_generators {
+        for id in view_objects {
+            let Some(object) = snapshot.object(id) else {
+                continue;
+            };
+            if object.plr_view_range >= 0 || object_is_closed_to_fog(snapshot, object) {
+                continue;
+            }
+            let radius = -object.plr_view_range;
+            map.add_modulation(
+                object.position.x + offset_x,
+                object.position.y + offset_y,
+                radius,
+                radius + 200,
+                (object.color_modulation >> 24) as u8,
+            );
+        }
+    }
+    Some(map)
+}
+
+fn c4_color_to_surface(raw: u32) -> Color {
+    let [red, green, blue, transparency] = split_c4_color(raw);
+    Color::new(red, green, blue, 255 - transparency)
+}
+
+fn modulate_surface_color(color: Color, modulation: u32) -> Color {
+    let packed = (u32::from(255 - color.a) << 24)
+        | (u32::from(color.r) << 16)
+        | (u32::from(color.g) << 8)
+        | u32::from(color.b);
+    c4_color_to_surface(modulate_c4_colors(packed, modulation))
+}
+
 /// The ClrByOwner tint passed by C4Object::DrawFace/DrawTopFace to
 /// C4DefGraphics::GetBitmap (C4Object.cpp:440-477,2617-2670). This is the
 /// live object color, which scripts may change independently of its owner.
@@ -590,9 +1437,19 @@ fn prepare_sprite_fragment(
                 modulation = modulate_c4_colors(modulation, global);
             }
         }
+        let quad_modulation_is_nonzero = if modulation != 0 {
+            blit.fog_modulation.map_or(true, |fog| {
+                let any_nonzero = fog.combined_quad_is_nonzero(modulation);
+                modulation = fog.combine_with(modulation);
+                any_nonzero
+            })
+        } else {
+            false
+        };
         // PerformBlt explicitly disables MOD2 for a completely black
-        // modulation (StdGL.cpp:471-472).
-        let mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0 && modulation != 0;
+        // modulation quad, not independently at each interpolated fragment
+        // (StdGL.cpp:471-472).
+        let mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0 && quad_modulation_is_nonzero;
         return shader_modulate_fragment(
             Color::new(mask, mask, mask, source.a),
             modulation,
@@ -600,12 +1457,24 @@ fn prepare_sprite_fragment(
         );
     }
 
-    if blit.modulation.is_none() && blit.mode & C4GFXBLIT_MOD2 == 0 {
+    if blit.modulation.is_none()
+        && blit.fog_modulation.is_none()
+        && blit.mode & C4GFXBLIT_MOD2 == 0
+    {
         return PreparedSpriteFragment::Legacy(source);
     }
 
-    let modulation = blit.modulation.unwrap_or(0x00ff_ffff);
-    let mod2 = blit.mode & C4GFXBLIT_MOD2 != 0 && modulation != 0;
+    let mut modulation = blit.modulation.unwrap_or(0x00ff_ffff);
+    let quad_modulation_is_nonzero = if modulation != 0 {
+        blit.fog_modulation.map_or(true, |fog| {
+            let any_nonzero = fog.combined_quad_is_nonzero(modulation);
+            modulation = fog.combine_with(modulation);
+            any_nonzero
+        })
+    } else {
+        false
+    };
+    let mod2 = blit.mode & C4GFXBLIT_MOD2 != 0 && quad_modulation_is_nonzero;
     shader_modulate_fragment(source, modulation, mod2)
 }
 
@@ -1219,6 +2088,12 @@ pub struct GraphicsSystem {
     /// Presentation-only `SafeRandom` stream. C++ deliberately keeps this
     /// outside the synchronized game RNG; DrawBolt consumes it while drawing.
     presentation_rng: SafeRng,
+    /// Active viewport `CClrModAddMap`. It is installed for world drawing and
+    /// removed before parallax GUI/overlay rendering.
+    active_fog_map: Option<Arc<ClrModMap>>,
+    /// `C4D_IgnoreFoW` temporarily disables the map around an object's base
+    /// draw without affecting the surrounding viewport pass.
+    fog_suppression_depth: u32,
 }
 
 impl GraphicsSystem {
@@ -1270,6 +2145,8 @@ impl GraphicsSystem {
             material_render_info: Arc::new(HashMap::new()),
             landscape_cache: None,
             presentation_rng: SafeRng::default(),
+            active_fog_map: None,
+            fog_suppression_depth: 0,
         }
     }
 
@@ -1323,6 +2200,117 @@ impl GraphicsSystem {
 
     pub fn surface_mut(&mut self) -> &mut Surface {
         &mut self.surface
+    }
+
+    fn fog_draw_context(&self) -> Option<FogDrawContext> {
+        if self.fog_suppression_depth != 0 {
+            return None;
+        }
+        Some(FogDrawContext {
+            map: Arc::clone(self.active_fog_map.as_ref()?),
+            zoom: self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
+        })
+    }
+
+    fn fog_box_sampler(
+        &self,
+        world_aligned: bool,
+    ) -> Option<(FogDrawContext, Option<FogSpriteSampler>)> {
+        let fog = self.fog_draw_context()?;
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let source_origin = if world_aligned {
+            (self.viewport_x, self.viewport_y)
+        } else {
+            (0.0, 0.0)
+        };
+        let chunk_size = (
+            fog.map.resolution_x as f32,
+            fog.map.resolution_y as f32,
+        );
+        let sampler = FogSpriteSampler::new_with_chunks(
+            &fog,
+            (
+                0.0,
+                0.0,
+                self.surface_width as f32,
+                self.surface_height as f32,
+            ),
+            (
+                source_origin.0,
+                source_origin.1,
+                self.surface_width as f32 / zoom,
+                self.surface_height as f32 / zoom,
+            ),
+            chunk_size,
+            false,
+            |x, y| (x, y),
+        );
+        Some((fog, sampler))
+    }
+
+    fn draw_world_color_pixel(
+        &mut self,
+        x: u32,
+        y: u32,
+        color: Color,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let color = self
+            .fog_draw_context()
+            .map_or(color, |fog| fog.color_at(color, x as i32, y as i32));
+        self.draw_prepared_world_color_pixel(x, y, color, gamma);
+    }
+
+    fn draw_prepared_world_color_pixel(
+        &mut self,
+        x: u32,
+        y: u32,
+        color: Color,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        if color.a == 0 {
+            return;
+        }
+        let destination = self.surface.get_pixel(x, y).unwrap_or_default();
+        let output = match gamma {
+            Some(gamma) if color.a == 255 => gamma_encode_fragment(color, gamma),
+            Some(gamma) => gamma_blend_fragment_over(color, destination, gamma),
+            None if color.a == 255 => color,
+            None => blend_colors(color, destination),
+        };
+        let _ = self.surface.set_pixel(x, y, output);
+    }
+
+    fn fill_world_color(
+        &mut self,
+        color: Color,
+        world_aligned: bool,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        if self.active_fog_map.is_none() {
+            self.surface.fill(
+                gamma.map_or(color, |gamma| gamma_encode_fragment(color, gamma)),
+            );
+            return;
+        }
+        let (fog, sampler) = self
+            .fog_box_sampler(world_aligned)
+            .expect("active fog map yields a draw context");
+        for y in 0..self.surface_height {
+            for x in 0..self.surface_width {
+                let color = sampler.as_ref().map_or_else(
+                    || fog.color_at(color, x as i32, y as i32),
+                    |sampler| {
+                        sampler.color_at(
+                            color,
+                            (x as f32 + 0.5) / self.surface_width as f32,
+                            (y as f32 + 0.5) / self.surface_height as f32,
+                        )
+                    },
+                );
+                self.draw_prepared_world_color_pixel(x, y, color, gamma);
+            }
+        }
     }
 
     /// Output rectangle of the player's active viewport. Viewport-owned GUI
@@ -1536,6 +2524,7 @@ impl GraphicsSystem {
                     None,
                     SpriteBlitState::normal(),
                     gamma,
+                    None,
                 );
             }
         }
@@ -1992,6 +2981,39 @@ impl GraphicsSystem {
         let content_surface = Surface::new(content_width.max(1), content_height.max(1), format);
         let main_surface = std::mem::replace(&mut self.surface, content_surface);
 
+        let fog_map = build_fog_modulation_map(
+            snapshot,
+            input.owner,
+            origin_x as i32,
+            origin_y as i32,
+            view_width,
+            view_height,
+        );
+        if fog_map
+            .as_ref()
+            .is_some_and(|map| map.fade_transparent)
+        {
+            // Reset draws FoWColor onto the viewport before enabling the map.
+            // Preserve the tiled viewport underlay for translucent colors.
+            for y in 0..content_height {
+                for x in 0..content_width {
+                    if let Some(color) = viewport_surface
+                        .get_pixel((offset_x + x as i32) as u32, (offset_y + y as i32) as u32)
+                    {
+                        let _ = self.surface.set_pixel(x, y, color);
+                    }
+                }
+            }
+            draw_color_rect(
+                &mut self.surface,
+                SurfaceRect::new(0, 0, content_width, content_height),
+                c4_color_to_surface(snapshot.environment.fow_color),
+                gamma,
+            );
+        }
+        self.active_fog_map = fog_map.map(Arc::new);
+        self.fog_suppression_depth = 0;
+
         let environment = &snapshot.environment;
         let events = &snapshot.weather_events;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
@@ -2073,6 +3095,10 @@ impl GraphicsSystem {
             gamma,
         );
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
+
+        // C4Viewport disables ClrModMap after world cursors and before the
+        // custom parallax GUI/overlay pass.
+        self.active_fog_map = None;
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
@@ -2192,6 +3218,7 @@ impl GraphicsSystem {
             return;
         }
         let cell = image.height() as i32;
+        let fog = self.fog_draw_context();
         let surface_width = self.surface_width as f32;
         let surface_height = self.surface_height as f32;
         let margin = (cell as f32).max(16.0);
@@ -2226,6 +3253,14 @@ impl GraphicsSystem {
                 (cox, coy + shape_height, 2),
                 (cox + shape_width, coy + shape_height, 3),
             ];
+            // This mark is normally emitted inside C4Object::Draw, while
+            // C4D_IgnoreFoW has the modulation map temporarily disabled.
+            let fog_disabled_for_parallax = object.category & CATEGORY_FOREGROUND_FLAG != 0
+                && object.category & CATEGORY_PARALLAX_FLAG != 0;
+            let object_fog = (object.category & CATEGORY_IGNORE_FOW_FLAG == 0
+                && !fog_disabled_for_parallax)
+                .then_some(())
+                .and(fog.as_ref());
             for (px, py, phase) in corners {
                 let source = SourceRect::new(phase * cell, 0, cell, cell);
                 if !Self::source_within_image(&image, &source) {
@@ -2245,6 +3280,7 @@ impl GraphicsSystem {
                     None,
                     SpriteBlitState::normal(),
                     gamma,
+                    object_fog,
                 );
             }
         }
@@ -2367,9 +3403,7 @@ impl GraphicsSystem {
                     Self::sky_color_for_temperature(environment.ambient_temperature)
                 });
             let tinted = Self::apply_lighting(base, lighting);
-            self.surface.fill(
-                gamma.map_or(tinted, |gamma| gamma_encode_fragment(tinted, gamma)),
-            );
+            self.fill_world_color(tinted, true, gamma);
         }
     }
 
@@ -2388,13 +3422,18 @@ impl GraphicsSystem {
         if let Some(color) = settings.back_color {
             let base = Self::bgr_to_color(color);
             let tinted = Self::apply_lighting(base, lighting);
-            self.surface.fill(
-                gamma.map_or(tinted, |gamma| gamma_encode_fragment(tinted, gamma)),
-            );
-        } else if !settings.has_surface {
-            self.fill_sky_gradient(settings, lighting, gamma);
-        } else {
-            self.surface.fill(Color::opaque(0, 0, 0));
+            self.fill_world_color(tinted, false, gamma);
+        } else if settings.has_surface
+            && !self
+                .active_fog_map
+                .as_ref()
+                .is_some_and(|map| map.fade_transparent)
+        {
+            // The legacy Rust surface starts transparent, while the native
+            // render target already has an opaque backing. Do not synthesize
+            // this backing when Reset has explicitly painted FoWColor: every
+            // world layer must fade independently onto that color.
+            self.fill_world_color(Color::opaque(0, 0, 0), false, gamma);
         }
 
         if settings.has_surface {
@@ -2460,14 +3499,34 @@ impl GraphicsSystem {
         if self.surface_width == 0 || self.surface_height == 0 {
             return;
         }
+        let fog = self.fog_box_sampler(true);
         let height = self.surface_height.saturating_sub(1).max(1);
         for y in 0..self.surface_height {
             let t = y as f32 / height as f32;
             let blended = Self::lerp_color(top, bottom, t);
             let tinted = Self::apply_lighting(blended, lighting);
-            let tinted = gamma.map_or(tinted, |gamma| gamma_encode_fragment(tinted, gamma));
             for x in 0..self.surface_width {
-                let _ = self.surface.set_pixel(x, y, tinted);
+                let tinted = fog.as_ref().map_or(tinted, |(fog, sampler)| {
+                    sampler.as_ref().map_or_else(
+                        || fog.color_at(tinted, x as i32, y as i32),
+                        |sampler| {
+                            sampler.vertical_color_at(
+                                (x as f32 + 0.5) / self.surface_width as f32,
+                                (y as f32 + 0.5) / self.surface_height as f32,
+                                |vertex_y| {
+                                    let t = (vertex_y * self.surface_height as f32
+                                        / height as f32)
+                                        .clamp(0.0, 1.0);
+                                    Self::apply_lighting(
+                                        Self::lerp_color(top, bottom, t),
+                                        lighting,
+                                    )
+                                },
+                            )
+                        },
+                    )
+                });
+                self.draw_prepared_world_color_pixel(x, y, tinted, gamma);
             }
         }
     }
@@ -2535,16 +3594,46 @@ impl GraphicsSystem {
         let width = image.width();
         let height = image.height();
         let pixels = image.pixels();
-        for y in 0..height {
+        let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
+        let height_i32 = i32::try_from(height).unwrap_or(i32::MAX);
+        // BlitSurfaceTile2 trims an edge tile to the visible source/dest
+        // rectangle before handing it to Blit. Those crop edges therefore
+        // become fresh ClrModMap vertices rather than retaining the vertices
+        // of the offscreen part of the repeated tile.
+        let source_left = (-dest_x).clamp(0, width_i32);
+        let source_top = (-dest_y).clamp(0, height_i32);
+        let source_right = (self.surface_width as i32 - dest_x).clamp(0, width_i32);
+        let source_bottom = (self.surface_height as i32 - dest_y).clamp(0, height_i32);
+        if source_left >= source_right || source_top >= source_bottom {
+            return;
+        }
+        let visible_width = source_right - source_left;
+        let visible_height = source_bottom - source_top;
+        let fog = self.fog_draw_context();
+        let fog_sampler = fog.as_ref().and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                (
+                    (dest_x + source_left) as f32,
+                    (dest_y + source_top) as f32,
+                    visible_width as f32,
+                    visible_height as f32,
+                ),
+                (
+                    source_left as f32,
+                    source_top as f32,
+                    visible_width as f32,
+                    visible_height as f32,
+                ),
+                (width, height),
+                false,
+                |x, y| (x, y),
+            )
+        });
+        for y in source_top as u32..source_bottom as u32 {
             let target_y = dest_y + y as i32;
-            if target_y < 0 || target_y >= self.surface_height as i32 {
-                continue;
-            }
-            for x in 0..width {
+            for x in source_left as u32..source_right as u32 {
                 let target_x = dest_x + x as i32;
-                if target_x < 0 || target_x >= self.surface_width as i32 {
-                    continue;
-                }
                 let idx = ((y * width + x) * 4) as usize;
                 if idx + 3 >= pixels.len() {
                     continue;
@@ -2562,29 +3651,37 @@ impl GraphicsSystem {
                     color = Self::apply_modulation(color, modulation);
                 }
                 color = color.modulate(lighting);
-                if let Some(gamma) = gamma {
-                    let background = self
+                if let Some(fog) = fog.as_ref() {
+                    let pixel_blit = fog_sprite_blit_at(
+                        fog_sampler.as_ref(),
+                        Some(fog),
+                        SpriteBlitState::normal(),
+                        (x as f32 + 0.5 - source_left as f32) / visible_width as f32,
+                        (y as f32 + 0.5 - source_top as f32) / visible_height as f32,
+                        target_x,
+                        target_y,
+                    );
+                    let source = prepare_sprite_fragment(color, None, None, pixel_blit);
+                    if source.alpha() == 0 {
+                        continue;
+                    }
+                    let destination = self
                         .surface
                         .get_pixel(target_x as u32, target_y as u32)
                         .unwrap_or_default();
-                    let blended = gamma_blend_fragment_over(color, background, gamma);
+                    let output =
+                        composite_sprite_fragment(source, destination, pixel_blit, gamma);
                     let _ = self
                         .surface
-                        .set_pixel(target_x as u32, target_y as u32, blended);
-                } else if color.a == 255 {
-                    let _ = self
-                        .surface
-                        .set_pixel(target_x as u32, target_y as u32, color);
-                } else {
-                    let background = self
-                        .surface
-                        .get_pixel(target_x as u32, target_y as u32)
-                        .unwrap_or_default();
-                    let blended = blend_color_over(color, background);
-                    let _ = self
-                        .surface
-                        .set_pixel(target_x as u32, target_y as u32, blended);
+                        .set_pixel(target_x as u32, target_y as u32, output);
+                    continue;
                 }
+                self.draw_prepared_world_color_pixel(
+                    target_x as u32,
+                    target_y as u32,
+                    color,
+                    gamma,
+                );
             }
         }
     }
@@ -2764,16 +3861,23 @@ impl GraphicsSystem {
             )
         };
         let end = screen(x.to_float(), y.to_float());
+        let fog = self.fog_draw_context();
         if moving {
             let start = screen((x - xdir).to_float(), (y - ydir).to_float());
-            draw_pxs_line(&mut self.surface, start, end, color, gamma);
+            draw_pxs_line(&mut self.surface, start, end, color, gamma, fog.as_ref());
         } else {
+            // DrawPix samples ClrModMap at the original float vertex (cast
+            // toward zero) before the raster coordinate is rounded.
+            let color = fog
+                .as_ref()
+                .map_or(color, |fog| fog.color_at_point(color, end.0, end.1));
             draw_pxs_pixel(
                 &mut self.surface,
                 end.0.round() as i32,
                 end.1.round() as i32,
                 color,
                 gamma,
+                None,
             );
         }
     }
@@ -2830,6 +3934,7 @@ impl GraphicsSystem {
         // intentionally narrows to that byte after its <=255 cap
         // (C4PXS.cpp:300-304; StdGL.cpp:437-469).
         let modulation_transparency = ((facet_third - z) * 16).min(255) as u8;
+        let fog = self.fog_draw_context();
         draw_pxs_image_region(
             &mut self.surface,
             &target,
@@ -2838,6 +3943,7 @@ impl GraphicsSystem {
             modulation_transparency,
             lighting,
             gamma,
+            fog.as_ref(),
         );
     }
 
@@ -2860,6 +3966,7 @@ impl GraphicsSystem {
         let blit = SpriteBlitState {
             mode: 0,
             modulation: (landscape.modulation() != 0).then_some(landscape.modulation()),
+            fog_modulation: None,
         };
         if self.material_textures.is_empty() || self.material_render_info.is_empty() {
             return false;
@@ -3108,13 +4215,34 @@ impl GraphicsSystem {
                 }
             }
         }
+        let fog = self.fog_draw_context();
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let fog_sampler = fog.as_ref().and_then(|fog| {
+            FogSpriteSampler::new(
+                fog,
+                (
+                    0.0,
+                    0.0,
+                    self.surface_width as f32,
+                    self.surface_height as f32,
+                ),
+                (
+                    self.viewport_x,
+                    self.viewport_y,
+                    self.surface_width as f32 / zoom,
+                    self.surface_height as f32 / zoom,
+                ),
+                (width, height),
+                false,
+                |x, y| (x, y),
+            )
+        });
         let Some(cache) = self.landscape_cache.as_mut() else {
             return false;
         };
         // Anchor the exact byte-plane generation presented by this snapshot.
         // The next engine mutation then starts a new COW dirty generation.
         cache.grid = grid.clone();
-        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let cache_width = cache.width as i32;
         let cache_height = cache.height as i32;
         let cache_pixels = &cache.pixels;
@@ -3138,7 +4266,16 @@ impl GraphicsSystem {
                     cache_pixels[src + 2],
                     cache_pixels[src + 3],
                 );
-                let source = prepare_sprite_fragment(color, None, None, blit);
+                let pixel_blit = fog_sprite_blit_at(
+                    fog_sampler.as_ref(),
+                    fog.as_ref(),
+                    blit,
+                    (screen_x as f32 + 0.5) / self.surface_width as f32,
+                    (screen_y as f32 + 0.5) / self.surface_height as f32,
+                    screen_x as i32,
+                    screen_y as i32,
+                );
+                let source = prepare_sprite_fragment(color, None, None, pixel_blit);
                 if source.alpha() == 0 {
                     continue;
                 }
@@ -3155,7 +4292,7 @@ impl GraphicsSystem {
                         .get_pixel(screen_x, screen_y)
                         .unwrap_or_default()
                 };
-                let output = composite_sprite_fragment(source, destination, blit, gamma);
+                let output = composite_sprite_fragment(source, destination, pixel_blit, gamma);
                 let _ = self.surface.set_pixel(screen_x, screen_y, output);
             }
         }
@@ -3181,12 +4318,14 @@ impl GraphicsSystem {
             modulation: landscape
                 .map(Landscape::modulation)
                 .filter(|modulation| *modulation != 0),
+            fog_modulation: None,
         };
         let source = prepare_sprite_fragment(ground_color, None, None, blit);
         if source.alpha() == 0 {
             return false;
         }
-        let opaque_output = (source.alpha() == 255)
+        let fog = self.fog_box_sampler(true);
+        let opaque_output = (fog.is_none() && source.alpha() == 255)
             .then(|| composite_sprite_fragment(source, Color::transparent(), blit, gamma));
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let surface_height = self.surface_height as i32;
@@ -3208,11 +4347,23 @@ impl GraphicsSystem {
                 let output = if let Some(output) = opaque_output {
                     output
                 } else {
+                    let pixel_blit = fog.as_ref().map_or(blit, |(fog, sampler)| {
+                        fog_sprite_blit_at(
+                            sampler.as_ref(),
+                            Some(fog),
+                            blit,
+                            (screen_x as f32 + 0.5) / self.surface_width as f32,
+                            (y as f32 + 0.5) / self.surface_height as f32,
+                            screen_x as i32,
+                            y,
+                        )
+                    });
+                    let source = prepare_sprite_fragment(ground_color, None, None, pixel_blit);
                     let destination = self
                         .surface
                         .get_pixel(screen_x, y as u32)
                         .unwrap_or_default();
-                    composite_sprite_fragment(source, destination, blit, gamma)
+                    composite_sprite_fragment(source, destination, pixel_blit, gamma)
                 };
                 let _ = self.surface.set_pixel(screen_x, y as u32, output);
             }
@@ -3241,12 +4392,14 @@ impl GraphicsSystem {
         let blit = SpriteBlitState {
             mode: 0,
             modulation: (landscape.modulation() != 0).then_some(landscape.modulation()),
+            fog_modulation: None,
         };
         let source = prepare_sprite_fragment(base_color, None, None, blit);
         if source.alpha() == 0 {
             return;
         }
 
+        let fog = self.fog_box_sampler(true);
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let surface_width = self.surface_width as i32;
         let surface_height = self.surface_height as i32;
@@ -3276,8 +4429,21 @@ impl GraphicsSystem {
                 for screen_y in start..=end {
                     let x = screen_x as u32;
                     let y = screen_y as u32;
+                    let pixel_blit = fog.as_ref().map_or(blit, |(fog, sampler)| {
+                        fog_sprite_blit_at(
+                            sampler.as_ref(),
+                            Some(fog),
+                            blit,
+                            (screen_x as f32 + 0.5) / self.surface_width as f32,
+                            (screen_y as f32 + 0.5) / self.surface_height as f32,
+                            screen_x,
+                            screen_y,
+                        )
+                    });
+                    let source = prepare_sprite_fragment(base_color, None, None, pixel_blit);
                     let destination = self.surface.get_pixel(x, y).unwrap_or_default();
-                    let output = composite_sprite_fragment(source, destination, blit, gamma);
+                    let output =
+                        composite_sprite_fragment(source, destination, pixel_blit, gamma);
                     let _ = self.surface.set_pixel(x, y, output);
                 }
             }
@@ -3421,6 +4587,15 @@ impl GraphicsSystem {
                 .get(&object.definition_id)
                 .map(|metadata| metadata.line)
                 .unwrap_or(0);
+            // `C4D_IgnoreFoW` disables the modulation map only around the
+            // object's base `Draw` body. Line definitions return before that
+            // switch and `DrawTopFace` runs later with the map restored.
+            let suppress_fog = line == 0
+                && object.category & CATEGORY_IGNORE_FOW_FLAG != 0
+                && self.active_fog_map.is_some();
+            if suppress_fog {
+                self.fog_suppression_depth += 1;
+            }
             self.paint_object(
                 object,
                 objects,
@@ -3431,6 +4606,9 @@ impl GraphicsSystem {
                 line,
                 gamma,
             );
+            if suppress_fog {
+                self.fog_suppression_depth -= 1;
+            }
         }
         for object in &selected {
             if definition_lines
@@ -3509,6 +4687,7 @@ impl GraphicsSystem {
         // ColorMod, rotation or object blit mode (C4Object.cpp:2617-2638).
         if object.ocf & lc_engine::ocf::CONSTRUCT != 0 && object.rotation == 0 {
             if let Some(construction) = self.hud_graphics.construction.clone() {
+                let fog = self.fog_draw_context();
                 let shape = Self::con_scaled_shape(
                     Self::sprite_def_shape(&definition_sprite),
                     object.construction.clamp(0, FULL_CON),
@@ -3535,6 +4714,7 @@ impl GraphicsSystem {
                     None,
                     SpriteBlitState::normal(),
                     gamma,
+                    fog.as_ref(),
                 );
             }
         }
@@ -3724,6 +4904,7 @@ impl GraphicsSystem {
         // No sprite available: debug fallbacks only (C++ objects always
         // have a graphics facet, so these paths have no oracle) — the
         // vertex polygon, then a plain dot.
+        let fog = self.fog_draw_context();
         if object.vertices.len() >= 3 {
             let mut points = Vec::with_capacity(object.vertices.len());
             let mut min_x = f32::MAX;
@@ -3746,7 +4927,11 @@ impl GraphicsSystem {
                 && min_x <= content_width + zoom
                 && max_y >= -zoom
                 && min_y <= content_height + zoom
-                && fill_polygon(&mut self.surface, &points, color)
+                && if let Some(fog) = fog.as_ref() {
+                    fill_polygon_impl(&mut self.surface, &points, color, Some(fog), gamma)
+                } else {
+                    fill_polygon(&mut self.surface, &points, color)
+                }
             {
                 return;
             }
@@ -3760,7 +4945,11 @@ impl GraphicsSystem {
             ),
             GuiSize::new(size, size),
         );
-        fill_rect(&mut self.surface, &rect, color);
+        if let Some(fog) = fog.as_ref() {
+            fill_rect_impl(&mut self.surface, &rect, color, Some(fog), gamma);
+        } else {
+            fill_rect(&mut self.surface, &rect, color);
+        }
         self.draw_object_overlays(
             object,
             objects,
@@ -3814,12 +5003,14 @@ impl GraphicsSystem {
         let blit = SpriteBlitState {
             mode: object_blit.mode & C4GFXBLIT_ADDITIVE,
             modulation: None,
+            fog_modulation: None,
         };
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let target_x = self.viewport_x as i32;
         let target_y = self.viewport_y as i32;
         let logical_width = ((self.surface.width() as f32 / zoom).ceil() as i32).max(1);
         let logical_height = ((self.surface.height() as f32 / zoom).ceil() as i32).max(1);
+        let fog = self.fog_draw_context();
         for vertices in object.vertices.windows(2) {
             // CONNECT owns absolute live C4Shape vertices. DrawLine is called
             // before TargetPos, so object position/parallax/transform never
@@ -3835,8 +5026,10 @@ impl GraphicsSystem {
                     logical_height,
                     zoom,
                     primary,
+                    marker,
                     blit,
                     gamma,
+                    fog.as_ref(),
                     &mut self.presentation_rng,
                 );
             } else {
@@ -3854,6 +5047,7 @@ impl GraphicsSystem {
                     marker,
                     blit,
                     gamma,
+                    fog.as_ref(),
                 );
             }
         }
@@ -4181,6 +5375,7 @@ impl GraphicsSystem {
 
         let viewport_x = self.viewport_x;
         let viewport_y = self.viewport_y;
+        let fog = self.fog_draw_context();
         if transform.is_none() && !flipped && rotation_degrees.abs() <= f32::EPSILON {
             let rect = GuiRect::from_origin_size(
                 GuiPoint::new((dest_x - viewport_x) * zoom, (dest_y - viewport_y) * zoom),
@@ -4196,6 +5391,7 @@ impl GraphicsSystem {
                 owner_color,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         } else {
             let mut matrix = transform
@@ -4234,6 +5430,7 @@ impl GraphicsSystem {
                 owner_color,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         }
     }
@@ -4300,6 +5497,7 @@ impl GraphicsSystem {
         if !Self::source_within_image(&sprite.image, &source_rect) {
             return false;
         }
+        let fog = self.fog_draw_context();
 
         if let Some(transform) = transform {
             let center = (screen_x / zoom, screen_y / zoom);
@@ -4331,6 +5529,7 @@ impl GraphicsSystem {
                 owner_color,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         } else if rotation_degrees.abs() <= f32::EPSILON {
             let dest_width = facet.width as f32 * zoom;
@@ -4352,6 +5551,7 @@ impl GraphicsSystem {
                 owner_color,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         } else {
             let dest_width = facet.width as f32 * zoom;
@@ -4370,6 +5570,7 @@ impl GraphicsSystem {
                 rotation_degrees,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         }
         true
@@ -4555,6 +5756,14 @@ impl GraphicsSystem {
             };
             let owner_color = Some(object_color_by_owner_tint(target));
             let rotation_degrees = (target.rotation.rem_euclid(360)) as f32;
+            // MODE_Object calls the referenced object's Draw body. Its own
+            // IgnoreFoW flag therefore covers the base face and recursively
+            // painted overlays, but DrawTopFace happens after restoration.
+            let suppress_fog = target.category & CATEGORY_IGNORE_FOW_FLAG != 0
+                && self.active_fog_map.is_some();
+            if suppress_fog {
+                self.fog_suppression_depth += 1;
+            }
             self.draw_object_face(
                 target,
                 objects,
@@ -4582,6 +5791,9 @@ impl GraphicsSystem {
                 gamma,
                 object_ancestry,
             );
+            if suppress_fog {
+                self.fog_suppression_depth -= 1;
+            }
             self.paint_object_top_face(target, blit, gamma);
         }
 
@@ -4700,6 +5912,7 @@ impl GraphicsSystem {
         if !Self::source_within_image(&sprite.image, &source_rect) {
             return;
         }
+        let fog = self.fog_draw_context();
 
         if let Some(transform) = transform {
             let center = (screen_x / zoom, screen_y / zoom);
@@ -4731,6 +5944,7 @@ impl GraphicsSystem {
                 owner_color,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         } else if rotation_degrees.abs() <= f32::EPSILON {
             let rect = GuiRect::from_origin_size(
@@ -4750,6 +5964,7 @@ impl GraphicsSystem {
                 owner_color,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         } else {
             draw_image_region_rotated(
@@ -4766,6 +5981,7 @@ impl GraphicsSystem {
                 rotation_degrees,
                 blit,
                 gamma,
+                fog.as_ref(),
             );
         }
     }
@@ -4892,6 +6108,7 @@ impl GraphicsSystem {
                 .unwrap_or(12.0 * zoom)
         };
         let cursor_size = cell as f32;
+        let fog = self.fog_draw_context();
 
         let mark_top = screen_y - shape_height / 2.0 - cursor_size;
         let rect = GuiRect::from_origin_size(
@@ -4908,6 +6125,7 @@ impl GraphicsSystem {
             None,
             SpriteBlitState::normal(),
             gamma,
+            fog.as_ref(),
         );
 
         // Cursor name label (src/C4Game.cpp:1873-1887): with cursor->Info,
@@ -4939,15 +6157,29 @@ impl GraphicsSystem {
             let text_x = screen_x.round() as i32;
             let mut text_y = mark_top.round() as i32 - 2 - text_height;
             for line in &lines {
-                font.draw_with_gamma(
-                    &mut self.surface,
-                    text_x,
-                    text_y,
-                    line,
-                    Color::opaque(0xff, 0x00, 0x00),
-                    lc_graphics::clonk_font::TextAlign::Center,
-                    gamma,
-                );
+                let color = Color::opaque(0xff, 0x00, 0x00);
+                if let Some(fog) = fog.as_ref() {
+                    draw_fogged_cursor_text_line(
+                        &mut self.surface,
+                        &font,
+                        text_x,
+                        text_y,
+                        line,
+                        color,
+                        gamma,
+                        fog,
+                    );
+                } else {
+                    font.draw_with_gamma(
+                        &mut self.surface,
+                        text_x,
+                        text_y,
+                        line,
+                        color,
+                        lc_graphics::clonk_font::TextAlign::Center,
+                        gamma,
+                    );
+                }
                 text_y += line_height;
             }
         }
@@ -5777,10 +7009,61 @@ fn triangle_top_left(a: (f32, f32), b: (f32, f32)) -> bool {
     b.1 < a.1 || (b.1 == a.1 && b.0 > a.0)
 }
 
+fn interpolate_color(start: Color, end: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    let channel = |start: u8, end: u8| {
+        (f32::from(start) + (f32::from(end) - f32::from(start)) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::new(
+        channel(start.r, end.r),
+        channel(start.g, end.g),
+        channel(start.b, end.b),
+        channel(start.a, end.a),
+    )
+}
+
+fn interpolate_triangle_color(colors: [Color; 3], weights: [f64; 3]) -> Color {
+    let channel = |select: fn(Color) -> u8| {
+        colors
+            .iter()
+            .copied()
+            .zip(weights)
+            .map(|(color, weight)| f64::from(select(color)) * weight)
+            .sum::<f64>()
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::new(
+        channel(|color| color.r),
+        channel(|color| color.g),
+        channel(|color| color.b),
+        channel(|color| color.a),
+    )
+}
+
+fn line_color_at(
+    start: (f32, f32),
+    end: (f32, f32),
+    start_color: Color,
+    end_color: Color,
+    point: (i32, i32),
+) -> Color {
+    let direction = (end.0 - start.0, end.1 - start.1);
+    let length_sq = direction.0 * direction.0 + direction.1 * direction.1;
+    if length_sq <= f32::EPSILON {
+        return start_color;
+    }
+    let offset = (point.0 as f32 - start.0, point.1 as f32 - start.1);
+    let amount = (offset.0 * direction.0 + offset.1 * direction.1) / length_sq;
+    interpolate_color(start_color, end_color, amount)
+}
+
 fn draw_object_triangle(
     surface: &mut Surface,
     vertices: [(f32, f32); 3],
-    color: Color,
+    colors: [Color; 3],
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
@@ -5835,6 +7118,12 @@ fn draw_object_triangle(
                 }
             });
             if covered {
+                let weights = [
+                    triangle_edge(vertices[1], vertices[2], sample) / area,
+                    triangle_edge(vertices[2], vertices[0], sample) / area,
+                    triangle_edge(vertices[0], vertices[1], sample) / area,
+                ];
+                let color = interpolate_triangle_color(colors, weights);
                 draw_object_line_pixel(surface, x, y, color, blit, gamma);
             }
         }
@@ -5849,28 +7138,36 @@ fn draw_object_bolt_segment(
     logical_width: i32,
     logical_height: i32,
     zoom: f32,
-    color: Color,
+    primary: Color,
+    marker: Color,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
     rng: &mut SafeRng,
 ) {
     let Some(points) = build_bolt_quad(start, end, logical_width, logical_height, rng) else {
         return;
     };
     let output = points.map(|(x, y)| (x as f32 * zoom, y as f32 * zoom));
+    let mut colors = [primary, marker, marker, primary];
+    if let Some(fog) = fog {
+        for (color, point) in colors.iter_mut().zip(output) {
+            *color = fog.color_at_point(*color, point.0, point.1);
+        }
+    }
     // DrawQuadDw submits GL_TRIANGLE_STRIP as raw 0,1,3,2. Rasterize the two
     // triangles separately: a folded strip can legitimately overlap itself.
     draw_object_triangle(
         surface,
         [output[0], output[1], output[3]],
-        color,
+        [colors[0], colors[1], colors[3]],
         blit,
         gamma,
     );
     draw_object_triangle(
         surface,
         [output[3], output[1], output[2]],
-        color,
+        [colors[3], colors[1], colors[2]],
         blit,
         gamma,
     );
@@ -5885,12 +7182,15 @@ fn draw_object_line_segment(
     marker: Color,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     // CStdGL::DrawLineDw shifts integer vertices to pixel centers. GL's
     // diamond-exit rule makes each segment half-open at its final endpoint
     // (src/StdGL.cpp:893-933). C4FacetEx then paints the secondary-color
     // point at the ORIGINAL start, including for zero-length segments
     // (src/C4FacetEx.cpp:46-54).
+    let primary_start = fog.map_or(primary, |fog| fog.color_at_point(primary, start.0, start.1));
+    let primary_end = fog.map_or(primary, |fog| fog.color_at_point(primary, end.0, end.1));
     if start != end {
         if let Some((clipped_start, clipped_end)) = clip_pxs_line(surface, start, end) {
             let (mut x0, mut y0) = (
@@ -5899,7 +7199,8 @@ fn draw_object_line_segment(
             );
             let (x1, y1) = (clipped_end.0.round() as i32, clipped_end.1.round() as i32);
             if x0 == x1 && y0 == y1 {
-                draw_object_line_pixel(surface, x0, y0, primary, blit, gamma);
+                let color = line_color_at(start, end, primary_start, primary_end, (x0, y0));
+                draw_object_line_pixel(surface, x0, y0, color, blit, gamma);
             } else {
                 let dx = (x1 - x0).abs();
                 let sx = if x0 < x1 { 1 } else { -1 };
@@ -5907,7 +7208,8 @@ fn draw_object_line_segment(
                 let sy = if y0 < y1 { 1 } else { -1 };
                 let mut error = dx + dy;
                 while x0 != x1 || y0 != y1 {
-                    draw_object_line_pixel(surface, x0, y0, primary, blit, gamma);
+                    let color = line_color_at(start, end, primary_start, primary_end, (x0, y0));
+                    draw_object_line_pixel(surface, x0, y0, color, blit, gamma);
                     let doubled = error * 2;
                     if doubled >= dy {
                         error += dy;
@@ -5921,6 +7223,7 @@ fn draw_object_line_segment(
             }
         }
     }
+    let marker = fog.map_or(marker, |fog| fog.color_at_point(marker, start.0, start.1));
     draw_object_line_pixel(
         surface,
         start.0.round() as i32,
@@ -5937,10 +7240,12 @@ fn draw_pxs_pixel(
     y: i32,
     color: Color,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     if x < 0 || y < 0 || x >= surface.width() as i32 || y >= surface.height() as i32 {
         return;
     }
+    let color = fog.map_or(color, |fog| fog.color_at(color, x, y));
     let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
     let blended = gamma.map_or_else(
         || blend_color_over(color, background),
@@ -5955,17 +7260,33 @@ fn draw_pxs_line(
     end: (f32, f32),
     color: Color,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     // Integer raster counterpart of CStdGL::DrawLineDw's GL_LINES call. Its
     // vertices are shifted by 0.5, and GL's diamond-exit rule makes the
     // segment half-open at its final endpoint (StdGL.cpp:893-933).
+    let original_start = start;
+    let original_end = end;
+    let start_color = fog.map_or(color, |fog| {
+        fog.color_at_point(color, original_start.0, original_start.1)
+    });
+    let end_color = fog.map_or(color, |fog| {
+        fog.color_at_point(color, original_end.0, original_end.1)
+    });
     let Some((start, end)) = clip_pxs_line(surface, start, end) else {
         return;
     };
     let (mut x0, mut y0) = (start.0.round() as i32, start.1.round() as i32);
     let (x1, y1) = (end.0.round() as i32, end.1.round() as i32);
     if x0 == x1 && y0 == y1 {
-        draw_pxs_pixel(surface, x0, y0, color, gamma);
+        let color = line_color_at(
+            original_start,
+            original_end,
+            start_color,
+            end_color,
+            (x0, y0),
+        );
+        draw_pxs_pixel(surface, x0, y0, color, gamma, None);
         return;
     }
     let dx = (x1 - x0).abs();
@@ -5974,7 +7295,14 @@ fn draw_pxs_line(
     let sy = if y0 < y1 { 1 } else { -1 };
     let mut error = dx + dy;
     while x0 != x1 || y0 != y1 {
-        draw_pxs_pixel(surface, x0, y0, color, gamma);
+        let color = line_color_at(
+            original_start,
+            original_end,
+            start_color,
+            end_color,
+            (x0, y0),
+        );
+        draw_pxs_pixel(surface, x0, y0, color, gamma, None);
         let doubled = error * 2;
         if doubled >= dy {
             error += dy;
@@ -6018,6 +7346,7 @@ fn draw_mouse_selection_frame_raster(
         (x2 as f32, y1 as f32),
         MOUSE_SELECTION_FRAME_COLOR,
         gamma,
+        None,
     );
     draw_pxs_line(
         surface,
@@ -6025,6 +7354,7 @@ fn draw_mouse_selection_frame_raster(
         (x2 as f32, y2 as f32),
         MOUSE_SELECTION_FRAME_COLOR,
         gamma,
+        None,
     );
     draw_pxs_line(
         surface,
@@ -6032,6 +7362,7 @@ fn draw_mouse_selection_frame_raster(
         (x1 as f32, y2 as f32),
         MOUSE_SELECTION_FRAME_COLOR,
         gamma,
+        None,
     );
     draw_pxs_line(
         surface,
@@ -6039,6 +7370,7 @@ fn draw_mouse_selection_frame_raster(
         (x2 as f32, y2 as f32),
         MOUSE_SELECTION_FRAME_COLOR,
         gamma,
+        None,
     );
 
     match previous_clip {
@@ -6102,6 +7434,7 @@ fn draw_pxs_image_region(
     modulation_transparency: u8,
     lighting: f32,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     if target.size.width <= 0.0
         || target.size.height <= 0.0
@@ -6120,6 +7453,26 @@ fn draw_pxs_image_region(
     let first_x = (target.origin.x - 0.5).ceil() as i32;
     let first_y = (target.origin.y - 0.5).ceil() as i32;
     let tile_size = cpp_tex_size(image.width(), image.height()) as i32;
+    let fog_sampler = fog.and_then(|fog| {
+        FogSpriteSampler::new(
+            fog,
+            (
+                target.origin.x,
+                target.origin.y,
+                target.size.width,
+                target.size.height,
+            ),
+            (
+                source.x as f32,
+                source.y as f32,
+                source.width as f32,
+                source.height as f32,
+            ),
+            (image.width(), image.height()),
+            false,
+            |x, y| (x, y),
+        )
+    });
     for y in first_y.max(0)..surface.height() as i32 {
         let pixel_y = y as f32 + 0.5;
         if pixel_y >= bottom {
@@ -6148,9 +7501,24 @@ fn draw_pxs_image_region(
             // texture and modulation transparency, then clamp. Keep filtered
             // alpha in float until the final framebuffer store
             // (StdGL.cpp:490-503,1070-1079,1320-1324).
+            let base_modulation =
+                (u32::from(modulation_transparency) << 24) | 0x00ff_ffff;
+            let modulation = if let Some(sampler) = fog_sampler.as_ref() {
+                sampler
+                    .modulation_sample(
+                        (pixel_x - target.origin.x) / target.size.width,
+                        (pixel_y - target.origin.y) / target.size.height,
+                    )
+                    .combine_with(base_modulation)
+            } else if let Some(fog) = fog {
+                modulate_c4_colors(base_modulation, fog.modulation_at(x, y))
+            } else {
+                base_modulation
+            };
+            let modulation = split_c4_color(modulation);
             let texture_transparency = 255.0 - sample[3].clamp(0.0, 255.0);
-            let transparency = (texture_transparency + f32::from(modulation_transparency))
-                .min(255.0);
+            let transparency =
+                (texture_transparency + f32::from(modulation[3])).min(255.0);
             let opacity = 255.0 - transparency;
             if opacity <= 0.0 {
                 continue;
@@ -6158,7 +7526,13 @@ fn draw_pxs_image_region(
             let alpha = opacity / 255.0;
             let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
             let blend = |channel, source: f32, destination: u8| -> u8 {
-                let source = (source * lighting).clamp(0.0, 255.0);
+                let modulation = match channel {
+                    lc_graphics::gamma::GammaChannel::Red => modulation[0],
+                    lc_graphics::gamma::GammaChannel::Green => modulation[1],
+                    lc_graphics::gamma::GammaChannel::Blue => modulation[2],
+                };
+                let source = (source * lighting * f32::from(modulation) / 255.0)
+                    .clamp(0.0, 255.0);
                 store_channel(
                     sample_channel(gamma, channel, source) * alpha
                         + f32::from(destination) * (1.0 - alpha),
@@ -6208,6 +7582,16 @@ fn blend_color_over(source: Color, dest: Color) -> Color {
 }
 
 fn fill_polygon(surface: &mut Surface, points: &[(i32, i32)], color: Color) -> bool {
+    fill_polygon_impl(surface, points, color, None, None)
+}
+
+fn fill_polygon_impl(
+    surface: &mut Surface,
+    points: &[(i32, i32)],
+    color: Color,
+    fog: Option<&FogDrawContext>,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) -> bool {
     if points.len() < 3 {
         return false;
     }
@@ -6278,7 +7662,15 @@ fn fill_polygon(surface: &mut Surface, points: &[(i32, i32)], color: Color) -> b
                     x_end = width - 1;
                 }
                 for x in x_start..=x_end {
-                    let _ = surface.set_pixel(x as u32, y as u32, color);
+                    let color = fog.map_or(color, |fog| fog.color_at(color, x, y));
+                    let destination = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+                    let output = match (color.a, gamma) {
+                        (255, Some(gamma)) => gamma_encode_fragment(color, gamma),
+                        (255, None) => color,
+                        (_, Some(gamma)) => gamma_blend_fragment_over(color, destination, gamma),
+                        (_, None) => blend_colors(color, destination),
+                    };
+                    let _ = surface.set_pixel(x as u32, y as u32, output);
                     drawn = true;
                 }
             }
@@ -6289,6 +7681,16 @@ fn fill_polygon(surface: &mut Surface, points: &[(i32, i32)], color: Color) -> b
 }
 
 pub(crate) fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
+    fill_rect_impl(surface, rect, color, None, None);
+}
+
+fn fill_rect_impl(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    color: Color,
+    fog: Option<&FogDrawContext>,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
     let x0 = rect.origin.x.floor() as i32;
     let y0 = rect.origin.y.floor() as i32;
     let x1 = (rect.origin.x + rect.size.width).ceil() as i32;
@@ -6301,7 +7703,15 @@ pub(crate) fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
 
     for y in y0..y1 {
         for x in x0..x1 {
-            let _ = surface.set_pixel(x as u32, y as u32, color);
+            let color = fog.map_or(color, |fog| fog.color_at(color, x, y));
+            let destination = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+            let output = match (color.a, gamma) {
+                (255, Some(gamma)) => gamma_encode_fragment(color, gamma),
+                (255, None) => color,
+                (_, Some(gamma)) => gamma_blend_fragment_over(color, destination, gamma),
+                (_, None) => blend_colors(color, destination),
+            };
+            let _ = surface.set_pixel(x as u32, y as u32, output);
         }
     }
 }
@@ -6344,6 +7754,7 @@ fn draw_image_region_transformed_float_source(
     owner_color: Option<u32>,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     let (dest_x, dest_y, dest_width, dest_height) = dest;
     if dest_width <= 0.0 || dest_height <= 0.0 || !source.is_valid() {
@@ -6355,6 +7766,16 @@ fn draw_image_region_transformed_float_source(
     let Some(inverse) = transform.inverse() else {
         return;
     };
+    let fog_sampler = fog.and_then(|fog| {
+        FogSpriteSampler::new(
+            fog,
+            dest,
+            (source.x, source.y, source.width, source.height),
+            (image.width(), image.height()),
+            flip_x,
+            |x, y| transform.transform_point(x, y),
+        )
+    });
 
     let corners = [
         (dest_x, dest_y),
@@ -6430,14 +7851,23 @@ fn draw_image_region_transformed_float_source(
             );
             let owner_mask =
                 mask.map(|mask_map| mask_map.value_at(source_x as u32, source_y as u32));
-            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            let pixel_blit = fog_sprite_blit_at(
+                fog_sampler.as_ref(),
+                fog,
+                blit,
+                normalized_x,
+                normalized_y,
+                target_x,
+                target_y,
+            );
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
             if source.alpha() == 0 {
                 continue;
             }
             let background = surface
                 .get_pixel(target_x as u32, target_y as u32)
                 .unwrap_or_default();
-            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let blended = composite_sprite_fragment(source, background, pixel_blit, gamma);
             let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
         }
     }
@@ -6455,6 +7885,7 @@ fn draw_image_region_transformed(
     owner_color: Option<u32>,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     let (dest_x, dest_y, dest_width, dest_height) = dest;
     if dest_width <= 0.0 || dest_height <= 0.0 || source.width <= 0 || source.height <= 0 {
@@ -6466,6 +7897,21 @@ fn draw_image_region_transformed(
     let Some(inverse) = transform.inverse() else {
         return;
     };
+    let fog_sampler = fog.and_then(|fog| {
+        FogSpriteSampler::new(
+            fog,
+            dest,
+            (
+                source.x as f32,
+                source.y as f32,
+                source.width as f32,
+                source.height as f32,
+            ),
+            (image.width(), image.height()),
+            flip_x,
+            |x, y| transform.transform_point(x, y),
+        )
+    });
 
     let corners = [
         (dest_x, dest_y),
@@ -6541,14 +7987,23 @@ fn draw_image_region_transformed(
             );
             let owner_mask =
                 mask.map(|mask_map| mask_map.value_at(source_x as u32, source_y as u32));
-            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            let pixel_blit = fog_sprite_blit_at(
+                fog_sampler.as_ref(),
+                fog,
+                blit,
+                normalized_x,
+                normalized_y,
+                target_x,
+                target_y,
+            );
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
             if source.alpha() == 0 {
                 continue;
             }
             let background = surface
                 .get_pixel(target_x as u32, target_y as u32)
                 .unwrap_or_default();
-            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let blended = composite_sprite_fragment(source, background, pixel_blit, gamma);
             let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
         }
     }
@@ -6568,6 +8023,7 @@ fn draw_image_region_float_source(
     owner_color: Option<u32>,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 || !source.is_valid() {
         return;
@@ -6581,6 +8037,21 @@ fn draw_image_region_float_source(
 
     let dest_x = rect.origin.x.round() as i32;
     let dest_y = rect.origin.y.round() as i32;
+    let fog_sampler = fog.and_then(|fog| {
+        FogSpriteSampler::new(
+            fog,
+            (
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+            ),
+            (source.x, source.y, source.width, source.height),
+            (image.width(), image.height()),
+            flip_x,
+            |x, y| (x, y),
+        )
+    });
 
     let bounds = surface.bounds();
     let image_width = image.width() as i32;
@@ -6628,14 +8099,23 @@ fn draw_image_region_float_source(
                 pixels[idx + 3],
             );
             let owner_mask = mask.map(|mask_map| mask_map.value_at(src_x as u32, src_y as u32));
-            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            let pixel_blit = fog_sprite_blit_at(
+                fog_sampler.as_ref(),
+                fog,
+                blit,
+                (target_x as f32 + 0.5 - rect.origin.x) / rect.size.width,
+                (target_y as f32 + 0.5 - rect.origin.y) / rect.size.height,
+                target_x,
+                target_y,
+            );
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
             if source.alpha() == 0 {
                 continue;
             }
             let background = surface
                 .get_pixel(target_x as u32, target_y as u32)
                 .unwrap_or_default();
-            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let blended = composite_sprite_fragment(source, background, pixel_blit, gamma);
             let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
         }
     }
@@ -6651,6 +8131,7 @@ fn draw_image_region(
     owner_color: Option<u32>,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
@@ -6668,6 +8149,26 @@ fn draw_image_region(
 
     let dest_x = rect.origin.x.round() as i32;
     let dest_y = rect.origin.y.round() as i32;
+    let fog_sampler = fog.and_then(|fog| {
+        FogSpriteSampler::new(
+            fog,
+            (
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+            ),
+            (
+                source.x as f32,
+                source.y as f32,
+                source.width as f32,
+                source.height as f32,
+            ),
+            (image.width(), image.height()),
+            flip_x,
+            |x, y| (x, y),
+        )
+    });
 
     let bounds = surface.bounds();
     let image_width = image.width() as i32;
@@ -6680,7 +8181,8 @@ fn draw_image_region(
             continue;
         }
 
-        let src_y = ((dy as f32 / dest_height as f32) * source.height as f32)
+        let normalized_y = dy as f32 / dest_height as f32;
+        let src_y = (normalized_y * source.height as f32)
             .floor()
             .clamp(0.0, (source.height - 1) as f32) as i32
             + source.y;
@@ -6719,14 +8221,23 @@ fn draw_image_region(
                 pixels[idx + 3],
             );
             let owner_mask = mask.map(|mask_map| mask_map.value_at(src_x as u32, src_y as u32));
-            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            let pixel_blit = fog_sprite_blit_at(
+                fog_sampler.as_ref(),
+                fog,
+                blit,
+                (target_x as f32 + 0.5 - rect.origin.x) / rect.size.width,
+                (target_y as f32 + 0.5 - rect.origin.y) / rect.size.height,
+                target_x,
+                target_y,
+            );
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
             if source.alpha() == 0 {
                 continue;
             }
             let background = surface
                 .get_pixel(target_x as u32, target_y as u32)
                 .unwrap_or_default();
-            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let blended = composite_sprite_fragment(source, background, pixel_blit, gamma);
 
             let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
         }
@@ -6747,6 +8258,7 @@ fn draw_image_region_rotated(
     rotation_degrees: f32,
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
+    fog: Option<&FogDrawContext>,
 ) {
     if dest_width <= 0.0 || dest_height <= 0.0 {
         return;
@@ -6768,6 +8280,33 @@ fn draw_image_region_rotated(
     let angle_rad = rotation_degrees.to_radians();
     let cos_theta = angle_rad.cos();
     let sin_theta = angle_rad.sin();
+    let fog_sampler = fog.and_then(|fog| {
+        FogSpriteSampler::new(
+            fog,
+            (
+                center_x - half_w,
+                center_y - half_h,
+                dest_width,
+                dest_height,
+            ),
+            (
+                source.x as f32,
+                source.y as f32,
+                source.width as f32,
+                source.height as f32,
+            ),
+            (image.width(), image.height()),
+            flip_x,
+            |x, y| {
+                let dx = x - center_x;
+                let dy = y - center_y;
+                (
+                    center_x + dx * cos_theta - dy * sin_theta,
+                    center_y + dx * sin_theta + dy * cos_theta,
+                )
+            },
+        )
+    });
 
     let corners = [
         (-half_w, -half_h),
@@ -6861,12 +8400,25 @@ fn draw_image_region_rotated(
             );
             let owner_mask =
                 mask.map(|mask_map| mask_map.value_at(sample_x as u32, sample_y as u32));
-            let source = prepare_sprite_fragment(color, owner_mask, owner_color, blit);
+            let fog_dx = x as f32 + 0.5 - center_x;
+            let fog_dy = y as f32 + 0.5 - center_y;
+            let fog_local_x = fog_dx * cos_theta + fog_dy * sin_theta;
+            let fog_local_y = -fog_dx * sin_theta + fog_dy * cos_theta;
+            let pixel_blit = fog_sprite_blit_at(
+                fog_sampler.as_ref(),
+                fog,
+                blit,
+                (fog_local_x + half_w) / dest_width,
+                (fog_local_y + half_h) / dest_height,
+                x,
+                y,
+            );
+            let source = prepare_sprite_fragment(color, owner_mask, owner_color, pixel_blit);
             if source.alpha() == 0 {
                 continue;
             }
             let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-            let blended = composite_sprite_fragment(source, background, blit, gamma);
+            let blended = composite_sprite_fragment(source, background, pixel_blit, gamma);
             let _ = surface.set_pixel(x as u32, y as u32, blended);
         }
     }
@@ -7541,9 +9093,9 @@ mod tests {
     use super::*;
     use lc_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
     use lc_engine::{
-        CommandStackSnapshot, Engine, EnvironmentFrame, JoinPlayerConfig, Landscape,
-        LiquidSegment, MaterialId, ObjectId, ObjectUpdate, ObjectVertex, PlayerState, RgbColor,
-        Scenario, ScenarioError, SpawnConfig, Vector2,
+        CommandStackSnapshot, Engine, EnvironmentFrame, FogOfWarPlayerFrame, JoinPlayerConfig,
+        Landscape, LiquidSegment, MaterialId, ObjectId, ObjectUpdate, ObjectVertex, PlayerState,
+        RgbColor, Scenario, ScenarioError, SpawnConfig, Vector2,
     };
     use lc_graphics::{BitmapFont, PixelFormat};
     use lc_resources::{Group, MaterialLibrary};
@@ -7564,6 +9116,542 @@ mod tests {
         let raw = lc_script::c4_string_from_bytes(b"Andr\xe9");
         assert_eq!(c4_presentation_text(&raw), "Andr\u{e9}");
         assert_eq!(lc_script::c4_string_bytes(&raw), b"Andr\xe9");
+    }
+
+    #[test]
+    fn clr_mod_map_reset_aligns_cells_and_keeps_the_extra_edge() {
+        let map = ClrModMap::reset(64, 64, 100, 70, 10, 70, 5, 9, 0).unwrap();
+
+        assert_eq!((map.origin_x, map.origin_y), (-5, 3));
+        assert_eq!((map.width, map.height), (3, 3));
+        assert_eq!(map.cells, vec![0; 9]);
+    }
+
+    #[test]
+    fn clr_mod_map_uses_native_nonstandard_corner_term() {
+        let map = ClrModMap {
+            resolution_x: 64,
+            resolution_y: 64,
+            width: 2,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: vec![0x0000_0000, 0x4040_4040, 0x8080_8080, 0xffff_ffff],
+        };
+
+        assert_eq!(map.get_mod_at(32, 32), 0x8787_8787);
+        assert_eq!(map.get_mod_at(16, 48), 0x8a8a_8a8a);
+    }
+
+    #[test]
+    fn fog_sprite_sampler_uses_64px_corner_quads_instead_of_per_pixel_get_mod_at() {
+        let map = ClrModMap {
+            resolution_x: 64,
+            resolution_y: 64,
+            width: 2,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
+        };
+        let fog = FogDrawContext {
+            map: Arc::new(map.clone()),
+            zoom: 1.0,
+        };
+        let sampler = FogSpriteSampler::new(
+            &fog,
+            (0.0, 0.0, 64.0, 64.0),
+            (0.0, 0.0, 64.0, 64.0),
+            (64, 64),
+            false,
+            |x, y| (x, y),
+        )
+        .unwrap();
+
+        assert_eq!(map.get_mod_at(32, 32), 0x0087_8787);
+        assert_eq!(sampler.modulation_at(0.5, 0.5), 0x0060_6060);
+
+        let flipped_partial = FogSpriteSampler::new(
+            &fog,
+            (0.0, 0.0, 40.0, 1.0),
+            (50.0, 0.0, 40.0, 1.0),
+            (128, 128),
+            true,
+            |x, y| (x, y),
+        )
+        .unwrap();
+        assert_eq!(flipped_partial.x_ranges, vec![(0.0, 26.0), (26.0, 40.0)]);
+        assert!(flipped_partial
+            .x_ranges
+            .iter()
+            .all(|(left, right)| right - left <= 64.0));
+
+        let local_box = FogSpriteSampler::new_with_chunks(
+            &fog,
+            (0.0, 0.0, 40.0, 1.0),
+            (0.0, 0.0, 40.0, 1.0),
+            (16.0, 16.0),
+            false,
+            |x, y| (x, y),
+        )
+        .unwrap();
+        let world_aligned_box = FogSpriteSampler::new_with_chunks(
+            &fog,
+            (0.0, 0.0, 40.0, 1.0),
+            (5.0, 0.0, 40.0, 1.0),
+            (16.0, 16.0),
+            false,
+            |x, y| (x, y),
+        )
+        .unwrap();
+        assert_eq!(local_box.x_ranges[0], (0.0, 16.0));
+        assert_eq!(world_aligned_box.x_ranges[0], (0.0, 11.0));
+
+        let vertex_first = FogModulationSample {
+            modulation: [0, 0x0002_0202, 0, 0],
+            weights: [0.5, 0.5, 0.0, 0.0],
+        };
+        assert_eq!(vertex_first.interpolate(), 0x0001_0101);
+        assert_eq!(
+            modulate_c4_colors(0x0080_8080, vertex_first.interpolate()),
+            0,
+            "combining after interpolation loses the low byte",
+        );
+        assert_eq!(
+            vertex_first.combine_with(0x0080_8080),
+            0x0001_0101,
+            "native ModulateClr runs at vertices before GL interpolation",
+        );
+
+        let mod2_at_black_corner = prepare_sprite_fragment(
+            Color::opaque(200, 200, 200),
+            None,
+            None,
+            SpriteBlitState {
+                mode: C4GFXBLIT_MOD2,
+                modulation: Some(0x00ff_ffff),
+                fog_modulation: Some(FogModulationSample {
+                    modulation: [0, 0x0002_0202, 0, 0],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                }),
+            },
+        );
+        let PreparedSpriteFragment::Shader { rgb, alpha } = mod2_at_black_corner else {
+            panic!("fogged MOD2 sprite must use the shader path");
+        };
+        assert_eq!(rgb, [145.0; 3]);
+        assert_eq!(
+            alpha, 255,
+            "one nonblack quad vertex keeps MOD2 active at its black corner",
+        );
+    }
+
+    #[test]
+    fn fog_lines_interpolate_original_endpoint_samples_and_fog_precedes_gamma() {
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 64,
+                resolution_y: 64,
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0x0000_0000, 0x0040_4040, 0x0080_8080, 0x00ff_ffff],
+            }),
+            zoom: 1.0,
+        };
+        let mut line = Surface::new(65, 65, PixelFormat::Rgba8888);
+        draw_pxs_line(
+            &mut line,
+            (0.0, 0.0),
+            (64.0, 64.0),
+            Color::opaque(255, 255, 255),
+            None,
+            Some(&fog),
+        );
+        assert_eq!(line.get_pixel(32, 32), Some(gray(127)));
+
+        let black_fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 64,
+                resolution_y: 64,
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![0; 4],
+            }),
+            zoom: 1.0,
+        };
+        let image = ImageData::new(1, 1, vec![255, 255, 255, 255]);
+        let mut pixel = Surface::new(1, 1, PixelFormat::Rgba8888);
+        let gamma = lc_graphics::GammaRamp::standard();
+        draw_image_region(
+            &mut pixel,
+            &GuiRect::new(0.0, 0.0, 1.0, 1.0),
+            &image,
+            None,
+            &SourceRect::new(0, 0, 1, 1),
+            false,
+            None,
+            SpriteBlitState::normal(),
+            Some(&gamma),
+            Some(&black_fog),
+        );
+        assert_eq!(
+            pixel.get_pixel(0, 0),
+            Some(gamma_encode_fragment(Color::opaque(0, 0, 0), &gamma))
+        );
+    }
+
+    #[test]
+    fn fog_transparency_adds_to_sky_texture_transparency() {
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "FoW sky alpha",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 255, 0));
+        graphics.active_fog_map = Some(Arc::new(ClrModMap {
+            resolution_x: 64,
+            resolution_y: 64,
+            width: 2,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: true,
+            cells: vec![0x80ff_ffff; 4],
+        }));
+        graphics.blit_sky_tile(
+            &ImageData::new(1, 1, vec![255, 0, 0, 128]),
+            0,
+            0,
+            None,
+            1.0,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::opaque(0, 255, 0))
+        );
+    }
+
+    #[test]
+    fn cropped_sky_tile_uses_visible_crop_edges_as_fog_vertices() {
+        let mut graphics = GraphicsSystem::new(
+            49,
+            1,
+            1,
+            "cropped FoW sky tile",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        let row = [0x0064_6464, 0x00c8_c8c8, 0x0032_3232, 0x0032_3232];
+        graphics.active_fog_map = Some(Arc::new(ClrModMap {
+            resolution_x: 32,
+            resolution_y: 1,
+            width: 4,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: row.into_iter().chain(row).collect(),
+        }));
+        let image = ImageData::new(64, 64, vec![255; 64 * 64 * 4]);
+        let fog = graphics.fog_draw_context().unwrap();
+        let cropped = FogSpriteSampler::new(
+            &fog,
+            (0.0, 0.0, 49.0, 1.0),
+            (15.0, 0.0, 49.0, 1.0),
+            (64, 64),
+            false,
+            |x, y| (x, y),
+        )
+        .unwrap();
+        let uncropped = FogSpriteSampler::new(
+            &fog,
+            (-15.0, 0.0, 64.0, 1.0),
+            (0.0, 0.0, 64.0, 1.0),
+            (64, 64),
+            false,
+            |x, y| (x, y),
+        )
+        .unwrap();
+        let output = |sampler: &FogSpriteSampler, normalized_x: f32| {
+            let blit = sampler.blit_at(SpriteBlitState::normal(), normalized_x, 0.5);
+            composite_sprite_fragment(
+                prepare_sprite_fragment(Color::opaque(255, 255, 255), None, None, blit),
+                Color::opaque(0, 0, 0),
+                blit,
+                None,
+            )
+        };
+        let expected = output(&cropped, 0.5 / 49.0);
+        let stale_offscreen_vertex = output(&uncropped, 15.5 / 64.0);
+
+        graphics.blit_sky_tile(&image, -15, 0, None, 1.0, None);
+
+        assert_eq!(graphics.surface().get_pixel(0, 0), Some(expected));
+        assert_ne!(expected, stale_offscreen_vertex);
+    }
+
+    #[test]
+    fn clr_mod_map_squared_reveal_and_generator_values_match_cpp() {
+        let mut reveal = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).unwrap();
+        reveal.reduce_modulation(64, 64, 64, 96);
+        assert_eq!(reveal.get_mod_at(128, 128), 0x0033_3333);
+
+        let mut alpha_reveal =
+            ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).unwrap();
+        alpha_reveal.reduce_modulation(64, 64, 64, 96);
+        assert_eq!(alpha_reveal.get_mod_at(128, 128), 0xccff_ffff);
+
+        let mut generator = ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0).unwrap();
+        generator.reduce_modulation(0, 0, 10_000, 11_000);
+        generator.add_modulation(0, 0, 64, 264, 0);
+        assert_eq!(generator.get_mod_at(128, 0), 0x0030_3030);
+
+        let mut alpha_generator =
+            ClrModMap::reset(64, 64, 256, 256, 0, 0, 0, 0, 0x0000_0001).unwrap();
+        alpha_generator.reduce_modulation(0, 0, 10_000, 11_000);
+        alpha_generator.add_modulation(0, 0, 64, 264, 64);
+        assert_eq!(alpha_generator.get_mod_at(128, 0), 0x8fff_ffff);
+    }
+
+    #[test]
+    fn packed_fog_modulation_keeps_native_shift_and_transparency_math() {
+        let color = Color::new(200, 100, 50, 245);
+
+        assert_eq!(
+            modulate_surface_color(color, 0x0080_8080),
+            Color::new(100, 50, 25, 245)
+        );
+        assert_eq!(
+            modulate_surface_color(color, 0x8080_8080),
+            Color::new(100, 50, 25, 122)
+        );
+        assert_eq!(
+            modulate_surface_color(color, 0x00ff_ffff),
+            Color::new(199, 99, 49, 245)
+        );
+    }
+
+    #[test]
+    fn fog_map_defers_generators_skips_closed_containers_and_adds_view_target() {
+        let mut snapshot = make_snapshot();
+        snapshot.environment.fow_resolution = 16;
+        let mut repeller = snapshot.objects[0].clone();
+        repeller.id = ObjectId::new(1);
+        repeller.position = Vector2::new(96, 64);
+        repeller.plr_view_range = 90;
+
+        let mut generator = repeller.clone();
+        generator.id = ObjectId::new(2);
+        generator.plr_view_range = -20;
+        generator.color_modulation = 0;
+
+        let mut container = repeller.clone();
+        container.id = ObjectId::new(3);
+        container.definition_id = "Closed".into();
+        container.plr_view_range = 0;
+
+        let mut hidden_repeller = repeller.clone();
+        hidden_repeller.id = ObjectId::new(4);
+        hidden_repeller.position = Vector2::new(192, 64);
+        hidden_repeller.plr_view_range = 50;
+        hidden_repeller.container = Some(container.id);
+
+        let mut open_container = container.clone();
+        open_container.id = ObjectId::new(7);
+        open_container.definition_id = "ClosedTwo".into();
+        let mut visible_repeller = repeller.clone();
+        visible_repeller.id = ObjectId::new(8);
+        visible_repeller.position = Vector2::new(416, 64);
+        visible_repeller.plr_view_range = 50;
+        visible_repeller.container = Some(open_container.id);
+
+        let mut target = repeller.clone();
+        target.id = ObjectId::new(5);
+        target.position = Vector2::new(336, 64);
+        target.plr_view_range = 0;
+
+        let mut cursor = repeller.clone();
+        cursor.id = ObjectId::new(6);
+        cursor.plr_view_range = 60;
+        snapshot.objects = vec![
+            repeller,
+            generator,
+            container,
+            hidden_repeller,
+            target,
+            cursor,
+            open_container,
+            visible_repeller,
+        ];
+        snapshot
+            .definition_closed_containers
+            .insert("Closed".into(), 1);
+        snapshot
+            .definition_closed_containers
+            .insert("ClosedTwo".into(), 2);
+        // Generator intentionally precedes the repeller: native still applies
+        // it last and leaves their shared center black.
+        snapshot
+            .fow_players
+            .insert(
+                0,
+                FogOfWarPlayerFrame {
+                    view_objects: vec![
+                        ObjectId::new(2),
+                        ObjectId::new(1),
+                        ObjectId::new(4),
+                        ObjectId::new(8),
+                    ],
+                    view_target: Some(ObjectId::new(5)),
+                },
+            );
+        snapshot.players = vec![PlayerState {
+            id: 0,
+            fog_of_war: true,
+            view_mode: PLAYER_VIEW_MODE_TARGET,
+            view_target: Some(ObjectId::new(5)),
+            cursor: Some(ObjectId::new(6)),
+            ..PlayerState::default()
+        }];
+
+        let map = build_fog_modulation_map(&snapshot, 0, 0, 0, 480, 128).unwrap();
+        assert_eq!(map.get_mod_at(96, 64), 0, "generator wins after reveal");
+        assert_eq!(
+            map.get_mod_at(192, 64),
+            0,
+            "ClosedContainer==1 suppresses the contained repeller"
+        );
+        assert_eq!(
+            map.get_mod_at(336, 64),
+            0x00ff_ffff,
+            "target uses the cursor's nonzero fallback range"
+        );
+        assert_eq!(
+            map.get_mod_at(416, 64),
+            0x00ff_ffff,
+            "ClosedContainer==2 explicitly retains outward vision"
+        );
+
+        snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == ObjectId::new(5))
+            .unwrap()
+            .position = Vector2::new(500, 64);
+        snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == ObjectId::new(6))
+            .unwrap()
+            .plr_view_range = 0;
+        let fow_player = snapshot.fow_players.get_mut(&0).unwrap();
+        fow_player.view_objects.clear();
+        let default_target = build_fog_modulation_map(&snapshot, 0, 0, 0, 800, 128).unwrap();
+        assert_ne!(
+            default_target.get_mod_at(100, 64) & 0x00ff_ffff,
+            0,
+            "zero target and cursor ranges fall back to the native 500px range"
+        );
+        assert_eq!(
+            default_target.get_mod_at(0, 64) & 0x00ff_ffff,
+            0,
+            "the fallback reveal excludes its exact outer-radius boundary"
+        );
+    }
+
+    #[test]
+    fn ignore_fow_suppresses_only_an_object_base_draw() {
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![255, 255, 255, 255]),
+            actions: HashMap::new(),
+            color_mask: None,
+            graphics_scale: 1.0,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "IgnoreFog".into();
+        object.position = Vector2::new(1, 1);
+        object.category = lc_engine::DEFAULT_CATEGORY | CATEGORY_IGNORE_FOW_FLAG;
+        object.color_modulation = 0;
+        object.blit_mode = 0;
+        object.action = Default::default();
+
+        let mut graphics = GraphicsSystem::new(
+            3,
+            3,
+            3,
+            "Ignore FoW",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("IgnoreFog", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.active_fog_map = Some(Arc::new(ClrModMap {
+            resolution_x: 64,
+            resolution_y: 64,
+            width: 2,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: vec![0; 4],
+        }));
+        graphics.draw_objects(
+            std::slice::from_ref(&object),
+            &[object.id],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(1, 1),
+            Some(Color::opaque(255, 255, 255))
+        );
+
+        object.category &= !CATEGORY_IGNORE_FOW_FLAG;
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.draw_objects(
+            std::slice::from_ref(&object),
+            &[object.id],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(1, 1),
+            Some(Color::opaque(0, 0, 0))
+        );
     }
 
     #[test]
@@ -8600,6 +10688,7 @@ mod tests {
             script_globals: Default::default(),
             particles: Vec::new(),
             players: Vec::new(),
+            fow_players: Default::default(),
             crew_selection: Default::default(),
             crew_roles: Default::default(),
             known_crew_owners: Vec::new(),
@@ -8611,11 +10700,307 @@ mod tests {
             controls: Vec::new(),
             network_packets: Vec::new(),
             definition_categories: Default::default(),
+            definition_closed_containers: Default::default(),
             definition_lines: Default::default(),
             transfer_zones: Vec::new(),
             menu_requests: Vec::new(),
             audio: Vec::new(),
         }
+    }
+
+    #[test]
+    fn viewport_fog_shrouds_far_pixels_fades_the_edge_and_preserves_non_fow_bytes() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(100, 60);
+        snapshot.objects[0].plr_view_range = 48;
+        snapshot.players = vec![PlayerState {
+            id: 0,
+            fog_of_war: false,
+            ..PlayerState::default()
+        }];
+
+        let render = |snapshot: &SimulationSnapshot| {
+            let mut graphics = GraphicsSystem::new(
+                128,
+                80,
+                120,
+                "FoW render",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.render_frame_with_gamma(
+                snapshot,
+                &[ViewportInput::new(
+                    0,
+                    snapshot.objects[0].position,
+                    1.0,
+                    &snapshot.objects[0],
+                )],
+                None,
+            );
+            graphics
+        };
+
+        let baseline = render(&snapshot);
+        let mut metadata_only = snapshot.clone();
+        metadata_only.environment.fow_resolution = 8;
+        metadata_only.environment.fow_color = 0x0000_ff00;
+        metadata_only.fow_players.insert(
+            0,
+            FogOfWarPlayerFrame {
+                view_objects: vec![ObjectId::new(1)],
+                view_target: None,
+            },
+        );
+        let metadata_render = render(&metadata_only);
+        assert_eq!(
+            baseline.surface().pixels(),
+            metadata_render.surface().pixels(),
+            "FoW metadata is inert while the viewport player's flag is false"
+        );
+
+        let mut fog = metadata_only.clone();
+        fog.players[0].fog_of_war = true;
+        fog.environment.fow_color = 0;
+        let fog_render = render(&fog);
+        let viewport = fog_render.active_viewports[0].clone();
+        let output_at_world = |world_x: i32, world_y: i32| {
+            (
+                (viewport.content_rect.x as f32
+                    + (world_x as f32 - viewport.viewport_x) * viewport.zoom)
+                    .round() as u32,
+                (viewport.content_rect.y as f32
+                    + (world_y as f32 - viewport.viewport_y) * viewport.zoom)
+                    .round() as u32,
+            )
+        };
+        let far = output_at_world(
+            viewport.viewport_x as i32,
+            viewport.viewport_y as i32,
+        );
+        let near = output_at_world(100, 60);
+        let fade = output_at_world(140, 60);
+        assert_eq!(
+            fog_render.surface().get_pixel(far.0, far.1),
+            Some(Color::opaque(0, 0, 0))
+        );
+        let baseline_near = baseline.surface().get_pixel(near.0, near.1).unwrap();
+        assert_eq!(
+            fog_render.surface().get_pixel(near.0, near.1),
+            Some(modulate_surface_color(baseline_near, 0x00ff_ffff))
+        );
+        let fade_color = fog_render.surface().get_pixel(fade.0, fade.1).unwrap();
+        let near_color = fog_render.surface().get_pixel(near.0, near.1).unwrap();
+        let brightness = |color: Color| u16::from(color.r) + u16::from(color.g) + u16::from(color.b);
+        assert!(brightness(fade_color) < brightness(near_color));
+        assert!(brightness(fade_color) > 0);
+
+        let mut colored_fog = fog;
+        colored_fog.environment.fow_color = 0x0000_ff00;
+        let colored_render = render(&colored_fog);
+        assert_eq!(
+            colored_render.surface().get_pixel(far.0, far.1),
+            Some(Color::opaque(0, 255, 0)),
+            "nonzero FoWColor is the fully shrouded backdrop"
+        );
+    }
+
+    #[test]
+    fn fog_stops_before_parallax_foreground_and_hud() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(100, 60);
+        snapshot.objects[0].plr_view_range = 12;
+        let mut fogged = snapshot.objects[0].clone();
+        fogged.id = ObjectId::new(2);
+        fogged.definition_id = "FoggedWorld".into();
+        fogged.position = Vector2::new(50, 60);
+        fogged.plr_view_range = 0;
+        fogged.crew_member = false;
+        let mut parallax = fogged.clone();
+        parallax.id = ObjectId::new(3);
+        parallax.definition_id = "ParallaxHud".into();
+        parallax.position = Vector2::new(120, 50);
+        parallax.category = lc_engine::DEFAULT_CATEGORY
+            | CATEGORY_FOREGROUND_FLAG
+            | CATEGORY_PARALLAX_FLAG;
+        snapshot.objects.extend([fogged.clone(), parallax]);
+        snapshot.render_order = snapshot.objects.iter().map(|object| object.id).collect();
+        snapshot.players = vec![PlayerState {
+            id: 0,
+            fog_of_war: false,
+            ..PlayerState::default()
+        }];
+        snapshot.environment.fow_resolution = 8;
+        snapshot.fow_players.insert(
+            0,
+            FogOfWarPlayerFrame {
+                view_objects: vec![snapshot.objects[0].id],
+                view_target: None,
+            },
+        );
+
+        let mut sprites = (*solid_sprite(
+            "FoggedWorld",
+            4,
+            4,
+            Color::opaque(220, 20, 20),
+            Some(DefinitionRect::new(0, 0, 4, 4)),
+            false,
+        ))
+        .clone();
+        sprites.extend((*solid_sprite(
+            "ParallaxHud",
+            4,
+            4,
+            Color::opaque(20, 220, 20),
+            Some(DefinitionRect::new(0, 0, 4, 4)),
+            false,
+        ))
+        .clone());
+        let board_color = Color::opaque(20, 40, 220);
+        let board = ImageData::new(
+            4,
+            50,
+            (0..200)
+                .flat_map(|_| [board_color.r, board_color.g, board_color.b, board_color.a])
+                .collect(),
+        );
+        let render = |snapshot: &SimulationSnapshot| {
+            let mut graphics = GraphicsSystem::new(
+                128,
+                120,
+                120,
+                "FoW lifetime",
+                test_font(),
+                Arc::new(sprites.clone()),
+                empty_cursor_atlas(),
+                Arc::new(HudGraphics {
+                    upper_board: Some(board.clone()),
+                    ..HudGraphics::default()
+                }),
+            );
+            graphics.render_frame_with_gamma(
+                snapshot,
+                &[ViewportInput::new(
+                    0,
+                    snapshot.objects[0].position,
+                    1.0,
+                    &snapshot.objects[0],
+                )],
+                None,
+            );
+            graphics
+        };
+
+        let baseline = render(&snapshot);
+        let normal = baseline
+            .world_to_screen(0, fogged.position)
+            .expect("far world object in viewport");
+        let normal = (normal.0.round() as u32 + 1, normal.1.round() as u32 + 1);
+        let parallax_screen = baseline
+            .world_to_screen(0, Vector2::new(120, 50))
+            .expect("parallax foreground in viewport");
+        let parallax_pixel = (
+            parallax_screen.0.round() as u32 + 1,
+            parallax_screen.1.round() as u32 + 1,
+        );
+        assert_eq!(
+            baseline.surface().get_pixel(normal.0, normal.1),
+            Some(Color::opaque(220, 20, 20)),
+        );
+        assert_eq!(
+            baseline
+                .surface()
+                .get_pixel(parallax_pixel.0, parallax_pixel.1),
+            Some(Color::opaque(20, 220, 20)),
+        );
+
+        let mut fog_snapshot = snapshot;
+        fog_snapshot.players[0].fog_of_war = true;
+        let fog = render(&fog_snapshot);
+        assert_eq!(
+            fog.surface().get_pixel(normal.0, normal.1),
+            Some(Color::opaque(0, 0, 0)),
+            "ordinary world sprite is shrouded",
+        );
+        assert_eq!(
+            fog.surface().get_pixel(parallax_pixel.0, parallax_pixel.1),
+            baseline
+                .surface()
+                .get_pixel(parallax_pixel.0, parallax_pixel.1),
+            "ForegroundParallax is drawn after ClrModMap is disabled",
+        );
+        assert_eq!(
+            fog.surface().get_pixel(0, 0),
+            baseline.surface().get_pixel(0, 0),
+            "fullscreen HUD chrome remains byte-identical",
+        );
+        assert_eq!(fog.surface().get_pixel(0, 0), Some(board_color));
+    }
+
+    #[test]
+    fn zoomed_scroll_border_keeps_fog_in_content_coordinates() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(10, 10);
+        snapshot.objects[0].plr_view_range = 12;
+        snapshot.players = vec![PlayerState {
+            id: 0,
+            fog_of_war: true,
+            ..PlayerState::default()
+        }];
+        snapshot.environment.fow_resolution = 8;
+        snapshot.fow_players.insert(
+            0,
+            FogOfWarPlayerFrame {
+                view_objects: vec![snapshot.objects[0].id],
+                view_target: None,
+            },
+        );
+        let mut graphics = GraphicsSystem::new(
+            200,
+            120,
+            120,
+            "zoomed FoW border",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame_with_gamma(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                snapshot.objects[0].position,
+                2.0,
+                &snapshot.objects[0],
+            )],
+            None,
+        );
+        let viewport = &graphics.active_viewports[0];
+        assert!(viewport.content_rect.x > viewport.rect.x);
+        assert!(viewport.content_rect.y > viewport.rect.y);
+        let at_world = |world: Vector2| {
+            (
+                (viewport.content_rect.x as f32
+                    + (world.x as f32 - viewport.viewport_x) * viewport.zoom)
+                    .round() as u32,
+                (viewport.content_rect.y as f32
+                    + (world.y as f32 - viewport.viewport_y) * viewport.zoom)
+                    .round() as u32,
+            )
+        };
+        let near = at_world(snapshot.objects[0].position);
+        let far = at_world(Vector2::new(50, 10));
+        assert_ne!(
+            graphics.surface().get_pixel(near.0, near.1),
+            Some(Color::opaque(0, 0, 0)),
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(far.0, far.1),
+            Some(Color::opaque(0, 0, 0)),
+        );
     }
 
     fn standard_gamma_color(color: Color) -> Color {
@@ -8671,7 +11056,9 @@ mod tests {
             20,
             1.0,
             c4_palette_color(6),
+            c4_palette_color(6),
             SpriteBlitState::normal(),
+            None,
             None,
             &mut rng,
         );
@@ -8694,14 +11081,14 @@ mod tests {
         draw_object_triangle(
             &mut surface,
             [(0.0, 0.0), (4.0, 0.0), (0.0, 4.0)],
-            translucent,
+            [translucent; 3],
             SpriteBlitState::normal(),
             None,
         );
         draw_object_triangle(
             &mut surface,
             [(0.0, 4.0), (4.0, 0.0), (4.0, 4.0)],
-            translucent,
+            [translucent; 3],
             SpriteBlitState::normal(),
             None,
         );
@@ -9030,6 +11417,7 @@ mod tests {
             c4_palette_color(191),
             SpriteBlitState::normal(),
             None,
+            None,
         );
         assert_eq!(
             graphics.surface().get_pixel(8, 2),
@@ -9044,6 +11432,7 @@ mod tests {
             c4_palette_color(191),
             c4_palette_color(0),
             SpriteBlitState::normal(),
+            None,
             None,
         );
         assert_eq!(
@@ -10542,6 +12931,7 @@ mod tests {
             0,
             1.0,
             Some(&gamma),
+            None,
         );
 
         assert_eq!(
@@ -11384,6 +13774,47 @@ mod tests {
     }
 
     #[test]
+    fn stationary_pxs_samples_fog_before_rounding_its_raster_position() {
+        let mut graphics = GraphicsSystem::new(
+            3,
+            2,
+            2,
+            "fractional PXS fog",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "rain".to_string(),
+            MaterialRenderInfo::new([200, 100, 50, 0, 0, 0, 0, 0, 0], [0; 6], None, 0, 25),
+        )])));
+        graphics.active_fog_map = Some(Arc::new(ClrModMap {
+            resolution_x: 1,
+            resolution_y: 1,
+            width: 3,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: vec![0x00ff_ffff, 0, 0, 0x00ff_ffff, 0, 0],
+        }));
+        let particle = pxs_particle("rain", [49_152, 0, 0, 0], 0); // x = 0.75
+
+        graphics.draw_pxs(&[particle], 1.0, None);
+
+        assert_eq!(
+            graphics.surface().get_pixel(1, 0),
+            Some(modulate_surface_color(
+                Color::opaque(200, 100, 50),
+                0x00ff_ffff,
+            )),
+            "DrawPix samples fog at int(0.75)=0 before rasterizing at round(0.75)=1",
+        );
+    }
+
+    #[test]
     fn mouse_selection_frame_matches_cpp_palette_raster_and_viewport_clip() {
         // C4MouseControl::Draw passes current -> down endpoints and CRed to
         // DrawFrame. On the render target, each edge is an independent
@@ -11573,6 +14004,7 @@ mod tests {
             &SourceRect::new(1, 0, 2, 4),
             0,
             1.0,
+            None,
             None,
         );
 
@@ -13664,6 +16096,7 @@ mod tests {
             None,
             SpriteBlitState::normal(),
             None,
+            None,
         );
         assert_surface_pixels_eq(
             partial_graphics.surface(),
@@ -13692,6 +16125,7 @@ mod tests {
             false,
             None,
             SpriteBlitState::normal(),
+            None,
             None,
         );
         assert_surface_pixels_eq(
@@ -13824,6 +16258,7 @@ mod tests {
                 None,
                 SpriteBlitState::normal(),
                 None,
+                None,
             );
             // C4Object::Draw computes the live target every draw:
             // height=(Target.y+Target.Shape.y)-(y+Shape.y+FacetY)
@@ -13850,6 +16285,7 @@ mod tests {
                 false,
                 None,
                 SpriteBlitState::normal(),
+                None,
                 None,
             );
             expected
@@ -13905,6 +16341,7 @@ mod tests {
                 false,
                 None,
                 SpriteBlitState::normal(),
+                None,
                 None,
             );
             expected
@@ -14129,6 +16566,63 @@ mod tests {
         assert!(
             count_red_text_pixels(&graphics) > 0,
             "expected red 0xffff0000 name text above the cursor mark"
+        );
+    }
+
+    #[test]
+    fn cursor_label_fog_is_sampled_per_glyph_instead_of_once_per_line() {
+        let mut raster = lc_graphics::clonk_font::ClonkFont::new(1);
+        raster.add_glyph(
+            'A',
+            lc_graphics::clonk_font::GlyphCell {
+                width: 4,
+                pixels: vec![Color::opaque(255, 255, 255); 8],
+            },
+        );
+        let font = hud::HudFont::Clonk(&raster);
+        let fog = FogDrawContext {
+            map: Arc::new(ClrModMap {
+                resolution_x: 4,
+                resolution_y: 2,
+                width: 4,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+                fade_transparent: false,
+                cells: vec![
+                    0,
+                    0x00ff_ffff,
+                    0,
+                    0,
+                    0,
+                    0x00ff_ffff,
+                    0,
+                    0,
+                ],
+            }),
+            zoom: 1.0,
+        };
+        let mut surface = Surface::new(9, 2, PixelFormat::Rgba8888);
+
+        draw_fogged_cursor_text_line(
+            &mut surface,
+            &font,
+            4,
+            0,
+            "AA",
+            Color::opaque(255, 0, 0),
+            None,
+            &fog,
+        );
+
+        let distinct_red: HashSet<u8> = (0..surface.width())
+            .filter_map(|x| surface.get_pixel(x, 0))
+            .filter(|pixel| pixel.r != 0)
+            .map(|pixel| pixel.r)
+            .collect();
+        assert!(
+            distinct_red.len() > 1,
+            "glyph-local fog vertices must produce a spatially varying label",
         );
     }
 
@@ -15215,6 +17709,7 @@ mod tests {
         let blit = |modulation| SpriteBlitState {
             mode: 0,
             modulation: (modulation != 0).then_some(modulation),
+            fog_modulation: None,
         };
         let with_modulation = |landscape: Landscape, modulation: u32| {
             let mut value = serde_json::to_value(landscape).expect("landscape serializes");

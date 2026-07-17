@@ -966,6 +966,8 @@ pub const FIRE_DEFINITION_ID: &str = "FLAM";
 const BUBBLE_DEFINITION_ID: &str = "FXU1";
 /// `Config.Graphics.SmokeLevel` default (C4Config.cpp:452).
 pub const DEFAULT_SMOKE_LEVEL: i32 = 200;
+/// `CClrModAddMap::iDefResolutionX/Y` and the C4Scenario FoWRes default.
+pub const DEFAULT_FOW_RESOLUTION: i32 = 64;
 /// `GetSmokeLevel` while `C4GameControl::SyncMode` is active.
 const SYNC_SMOKE_LEVEL: i32 = 150;
 
@@ -3651,7 +3653,15 @@ impl Default for EnvironmentSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+fn default_fow_resolution() -> i32 {
+    DEFAULT_FOW_RESOLUTION
+}
+
+fn is_default_fow_resolution(value: &i32) -> bool {
+    *value == DEFAULT_FOW_RESOLUTION
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentFrame {
     pub settings: EnvironmentSettings,
     pub wind_force: i32,
@@ -3664,6 +3674,30 @@ pub struct EnvironmentFrame {
     /// intentionally absent from C4ControlSyncCheck.
     #[serde(default, skip_serializing_if = "GammaControlState::is_default")]
     pub gamma: GammaControlState,
+    /// Packed C4 `Game.C4S.Game.FoWColor` used only by viewport presentation.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub fow_color: u32,
+    /// `Game.C4S.Landscape.FoWRes`; both modulation-map axes use this value.
+    #[serde(
+        default = "default_fow_resolution",
+        skip_serializing_if = "is_default_fow_resolution"
+    )]
+    pub fow_resolution: i32,
+}
+
+impl Default for EnvironmentFrame {
+    fn default() -> Self {
+        Self {
+            settings: EnvironmentSettings::default(),
+            wind_force: 0,
+            ambient_temperature: 0,
+            precipitation: 0,
+            sky_color: None,
+            gamma: GammaControlState::default(),
+            fow_color: 0,
+            fow_resolution: default_fow_resolution(),
+        }
+    }
 }
 
 fn default_wind_min() -> i32 {
@@ -8945,6 +8979,26 @@ fn denumerate_effect(effect: &mut EffectState, object_numbers: &HashSet<u64>) {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FogOfWarPlayerFrame {
+    /// Ordered runtime `C4Player::FoWViewObjs` projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub view_objects: Vec<ObjectId>,
+    /// Runtime-only `C4Player::ViewTarget`, retained by presentation records
+    /// even though native player save data deliberately omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_target: Option<ObjectId>,
+}
+
+impl Default for FogOfWarPlayerFrame {
+    fn default() -> Self {
+        Self {
+            view_objects: Vec::new(),
+            view_target: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
     /// `C4Game::Time`, deliberately independent from FrameCounter
@@ -8990,6 +9044,10 @@ pub struct SimulationSnapshot {
     pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
     pub players: Vec<PlayerState>,
+    /// Runtime fog-of-war player projections. These are deterministic frame
+    /// presentation data; the underlying player fields remain NoSave.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fow_players: BTreeMap<i32, FogOfWarPlayerFrame>,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
@@ -9012,6 +9070,9 @@ pub struct SimulationSnapshot {
     pub network_packets: Vec<NetworkPacketSnapshot>,
     #[serde(default)]
     pub definition_categories: HashMap<DefinitionId, i32>,
+    /// Definition `ClosedContainer` values needed by the viewport FoW pass.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definition_closed_containers: BTreeMap<DefinitionId, i32>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub definition_lines: HashMap<DefinitionId, DefinitionLineMetadata>,
     #[serde(default)]
@@ -9032,6 +9093,52 @@ impl SimulationSnapshot {
             object_visible_for_player(&self.objects, &self.players, object, player, as_overlay)
         })
     }
+}
+
+#[cfg(test)]
+#[test]
+fn simulation_snapshot_roundtrips_fow_presentation_and_defaults_legacy_frames() {
+    let mut snapshot = Engine::new().snapshot();
+    snapshot.environment.fow_color = 0x7f12_3456;
+    snapshot.environment.fow_resolution = 96;
+    snapshot.fow_players.insert(
+        2,
+        FogOfWarPlayerFrame {
+            view_objects: vec![ObjectId::new(9), ObjectId::new(3)],
+            view_target: Some(ObjectId::new(11)),
+        },
+    );
+    snapshot
+        .definition_closed_containers
+        .insert("HUT1".into(), 1);
+
+    let encoded = serde_json::to_value(&snapshot).expect("snapshot serializes");
+    let restored: SimulationSnapshot =
+        serde_json::from_value(encoded.clone()).expect("snapshot deserializes");
+    assert_eq!(restored.environment.fow_color, 0x7f12_3456);
+    assert_eq!(restored.environment.fow_resolution, 96);
+    assert_eq!(restored.fow_players, snapshot.fow_players);
+    assert_eq!(
+        restored.definition_closed_containers,
+        snapshot.definition_closed_containers
+    );
+
+    let mut legacy = encoded;
+    let root = legacy.as_object_mut().expect("snapshot JSON object");
+    root.remove("fow_players");
+    root.remove("definition_closed_containers");
+    let environment = root
+        .get_mut("environment")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("environment JSON object");
+    environment.remove("fow_color");
+    environment.remove("fow_resolution");
+    let restored: SimulationSnapshot =
+        serde_json::from_value(legacy).expect("legacy snapshot deserializes");
+    assert_eq!(restored.environment.fow_color, 0);
+    assert_eq!(restored.environment.fow_resolution, DEFAULT_FOW_RESOLUTION);
+    assert!(restored.fow_players.is_empty());
+    assert!(restored.definition_closed_containers.is_empty());
 }
 
 /// C4Object::IsVisible (C4Object.cpp:5600-5629), shared by presentation
@@ -30852,6 +30959,7 @@ impl Engine {
         eliminated_crew_owners.sort_unstable();
         let ambient_temperature = self.environment.ambient_temperature(self.frame);
         let sky_color = self.environment.resolved_sky_color(ambient_temperature);
+        let has_fog_player = self.players.values().any(Player::fog_of_war);
         let environment = EnvironmentFrame {
             settings: self.environment,
             wind_force: self.environment.wind_force(self.frame),
@@ -30859,6 +30967,12 @@ impl Engine {
             precipitation: self.environment.precipitation(),
             sky_color: Some(sky_color),
             gamma: self.gamma,
+            fow_color: has_fog_player
+                .then(|| self.scenario_values.fow_color())
+                .unwrap_or(0),
+            fow_resolution: has_fog_player
+                .then(|| self.scenario_values.fow_resolution())
+                .unwrap_or(DEFAULT_FOW_RESOLUTION),
         };
         let sky_snapshot = self.sky.as_ref().map(SkyState::snapshot);
         let weather_events = self.weather_events.clone();
@@ -30948,11 +31062,36 @@ impl Engine {
             })
             .collect();
         player_states.sort_unstable_by_key(|state| state.id);
+        let fow_players = self
+            .players
+            .iter()
+            .filter(|(_, player)| player.fog_of_war())
+            .map(|(&id, player)| {
+                (
+                    id,
+                    FogOfWarPlayerFrame {
+                        view_objects: player.fow_view_objects().to_vec(),
+                        view_target: player.raw_view_target(),
+                    },
+                )
+            })
+            .collect();
         let definition_categories = self
             .definitions
             .iter()
             .map(|(id, definition)| (id.clone(), definition.category()))
             .collect();
+        let definition_closed_containers = if has_fog_player {
+            self.definitions
+                .iter()
+                .filter_map(|(id, definition)| {
+                    let closed = definition.closed_container();
+                    (closed != 0).then(|| (id.clone(), closed))
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         let definition_lines = self
             .definitions
             .iter()
@@ -30994,6 +31133,7 @@ impl Engine {
             script_globals: self.capture_script_globals(),
             particles,
             players: player_states,
+            fow_players,
             crew_selection,
             crew_roles,
             known_crew_owners,
@@ -31011,6 +31151,7 @@ impl Engine {
             controls: Vec::new(),
             network_packets: Vec::new(),
             definition_categories,
+            definition_closed_containers,
             definition_lines,
             transfer_zones: self.transfer_zones.states(),
             menu_requests: Vec::new(),

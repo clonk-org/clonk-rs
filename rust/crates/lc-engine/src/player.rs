@@ -1925,6 +1925,10 @@ impl Player {
         self.view_target.or(self.cursor)
     }
 
+    pub(crate) fn raw_view_target(&self) -> Option<ObjectId> {
+        self.view_target
+    }
+
     pub(crate) fn resolved_view_object(&self) -> Option<ObjectId> {
         resolved_view_object(
             self.view_mode,
