@@ -49899,10 +49899,14 @@ impl Engine {
             ty = ry;
             mat = probe.mat;
         }
-        // Insert dead material, keeping the current pixel's IFT
-        // (C4Landscape.cpp:1211-1218); the displaced material thrusts up
-        // (LandscapeInsertThrust default 1, :1220-1221).
-        let old_mat = self.landscape_material(tx, ty);
+        // Insert dead material, keeping the current pixel's IFT. C++ only
+        // captures and re-inserts the displaced material when the runtime
+        // LandscapeInsertThrust flag is enabled (C4Landscape.cpp:1197-1206).
+        let old_mat = if self.landscape_insert_thrust {
+            self.landscape_material(tx, ty)
+        } else {
+            None
+        };
         if let Some(landscape) = self.landscape.as_mut() {
             landscape.insert_material_pix(tx, ty, mat);
         }

@@ -2,7 +2,7 @@ use std::fs;
 
 use image::{Rgba, RgbaImage};
 use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, ObjectId, Scenario, ScenarioError, Vector2};
+use lc_engine::{Engine, Landscape, ObjectId, Scenario, ScenarioError, Vector2};
 use lc_resources::Group;
 use tempfile::tempdir;
 
@@ -90,6 +90,125 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
     assert_eq!(spawned.definition_id, "TEST");
     assert_eq!(spawned.position, Vector2::new(50, 60));
 
+    Ok(())
+}
+
+#[test]
+fn legacy_scenario_landscape_insert_thrust_zero_controls_script_insert_material(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    let scenario_dir = temp.path();
+
+    // A minimal Map.bmp lets the legacy scenario complete landscape init;
+    // the focused pixel plane is installed after apply so this test isolates
+    // the realism-key handoff and the scenario-script InsertMaterial fold.
+    let mut map = RgbaImage::new(2, 2);
+    for y in 0..2 {
+        for x in 0..2 {
+            map.put_pixel(
+                x,
+                y,
+                if y == 0 {
+                    Rgba([12, 34, 56, 255])
+                } else {
+                    Rgba([160, 120, 80, 255])
+                },
+            );
+        }
+    }
+    map.save(scenario_dir.join("Map.bmp"))?;
+    let definition_dir = scenario_dir.join("Objects.ocd");
+    fs::create_dir_all(&definition_dir)?;
+    fs::write(
+        definition_dir.join("DefCore.txt"),
+        "[DefCore]\nid=DUMY\nName=Dummy\nCategory=C4D_Object\n",
+    )?;
+    fs::write(definition_dir.join("Script.c"), BASIC_SCRIPT)?;
+    fs::write(
+        scenario_dir.join("Scenario.txt"),
+        "[Head]\nTitle=Insert thrust off\n\n[Definitions]\nDefinition1=Objects.ocd\n\n[Game]\nLandscapeInsertThrust=0\n\n[Landscape]\nMapZoom=10\n",
+    )?;
+    fs::write(
+        scenario_dir.join("Script.c"),
+        r#"
+        #strict 2
+        func ProbeInsert()
+        {
+            return InsertMaterial(Material("Source"), 3, 5);
+        }
+        "#,
+    )?;
+
+    let scenario = Scenario::load_from_path_with(scenario_dir, &LocalDefinitionResolver)?;
+    let mut engine = Engine::with_seed(25);
+    // Prove Scenario::apply actively installs zero; relying on Engine's
+    // false default would let a missing key handoff pass this regression.
+    engine.set_landscape_insert_thrust(true);
+    scenario.apply(&mut engine)?;
+
+    let library = lc_resources::MaterialLibrary::parse(
+        r#"
+        [Material Source]
+        Name=Source
+        Density=50
+        MaxSlide=0
+
+        [Material Old]
+        Name=Old
+        Density=25
+        MaxSlide=0
+
+        [Material Support]
+        Name=Support
+        Density=100
+        MaxSlide=0
+        "#,
+    )?;
+    // This path also invalidates the script host's shared material table;
+    // set_materials alone is intended for pre-script synthetic fixtures.
+    engine.configure_materials_from_library(&library);
+    let source = engine.materials().id_of("Source").expect("Source exists");
+    let support = engine
+        .materials()
+        .id_of("Support")
+        .expect("Support exists");
+
+    let mut densities = vec![0i32; 128];
+    densities[10] = 50;
+    densities[20] = 25;
+    densities[30] = 100;
+    let mut names: Vec<Option<String>> = vec![None; 128];
+    names[10] = Some("Source".into());
+    names[20] = Some("Old".into());
+    names[30] = Some("Support".into());
+    let mut bytes = vec![0u8; 7 * 10];
+    bytes[5 * 7 + 3] = 20;
+    bytes[6 * 7 + 3] = 30;
+    let grid = lc_engine::landscape::PixelGrid::new(
+        7,
+        10,
+        bytes,
+        densities,
+        names,
+        vec![None; 128],
+    );
+    let mut landscape = Landscape::new(7, vec![10; 7])?;
+    landscape.set_world_height(10);
+    landscape.set_pixel_grid(grid);
+    engine.set_landscape(landscape);
+
+    engine.call_scenario_script_function("ProbeInsert", Vec::new())?;
+    let landscape = engine.landscape().expect("landscape remains set");
+    assert_eq!(landscape.material_at(3, 5), Some(source));
+    assert_eq!(landscape.grid_byte_at(3, 5), Some(10));
+    assert_eq!(
+        landscape.material_at(3, 4),
+        None,
+        "the scenario's LandscapeInsertThrust=0 suppresses displaced Old"
+    );
+    assert_eq!(landscape.grid_byte_at(3, 4), Some(0));
+    assert_eq!(landscape.material_at(3, 6), Some(support));
+    assert_eq!(engine.pxs_system.count(), 0);
     Ok(())
 }
 

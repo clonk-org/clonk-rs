@@ -6726,6 +6726,110 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         (engine, snow, water)
     }
 
+    fn insert_material_thrust_fixture(
+        landscape_insert_thrust: bool,
+    ) -> (Engine, MaterialId, MaterialId, MaterialId) {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Source]
+            Name=Source
+            Density=50
+            Friction=0
+            MaxSlide=0
+
+            [Material Old]
+            Name=Old
+            Density=25
+            Friction=0
+            MaxSlide=0
+
+            [Material Support]
+            Name=Support
+            Density=100
+            Friction=0
+            MaxSlide=0
+            "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let source = materials.id_of("Source").expect("Source exists");
+        let old = materials.id_of("Old").expect("Old exists");
+        let support = materials.id_of("Support").expect("Support exists");
+
+        // Source overwrites lower-density Old at (3,5). Dense Support at
+        // (3,6) prevents the FindMatSlide/PXS path, so the only optional
+        // write is Old recursively reinserted at (3,4).
+        let mut densities = vec![0i32; 128];
+        densities[10] = 50;
+        densities[20] = 25;
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[10] = Some("Source".into());
+        names[20] = Some("Old".into());
+        names[30] = Some("Support".into());
+        let mut bytes = vec![0u8; 7 * 10];
+        bytes[5 * 7 + 3] = 20;
+        bytes[6 * 7 + 3] = 30;
+        let grid = landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
+        let mut world = Landscape::new(7, vec![10; 7]).expect("landscape builds");
+        world.set_world_height(10);
+        world.set_pixel_grid(grid);
+
+        let mut engine = Engine::with_seed(24);
+        engine.set_materials(materials);
+        engine.set_physics(PhysicsSettings::new(1, 12, -20));
+        engine.set_landscape_insert_thrust(landscape_insert_thrust);
+        engine.set_landscape(world);
+        (engine, source, old, support)
+    }
+
+    fn insert_source_over_old(engine: &mut Engine, source: MaterialId) {
+        engine.apply_landscape_operations(vec![LandscapeOperation::InsertMaterial {
+            material: source.index() as i32,
+            position: Vector2::new(3, 5),
+            velocity: Vector2::ZERO,
+        }]);
+    }
+
+    #[test]
+    fn insert_material_without_landscape_insert_thrust_drops_displaced_pixel() {
+        let (mut engine, source, old, support) = insert_material_thrust_fixture(false);
+
+        insert_source_over_old(&mut engine, source);
+
+        let world = engine.landscape().expect("landscape remains set");
+        assert_eq!(world.material_at(3, 5), Some(source));
+        assert_eq!(world.grid_byte_at(3, 5), Some(10));
+        assert_eq!(
+            world.material_at(3, 4),
+            None,
+            "LandscapeInsertThrust=0 must not recursively reinsert Old"
+        );
+        assert_eq!(world.grid_byte_at(3, 4), Some(0));
+        assert_eq!(world.material_at(3, 6), Some(support));
+        assert_ne!(world.material_at(3, 4), Some(old));
+        assert_eq!(engine.pxs_system.count(), 0);
+    }
+
+    #[test]
+    fn insert_material_with_landscape_insert_thrust_reinserts_displaced_pixel() {
+        let (mut engine, source, old, support) = insert_material_thrust_fixture(true);
+
+        insert_source_over_old(&mut engine, source);
+
+        let world = engine.landscape().expect("landscape remains set");
+        assert_eq!(world.material_at(3, 5), Some(source));
+        assert_eq!(world.grid_byte_at(3, 5), Some(10));
+        assert_eq!(
+            world.material_at(3, 4),
+            Some(old),
+            "LandscapeInsertThrust=1 preserves the recursive thrust behavior"
+        );
+        assert_eq!(world.grid_byte_at(3, 4), Some(20));
+        assert_eq!(world.material_at(3, 6), Some(support));
+        assert_eq!(engine.pxs_system.count(), 0);
+    }
+
     #[test]
     fn insert_material_convert_writes_back_material_before_dead_pixel_insert() {
         // mrfConvert returns false after changing iPxsMat, so InsertMaterial's
