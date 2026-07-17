@@ -56,6 +56,16 @@ live shadow-diff — see "Phase 2" below.
   twice. Rust intentionally transfers unique ownership and clears the tail.
   Golden or live-shadow equality is therefore not expected at this undefined-
   behavior boundary; Rust's single-copy survivor order is authoritative.
+- **S2 map-generator terminal parameters:** a negative Mandel alpha becomes a
+  huge `uint32_t` iteration budget in C++, Gradient with `Wdt=0` performs
+  integer division by zero, and Random with `alpha=-2` performs remainder by
+  zero (C4MapCreatorS2.cpp:1357-1361,1422-1447). Rust bounds negative Mandel
+  alpha to ten iterations, substitutes a denominator of one for Gradient's
+  zero width, and returns false from Random's raw algorithm (before normal
+  overlay inversion). These inputs are excluded from C++ differential runs.
+  Mandel zero width or height is not excluded: its floating division is
+  emulated with the same IEEE-754 inf/NaN propagation, and safe parameters
+  remain formula-identical.
 
 ## How the oracle stays honest
 

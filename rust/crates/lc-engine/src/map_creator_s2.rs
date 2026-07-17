@@ -829,11 +829,17 @@ impl Tree {
                 if iter == 0 {
                     iter = 1000;
                 }
+                // C++ converts a negative alpha to u32, yielding billions of
+                // iterations. Keep a finite ten-step safety policy instead of
+                // making in-set pixels effectively hang.
                 let iter = iter.max(10) as u32;
-                let c = (f64::from(ix) / f64::from(z) / f64::from(overlay.wdt.max(1))
+                // Unlike Gradient below, these are floating divisions. Rust
+                // f64 preserves C++'s zero-dimension inf/NaN behavior and
+                // ordinary signed division for negative dimensions.
+                let c = (f64::from(ix) / f64::from(z) / f64::from(overlay.wdt)
                     - 0.5 * (f64::from(overlay.zoom_x) / f64::from(z)))
                     * 4.0;
-                let ci = (f64::from(iy) / f64::from(z) / f64::from(overlay.hgt.max(1))
+                let ci = (f64::from(iy) / f64::from(z) / f64::from(overlay.hgt)
                     - 0.5 * (f64::from(overlay.zoom_y) / f64::from(z)))
                     * 4.0;
                 let (mut zr, mut zi) = (c, ci);
@@ -850,10 +856,14 @@ impl Tree {
                 i >= iter
             }
             Algo::Gradient => {
+                // C++ performs integer division by zero here. Retain Rust's
+                // denominator-one fallback only for that terminal input;
+                // nonzero negative widths keep their signed C++ arithmetic.
+                let wdt = if overlay.wdt == 0 { 1 } else { overlay.wdt };
                 // (abs((iX ^ (iY*3)) * 2531011L) % 214013L) % z — the
                 // multiply promotes to 64-bit long on LP64 (no overflow).
                 let v = i64::from(ix ^ iy.wrapping_mul(3)) * 2531011;
-                (v.abs() % 214013) % i64::from(z) > i64::from(ix / overlay.wdt.max(1))
+                (v.abs() % 214013) % i64::from(z) > i64::from(ix / wdt)
             }
             // AlgoScript asks for `ScriptAlgo<Name>` at render time. When it
             // is missing, C++'s documented failsafe contributes no pixels.
@@ -999,6 +1009,8 @@ fn algo_random_seeded(s: i32, a: i32, ix: i32, iy: i32) -> bool {
             .wrapping_add(iy.wrapping_shl(2)));
     let divisor = a + 2;
     if divisor == 0 {
+        // C++ evaluates `% 0` for alpha=-2. Keep malformed maps nonfatal and
+        // contribute a false mask instead of reproducing the terminal fault.
         return false;
     }
     (mixed / 17) % divisor == 0
@@ -2004,6 +2016,244 @@ mod tests {
             .flat_map(|row| row.bytes())
             .map(|byte| if byte == b'#' { filled } else { 0 })
             .collect()
+    }
+
+    fn algorithm_tree(
+        algorithm: Algo,
+        alpha: i32,
+        seed: i32,
+        wdt: i32,
+        hgt: i32,
+        zoom_x: i32,
+        zoom_y: i32,
+    ) -> (Tree, NodeId) {
+        let mut tree = Tree::new();
+        let mut overlay = Overlay::default_template();
+        overlay.algorithm = algorithm;
+        overlay.alpha = IntBool::new(alpha, false);
+        overlay.seed = seed;
+        overlay.wdt = wdt;
+        overlay.hgt = hgt;
+        overlay.zoom_x = zoom_x;
+        overlay.zoom_y = zoom_y;
+        let node = tree.add(0, String::new(), NodeKind::Overlay(overlay));
+        (tree, node)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_algorithm_case(
+        algorithm: Algo,
+        alpha: i32,
+        seed: i32,
+        wdt: i32,
+        hgt: i32,
+        zoom_x: i32,
+        zoom_y: i32,
+        ix: i32,
+        iy: i32,
+    ) -> bool {
+        let (tree, node) =
+            algorithm_tree(algorithm, alpha, seed, wdt, hgt, zoom_x, zoom_y);
+        tree.run_algorithm(node, ix, iy)
+    }
+
+    fn cpp_mandel_formula(
+        alpha: i32,
+        wdt: i32,
+        hgt: i32,
+        zoom_x: i32,
+        zoom_y: i32,
+        ix: i32,
+        iy: i32,
+    ) -> bool {
+        assert!(
+            alpha >= 0,
+            "negative-alpha C++ oracle is intentionally excluded"
+        );
+        let mut iterations = if alpha == 0 { 1000 } else { alpha as u32 };
+        iterations = iterations.max(10);
+        let c = (f64::from(ix) / f64::from(ZOOM_RES) / f64::from(wdt)
+            - 0.5 * (f64::from(zoom_x) / f64::from(ZOOM_RES)))
+            * 4.0;
+        let ci = (f64::from(iy) / f64::from(ZOOM_RES) / f64::from(hgt)
+            - 0.5 * (f64::from(zoom_y) / f64::from(ZOOM_RES)))
+            * 4.0;
+        let (mut zr, mut zi) = (c, ci);
+        for _ in 0..iterations {
+            let xz = zr * zr - zi * zi;
+            zi = 2.0 * zr * zi + ci;
+            zr = xz + c;
+            if zr * zr + zi * zi > 4.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn cpp_gradient_formula(wdt: i32, ix: i32, iy: i32) -> bool {
+        let value = i64::from(ix ^ (iy * 3)) * 2_531_011;
+        (value.abs() % 214_013) % i64::from(ZOOM_RES) > i64::from(ix / wdt)
+    }
+
+    fn cpp_random_formula(seed: i32, alpha: i32, ix: i32, iy: i32) -> bool {
+        let mixed = (seed ^ (ix << 2) ^ (iy << 5))
+            ^ ((seed >> 16) + 1 + ix + (iy << 2));
+        (mixed / 17) % (alpha + 2) == 0
+    }
+
+    #[test]
+    fn nondegenerate_mandel_gradient_random_match_cpp_formula_sweep() {
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for alpha in [0, 1, 9, 10, 13, 100] {
+            for (wdt, hgt) in [(1, 1), (3, 7), (100, 100), (-3, 7), (3, -7)] {
+                for (zoom_x, zoom_y) in [(50, 75), (100, 100), (175, 60)] {
+                    for (ix, iy) in [
+                        (0, 0),
+                        (100, 250),
+                        (3500, 3300),
+                        (4700, 2500),
+                        (-200, 700),
+                    ] {
+                        actual.push(u8::from(run_algorithm_case(
+                            Algo::Mandel,
+                            alpha,
+                            0,
+                            wdt,
+                            hgt,
+                            zoom_x,
+                            zoom_y,
+                            ix,
+                            iy,
+                        )));
+                        expected.push(u8::from(cpp_mandel_formula(
+                            alpha, wdt, hgt, zoom_x, zoom_y, ix, iy,
+                        )));
+                    }
+                }
+            }
+        }
+        assert_eq!(actual, expected, "Mandel mask bytes match the C++ formula");
+
+        actual.clear();
+        expected.clear();
+        for wdt in [-9, -2, 1, 2, 9] {
+            for (ix, iy) in [(-100, -50), (-1, 0), (0, 0), (1, 3), (100, 50)] {
+                actual.push(u8::from(run_algorithm_case(
+                    Algo::Gradient,
+                    0,
+                    0,
+                    wdt,
+                    1,
+                    100,
+                    100,
+                    ix,
+                    iy,
+                )));
+                expected.push(u8::from(cpp_gradient_formula(wdt, ix, iy)));
+            }
+        }
+        assert_eq!(actual, expected, "Gradient mask bytes match the C++ formula");
+
+        actual.clear();
+        expected.clear();
+        for alpha in [-5, -3, -1, 0, 1, 10] {
+            for seed in [0, 1, 0x0123_4567] {
+                for (ix, iy) in [(0, 0), (1, 2), (17, 9), (100, 50)] {
+                    actual.push(u8::from(run_algorithm_case(
+                        Algo::Random,
+                        alpha,
+                        seed,
+                        1,
+                        1,
+                        100,
+                        100,
+                        ix,
+                        iy,
+                    )));
+                    expected.push(u8::from(cpp_random_formula(seed, alpha, ix, iy)));
+                }
+            }
+        }
+        assert_eq!(actual, expected, "Random mask bytes match the C++ formula");
+    }
+
+    #[test]
+    fn degenerate_algorithm_policies_are_bounded_and_explicit() {
+        // c=-0.6, ci=-0.68 stays bounded for ten updates and escapes on
+        // update eleven. Never use an in-set point here: a regression to the
+        // C++ negative-to-u32 cast would then run billions of iterations.
+        assert!(run_algorithm_case(
+            Algo::Mandel,
+            -1,
+            0,
+            100,
+            100,
+            100,
+            100,
+            3500,
+            3300,
+        ));
+        assert!(!run_algorithm_case(
+            Algo::Mandel,
+            11,
+            0,
+            100,
+            100,
+            100,
+            100,
+            3500,
+            3300,
+        ));
+
+        for (wdt, hgt, ix, iy, expected) in [
+            (0, 1, 0, 0, true),
+            (0, 1, 1, 0, false),
+            (1, 0, 0, 0, true),
+        ] {
+            let actual = run_algorithm_case(
+                Algo::Mandel,
+                10,
+                0,
+                wdt,
+                hgt,
+                100,
+                100,
+                ix,
+                iy,
+            );
+            assert_eq!(
+                actual,
+                expected,
+                "floating zero dimension keeps C++ inf/NaN behavior"
+            );
+        }
+
+        let gradient_zero = run_algorithm_case(
+            Algo::Gradient,
+            0,
+            0,
+            0,
+            1,
+            100,
+            100,
+            5,
+            3,
+        );
+        let gradient_one = run_algorithm_case(
+            Algo::Gradient,
+            0,
+            0,
+            1,
+            1,
+            100,
+            100,
+            5,
+            3,
+        );
+        assert!(gradient_zero);
+        assert_eq!(gradient_zero, gradient_one);
+        assert!(!algo_random_seeded(17, -2, 5, 3));
     }
 
     #[test]
