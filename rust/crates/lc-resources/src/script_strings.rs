@@ -112,20 +112,26 @@ fn replace_localization_keys(
     {
         let open = search_from + open_offset;
         let key_start = open + 1;
-        let Some(close_offset) = source[key_start..]
+        // C++ copies at most C4MaxName bytes, then checks the following byte.
+        // On an overlong run, its next delimiter search resumes from here.
+        let key_len = source[key_start..]
             .iter()
-            .position(|byte| *byte == b'$')
-        else {
+            .take(C4_MAX_NAME)
+            .take_while(|byte| **byte != b'$')
+            .count();
+        let close = key_start + key_len;
+        let Some(&terminator) = source.get(close) else {
             break;
         };
-        let close = key_start + close_offset;
-        let key = &source[key_start..close];
         search_from = close + 1;
+        if terminator != b'$' {
+            continue;
+        }
 
-        let valid = key.len() <= C4_MAX_NAME
-            && key.iter().copied().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'~' | b'+' | b'-')
-            });
+        let key = &source[key_start..close];
+        let valid = key.iter().copied().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'~' | b'+' | b'-')
+        });
         if !valid {
             continue;
         }
@@ -174,6 +180,51 @@ mod tests {
         assert_eq!(
             lc_script::c4_string_bytes(&localized),
             [b'"', 0xff, b' ', 0xe9, 0xff, b'"']
+        );
+    }
+
+    #[test]
+    fn overlong_localization_run_reuses_its_closing_dollar_as_next_opener() {
+        let overlong = vec![b'A'; C4_MAX_NAME + 5];
+        let source = [b"$".as_slice(), &overlong, b"$Key$"].concat();
+        let expected = [b"$".as_slice(), &overlong, b"V"].concat();
+        let entries = HashMap::from([(b"Key".as_slice(), b"V".as_slice())]);
+
+        assert_eq!(
+            replace_localization_keys(
+                &source,
+                &entries,
+                std::path::Path::new("StringTbl.txt"),
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn localization_key_length_boundary_matches_c4maxname() {
+        let key_at_limit = vec![b'A'; C4_MAX_NAME];
+        let key_over_limit = vec![b'B'; C4_MAX_NAME + 1];
+        let source = [
+            b"$".as_slice(),
+            &key_at_limit,
+            b"$|$",
+            &key_over_limit,
+            b"$",
+        ]
+        .concat();
+        let expected = [b"accepted|$".as_slice(), &key_over_limit, b"$"].concat();
+        let entries = HashMap::from([
+            (key_at_limit.as_slice(), b"accepted".as_slice()),
+            (key_over_limit.as_slice(), b"rejected".as_slice()),
+        ]);
+
+        assert_eq!(
+            replace_localization_keys(
+                &source,
+                &entries,
+                std::path::Path::new("StringTbl.txt"),
+            ),
+            expected
         );
     }
 
