@@ -6434,6 +6434,118 @@ func CatchBlow(level, by)
     }
 
     #[test]
+    fn failed_pxs_incineration_uses_full_insert_material_and_preserves_ift() {
+        // C++ mrfIncinerate calls the full C4Landscape::InsertMaterial when
+        // a PXSMove ignition fails (C4Material.cpp:758-767). Equal-density
+        // Oil makes InsertMaterial climb to the sky pixel at (3, 5), where
+        // it performs exactly one SetPix while preserving that pixel's IFT.
+        // The column helper instead raises the surface to y=8 and rewrites
+        // the intervening raster band.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Lava]
+            Name=Lava
+            Density=25
+            Friction=0
+            MaxSlide=0
+            SplashRate=100
+            Incindiary=1
+
+            [Material Oil]
+            Name=Oil
+            Density=25
+            Friction=0
+            MaxSlide=0
+            Inflammable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let lava = materials.id_of("Lava").expect("lava exists");
+        let oil = materials.id_of("Oil").expect("oil exists");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        engine
+            .register_definition(
+                Definition::from_script(FIRE_DEFINITION_ID, "Fire", "")
+                    .expect("FLAM definition compiles"),
+            )
+            .expect("FLAM definition registers");
+        let blocking_flame = engine
+            .spawn_object(
+                SpawnConfig::new(FIRE_DEFINITION_ID)
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(3, 7)),
+            )
+            .expect("blocking FLAM spawns");
+        assert!(
+            engine
+                .object_snapshot(blocking_flame)
+                .expect("blocking FLAM remains live")
+                .status
+                .is_active()
+        );
+
+        let mut densities = vec![0i32; 128];
+        densities[10] = 25;
+        densities[20] = 25;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[10] = Some("Lava".into());
+        names[20] = Some("Oil".into());
+        let mut bytes = vec![0u8; 9 * 12];
+        for y in 6..12 {
+            for x in 0..9 {
+                bytes[y * 9 + x] = 20;
+            }
+        }
+        bytes[5 * 9 + 3] = 0x80;
+        let grid = landscape::PixelGrid::new(9, 12, bytes, densities, names, vec![None; 128]);
+        let mut world =
+            Landscape::with_default_material(9, vec![6; 9], Some(oil)).expect("landscape builds");
+        world.set_world_height(12);
+        world.set_pixel_grid(grid);
+        engine.set_landscape(world);
+
+        assert!(engine.pxs_system.create(
+            lava,
+            math::itofix(3),
+            math::itofix(7),
+            math::C4Fixed::ZERO,
+            math::itofix(2),
+        ));
+        let mut mirror = engine.rng.clone();
+        assert_eq!(mirror.random(100), 63, "failed splash gate draw");
+        assert_eq!(mirror.random(25), 0, "incendiary smoke gate draw");
+        assert_eq!(mirror.rnd3(), 1, "smoke level draw");
+
+        engine.tick_pxs();
+
+        assert_eq!(engine.rng, mirror, "exact mrfInsertCheck RNG ledger");
+        assert_eq!(engine.pxs_system.count(), 0, "original PXS is dead");
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| {
+                    !object.destroyed
+                        && object.state.status.is_active()
+                        && object.definition_id == FIRE_DEFINITION_ID
+                })
+                .count(),
+            1,
+            "the existing FLAM blocks a second ignition"
+        );
+
+        let world = engine.landscape().expect("landscape remains set");
+        let grid = world.pixel_grid().expect("pixel grid remains set");
+        assert_eq!(grid.bytes()[5 * 9 + 3], 10 | 0x80, "single SetPix keeps IFT");
+        assert_eq!(grid.bytes()[6 * 9 + 3], 20, "Oil above contact is intact");
+        assert_eq!(grid.bytes()[7 * 9 + 3], 20, "contact Oil is intact");
+        assert_eq!(world.material_at(3, 5), Some(lava));
+        assert_eq!(world.surface_height(3), Some(6), "no column-band rewrite");
+    }
+
+    #[test]
     fn insert_material_reaction_probe_follows_negative_gravity_like_cpp() {
         // C4Landscape::InsertMaterial probes the reaction at
         // `ty + Sign(GravAccel)` and passes that same coordinate to the

@@ -48733,10 +48733,9 @@ impl Engine {
                     return true;
                 }
                 if event == MaterialInteractionEvent::PxsMove {
-                    // Else: dead. Insert material here (C4Material.cpp:765-767)
-                    if let Some(landscape) = self.landscape.as_mut() {
-                        landscape.insert_material_at(*x, *y, pixel.mat);
-                    }
+                    // Else: dead. C++ routes through the full InsertMaterial
+                    // slide/reaction/thrust path (C4Material.cpp:765-767).
+                    let _ = self.insert_material(pixel.mat, *x, *y, 0, 0);
                     return true;
                 }
                 false
