@@ -10,7 +10,8 @@
 //! keeping the post-init synced ledger untouched.
 //!
 //! `evalFn=`/`drawFn=` record pixels during rendering for the post-landscape
-//! scenario-script callback phase. `algo=script` remains unsupported.
+//! scenario-script callback phase. `algo=script` parses and uses C++'s
+//! missing-`ScriptAlgo<Name>` failsafe (an empty mask).
 
 use crate::map_creator::evaluate_map_size;
 use crate::rng::LcgRng;
@@ -47,12 +48,13 @@ enum Algo {
     Border,
     Mandel,
     Gradient,
+    Script,
     RndAll,
     Poly,
 }
 
 impl Algo {
-    /// C4MCAlgoMap (src/C4MapCreatorS2.cpp:1572-1589), sans `script`.
+    /// C4MCAlgoMap (src/C4MapCreatorS2.cpp:1572-1589).
     fn by_name(name: &str) -> Option<Self> {
         Some(match name {
             "solid" => Self::Solid,
@@ -66,6 +68,7 @@ impl Algo {
             "border" => Self::Border,
             "mandel" => Self::Mandel,
             "gradient" => Self::Gradient,
+            "script" => Self::Script,
             "rndall" => Self::RndAll,
             "poly" => Self::Poly,
             _ => return None,
@@ -852,6 +855,9 @@ impl Tree {
                 let v = i64::from(ix ^ iy.wrapping_mul(3)) * 2531011;
                 (v.abs() % 214013) % i64::from(z) > i64::from(ix / overlay.wdt.max(1))
             }
+            // AlgoScript asks for `ScriptAlgo<Name>` at render time. When it
+            // is missing, C++'s documented failsafe contributes no pixels.
+            Algo::Script => false,
             Algo::RndAll => modulo(s, 100) < overlay.alpha.evaluate(SIZE_RES),
             Algo::Poly => self.algo_polygon(id, ix, iy),
         }
@@ -2472,6 +2478,32 @@ mod tests {
         assert_eq!(at(2, 5), 3 | 0x80, "left rim is Rock");
         assert_eq!(at(9, 5), 2 | 0x80, "interior stays Earth-Rough");
         assert_eq!(at(1, 5), 0, "outside stays sky");
+    }
+
+    #[test]
+    fn missing_script_algorithm_is_false_without_truncating_later_overlay() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let map = create_s2_map(
+            "map Test { seed=1; wdt=2px; hgt=1px; \
+               overlay Missing { algo=script; mat=Rock; tex=Ridge; sub=0; }; \
+               overlay { x=1px; y=0px; wdt=1px; hgt=1px; seed=2; \
+                         mat=Earth; tex=Rough; sub=0; }; \
+             };",
+            &mut classifier,
+            LegacyC4SVal::new(2, 0, 2, 2),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+        )
+        .expect("script algorithm does not abort the later overlay");
+
+        assert_eq!(
+            map.indices,
+            vec![0, 2],
+            "missing ScriptAlgoMissing paints nothing and parsing continues"
+        );
     }
 
     #[test]
