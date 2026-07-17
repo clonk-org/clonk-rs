@@ -11978,6 +11978,7 @@ fn is_rejected_definition_error(error: &ResourceDefinitionError) -> bool {
             | ResourceDefinitionError::InvalidCategoryValue(_)
             | ResourceDefinitionError::DefCoreParse(_)
             | ResourceDefinitionError::ActMapParse(_)
+            | ResourceDefinitionError::ColorByOwnerOverlay { .. }
     )
 }
 
@@ -17059,6 +17060,63 @@ global func Step(state, frame, random)
                     .error
                     .as_deref()
                     .is_some_and(|error| error.contains("ActMap"))
+        }));
+    }
+
+    #[test]
+    fn mismatched_owner_overlay_skips_only_parent_and_still_loads_its_child() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let broken = dir.path().join("Defs.c4d/BadGfx.c4d");
+        let child = broken.join("Child.c4d");
+        std::fs::create_dir_all(&child).expect("nested definition dir");
+        std::fs::write(
+            broken.join("DefCore.txt"),
+            "[DefCore]\nid=BGFX\nName=Bad Graphics\nColorByOwner=1\n",
+        )
+        .expect("write parent DefCore");
+        std::fs::write(broken.join("Script.c"), "// parent\n").expect("write parent script");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
+            .save(broken.join("Graphics.png"))
+            .expect("write base graphics");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([32, 32, 32, 255]))
+            .save(broken.join("Overlay.png"))
+            .expect("write base overlay");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([136, 0, 0, 255]))
+            .save(broken.join("GraphicsBad.png"))
+            .expect("write named graphics");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([64, 64, 64, 255]))
+            .save(broken.join("OverlayBad.png"))
+            .expect("write wrong-size overlay");
+        std::fs::write(
+            child.join("DefCore.txt"),
+            "[DefCore]\nid=CHLD\nName=Child\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write child DefCore");
+        std::fs::write(child.join("Script.c"), "// child\n").expect("write child script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let (loaded, warnings) = capture_definition_warnings(|| {
+            Scenario::load_from_path_with(&scenario_dir, &resolver)
+        });
+        let scenario = loaded.expect("bad graphics reject only their definition");
+        let mut ids = scenario
+            .definitions
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["CHLD", "GOOD"]);
+
+        assert!(warnings.iter().any(|warning| {
+            warning.message.as_deref() == Some("definition failed to load; skipping")
+                && warning.group.as_deref() == Some(broken.to_string_lossy().as_ref())
+                && warning
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("OverlayBad.png"))
         }));
     }
 

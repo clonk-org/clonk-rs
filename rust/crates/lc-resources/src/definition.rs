@@ -100,7 +100,7 @@ impl Definition {
         script.definition_description = load_definition_description(group)?;
 
         let (graphics_image, color_by_owner_mask, additional_graphics) =
-            load_definition_graphics(group, core.color_by_owner);
+            load_definition_graphics(group, core.color_by_owner)?;
         let picture_image = load_definition_picture(
             group,
             &core,
@@ -115,10 +115,10 @@ impl Definition {
         );
         let portrait_image = load_plain_image(group, "Portrait1.png");
         let (portrait_graphics_image, portrait_color_by_owner_mask) =
-            load_graphics_entry(group, Path::new("Portrait1.png"), core.color_by_owner)
+            load_graphics_entry(group, Path::new("Portrait1.png"), core.color_by_owner)?
                 .map(|(image, mask)| (Some(image), mask))
                 .unwrap_or((None, None));
-        let portrait_graphics = load_portrait_graphics(group, core.color_by_owner);
+        let portrait_graphics = load_portrait_graphics(group, core.color_by_owner)?;
         // C4Def chooses the PNG branch by entry presence; a corrupt PNG does
         // not fall through to a valid legacy BMP (C4Def.cpp:684-691).
         let rank_symbols_image = if group.exists("Rank.png") {
@@ -916,6 +916,8 @@ pub enum DefinitionError {
     },
     #[error("ActMap.txt could not be parsed: {0}")]
     ActMapParse(String),
+    #[error("ColorByOwner overlay `{path}` could not be loaded: {reason}")]
+    ColorByOwnerOverlay { path: PathBuf, reason: String },
     #[error(transparent)]
     Resources(#[from] GroupError),
 }
@@ -2192,14 +2194,17 @@ fn find_picture_entry_recursive(
 fn load_definition_graphics(
     group: &Group,
     color_by_owner: bool,
-) -> (
-    Option<GraphicsImage>,
-    Option<ColorByOwnerMask>,
-    HashMap<String, DefinitionGraphicsVariant>,
-) {
+) -> Result<
+    (
+        Option<GraphicsImage>,
+        Option<ColorByOwnerMask>,
+        HashMap<String, DefinitionGraphicsVariant>,
+    ),
+    DefinitionError,
+> {
     let mut candidates = collect_graphics_entries(group).unwrap_or_default();
     if candidates.is_empty() {
-        return (None, None, HashMap::new());
+        return Ok((None, None, HashMap::new()));
     }
 
     let base_path = select_base_graphics(&candidates);
@@ -2208,7 +2213,7 @@ fn load_definition_graphics(
     let mut additional = HashMap::new();
 
     if let Some(base_path) = base_path.clone() {
-        if let Some((image, mask)) = load_graphics_entry(group, &base_path, color_by_owner) {
+        if let Some((image, mask)) = load_graphics_entry(group, &base_path, color_by_owner)? {
             base_image = Some(image);
             base_mask = mask;
         }
@@ -2220,7 +2225,7 @@ fn load_definition_graphics(
     }
 
     for path in candidates {
-        if let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner) {
+        if let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner)? {
             if let Some(name) = derive_variant_name(&path) {
                 if !name.is_empty() {
                     let key = normalize_variant_key(&name);
@@ -2236,13 +2241,13 @@ fn load_definition_graphics(
         }
     }
 
-    (base_image, base_mask, additional)
+    Ok((base_image, base_mask, additional))
 }
 
 fn load_portrait_graphics(
     group: &Group,
     color_by_owner: bool,
-) -> Vec<DefinitionGraphicsVariant> {
+) -> Result<Vec<DefinitionGraphicsVariant>, DefinitionError> {
     let mut portraits = Vec::new();
     for entry in group.entries().unwrap_or_default() {
         if entry.is_directory {
@@ -2268,7 +2273,7 @@ fn load_portrait_graphics(
         if !supported {
             continue;
         }
-        let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner) else {
+        let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner)? else {
             continue;
         };
         portraits.push(DefinitionGraphicsVariant {
@@ -2277,7 +2282,7 @@ fn load_portrait_graphics(
             color_by_owner_mask: mask,
         });
     }
-    portraits
+    Ok(portraits)
 }
 
 fn collect_graphics_entries(group: &Group) -> Result<Vec<PathBuf>, GroupError> {
@@ -2362,21 +2367,31 @@ fn load_graphics_entry(
     group: &Group,
     path: &Path,
     color_by_owner: bool,
-) -> Option<(GraphicsImage, Option<ColorByOwnerMask>)> {
-    let data = group.read_file(path).ok()?;
-    let mut image = image::load_from_memory(&data).ok()?.into_rgba8();
+) -> Result<Option<(GraphicsImage, Option<ColorByOwnerMask>)>, DefinitionError> {
+    let Some(data) = group.read_file(path).ok() else {
+        return Ok(None);
+    };
+    let Some(mut image) = image::load_from_memory(&data)
+        .ok()
+        .map(|image| image.into_rgba8())
+    else {
+        return Ok(None);
+    };
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
-        return None;
+        return Ok(None);
     }
 
     let mask = if color_by_owner {
-        load_or_generate_color_by_owner_mask(group, path, &mut image)
+        load_or_generate_color_by_owner_mask(group, path, &mut image)?
     } else {
         None
     };
 
-    Some((GraphicsImage::new(width, height, image.into_raw()), mask))
+    Ok(Some((
+        GraphicsImage::new(width, height, image.into_raw()),
+        mask,
+    )))
 }
 
 fn strip_graphics_prefix(name: &str) -> Option<&str> {
@@ -2423,43 +2438,83 @@ fn load_or_generate_color_by_owner_mask(
     group: &Group,
     graphics_path: &Path,
     image: &mut image::RgbaImage,
-) -> Option<ColorByOwnerMask> {
-    if let Some(overlay) = load_color_by_owner_overlay(group, graphics_path) {
-        return extract_mask_from_overlay(&overlay, image);
+) -> Result<Option<ColorByOwnerMask>, DefinitionError> {
+    if let Some((path, overlay)) = load_color_by_owner_overlay(group, graphics_path)? {
+        if overlay.dimensions() != image.dimensions() {
+            let (image_width, image_height) = image.dimensions();
+            let (overlay_width, overlay_height) = overlay.dimensions();
+            return Err(DefinitionError::ColorByOwnerOverlay {
+                path,
+                reason: format!(
+                    "size {overlay_width}x{overlay_height} does not match graphics {image_width}x{image_height}"
+                ),
+            });
+        }
+        return Ok(extract_mask_from_overlay(&overlay, image));
     }
-    generate_color_by_owner_mask(image)
+    Ok(generate_color_by_owner_mask(image))
 }
 
-fn load_color_by_owner_overlay(group: &Group, graphics_path: &Path) -> Option<image::RgbaImage> {
-    let mut candidates = Vec::new();
-
-    if let Some(parent) = graphics_path.parent() {
-        if let Some(name) = graphics_path.file_name().and_then(|n| n.to_str()) {
-            let suffix = name
-                .strip_prefix("Graphics")
-                .or_else(|| name.strip_prefix("Portrait"));
-            if let Some(stripped) = suffix.filter(|stripped| !stripped.is_empty()) {
-                let mut candidate = parent.to_path_buf();
-                candidate.push(format!("Overlay{}", stripped));
-                candidates.push(candidate);
-            }
+fn load_color_by_owner_overlay(
+    group: &Group,
+    graphics_path: &Path,
+) -> Result<Option<(PathBuf, image::RgbaImage)>, DefinitionError> {
+    let Some(candidate) = color_by_owner_overlay_path(graphics_path) else {
+        return Ok(None);
+    };
+    let data = match group.read_file(&candidate) {
+        Ok(data) => data,
+        Err(GroupError::EntryNotFound(_)) => return Ok(None),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(DefinitionError::ColorByOwnerOverlay {
+                path: candidate,
+                reason: error.to_string(),
+            });
         }
-        let mut overlay_name = parent.to_path_buf();
-        overlay_name.push("Overlay.png");
-        candidates.push(overlay_name);
-    }
-
-    candidates.push(PathBuf::from("Overlay.png"));
-
-    for candidate in candidates {
-        if let Ok(data) = group.read_file(&candidate) {
-            if let Ok(image) = image::load_from_memory(&data) {
-                return Some(image.into_rgba8());
+    };
+    let overlay =
+        image::load_from_memory_with_format(&data, image::ImageFormat::Png).map_err(|error| {
+            DefinitionError::ColorByOwnerOverlay {
+                path: candidate.clone(),
+                reason: error.to_string(),
             }
-        }
-    }
+        })?;
+    Ok(Some((candidate, overlay.into_rgba8())))
+}
 
-    None
+/// Returns the single overlay name passed to C++ `LoadGraphics` for this
+/// definition entry. Named PNGs use only their suffix-matched overlay; named
+/// BMP variants and definition BMP portraits auto-generate from shades.
+fn color_by_owner_overlay_path(graphics_path: &Path) -> Option<PathBuf> {
+    let extension = graphics_path.extension()?.to_str()?;
+    let stem = graphics_path.file_stem()?.to_str()?;
+    let png = extension.eq_ignore_ascii_case("png");
+    let bmp = extension.eq_ignore_ascii_case("bmp");
+
+    let suffix = if png {
+        strip_ascii_case_prefix(stem, "Graphics")
+            .or_else(|| strip_ascii_case_prefix(stem, "Portrait"))?
+    } else if bmp && stem.eq_ignore_ascii_case("Graphics") {
+        ""
+    } else {
+        return None;
+    };
+
+    let overlay = format!("Overlay{suffix}.png");
+    Some(
+        graphics_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(overlay),
+    )
+}
+
+fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .and_then(|_| value.get(prefix.len()..))
 }
 
 fn extract_mask_from_overlay(
@@ -3399,6 +3454,224 @@ Entrance=1,2,,4
                 .map(|mask| mask.pixels.as_slice()),
             Some([64, 64].as_slice())
         );
+    }
+
+    #[test]
+    fn shipped_clonk_portrait_auto_generates_its_owner_color_mask() {
+        let directory = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../content/Objects.c4d/Crew.c4d/Clonk.c4d"
+        ));
+        if !directory.is_dir() {
+            return;
+        }
+
+        let definition = Definition::load(&Group::open(directory).expect("open Clonk definition"))
+            .expect("load Clonk definition");
+        let primary = definition
+            .portrait_color_by_owner_mask
+            .as_ref()
+            .expect("Portrait1 blue shades generate an owner-color mask");
+        assert_eq!((primary.width, primary.height), (150, 150));
+        assert!(primary.pixels.iter().any(|value| *value != 0));
+
+        let retained = definition
+            .portrait_graphics
+            .iter()
+            .find(|portrait| portrait.name == "1")
+            .expect("Portrait1 retained in the full portrait set");
+        assert!(retained
+            .color_by_owner_mask
+            .as_ref()
+            .is_some_and(|mask| mask.pixels.iter().any(|value| *value != 0)));
+    }
+
+    #[test]
+    fn shipped_knight_shield_uses_its_suffix_matched_overlay() {
+        let directory = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../content/Knights.c4d/Crew.c4d/Knight.c4d"
+        ));
+        if !directory.is_dir() {
+            return;
+        }
+
+        let group = Group::open(directory).expect("open Knight definition");
+        let definition = Definition::load(&group).expect("load Knight definition");
+        let shield = definition
+            .additional_graphics
+            .get("shield")
+            .expect("GraphicsShield retained");
+
+        let mut expected_image = image::load_from_memory(
+            &group
+                .read_file("GraphicsShield.png")
+                .expect("read shield graphics"),
+        )
+        .expect("decode shield graphics")
+        .into_rgba8();
+        let overlay = image::load_from_memory(
+            &group
+                .read_file("OverlayShield.png")
+                .expect("read shield overlay"),
+        )
+        .expect("decode shield overlay")
+        .into_rgba8();
+        let expected_mask = extract_mask_from_overlay(&overlay, &mut expected_image)
+            .expect("shield overlay contains an owner-color mask");
+
+        let actual_mask = shield
+            .color_by_owner_mask
+            .as_ref()
+            .expect("suffix-matched shield overlay loaded");
+        assert_eq!(
+            (actual_mask.width, actual_mask.height),
+            (expected_mask.width, expected_mask.height)
+        );
+        assert_eq!(actual_mask.pixels, expected_mask.pixels);
+        assert_eq!(shield.image.pixels(), expected_image.as_raw());
+    }
+
+    #[test]
+    fn missing_variant_overlay_and_bmp_portrait_auto_generate_masks() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("AutoMasks.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=AUTO\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
+            .save(def_dir.join("Graphics.png"))
+            .expect("base graphics");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([32, 32, 32, 255]))
+            .save(def_dir.join("Overlay.png"))
+            .expect("base overlay");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([136, 0, 0, 255]))
+            .save(def_dir.join("GraphicsAuto.png"))
+            .expect("named graphics");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([144, 0, 0, 255]))
+            .save(def_dir.join("Portrait1.png"))
+            .expect("PNG portrait");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([160, 0, 0, 255]))
+            .save(def_dir.join("PortraitLegacy.bmp"))
+            .expect("BMP portrait");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let mut expected_auto = image::load_from_memory(
+            &group
+                .read_file("GraphicsAuto.png")
+                .expect("read named graphics"),
+        )
+        .expect("decode named graphics")
+        .into_rgba8();
+        let expected_auto_mask = generate_color_by_owner_mask(&mut expected_auto)
+            .expect("named graphics contain an auto-mask shade");
+        let mut expected_primary_portrait = image::load_from_memory(
+            &group
+                .read_file("Portrait1.png")
+                .expect("read PNG portrait"),
+        )
+        .expect("decode PNG portrait")
+        .into_rgba8();
+        let expected_primary_portrait_mask =
+            generate_color_by_owner_mask(&mut expected_primary_portrait)
+                .expect("PNG portrait contains an auto-mask shade");
+        let mut expected_portrait = image::load_from_memory(
+            &group
+                .read_file("PortraitLegacy.bmp")
+                .expect("read BMP portrait"),
+        )
+        .expect("decode BMP portrait")
+        .into_rgba8();
+        let expected_portrait_mask = generate_color_by_owner_mask(&mut expected_portrait)
+            .expect("BMP portrait contains an auto-mask shade");
+
+        let definition = Definition::load(&group).expect("load definition");
+        let named = definition
+            .additional_graphics
+            .get("auto")
+            .expect("named graphics retained");
+        let named_mask = named
+            .color_by_owner_mask
+            .as_ref()
+            .expect("missing OverlayAuto.png triggers auto-generation");
+        assert_eq!(named_mask.pixels, expected_auto_mask.pixels);
+        assert_eq!(named.image.pixels(), expected_auto.as_raw());
+        assert_ne!(named_mask.pixels, vec![32]);
+
+        let primary_portrait_mask = definition
+            .portrait_color_by_owner_mask
+            .as_ref()
+            .expect("missing Overlay1.png triggers portrait auto-generation");
+        assert_eq!(
+            primary_portrait_mask.pixels,
+            expected_primary_portrait_mask.pixels
+        );
+        assert_eq!(
+            definition
+                .portrait_graphics_image
+                .as_ref()
+                .expect("PNG portrait retained")
+                .pixels(),
+            expected_primary_portrait.as_raw()
+        );
+        assert_ne!(primary_portrait_mask.pixels, vec![32]);
+
+        let portrait = definition
+            .portrait_graphics
+            .iter()
+            .find(|portrait| portrait.name == "Legacy")
+            .expect("BMP portrait retained");
+        let portrait_mask = portrait
+            .color_by_owner_mask
+            .as_ref()
+            .expect("BMP portrait auto-generates without consulting Overlay.png");
+        assert_eq!(portrait_mask.pixels, expected_portrait_mask.pixels);
+        assert_eq!(portrait.image.pixels(), expected_portrait.as_raw());
+        assert_ne!(portrait_mask.pixels, vec![32]);
+    }
+
+    #[test]
+    fn invalid_exact_owner_overlay_rejects_definition() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("BadOverlay.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=BADG\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
+            .save(def_dir.join("Graphics.png"))
+            .expect("base graphics");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([32, 32, 32, 255]))
+            .save(def_dir.join("Overlay.png"))
+            .expect("base overlay");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([136, 0, 0, 255]))
+            .save(def_dir.join("GraphicsBad.png"))
+            .expect("named graphics");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([64, 64, 64, 255]))
+            .save(def_dir.join("OverlayBad.png"))
+            .expect("wrong-size named overlay");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        assert!(matches!(
+            Definition::load(&group),
+            Err(DefinitionError::ColorByOwnerOverlay { path, reason })
+                if path == Path::new("OverlayBad.png") && reason.contains("does not match")
+        ));
+
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([64, 64, 64, 255]))
+            .save_with_format(def_dir.join("OverlayBad.png"), image::ImageFormat::Bmp)
+            .expect("write BMP bytes under a PNG overlay name");
+        assert!(matches!(
+            Definition::load(&group),
+            Err(DefinitionError::ColorByOwnerOverlay { path, .. })
+                if path == Path::new("OverlayBad.png")
+        ));
     }
 
     #[test]
