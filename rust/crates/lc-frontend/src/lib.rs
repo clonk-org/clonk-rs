@@ -787,6 +787,14 @@ impl CameraState {
         }
         (self.view_x, self.view_y)
     }
+
+    /// A temporary `SetFilmView(NO_OWNER)` on an owned viewport disables
+    /// player tracking without turning it into a classified observer
+    /// viewport. Preserve its current center across output-size changes.
+    fn stationary_position(&mut self, view_width: i32, view_height: i32) -> (i32, i32) {
+        self.resize_output(view_width, view_height);
+        (self.view_x, self.view_y)
+    }
 }
 
 /// C4Viewport::AdjustPosition's per-axis dead-zone and progressive edge
@@ -1011,6 +1019,13 @@ pub struct ViewportInput<'a> {
     pub offset: Vector2,
     pub zoom: f32,
     pub focus: &'a ObjectSnapshot,
+    /// Stable physical viewport identity. `SetFilmView` changes the player
+    /// assigned to a viewport without replacing that viewport or resetting
+    /// its smoothing state.
+    camera_identity: Option<CameraKey>,
+    /// C4Viewport::fIsNoOwnerViewport is independent from its temporary
+    /// Player assignment. Film view switches preserve this classification.
+    is_no_owner_viewport: bool,
 }
 
 impl<'a> ViewportInput<'a> {
@@ -1021,11 +1036,20 @@ impl<'a> ViewportInput<'a> {
             offset: Vector2::ZERO,
             zoom,
             focus,
+            camera_identity: None,
+            is_no_owner_viewport: owner == OWNER_NONE,
         }
     }
 
     pub fn with_offset(mut self, offset: Vector2) -> Self {
         self.offset = offset;
+        self
+    }
+
+    /// Bind this input to an existing physical viewport across temporary
+    /// player retargets.
+    pub fn with_camera_identity(mut self, owner: i32, slot: usize) -> Self {
+        self.camera_identity = Some(CameraKey { owner, slot });
         self
     }
 
@@ -1036,6 +1060,8 @@ impl<'a> ViewportInput<'a> {
             offset: Vector2::ZERO,
             zoom: 1.0,
             focus,
+            camera_identity: None,
+            is_no_owner_viewport: focus.owner == OWNER_NONE,
         }
     }
 }
@@ -1852,26 +1878,45 @@ impl GraphicsSystem {
             owner: input.owner,
             slot: camera_slot,
         };
+        let key = input.camera_identity.unwrap_or(key);
 
         let state = self.camera_states.entry(key).or_insert_with(|| {
             CameraState::new(world_width, world_height, view_width, view_height)
         });
         let (view_x, view_y) = if input.owner == OWNER_NONE {
-            state.no_owner_position(view_width, view_height, world_width, world_height)
+            if input.is_no_owner_viewport {
+                state.no_owner_position(view_width, view_height, world_width, world_height)
+            } else {
+                state.stationary_position(view_width, view_height)
+            }
         } else {
-            state.update(
+            let position = state.update(
                 input.center.x,
                 input.center.y,
                 view_width,
                 view_height,
                 world_width,
                 world_height,
-                VIEWPORT_SCROLL_BORDER,
+                if input.is_no_owner_viewport {
+                    0
+                } else {
+                    VIEWPORT_SCROLL_BORDER
+                },
                 self.scroll_smooth,
-            )
+            );
+            if input.is_no_owner_viewport {
+                state.no_owner_position(view_width, view_height, world_width, world_height)
+            } else {
+                position
+            }
         };
-        let view_x = view_x.saturating_add(input.offset.x);
-        let view_y = view_y.saturating_add(input.offset.y);
+        let offset = if input.is_no_owner_viewport {
+            Vector2::ZERO
+        } else {
+            input.offset
+        };
+        let view_x = view_x.saturating_add(offset.x);
+        let view_y = view_y.saturating_add(offset.y);
         // C4Viewport keeps the full ViewWdt/Hgt and clips landscape drawing
         // around any out-of-map portion. Preserve the existing Rust
         // letterbox representation by turning those portions into tiled
@@ -12065,6 +12110,79 @@ mod tests {
             .expect("stable viewport camera");
         assert_eq!(camera.view_x, 548);
         assert_eq!(graphics.active_viewports[0].viewport_x, 548.0);
+    }
+
+    #[test]
+    fn film_view_retarget_preserves_physical_camera_identity_and_classification() {
+        let mut snapshot = camera_world_snapshot();
+        let mut second = snapshot.objects[0].clone();
+        second.id = ObjectId::new(2);
+        second.owner = 1;
+        second.position = Vector2::new(900, 500);
+        snapshot.objects.push(second);
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Film view",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                0,
+                Vector2::new(500, 500),
+                1.0,
+                &snapshot.objects[0],
+            )
+            .with_camera_identity(0, 0)],
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                Vector2::new(900, 500),
+                1.0,
+                &snapshot.objects[1],
+            )
+            .with_camera_identity(0, 0)],
+        );
+        assert_eq!(graphics.active_viewports[0].owner, 1);
+        assert_eq!(
+            graphics
+                .camera_states
+                .get(&CameraKey { owner: 0, slot: 0 })
+                .expect("physical viewport camera survives player switch")
+                .view_x,
+            548
+        );
+        assert!(!graphics
+            .camera_states
+            .contains_key(&CameraKey { owner: 1, slot: 0 }));
+
+        let mut ownerless = ViewportInput::new(
+            0,
+            Vector2::new(900, 500),
+            1.0,
+            &snapshot.objects[1],
+        )
+        .with_camera_identity(0, 0);
+        ownerless.owner = OWNER_NONE;
+        graphics.render_frame(&snapshot, &[ownerless]);
+        assert_eq!(graphics.active_viewports[0].owner, OWNER_NONE);
+        assert_eq!(
+            graphics
+                .camera_states
+                .get(&CameraKey { owner: 0, slot: 0 })
+                .expect("temporary NO_OWNER keeps the owned viewport camera")
+                .view_x,
+            548,
+            "temporary NO_OWNER freezes rather than reclassifying the viewport"
+        );
     }
 
     #[test]

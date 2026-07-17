@@ -34,7 +34,7 @@ use crate::{
     CommandDirection, CrewInfoLink, CrewObjectInfo, CrewPermanentPortrait, CrewPortrait,
     CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DefinitionId, DefinitionRect,
     Direction, DrawTransform, EnvironmentSettings, FULL_CON, FloatVector2, GraphicsOverlayMode,
-    Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
+    FilmViewRequest, Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PauseGameRequest,
     PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand,
@@ -1808,8 +1808,12 @@ pub struct HostWorldContext {
     /// Process-local `Game.Control.isReplay()` state. Unlike SyncMode this
     /// excludes ordinary network and recording sessions.
     replay_control: bool,
+    /// App-owned `Game.GraphicsSystem.GetViewportCount() > 0` projection.
+    film_viewport_available: bool,
     /// App-owned console pause requests produced by `PauseGame`.
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    /// App-owned primary viewport retargets produced by replay `SetFilmView`.
+    film_view_requests: Rc<RefCell<Vec<FilmViewRequest>>>,
     /// Effective `GetSmokeLevel` for sync-relevant FXU1 creation: 150 in
     /// network/recording sync mode, otherwise Config.Graphics.SmokeLevel.
     smoke_level: i32,
@@ -1941,7 +1945,9 @@ impl Default for HostWorldContext {
             control_sync_mode: false,
             edit_cursor_target: None,
             replay_control: false,
+            film_viewport_available: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+            film_view_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2187,7 +2193,9 @@ impl HostWorldContext {
             control_sync_mode: false,
             edit_cursor_target: None,
             replay_control: false,
+            film_viewport_available: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+            film_view_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2440,6 +2448,21 @@ impl HostWorldContext {
     ) -> Self {
         self.replay_control = replay_control;
         self.pause_game_requests = requests;
+        self
+    }
+
+    pub(crate) fn with_film_view_requests(
+        mut self,
+        replay_control: bool,
+        requests: Rc<RefCell<Vec<FilmViewRequest>>>,
+    ) -> Self {
+        self.replay_control = replay_control;
+        self.film_view_requests = requests;
+        self
+    }
+
+    pub(crate) fn with_film_viewport_available(mut self, available: bool) -> Self {
+        self.film_viewport_available = available;
         self
     }
 
@@ -8348,6 +8371,41 @@ fn get_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetFilmView (C4Script.cpp:5134-5148): validate the target even in live
+/// games, where the call is a no-op. Replay execution hands the temporary
+/// first-viewport player assignment to the embedding app.
+fn set_film_view(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "SetFilmView expects at most 1 argument: player",
+        ));
+    }
+    let player = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetFilmView",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref();
+        if player != OWNER_NONE
+            && context.is_none_or(|context| context.player_state(player).is_none())
+        {
+            return Ok(Value::Bool(false));
+        }
+        if let Some(context) = context.filter(|context| {
+            context.world.replay_control && context.world.film_viewport_available
+        }) {
+            context
+                .world
+                .film_view_requests
+                .borrow_mut()
+                .push(FilmViewRequest { player });
+        }
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnSetPlrViewRange (C4Script.cpp:3681-3691): persist the object's FoW
 /// range, including the legacy low-range clamp unless `exact` is true.
 fn set_plr_view_range(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -14070,6 +14128,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("GetPlrViewMode", get_plr_view_mode);
     script.register_host_function("GetPlrView", get_plr_view);
+    script.register_host_function("SetFilmView", set_film_view);
     script.register_host_function("SetGameSpeed", set_game_speed);
     script.register_host_function("SetPreSend", set_pre_send);
     script.register_host_function("FrameCounter", frame_counter);
@@ -47959,6 +48018,7 @@ mod tests {
         "SetCursor",
         "SetDir",
         "SetEntrance",
+        "SetFilmView",
         "SetFoW",
         "SetGameSpeed",
         "SetGamma",
@@ -55140,6 +55200,105 @@ public func RejectConstruction(x, y, builder)
         });
         result.expect("non-replay synchronized PauseGame executes");
         assert_eq!(*sync_requests.borrow(), vec![PauseGameRequest::Halt]);
+    }
+
+    #[test]
+    fn set_film_view_validates_in_live_games_and_requests_replay_retargets() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\n\
+                 func Probe() { return [SetFilmView(), SetFilmView(42), SetFilmView(-1)]; }",
+            )
+            .expect("SetFilmView probe compiles");
+
+        let mut engine = crate::Engine::new();
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("film-view player registers");
+        let call = |engine: &crate::Engine| {
+            let (result, _) = with_effect_context(
+                None,
+                &[],
+                engine.host_world_context(),
+                1,
+                || script.call("Probe", &[]),
+            );
+            result.expect("SetFilmView probe executes")
+        };
+
+        assert_eq!(
+            call(&engine),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(true),
+            ]),
+            "validation precedes the live no-op and nil defaults to player zero"
+        );
+        assert!(engine.take_film_view_requests().is_empty());
+
+        engine.set_replay_control(true);
+        assert_eq!(
+            call(&engine),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(true),
+            ]),
+            "replay Initialize still runs before physical viewport creation"
+        );
+        assert!(engine.take_film_view_requests().is_empty());
+
+        engine.set_film_viewport_available(true);
+        assert_eq!(
+            call(&engine),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(true),
+            ])
+        );
+        assert_eq!(
+            engine.take_film_view_requests(),
+            vec![
+                FilmViewRequest { player: 0 },
+                FilmViewRequest { player: OWNER_NONE },
+            ],
+            "invalid players never reach the app-owned viewport channel"
+        );
+        assert!(engine.take_film_view_requests().is_empty());
+
+        let mut without_viewport = crate::Engine::new();
+        without_viewport.set_replay_control(true);
+        assert_eq!(
+            call(&without_viewport),
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+            ]),
+            "NO_OWNER remains valid when the replay has no viewport"
+        );
+        assert!(
+            without_viewport.take_film_view_requests().is_empty(),
+            "an empty viewport list is a successful no-op sampled at call time"
+        );
+        without_viewport.set_film_viewport_available(true);
+        assert_eq!(
+            call(&without_viewport),
+            Value::Array(vec![
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+            ])
+        );
+        assert_eq!(
+            without_viewport.take_film_view_requests(),
+            vec![FilmViewRequest { player: OWNER_NONE }],
+            "an explicit observer viewport exists independently of local players"
+        );
     }
 
     #[test]

@@ -7417,6 +7417,9 @@ struct GameApp {
     /// GraphicsSystem resize, and is reset by Game::Default/new-game.
     runtime_flash_resources_cache: OnceLock<std::result::Result<RuntimeFlashResources, String>>,
     runtime_flash_message: Option<RuntimeFlashMessage>,
+    /// Temporary player assigned to the existing primary viewport by replay
+    /// `SetFilmView`. The physical viewport identity remains unchanged.
+    film_view_player: Option<i32>,
     /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
     /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
     /// the explicit game-over/Clear close sites.
@@ -14575,6 +14578,7 @@ impl GameApp {
             runtime_key_config_cache: OnceLock::new(),
             runtime_flash_resources_cache,
             runtime_flash_message: None,
+            film_view_player: None,
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
@@ -18865,6 +18869,30 @@ impl GameApp {
                 request.player,
                 Some(IngameMenuState::goals_menu(&entries)),
             );
+        }
+    }
+
+    /// Apply replay-only `SetFilmView` requests to the app-owned physical
+    /// viewport. An absent primary viewport stays absent, matching the C++
+    /// function's successful no-op for an empty viewport list.
+    fn sync_film_view_presentation(&mut self) {
+        let requests = self.engine.take_film_view_requests();
+        for request in requests {
+            self.film_view_player = Some(request.player);
+            if request.player != OWNER_NONE {
+                // C4Viewport::Init(valid player, true) clears the process-
+                // global observer flash message.
+                self.runtime_flash_message = None;
+            }
+        }
+        if self.film_view_player.is_some_and(|player| {
+            player != OWNER_NONE
+                && !self.snapshot.players.iter().any(|state| state.id == player)
+        }) {
+            // C++ closes a viewport whose temporarily assigned player is
+            // removed. Never retain that stale numeric assignment in the
+            // Rust projection; later viewport reconciliation starts clean.
+            self.film_view_player = None;
         }
     }
 
@@ -28932,6 +28960,7 @@ impl GameApp {
                     local_players.push(joined.number());
                     self.engine.set_local_players(local_players);
                 }
+                self.engine.set_film_viewport_available(true);
                 if matches!(
                     joined,
                     lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
@@ -31390,6 +31419,7 @@ impl GameApp {
 
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
         self.apply_show_commands_enable_request();
+        self.sync_film_view_presentation();
         self.reject_classic_global_gui_bootstrap()?;
         self.preflight_visible_gui_overlay_resources()?;
         if self.game_over_dialog.is_some() {
@@ -31436,7 +31466,11 @@ impl GameApp {
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
-        let viewports = collect_viewport_inputs(&self.snapshot).map_err(|reason| {
+        let viewports = collect_viewport_inputs_with_film_view(
+            &self.snapshot,
+            self.film_view_player,
+        )
+        .map_err(|reason| {
             report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
         })?;
         // Capture CStdDDraw's installed ramp before render_frame latches any
@@ -32685,6 +32719,7 @@ impl GameApp {
         self.game_over_dialog = None;
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
+        self.film_view_player = None;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
@@ -33484,6 +33519,7 @@ impl GameApp {
         }
 
         self.engine = engine;
+        self.film_view_player = None;
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
@@ -33678,6 +33714,11 @@ impl GameApp {
             .is_some()
             .then(|| std::mem::take(&mut self.control_player_infos));
         self.configure_running_state(label, ground);
+        if !network_game {
+            // C++ creates fullscreen viewports only after Script.Initialize
+            // and player initialization have completed.
+            self.engine.set_film_viewport_available(true);
+        }
         if let Some(player_infos) = offline_player_infos {
             self.control_player_infos = player_infos;
         }
@@ -33747,6 +33788,7 @@ impl GameApp {
         self.finish_recording();
         self.loading_state = None;
         self.engine = Engine::new();
+        self.film_view_player = None;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
@@ -33794,6 +33836,7 @@ impl GameApp {
         self.rebuild_definition_sprites();
         let fallback_ground = Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT);
         self.configure_running_state(scenario.title.clone(), fallback_ground);
+        self.engine.set_film_viewport_available(true);
         if matches!(self.runtime_network_role(), RuntimeNetworkRole::Offline)
             && self.engine.is_control_host()
         {
@@ -33991,6 +34034,7 @@ impl GameApp {
 
         self.finish_recording();
         self.engine = Engine::new();
+        self.film_view_player = None;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
@@ -34398,6 +34442,7 @@ impl GameApp {
         self.engine
             .finalize_restored_players()
             .context("failed to run restored player FinalInit")?;
+        self.engine.set_film_viewport_available(true);
         self.mouse_control = self.local_controls.mouse_owner().is_some();
         if let Some(max_players) = self.engine.max_players() {
             self.network_max_players = usize::try_from(max_players).unwrap_or(0);
@@ -35379,7 +35424,8 @@ fn collect_viewport_inputs<'a>(
             let center = Vector2::new(viewport.center.x, viewport.center.y);
             inputs.push(
                 ViewportInput::new(state.id, center, viewport.zoom, object)
-                    .with_offset(state.view_offset),
+                    .with_offset(state.view_offset)
+                    .with_camera_identity(state.id, slot),
             );
         }
     }
@@ -35393,6 +35439,44 @@ fn collect_viewport_inputs<'a>(
         });
     }
 
+    Ok(inputs)
+}
+
+/// Project a temporary replay film target onto the existing first physical
+/// viewport. Its zoom, stable camera identity, classification, and every
+/// later viewport remain untouched, matching C4Viewport::Init(..., true).
+fn collect_viewport_inputs_with_film_view<'a>(
+    snapshot: &'a SimulationSnapshot,
+    film_view_player: Option<i32>,
+) -> std::result::Result<Vec<ViewportInput<'a>>, ClassicViewportBoundary> {
+    let mut inputs = collect_viewport_inputs(snapshot)?;
+    let Some(player) = film_view_player else {
+        return Ok(inputs);
+    };
+    let primary = inputs
+        .first_mut()
+        .expect("collect_viewport_inputs returns at least one viewport");
+    if player == OWNER_NONE {
+        primary.owner = OWNER_NONE;
+        return Ok(inputs);
+    }
+
+    let Some(state) = snapshot.players.iter().find(|state| state.id == player) else {
+        return Ok(inputs);
+    };
+    let viewport = state.viewports.first();
+    let object = viewport
+        .and_then(|viewport| viewport.focus)
+        .and_then(|focus_id| snapshot.object(focus_id))
+        .or_else(|| state.cursor.and_then(|cursor| snapshot.object(cursor)))
+        .or_else(|| state.crew.first().and_then(|crew| snapshot.object(*crew)));
+    primary.owner = player;
+    if let Some(viewport) = viewport {
+        primary.center = viewport.center;
+    }
+    if let Some(object) = object {
+        primary.focus = object;
+    }
     Ok(inputs)
 }
 
@@ -58549,6 +58633,208 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut frame = vec![0x91; app.graphics.surface().pixels().len()];
         app.render_running(&mut frame, false)
             .expect("eliminated local viewport remains renderable");
+    }
+
+    #[test]
+    fn replay_film_view_retargets_only_the_existing_primary_viewport() {
+        let app = new_running_sandbox_app();
+        let mut snapshot = app.snapshot.clone();
+        let local_owner = app.local_owner;
+        let local = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == local_owner)
+            .cloned()
+            .expect("sandbox local player");
+        let local_focus = local
+            .viewports
+            .first()
+            .and_then(|viewport| viewport.focus)
+            .or(local.cursor)
+            .or_else(|| local.crew.first().copied())
+            .expect("sandbox local focus");
+
+        let film_focus = ObjectId::new(
+            snapshot
+                .objects
+                .iter()
+                .map(|object| object.id.as_u64())
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        let mut film_object = snapshot
+            .object(local_focus)
+            .expect("sandbox focus object")
+            .clone();
+        film_object.id = film_focus;
+        snapshot.objects.push(film_object);
+
+        let mut split_local = local.clone();
+        split_local.view_offset = Vector2::new(17, 19);
+        split_local.viewports.push(
+            lc_engine::PlayerViewport::new(Vector2::new(300, 400))
+                .with_focus(Some(local_focus))
+                .with_zoom(1.5),
+        );
+        let mut film_player = local;
+        film_player.id = local_owner + 1;
+        film_player.name = "Film target".to_string();
+        film_player.view_offset = Vector2::new(11, 13);
+        film_player.viewports = vec![
+            lc_engine::PlayerViewport::new(Vector2::new(700, 800))
+                .with_focus(Some(film_focus))
+                .with_zoom(2.0),
+        ];
+        snapshot.players = vec![split_local, film_player.clone()];
+        snapshot.hud.local_players = vec![local_owner, film_player.id];
+
+        let ordinary = collect_viewport_inputs(&snapshot).expect("ordinary viewports");
+        let film = collect_viewport_inputs_with_film_view(&snapshot, Some(film_player.id))
+            .expect("valid replay film target");
+        assert_eq!(film.len(), ordinary.len());
+        assert_eq!(film[0].owner, film_player.id);
+        assert_eq!(film[0].center, Vector2::new(700, 800));
+        assert_eq!(
+            film[0].offset,
+            Vector2::new(17, 19),
+            "temporary Init preserves the physical viewport offset"
+        );
+        assert_eq!(film[0].focus.id, film_focus);
+        assert_eq!(
+            film[0].zoom, ordinary[0].zoom,
+            "temporary Init preserves the physical viewport zoom"
+        );
+        assert_eq!(
+            film[1..]
+                .iter()
+                .map(|viewport| (viewport.owner, viewport.center, viewport.zoom, viewport.focus.id))
+                .collect::<Vec<_>>(),
+            ordinary[1..]
+                .iter()
+                .map(|viewport| (viewport.owner, viewport.center, viewport.zoom, viewport.focus.id))
+                .collect::<Vec<_>>(),
+            "only the first physical viewport is retargeted"
+        );
+
+        let ownerless = collect_viewport_inputs_with_film_view(&snapshot, Some(OWNER_NONE))
+            .expect("NO_OWNER is a valid temporary target");
+        assert_eq!(ownerless[0].owner, OWNER_NONE);
+        assert_eq!(ownerless[0].center, ordinary[0].center);
+        assert_eq!(ownerless[0].zoom, ordinary[0].zoom);
+        assert_eq!(ownerless[0].focus.id, ordinary[0].focus.id);
+        assert_eq!(ownerless.len(), ordinary.len());
+
+        let mut no_target_focus = snapshot.clone();
+        let target = no_target_focus
+            .players
+            .iter_mut()
+            .find(|player| player.id == film_player.id)
+            .expect("film target remains registered");
+        target.viewports[0].focus = None;
+        target.cursor = None;
+        target.view_cursor = None;
+        target.crew.clear();
+        no_target_focus.hud.local_players = vec![local_owner];
+        let unfocused = collect_viewport_inputs_with_film_view(
+            &no_target_focus,
+            Some(film_player.id),
+        )
+        .expect("a valid player does not require a focus object");
+        assert_eq!(unfocused[0].owner, film_player.id);
+        assert_eq!(unfocused[0].center, Vector2::new(700, 800));
+        assert_eq!(unfocused[0].focus.id, ordinary[0].focus.id);
+
+        let mut no_target_viewport = no_target_focus;
+        no_target_viewport
+            .players
+            .iter_mut()
+            .find(|player| player.id == film_player.id)
+            .expect("film target remains registered")
+            .viewports
+            .clear();
+        let without_local_slot = collect_viewport_inputs_with_film_view(
+            &no_target_viewport,
+            Some(film_player.id),
+        )
+        .expect("a valid film target does not need its own local viewport");
+        assert_eq!(without_local_slot[0].owner, film_player.id);
+        assert_eq!(without_local_slot[0].center, ordinary[0].center);
+
+    }
+
+    #[test]
+    fn set_film_view_builtin_reaches_the_real_replay_viewport() {
+        let mut app = new_running_sandbox_app();
+        let local_owner = app.local_owner;
+        let film_player = local_owner + 1;
+        let focus = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == local_owner)
+            .and_then(|player| {
+                player
+                    .viewports
+                    .first()
+                    .and_then(|viewport| viewport.focus)
+                    .or(player.cursor)
+                    .or_else(|| player.crew.first().copied())
+            })
+            .expect("sandbox viewport focus");
+        app.engine
+            .register_player(PlayerConfig::new(film_player, "Film target"))
+            .expect("film target registers");
+        app.engine
+            .replace_player_viewports(
+                film_player,
+                vec![
+                    lc_engine::PlayerViewport::new(Vector2::new(700, 800))
+                        .with_focus(Some(focus))
+                        .with_zoom(2.0),
+                ],
+            )
+            .expect("film target viewport installs");
+        app.engine.clear_scenario_script();
+        app.engine
+            .install_scenario_script_with_convention(
+                "FilmView.c",
+                &format!(
+                    "#strict 3\nfunc Probe() {{ SetViewOffset({local_owner}, 17, 19); return SetFilmView({film_player}); }}"
+                ),
+                true,
+            )
+            .expect("film-view probe installs");
+
+        app.engine.set_replay_control(false);
+        app.engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("live film-view probe executes");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0; app.graphics.surface().pixels().len()];
+        app.render_running(&mut frame, false)
+            .expect("live no-op viewport renders");
+        assert_eq!(app.film_view_player, None);
+        assert_eq!(
+            app.graphics.active_viewport_projections()[0].owner,
+            local_owner
+        );
+
+        app.engine.set_replay_control(true);
+        app.engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("replay film-view probe executes");
+        app.snapshot = app.engine.snapshot();
+        app.render_running(&mut frame, false)
+            .expect("retargeted replay viewport renders");
+        assert_eq!(app.film_view_player, Some(film_player));
+        assert_eq!(
+            app.graphics.active_viewport_projections()[0].owner,
+            film_player
+        );
+        let inputs = collect_viewport_inputs_with_film_view(&app.snapshot, app.film_view_player)
+            .expect("retargeted input remains projectable");
+        assert_eq!(inputs[0].offset, Vector2::new(17, 19));
     }
 
     fn assert_running_viewport_boundary(

@@ -14699,6 +14699,14 @@ pub enum PauseGameRequest {
     Toggle,
 }
 
+/// Process-local replay viewport retarget requested by `SetFilmView`.
+/// The embedding app owns the physical viewport and applies these in script
+/// call order without changing synchronized player or snapshot state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilmViewRequest {
+    pub player: i32,
+}
+
 impl ScriptControlPolicy {
     pub const fn live(console_active: bool) -> Self {
         Self {
@@ -14871,6 +14879,9 @@ pub struct Engine {
     /// Process-local `Game.Control.isReplay()` state. It suppresses local
     /// presentation without changing synchronized goal evaluation.
     replay_control: bool,
+    /// Whether the embedding app currently owns a primary physical viewport.
+    /// Scenario Initialize runs before this becomes true.
+    film_viewport_available: bool,
     /// `Game.Parameters::isLeague()` — specifically whether the synchronized
     /// LeagueAddress is non-empty. This is independent from network play:
     /// ordinary network games may still allow script-driven team switches.
@@ -14904,6 +14915,9 @@ pub struct Engine {
     /// Process-local console pause requests emitted by `PauseGame`. Shared
     /// into copied host contexts so nested calls preserve script call order.
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
+    /// Process-local replay viewport requests emitted by `SetFilmView`.
+    /// Physical viewport ownership remains in the embedding app.
+    film_view_requests: Rc<RefCell<Vec<FilmViewRequest>>>,
     /// Process-local `Console.EditCursor.Target`. The developer console owns
     /// this pointer; synchronized state and snapshots deliberately do not.
     edit_cursor_target: Option<ObjectId>,
@@ -17008,6 +17022,7 @@ impl Engine {
             network_control_mode: false,
             recording_active: false,
             replay_control: false,
+            film_viewport_available: false,
             league_game: false,
             league_name: Rc::new(Vec::new()),
             player_info_league_progress_data: Rc::new(BTreeMap::new()),
@@ -17018,6 +17033,7 @@ impl Engine {
             pending_remove_player_controls: Vec::new(),
             pending_game_goal_menu_requests: Vec::new(),
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
+            film_view_requests: Rc::new(RefCell::new(Vec::new())),
             edit_cursor_target: None,
             local_players: None,
             control_key_names: Rc::new(HashMap::new()),
@@ -21560,6 +21576,12 @@ impl Engine {
         self.replay_control = replay_control;
     }
 
+    /// Set the app-owned physical viewport availability sampled by replay
+    /// `SetFilmView`. This is process-local and excluded from EngineState.
+    pub fn set_film_viewport_available(&mut self, available: bool) {
+        self.film_viewport_available = available;
+    }
+
     #[doc(hidden)]
     pub fn is_control_host(&self) -> bool {
         self.control_host
@@ -21596,6 +21618,12 @@ impl Engine {
     /// are suppressed before they reach this app-owned request channel.
     pub fn take_pause_game_requests(&mut self) -> Vec<PauseGameRequest> {
         std::mem::take(&mut *self.pause_game_requests.borrow_mut())
+    }
+
+    /// Drain replay viewport retargets in script call order. Live and invalid
+    /// calls are filtered before reaching this app-owned request channel.
+    pub fn take_film_view_requests(&mut self) -> Vec<FilmViewRequest> {
+        std::mem::take(&mut *self.film_view_requests.borrow_mut())
     }
 
     /// Update the process-local developer-console target queried by the
@@ -22073,6 +22101,11 @@ impl Engine {
             self.replay_control,
             Rc::clone(&self.pause_game_requests),
         )
+        .with_film_view_requests(
+            self.replay_control,
+            Rc::clone(&self.film_view_requests),
+        )
+        .with_film_viewport_available(self.film_viewport_available)
         .with_smoke_level(self.bubble_smoke_level())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
@@ -30120,6 +30153,8 @@ impl Engine {
     pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
         self.active_message_board_input = None;
         self.pending_game_goal_menu_requests.clear();
+        self.film_view_requests.borrow_mut().clear();
+        self.film_viewport_available = false;
         self.player_info_league_progress_updates.clear();
         for object in &state.objects {
             if !self
