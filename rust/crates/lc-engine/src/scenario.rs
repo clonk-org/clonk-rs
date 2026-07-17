@@ -8527,6 +8527,35 @@ pub(crate) fn build_map_pixel_classifier(
     Ok(Some(classifier))
 }
 
+/// Install an exact landscape's decoded index plane directly as Surface8.
+/// C4Landscape::Load keeps the texture map but no C4Landscape::Map, and does
+/// not apply MapZoom/ChunkOZoom (C4Landscape.cpp:658-668,1520-1533).
+fn exact_classified_landscape(
+    bitmap: &lc_resources::bitmap::IndexedBitmap,
+    classifier: &MapPixelClassifier,
+    map_seed: i32,
+) -> Result<Landscape, ScenarioError> {
+    let world_height = bitmap.height as i32;
+    let mut landscape = Landscape::new(bitmap.width, vec![world_height; bitmap.width as usize])
+        .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
+    landscape.set_world_height(world_height);
+    landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+        bitmap.width,
+        bitmap.height,
+        bitmap.indices.clone(),
+        classifier.state.densities.clone(),
+        classifier.state.material_names.clone(),
+        classifier.state.texture_names.clone(),
+    ));
+    landscape.refresh_all_raster_columns();
+    landscape.set_raster_state(LandscapeRasterState::new(
+        1,
+        map_seed,
+        classifier.state.clone(),
+    ));
+    Ok(landscape)
+}
+
 /// Build the landscape from a classified 8-bit map: the map zooms through
 /// ChunkOZoom into the Surface8 pixel plane (chunky material rims and
 /// slope smoothers, C4Landscape::MapToSurface → TexOZoom → ChunkOZoom,
@@ -8644,10 +8673,9 @@ fn load_legacy_landscape_body(
     // GBackSolid answering "never solid" and hang placement loops in real
     // content (Grass.c4d Initialize).
     let (map_bytes, map_zoom_u32) = if exact_landscape {
-        match read_optional("Landscape.bmp")? {
-            Some(bytes) => (Some(bytes), 1),
-            None => (read_optional("Map.bmp")?, map_zoom_u32),
-        }
+        // C4Landscape::Load requires C4CFN_Landscape. Exact mode never falls
+        // back to Map.bmp (C4Landscape.cpp:1520-1524).
+        (Some(group.read_file("Landscape.bmp")?), 1)
     } else {
         // Static map: Map.bmp, with Landscape.bmp accepted as the map for
         // downwards compatibility (C4Landscape.cpp:593-601) — most CR
@@ -8666,12 +8694,16 @@ fn load_legacy_landscape_body(
         // below stands in.
         if let Some(classifier) = classifier.take() {
             if let Ok(bitmap) = lc_resources::bitmap::IndexedBitmap::decode(&bytes) {
-                let mut landscape = classified_landscape(
-                    &bitmap,
-                    classifier,
-                    map_zoom_u32 as i32,
-                    legacy_map_seed(random_seed),
-                )?;
+                let mut landscape = if exact_landscape {
+                    exact_classified_landscape(&bitmap, classifier, legacy_map_seed(random_seed))?
+                } else {
+                    classified_landscape(
+                        &bitmap,
+                        classifier,
+                        map_zoom_u32 as i32,
+                        legacy_map_seed(random_seed),
+                    )?
+                };
                 let _ = landscape.set_mode(if exact_landscape {
                     LANDSCAPE_MODE_EXACT
                 } else {
@@ -22804,6 +22836,95 @@ public func ActualizePhase(pClonk)
             "surface columns derive from the synthesized plane"
         );
         assert_eq!(landscape.surface_height(4), Some(4));
+    }
+
+    #[test]
+    fn exact_indexed_landscape_preserves_surface8_bytes_verbatim() {
+        // C4Landscape::Load installs GroupReadSurfaceOwnPal8's index plane
+        // directly as Surface8 (C4Landscape.cpp:1520-1533). Exact landscapes
+        // neither apply MapZoom nor pass through ChunkOZoom: Flat pixels must
+        // not bleed into their right/bottom neighbors, and IFT stays bit 0x80.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("Exact.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Landscape]\nExactLandscape=1\nMapZoom=7\n",
+        )
+        .expect("write scenario core");
+        let expected = vec![
+            0, 0, 0, 0, //
+            0, 5, 0, 0, // isolated Flat pixel: no inclusive-edge bleed
+            0, 0x85, 0, 0, // the same texmap slot with IFT set
+        ];
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0, 0, 0, 0], &[0, 5, 0, 0], &[0, 0x85, 0, 0]]),
+        )
+        .expect("write exact landscape");
+
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nMapZoom=7\n")
+            .expect("scenario core parses");
+        let mut densities = [0i32; 128];
+        densities[5] = 100;
+        let mut names = vec![None; 128];
+        names[5] = Some("Earth".into());
+        let mut shapes = vec![None; 128];
+        shapes[5] = Some(crate::chunky::ChunkShape::Flat);
+        let mut classifier =
+            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
+
+        let landscape = load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 1)
+            .expect("exact landscape loads")
+            .expect("exact landscape exists");
+        let grid = landscape
+            .pixel_grid()
+            .expect("exact indexed landscape keeps Surface8");
+        assert_eq!(landscape.mode(), LANDSCAPE_MODE_EXACT);
+        assert_eq!(landscape.width(), 4, "bitmap width is not MapZoom-scaled");
+        assert_eq!(landscape.estimated_height(), 3, "bitmap height is exact");
+        assert_eq!((grid.width(), grid.height()), (4, 3));
+        assert_eq!(grid.bytes(), expected, "Surface8 bytes are verbatim");
+        assert!(
+            landscape
+                .raster_state()
+                .expect("exact landscape retains the runtime texmap")
+                .map()
+                .is_none(),
+            "exact landscapes retain no Map/ChunkOZoom source surface"
+        );
+    }
+
+    #[test]
+    fn exact_landscape_requires_landscape_bmp_instead_of_map_fallback() {
+        // C4Landscape::Load accesses C4CFN_Landscape directly and fails when
+        // it is absent; the static-only Map.bmp fallback is not consulted.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("Exact.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Map.bmp"),
+            encode_indexed_bmp(&[&[0, 0], &[5, 5]]),
+        )
+        .expect("write static map only");
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\n")
+            .expect("scenario core parses");
+
+        let error = load_legacy_landscape_body(&group, &manifest, None, 0, 1)
+            .expect_err("exact load must require Landscape.bmp");
+        assert!(
+            matches!(
+                &error,
+                ScenarioError::Resources(GroupError::EntryNotFound(_))
+            ) || matches!(
+                &error,
+                ScenarioError::Resources(GroupError::Io(io_error))
+                    if io_error.kind() == io::ErrorKind::NotFound
+            ),
+            "unexpected missing-Landscape.bmp error: {error:?}"
+        );
     }
 
     #[test]
