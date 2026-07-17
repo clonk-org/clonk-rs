@@ -14681,6 +14681,42 @@ impl ScriptControlPolicy {
     }
 }
 
+/// Process-local `Config.General.MissionAccess` storage shared by game engines.
+///
+/// This deliberately lives outside [`EngineState`]: mission access is local
+/// application configuration in C++, not synchronized or savegame state.
+#[derive(Clone, Debug)]
+pub struct MissionAccessStore {
+    inner: Rc<RefCell<String>>,
+}
+
+impl MissionAccessStore {
+    pub fn new(mission_access: impl Into<String>) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(mission_access.into())),
+        }
+    }
+}
+
+impl Default for MissionAccessStore {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn mission_access_store_can_be_shared_across_engines() {
+    let store = MissionAccessStore::new("First");
+    let mut first = Engine::new();
+    first.set_mission_access_store(store.clone());
+    let mut second = Engine::new();
+    second.set_mission_access_store(store);
+
+    first.mission_access.inner.borrow_mut().push_str(";Second");
+    assert_eq!(&*second.mission_access.inner.borrow(), "First;Second");
+}
+
 pub struct Engine {
     #[doc(hidden)] pub definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -14995,7 +15031,7 @@ pub struct Engine {
     messages: MessageManager,
     /// Engine-held mission-password surrogate for process config. This stays
     /// outside EngineState/save serialization, like C++ Config.
-    mission_access: Rc<RefCell<String>>,
+    mission_access: MissionAccessStore,
     scoreboard: Rc<RefCell<ScoreboardState>>,
     scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
 }
@@ -17010,7 +17046,7 @@ impl Engine {
             pending_audio: Vec::new(),
             pending_menu_requests: Vec::new(),
             messages: MessageManager::new(),
-            mission_access: Rc::new(RefCell::new(String::new())),
+            mission_access: MissionAccessStore::default(),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
             scoreboard_presentations: Rc::new(RefCell::new(ScoreboardPresentationSink::default())),
         };
@@ -17269,6 +17305,12 @@ impl Engine {
     /// list crew-info creation draws from when the def has no ClonkNames.
     pub fn set_standard_names(&mut self, names: Option<String>) {
         self.standard_names = names;
+    }
+
+    /// Attach the process-local mission-access configuration shared across
+    /// fresh game engines.
+    pub fn set_mission_access_store(&mut self, store: MissionAccessStore) {
+        self.mission_access = store;
     }
 
     /// `[Landscape] MapZoom` as a C4SVal — ScenarioInit evaluates it per
@@ -21834,7 +21876,7 @@ impl Engine {
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
         .with_local_players(local_players)
         .with_active_message_board_input(self.active_message_board_input.clone())
-        .with_mission_access(Rc::clone(&self.mission_access))
+        .with_mission_access(Rc::clone(&self.mission_access.inner))
         .with_scoreboard(Rc::clone(&self.scoreboard))
         .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
         .with_scenario_script_counter(self.scenario_script_counter)

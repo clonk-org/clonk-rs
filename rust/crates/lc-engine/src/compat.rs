@@ -15297,9 +15297,19 @@ fn get_mission_access(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     Ok(Value::Bool(HOST_CONTEXT.with(|cell| {
-        cell.borrow().as_ref().is_some_and(|context| {
-            mission_access_contains(&context.world.mission_access.borrow(), &password)
-        })
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        if context.world.control_sync_mode {
+            tracing::warn!(
+                target: "lc-script",
+                "using GetMissionAccess may cause desyncs when playing records!"
+            );
+        }
+        let contains =
+            mission_access_contains(&context.world.mission_access.borrow(), &password);
+        contains
     })))
 }
 
@@ -53396,6 +53406,68 @@ public func CheckGoals()
         assert_eq!(
             lc_script::c4_string_bytes(&access.borrow()),
             "\u{ff}".as_bytes()
+        );
+    }
+
+    #[test]
+    fn get_mission_access_reads_config_modules_and_warns_only_for_sync_queries() {
+        fn query(access: Rc<RefCell<String>>, sync: bool, args: &[Value]) -> Value {
+            let world = HostWorldContext::default()
+                .with_mission_access(access)
+                .with_control_sync_mode(sync);
+            with_effect_context(None, &[], world, 1, || get_mission_access(args))
+                .0
+                .expect("GetMissionAccess query succeeds")
+        }
+
+        let access = Rc::new(RefCell::new("Alpha; Beta ;Gamma".to_string()));
+        for password in ["alpha", "BETA", "Gamma"] {
+            assert_eq!(
+                query(
+                    Rc::clone(&access),
+                    false,
+                    &[Value::String(password.into())]
+                ),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(
+            query(
+                Rc::clone(&access),
+                false,
+                &[Value::String("missing".into())]
+            ),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            query(Rc::clone(&access), false, &[Value::Nil]),
+            Value::Bool(false)
+        );
+
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
+        subscriber::with_default(subscriber, || {
+            assert_eq!(
+                query(
+                    Rc::clone(&access),
+                    true,
+                    &[Value::String("Alpha".into())]
+                ),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                query(Rc::clone(&access), true, &[Value::Nil]),
+                Value::Bool(false)
+            );
+        });
+
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, Level::WARN);
+        assert_eq!(records[0].target, "lc-script");
+        assert_eq!(
+            records[0].message,
+            "using GetMissionAccess may cause desyncs when playing records!"
         );
     }
 

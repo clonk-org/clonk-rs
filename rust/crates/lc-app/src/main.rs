@@ -66,7 +66,8 @@ use ingame_menu::{
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use lc_app::{
     ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
-    compose_client_network_scenario, load_snapshotted_client_players,
+    compose_client_network_scenario, load_configured_mission_access,
+    load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
 };
@@ -82,7 +83,8 @@ use lc_engine::{
     EngineState, EnvironmentSettings, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT,
     FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
-    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
+    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MissionAccessStore,
+    MouseDragSource,
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
     ScoreboardPresentationRequest, ScriptControlPolicy, SimulationSnapshot, SkyConfig, SpawnConfig,
@@ -7127,6 +7129,8 @@ struct GameApp {
     /// and reinstalled on every fresh Engine.
     needed_material_need: String,
     needed_material_none: String,
+    /// Process-local Config.General.MissionAccess shared across fresh games.
+    mission_access: MissionAccessStore,
     input: InputDispatcher,
     bindings: KeyboardBindings,
     gamepad_bindings: GamepadBindings,
@@ -13734,7 +13738,17 @@ impl GameApp {
 
         // Engine starts with default materials; will be updated when boot loading finishes
         let graphics_smoke_level = load_graphics_smoke_level(paths);
+        let mission_access = paths
+            .and_then(|paths| match load_configured_mission_access(paths) {
+                Ok(access) => Some(MissionAccessStore::new(access)),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to load General.MissionAccess; using empty list");
+                    None
+                }
+            })
+            .unwrap_or_default();
         let mut engine = Engine::new();
+        engine.set_mission_access_store(mission_access.clone());
         engine.set_smoke_level(graphics_smoke_level);
         engine.set_control_host(!matches!(
             network_mode.as_ref(),
@@ -13836,6 +13850,7 @@ impl GameApp {
             standard_names,
             needed_material_need,
             needed_material_none,
+            mission_access,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             gamepad_bindings: GamepadBindings::load(paths),
@@ -14296,6 +14311,8 @@ impl GameApp {
 
     fn apply_material_library(&mut self) {
         self.engine
+            .set_mission_access_store(self.mission_access.clone());
+        self.engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
         self.engine.set_needed_material_resource_strings(
             self.needed_material_need.clone(),
@@ -14309,6 +14326,7 @@ impl GameApp {
     }
 
     fn apply_material_library_to(&self, engine: &mut Engine) {
+        engine.set_mission_access_store(self.mission_access.clone());
         engine
             .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
         engine.set_needed_material_resource_strings(
@@ -44105,6 +44123,80 @@ mod tests {
             c4_module_count("\t"),
             1,
             "C++ SModuleCount ignores ASCII spaces only"
+        );
+    }
+
+    #[test]
+    fn configured_mission_access_reaches_fresh_engines_and_survives_replacement() {
+        fn install_probe(engine: &mut Engine) -> usize {
+            engine
+                .register_definition(
+                    Definition::from_script(
+                        "MACC",
+                        "Mission access probe",
+                        r#"#strict 2
+public func Has(password) { return GetMissionAccess(password); }
+public func Grant(password) { return GainMissionAccess(password); }
+"#,
+                    )
+                    .expect("mission-access probe compiles"),
+                )
+                .expect("mission-access probe registers");
+            let object = engine
+                .spawn_object(SpawnConfig::new("MACC"))
+                .expect("mission-access probe spawns");
+            engine.find_object_index(object).expect("probe remains live")
+        }
+
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated mission-access user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "MissionAccess", "Alpha; Beta")
+            .expect("configure mission access");
+
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let probe = install_probe(&mut app.engine);
+        for password in ["alpha", "BETA"] {
+            assert_eq!(
+                app.engine
+                    .call_object_function(
+                        probe,
+                        "Has",
+                        vec![Value::String(password.to_string())],
+                    )
+                    .expect("configured access query executes"),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(
+            app.engine
+                .call_object_function(probe, "Has", vec![Value::Nil])
+                .expect("nil access query executes"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            app.engine
+                .call_object_function(
+                    probe,
+                    "Grant",
+                    vec![Value::String("Runtime".to_string())],
+                )
+                .expect("runtime access grant executes"),
+            Value::Bool(true)
+        );
+
+        app.return_to_menu();
+        let probe = install_probe(&mut app.engine);
+        assert_eq!(
+            app.engine
+                .call_object_function(
+                    probe,
+                    "Has",
+                    vec![Value::String("runtime".to_string())],
+                )
+                .expect("replacement engine sees process-local access"),
+            Value::Bool(true)
         );
     }
 

@@ -70,6 +70,25 @@ pub fn load_configured_client_players(
     Ok(load_snapshotted_client_players(paths, &selection))
 }
 
+pub fn load_configured_mission_access(
+    paths: &AppPaths,
+) -> Result<String, ConfiguredClientPlayersError> {
+    load_configured_mission_access_from_path(&paths.config_file())
+}
+
+fn load_configured_mission_access_from_path(
+    config_path: &Path,
+) -> Result<String, ConfiguredClientPlayersError> {
+    let config = match fs::read(config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(lc_script::c4_string_from_bytes(
+        &raw_general_config(&config).mission_access,
+    ))
+}
+
 pub fn snapshot_configured_client_player_selection(
     paths: &AppPaths,
 ) -> Result<ConfiguredClientPlayerSelection, ConfiguredClientPlayersError> {
@@ -180,6 +199,7 @@ fn exe_relative_name(source_path: &Path, module: &[u8], exe_roots: &[PathBuf]) -
 struct RawGeneralConfig {
     participants: Vec<u8>,
     name: Vec<u8>,
+    mission_access: Vec<u8>,
 }
 
 fn raw_general_config(config: &[u8]) -> RawGeneralConfig {
@@ -187,6 +207,7 @@ fn raw_general_config(config: &[u8]) -> RawGeneralConfig {
     let mut selected_general = false;
     let mut participants = None;
     let mut name = None;
+    let mut mission_access = None;
     for raw_line in config.split(|byte| *byte == b'\n') {
         let line = raw_line
             .split(|byte| *byte == b'\r')
@@ -219,11 +240,17 @@ fn raw_general_config(config: &[u8]) -> RawGeneralConfig {
                 &line[equals + 1..],
                 CFG_MAX_STRING,
             ));
+        } else if mission_access.is_none() && key == b"MissionAccess" {
+            mission_access = Some(decode_general_config_string(
+                &line[equals + 1..],
+                CFG_MAX_STRING,
+            ));
         }
     }
     RawGeneralConfig {
         participants: participants.unwrap_or_default(),
         name: name.unwrap_or_default(),
+        mission_access: mission_access.unwrap_or_default(),
     }
 }
 
@@ -853,6 +880,35 @@ Name=\"Right\"\nParticipants=\"Right.c4p\"\n",
     }
 
     #[test]
+    fn mission_access_preserves_escaped_bytes_and_first_exact_value_with_cpp_cap() {
+        let config = super::raw_general_config(
+            b"[general]\nMissionAccess=\"Wrong section\"\n\
+[General]\nmissionaccess=\"Wrong key\"\n\
+MissionAccess=\"M\\151ss\\x80\"\nMissionAccess=\"Later key\"\n\
+[Other]\nValue=1\n[General]\nMissionAccess=\"Later section\"\n",
+        );
+
+        assert_eq!(config.mission_access, b"Miss\x80");
+
+        let mut capped = b"[General]\nMissionAccess=\"".to_vec();
+        capped.extend(std::iter::repeat_n(b'A', super::CFG_MAX_STRING + 6));
+        capped.extend_from_slice(b"\"\n");
+        let capped = super::raw_general_config(&capped);
+        assert_eq!(capped.mission_access, vec![b'A'; super::CFG_MAX_STRING]);
+
+        let directory = tempdir().expect("config directory");
+        let config_path = directory.path().join("LegacyClonk.conf");
+        fs::write(
+            &config_path,
+            b"[General]\nMissionAccess=\"M\\151ss\\x80\"\n",
+        )
+        .expect("write config");
+        let loaded = super::load_configured_mission_access_from_path(&config_path)
+            .expect("mission access loads");
+        assert_eq!(lc_script::c4_string_bytes(&loaded), b"Miss\x80");
+    }
+
+    #[test]
     fn missing_config_snapshots_cpp_empty_player_selection() {
         // C4Config initializes fixed General.Name/Participants buffers empty;
         // a missing persisted config therefore still permits a zero-player
@@ -866,6 +922,11 @@ Name=\"Right\"\nParticipants=\"Right.c4p\"\n",
 
         assert!(selection.participants.is_empty());
         assert!(selection.group_maker.as_bytes().is_empty());
+        assert!(super::load_configured_mission_access_from_path(
+            &directory.path().join("missing.config")
+        )
+        .expect("missing config uses empty mission access")
+        .is_empty());
     }
 
     #[test]

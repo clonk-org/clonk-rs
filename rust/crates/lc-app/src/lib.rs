@@ -9,9 +9,9 @@ pub use client_network_scenario::{
 };
 pub use client_start_barrier::ClientStartBarrier;
 pub use configured_client_players::{
-    load_configured_client_players, load_snapshotted_client_players,
-    snapshot_configured_client_player_selection, ConfiguredClientPlayerSelection,
-    ConfiguredClientPlayers, ConfiguredClientPlayersError,
+    load_configured_client_players, load_configured_mission_access,
+    load_snapshotted_client_players, snapshot_configured_client_player_selection,
+    ConfiguredClientPlayerSelection, ConfiguredClientPlayers, ConfiguredClientPlayersError,
 };
 
 use std::collections::HashMap;
