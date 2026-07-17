@@ -1,4 +1,6 @@
-use crate::{ComponentGroups, Group, GroupError, LanguagePacks};
+use crate::{
+    language::component_language_string, ComponentGroups, Group, GroupError, LanguagePacks,
+};
 use image::{load_from_memory, ImageError};
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -1064,14 +1066,9 @@ fn title_from_title_files(
 /// each 2-letter code of the sequence, search the text body for "XX:" and
 /// return the remainder of that line.
 fn resolve_language_string(text: &str, languages: &[String]) -> Option<String> {
-    languages.iter().find_map(|code| {
-        let needle = format!("{code}:");
-        text.find(&needle).map(|pos| {
-            let rest = &text[pos + needle.len()..];
-            let end = rest.find(['\r', '\n']).unwrap_or(rest.len());
-            rest[..end].to_string()
-        })
-    })
+    languages
+        .iter()
+        .find_map(|code| component_language_string(text, code).map(str::to_string))
 }
 
 /// Decodes legacy component text: UTF-8 when valid, otherwise the
@@ -1512,6 +1509,22 @@ mod tests {
         // Unknown language falls back through the sequence to the next code.
         let fr = discover_with_languages(dir.path(), &langs(&["FR", "DE"])).expect("discover");
         assert_eq!(fr[0].title, "Lernrunden");
+    }
+
+    #[test]
+    fn language_string_line_end_prefers_any_cr_before_lf_fallback() {
+        let languages = langs(&["US", "DE"]);
+
+        assert_eq!(
+            (
+                resolve_language_string("US:Cabin\nDE:Huette\r\n", &languages),
+                resolve_language_string("US:Cabin\nDE:Huette\n", &languages),
+            ),
+            (
+                Some("Cabin\nDE:Huette".to_string()),
+                Some("Cabin".to_string()),
+            )
+        );
     }
 
     // C4CFN_Title = "Title{}.txt|Title.txt" (C4Components.h:67): language-

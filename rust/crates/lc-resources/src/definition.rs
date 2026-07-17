@@ -1,6 +1,6 @@
 use crate::{
-    decode_legacy_script_text, ComponentGroups, GraphicsImage, Group, GroupError,
-    LoadedComponent,
+    decode_legacy_script_text, language::component_language_string, ComponentGroups,
+    GraphicsImage, Group, GroupError, LoadedComponent,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -315,13 +315,9 @@ fn load_definition_name<S: AsRef<str>>(
     };
     let text = decode_legacy_script_text(&component.bytes);
     let localized_name = |code: &str| {
-        let needle = format!("{code}:");
-        text.find(&needle).and_then(|position| {
-            let value = &text[position + needle.len()..];
-            let end = value.find(['\r', '\n']).unwrap_or(value.len());
-            let value = value[..end].to_string();
-            (!value.is_empty()).then_some(value)
-        })
+        component_language_string(&text, code)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     };
     if languages.is_empty() {
         Ok(localized_name(""))
@@ -5102,6 +5098,29 @@ HideHUDElements=Portrait|Bogus|Inventory
         let empty = Definition::load_with_languages(&group, &[] as &[&str])
             .expect("empty language sequence uses one empty code");
         assert_eq!(empty.core.name.as_deref(), Some("Hütte"));
+    }
+
+    #[test]
+    fn definition_name_line_end_prefers_any_later_cr() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("MixedLines.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=MIXD\nName=Fallback\n",
+        )
+        .expect("DefCore");
+        fs::write(
+            def_dir.join("Names.txt"),
+            b"US:Cabin\nDE:Huette\r\n",
+        )
+        .expect("mixed-line-ending names");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load_with_languages(&group, &["US", "DE"])
+            .expect("load definition name");
+
+        assert_eq!(definition.core.name.as_deref(), Some("Cabin\nDE:Huette"));
     }
 
     #[test]

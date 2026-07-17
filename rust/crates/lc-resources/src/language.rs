@@ -2,6 +2,19 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{Group, GroupError};
 
+/// The value selected by `C4ComponentHost::GetLanguageString`: C++ searches
+/// the entire remainder for CR before falling back to LF.
+pub(crate) fn component_language_string<'a>(text: &'a str, code: &str) -> Option<&'a str> {
+    let needle = format!("{code}:");
+    let position = text.find(&needle)?;
+    let rest = &text[position + needle.len()..];
+    let end = rest
+        .find('\r')
+        .or_else(|| rest.find('\n'))
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
 /// One `C4LanguageInfo` discovered from a `System.c4g/Language*.txt` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageInfo {
