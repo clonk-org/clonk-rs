@@ -1214,7 +1214,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 rebuyable = reflected_int!("Rebuy", parse_reflected_int(value)) != 0;
             }
             "baseautosell" => {
-                base_auto_sell = Some(parse_bool(value));
+                base_auto_sell = parse_bool(raw_value);
             }
             "nosell" => {
                 no_sell = parse_i32(value).unwrap_or(0);
@@ -2843,13 +2843,25 @@ fn parse_category(value: &str) -> i32 {
     parse_named_bitfield(value, CATEGORY_FLAGS)
 }
 
-fn parse_bool(value: &str) -> bool {
-    let lower = value.trim().to_ascii_lowercase();
-    matches!(lower.as_str(), "1" | "true" | "yes" | "on")
+fn parse_bool(value: &str) -> Option<bool> {
+    let bytes = value.as_bytes();
+    if bytes.first() == Some(&b'1') && !bytes.get(1).is_some_and(u8::is_ascii_digit) {
+        return Some(true);
+    }
+    if bytes.first() == Some(&b'0') && !bytes.get(1).is_some_and(u8::is_ascii_digit) {
+        return Some(false);
+    }
+    if bytes.starts_with(b"true") {
+        return Some(true);
+    }
+    if bytes.starts_with(b"false") {
+        return Some(false);
+    }
+    None
 }
 
 fn parse_reflected_int(value: &str) -> i32 {
-    parse_i32(value).unwrap_or_else(|| i32::from(parse_bool(value)))
+    parse_i32(value).unwrap_or(0)
 }
 
 fn parse_action_string(value: &str) -> Option<String> {
@@ -2912,6 +2924,10 @@ fn parse_action_attach(value: &str) -> i32 {
 }
 
 fn parse_action_i32_prefix(value: &[u8]) -> Option<(i32, usize)> {
+    parse_action_i64_prefix(value).map(|(value, consumed)| (value as i32, consumed))
+}
+
+fn parse_action_integer_prefix(value: &[u8]) -> Option<(u128, bool, usize)> {
     let mut cursor = 0;
     while value.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
         cursor += 1;
@@ -2962,12 +2978,17 @@ fn parse_action_i32_prefix(value: &[u8]) -> Option<(i32, usize)> {
         cursor += 1;
     }
     if cursor == digits_start {
-        // strtol("0x", ..., 16) still consumes the leading zero.
+        // strtol/strtoul("0x", ..., 16) still consume the leading zero.
         if radix == 16 {
-            return Some((0, number_start + 1));
+            return Some((0, false, number_start + 1));
         }
         return None;
     }
+    Some((magnitude, negative, cursor))
+}
+
+fn parse_action_i64_prefix(value: &[u8]) -> Option<(i64, usize)> {
+    let (magnitude, negative, consumed) = parse_action_integer_prefix(value)?;
     // strtol saturates to native C `long` and the result is then assigned to
     // int32_t. LP64 uses 64-bit long; Windows LLP64 and 32-bit targets use
     // 32-bit long. The final Rust cast supplies the same modulo narrowing.
@@ -2983,11 +3004,26 @@ fn parse_action_i32_prefix(value: &[u8]) -> Option<(i32, usize)> {
     } else {
         magnitude.min(long_max) as i128
     };
-    Some(((signed as i64) as i32, cursor))
+    Some((signed as i64, consumed))
+}
+
+fn parse_action_u64_prefix(value: &[u8]) -> Option<(u64, usize)> {
+    let (magnitude, negative, consumed) = parse_action_integer_prefix(value)?;
+    let long_bits = std::mem::size_of::<std::os::raw::c_ulong>() * 8;
+    let long_max = (1u128 << long_bits) - 1;
+    let unsigned = if magnitude > long_max {
+        long_max
+    } else if negative {
+        0u128.wrapping_sub(magnitude) & long_max
+    } else {
+        magnitude
+    };
+    Some((unsigned as u64, consumed))
 }
 
 fn parse_u32(value: &str) -> Option<u32> {
-    parse_i64(value).and_then(|num| if num < 0 { None } else { Some(num as u32) })
+    parse_action_u64_prefix(&lc_script::c4_string_bytes(value))
+        .map(|(value, _)| value as u32)
 }
 
 fn fill_i32_array(value: &str, target: &mut [i32]) {
@@ -3057,23 +3093,7 @@ fn parse_target_rect(value: &str) -> Option<TargetRect> {
 }
 
 fn parse_i32(value: &str) -> Option<i32> {
-    parse_i64(value).and_then(|num| num.try_into().ok())
-}
-
-fn parse_i64(value: &str) -> Option<i64> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(rest) = trimmed.strip_prefix("0x") {
-        i64::from_str_radix(rest, 16).ok()
-    } else if let Some(rest) = trimmed.strip_prefix("$") {
-        i64::from_str_radix(rest, 16).ok()
-    } else if let Some(rest) = trimmed.strip_prefix("0b") {
-        i64::from_str_radix(rest, 2).ok()
-    } else {
-        trimmed.parse().ok()
-    }
+    parse_action_i32(value)
 }
 
 fn parse_action_facet(value: &str) -> Option<ActionFacet> {
@@ -3216,6 +3236,7 @@ Entrance=1,2,,4
         assert_eq!(parsed.reflected_ints.get("CollectionLimit"), Some(&-4));
         assert_eq!(parsed.reflected_ints.get("Vertices"), Some(&-3));
         assert_eq!(parsed.reflected_ints.get("Scale"), Some(&-5));
+        assert_eq!(parsed.graphics_scale, 4_294_967_291);
         assert_eq!(parsed.reflected_ints.get("NoGet"), Some(&-8));
         assert_eq!(parsed.version, [5, 0, 2, 0, 0]);
         assert_eq!(parsed.vertex_slots[0].x, 10);
@@ -4200,6 +4221,90 @@ Entrance=1,2,,4
         let raw_crew = parse_def_core(b"[DefCore]\nid=CREW\nCrewMember=-2\n")
             .expect("raw crew value parses");
         assert_eq!(raw_crew.crew_member, -2);
+    }
+
+    #[test]
+    fn parse_def_core_stdcompiler_numeric_prefixes_and_radices() {
+        let parsed = parse_def_core(
+            br#"[DefCore]
+id=LEXR
+Mass=100abc
+Vertices=3 ; comment
+BlitMode=0X11
+Value=$FF
+Growth=0b101
+MoveToRange=4294967297
+
+[Physical]
+Jump=40000junk
+"#,
+        )
+        .expect("DefCore numeric prefixes parse");
+
+        assert_eq!(parsed.mass, 100);
+        assert_eq!(parsed.vertices.len(), 3);
+        assert_eq!(parsed.blit_mode, 17);
+        assert_eq!(parsed.value, 0, "$ is not a C++ integer prefix");
+        assert_eq!(parsed.growth, 0, "0b consumes only the leading zero");
+        let narrowed_overflow = if std::mem::size_of::<std::os::raw::c_long>() == 8 {
+            1
+        } else {
+            i32::MAX
+        };
+        assert_eq!(parsed.move_to_range, narrowed_overflow);
+        assert_eq!(parsed.physical.jump, 40_000);
+
+        for (raw, expected) in [
+            ("0X65junk", 101),
+            ("$FF", 100),
+            ("0b101", 0),
+            ("-1", u32::MAX),
+        ] {
+            let scale = parse_def_core(
+                format!("[DefCore]\nid=SCAL\nScale={raw}\n").as_bytes(),
+            )
+            .expect("Scale DefCore parses");
+            assert_eq!(scale.graphics_scale, expected, "Scale={raw}");
+        }
+    }
+
+    #[test]
+    fn parse_def_core_uses_cpp_boolean_only_for_boolean_typed_fields() {
+        for value in ["true", "yes"] {
+            let parsed = parse_def_core(
+                format!("[DefCore]\nid=REBY\nRebuy={value}\n").as_bytes(),
+            )
+            .expect("Rebuy DefCore parses");
+            assert!(!parsed.rebuyable, "int32 Rebuy={value} defaults to zero");
+        }
+
+        let gold = parse_def_core(b"[DefCore]\nid=GOLD\nBaseAutoSell=2\n")
+            .expect("GOLD DefCore parses");
+        assert!(
+            gold.base_auto_sell,
+            "invalid Boolean text restores the GOLD-specific default"
+        );
+        let ordinary = parse_def_core(b"[DefCore]\nid=ROCK\nBaseAutoSell=2\n")
+            .expect("ordinary DefCore parses");
+        assert!(!ordinary.base_auto_sell);
+    }
+
+    #[test]
+    fn parse_def_core_stdcompiler_boolean_grammar() {
+        for (raw, expected) in [
+            ("1x", Some(true)),
+            ("0x", Some(false)),
+            ("truejunk", Some(true)),
+            ("falsehood", Some(false)),
+            ("10", None),
+            ("00", None),
+            ("TRUE", None),
+            ("yes", None),
+            ("on", None),
+            (" true", None),
+        ] {
+            assert_eq!(parse_bool(raw), expected, "Boolean `{raw}`");
+        }
     }
 
     #[test]
@@ -5472,12 +5577,16 @@ Default=Ghost
     }
 
     #[test]
-    fn parse_def_core_silent_commands_flag_and_default_like_cpp() {
-        // C4Def::CompileFunc reads SilentCommands with a zero default
-        // (src/C4Def.cpp:404), using the compiler's case-insensitive keys.
-        let enabled = parse_def_core(b"[DefCore]\nid=CLNK\nsIlEnTcOmMaNdS=yes\n")
+    fn parse_def_core_silent_commands_integer_and_default_like_cpp() {
+        // C4Def::CompileFunc reads the int32 SilentCommands with a zero
+        // default (src/C4Def.cpp:404), not through the Boolean reader.
+        let enabled = parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=1\n")
             .expect("defcore parsed");
         assert!(enabled.silent_commands);
+
+        let invalid = parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=yes\n")
+            .expect("defcore parsed");
+        assert!(!invalid.silent_commands);
 
         let defaulted = parse_def_core(b"[DefCore]\nid=ROCK\n").expect("defcore parsed");
         assert!(!defaulted.silent_commands);
