@@ -34322,6 +34322,7 @@ impl Engine {
             let mut landscape = self.landscape.as_mut();
             let materials = &self.materials;
             let mass_movers = &mut self.mass_movers;
+            let sectors = self.sectors.as_ref();
             let (objects_before, objects_tail) = self.objects.split_at_mut(idx);
             let (object, objects_after) = objects_tail.split_first_mut().expect("index checked");
             let mut on_do_motion = |object: &mut Object,
@@ -34335,6 +34336,7 @@ impl Engine {
                     materials,
                     mass_movers,
                     landscape,
+                    sectors,
                     true,
                     true,
                 );
@@ -44463,6 +44465,7 @@ impl Engine {
         let definitions = &self.definitions;
         let materials = &self.materials;
         let mass_movers = &mut self.mass_movers;
+        let sectors = self.sectors.as_ref();
         let (before, tail) = self.objects.split_at_mut(index);
         let (mover, after) = tail.split_first_mut().expect("index checked");
         Self::remove_solid_mask_from_fields(
@@ -44473,6 +44476,7 @@ impl Engine {
             materials,
             mass_movers,
             landscape,
+            sectors,
             cause_instability,
             backup_attachments,
         )
@@ -44491,6 +44495,7 @@ impl Engine {
         materials: &MaterialSet,
         mass_movers: &mut MassMoverSet,
         landscape: &mut Landscape,
+        sectors: Option<&SectorMap>,
         cause_instability: bool,
         backup_attachments: bool,
     ) -> Option<SolidMaskAttachmentBackup> {
@@ -44579,9 +44584,43 @@ impl Engine {
         if !backup_attachments {
             return None;
         }
-        let object_ids = before
+        // C4SolidMask::Remove enumerates every ObjectShapes link from a
+        // C4LArea expanded one pixel around MaskPutRect. This is sector
+        // row-major order (outside last), with each sector list retaining
+        // main-list order; it is neither the backing object-vec order nor a
+        // deduplicated find (C4SolidMask.cpp:282-305; C4Sector.cpp:264-277).
+        let candidate_ids: Vec<ObjectId> = sectors.map_or_else(
+            || {
+                before
+                    .iter()
+                    .chain(after.iter())
+                    .map(|object| object.id)
+                    .collect::<Vec<_>>()
+            },
+            |sectors| {
+                let area = sectors.area(DefinitionRect::new(
+                    bake.x.saturating_sub(1),
+                    bake.y.saturating_sub(1),
+                    bake.width.saturating_add(2),
+                    bake.height.saturating_add(2),
+                ));
+                sectors
+                    .shape_id_lists_in_area(&area)
+                    .into_iter()
+                    .flatten()
+                .collect()
+            },
+        );
+        let candidates = before
             .iter()
             .chain(after.iter())
+            .map(|object| (object.id, object))
+            .collect::<HashMap<_, _>>();
+        let object_ids = candidate_ids
+            .into_iter()
+            // The lookup retains every repeated sector link in the input;
+            // only the id-to-object resolution is indexed.
+            .filter_map(|candidate_id| candidates.get(&candidate_id).copied())
             .filter(|object| {
                 if object.state.status != ObjectStatus::Normal
                     || object.state.category & (CATEGORY_STATIC_BACK | CATEGORY_STRUCTURE) != 0
@@ -44758,7 +44797,25 @@ impl Engine {
         vehicle: u8,
     ) -> Option<SolidMaskAttachmentBackup> {
         let mover = self.objects.get(mover_index)?;
-        let object_ids = (0..self.objects.len())
+        let candidate_ids: Vec<ObjectId> = self.sectors.as_ref().map_or_else(
+            || self.objects.iter().map(|object| object.id).collect(),
+            |sectors| {
+                let area = sectors.area(DefinitionRect::new(
+                    bake.x.saturating_sub(1),
+                    bake.y.saturating_sub(1),
+                    bake.width.saturating_add(2),
+                    bake.height.saturating_add(2),
+                ));
+                sectors
+                    .shape_id_lists_in_area(&area)
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            },
+        );
+        let object_ids = candidate_ids
+            .into_iter()
+            .filter_map(|object_id| self.find_object_index(object_id))
             .filter(|index| *index != mover_index)
             .filter(|index| self.object_is_moveable_by_solid_mask(*index))
             .filter(|index| {

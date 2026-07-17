@@ -56081,6 +56081,100 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
+    fn solid_mask_riders_restore_in_sector_shape_order() {
+        // Native capture walks the expanded platform rect's ObjectShapes
+        // lists sector by sector. A is in sector 0 and B in sector 1 even
+        // though loaded object-vec order is B, A. The order is observable:
+        // A's offset mask initially blocks B's destination and must move
+        // away before B is restored (C4SolidMask.cpp:282-305,184-194).
+        let mut platform = movement_mask_definition("PLAT", 20, -2);
+        platform.set_category(CATEGORY_OBJECT);
+
+        let rider_definition = |id: &str, own_mask| {
+            let mut rider = simple_definition(id);
+            rider.set_category(CATEGORY_OBJECT);
+            rider.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+            rider.set_shape_vertices(vec![
+                ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM),
+            ]);
+            rider.set_contact_density(50);
+            if own_mask {
+                rider.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 2, 0)));
+            }
+            rider
+        };
+
+        let mut engine = Engine::with_seed(66);
+        engine.set_landscape(vehicle_grid_landscape(120, 60));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(platform).expect("platform registers");
+        engine
+            .register_definition(rider_definition("RIDB", false))
+            .expect("plain rider registers");
+        engine
+            .register_definition(rider_definition("RIDA", true))
+            .expect("masked rider registers");
+
+        let platform = engine
+            .spawn_object(
+                SpawnConfig::new("PLAT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(45, 30))
+                    .with_fixed_position(FixedVec2::from_ints(45, 30))
+                    .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("platform spawns");
+        let platform_index = engine
+            .find_object_index(platform)
+            .expect("platform exists");
+        engine.update_solid_mask(platform_index);
+        let rider_b = engine
+            .spawn_object(
+                SpawnConfig::new("RIDB")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 29))
+                    .with_fixed_position(FixedVec2::from_ints(50, 29))
+                    .with_loaded(true),
+            )
+            .expect("plain rider spawns first");
+        let rider_b_index = engine.find_object_index(rider_b).expect("plain rider exists");
+        let rider_a = engine
+            .spawn_object(
+                SpawnConfig::new("RIDA")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(49, 29))
+                    .with_fixed_position(FixedVec2::from_ints(49, 29))
+                    .with_loaded(true),
+            )
+            .expect("masked rider spawns second");
+        let rider_a_index = engine.find_object_index(rider_a).expect("masked rider exists");
+        engine.update_solid_mask(rider_a_index);
+        assert!(
+            rider_b_index < rider_a_index,
+            "object-vector order is deliberately the reverse of sector order"
+        );
+
+        engine.tick().expect("platform movement succeeds");
+
+        assert_eq!(
+            engine.object_snapshot(platform).expect("platform remains").position,
+            Vector2::new(46, 30)
+        );
+        assert_eq!(
+            engine.object_snapshot(rider_a).expect("masked rider remains").position,
+            Vector2::new(50, 29),
+            "sector-0 rider moves first, taking its own mask away"
+        );
+        assert_eq!(
+            engine.object_snapshot(rider_b).expect("plain rider remains").position,
+            Vector2::new(51, 29),
+            "sector-1 rider can then enter the vacated mask pixel"
+        );
+    }
+
+    #[test]
     fn no_motion_frame_still_cycles_overlapping_solid_mask_bakes() {
         let mut engine = Engine::with_seed(64);
         engine.set_landscape(vehicle_grid_landscape(20, 20));
