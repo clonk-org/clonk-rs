@@ -14438,6 +14438,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetSeason", get_season);
     script.register_host_function("Music", music);
     script.register_host_function("MusicLevel", music_level);
+    script.register_host_function("SetPlayList", set_play_list);
     script.register_host_function("Sound", sound);
     script.register_host_function("SoundLevel", sound_level);
 }
@@ -19325,6 +19326,32 @@ fn music_level(args: &[Value]) -> Result<Value, RuntimeError> {
             .unwrap_or(level.clamp(0, 100) as u8)
     });
     Ok(Value::Int(i32::from(level)))
+}
+
+/// FnSetPlayList (C4Script.cpp:2349-2356): replace the active music filter,
+/// optionally restart automatic playback, and only expose the local match
+/// count outside synchronized control modes. The playlist mutation happens
+/// before the sync-safe return gate, just like C++.
+fn set_play_list(args: &[Value]) -> Result<Value, RuntimeError> {
+    let playlist =
+        parse_native_c4_string_argument(args.first(), "SetPlayList", "playlist")?
+            .unwrap_or_default();
+    let restart = args.get(1).is_some_and(Value::as_bool);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let count = context
+            .audio_mut()
+            .set_music_playlist(playlist, restart);
+        if context.world.control_sync_mode {
+            Ok(Value::Nil)
+        } else {
+            Ok(Value::Int(count))
+        }
+    })
 }
 
 fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -41218,6 +41245,12 @@ pub struct AudioRegistry {
     /// is client-local presentation state, not synchronized or save-persisted
     /// state; cloning the registry across callbacks is cheap.
     available_samples: Arc<HashSet<String>>,
+    /// One entry per C4MusicFile record in the active client-side catalog.
+    /// Keep duplicates: C++ counts records, not unique filenames.
+    available_music: Arc<Vec<String>>,
+    /// `None` is C4MusicSystem's default playlist; `Some("")` is the
+    /// explicit empty filter produced by script nil/omitted arguments.
+    music_playlist: Option<String>,
     looping: HashMap<AudioInstanceKey, AudioInstance>,
     events: Vec<AudioCommand>,
 }
@@ -41288,6 +41321,46 @@ impl AudioRegistry {
                 .map(|sample| normalize_sound_sample_name(sample.as_ref()))
                 .collect(),
         );
+    }
+
+    pub(crate) fn set_available_music<I, S>(&mut self, tracks: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.available_music = Arc::new(
+            tracks
+                .into_iter()
+                .map(|track| track.as_ref().to_owned())
+                .collect(),
+        );
+    }
+
+    pub(crate) fn music_playlist(&self) -> Option<&str> {
+        self.music_playlist.as_deref()
+    }
+
+    pub(crate) fn restore_music_playlist(&mut self, playlist: Option<String>) {
+        self.music_playlist = playlist;
+    }
+
+    pub(crate) fn set_music_playlist(&mut self, playlist: String, restart: bool) -> i32 {
+        let count = self
+            .available_music
+            .iter()
+            .filter(|track| {
+                let filename = track.rsplit(['/', '\\']).next().unwrap_or(track);
+                playlist
+                    .split(';')
+                    .any(|pattern| lc_core::std_file::wildcard_match(pattern, filename))
+            })
+            .count();
+        self.music_playlist = Some(playlist.clone());
+        self.events.push(AudioCommand::SetMusicPlaylist {
+            playlist: Some(playlist),
+            restart,
+        });
+        i32::try_from(count).unwrap_or(i32::MAX)
     }
 
     /// StartSoundEffect/NewInstance's primary success gate for message
@@ -47916,6 +47989,7 @@ mod tests {
         "SetPhase",
         "SetPhysical",
         "SetPicture",
+        "SetPlayList",
         "SetPlayerTeam",
         "SetPlrExtraData",
         "SetPlrKnowledge",
@@ -53301,6 +53375,59 @@ func Announce()
                 AudioCommand::StopMusic,
             ]
         );
+    }
+
+    #[test]
+    fn set_playlist_filters_restarts_and_hides_only_the_sync_count_like_cpp() {
+        // C4MusicSystem disables all records, then enables the union of raw
+        // semicolon-separated, case-insensitive wildcard matches. An entry
+        // matched by both patterns counts once, while duplicate records count
+        // independently (C4MusicSystem.cpp:181-228). FnSetPlayList performs
+        // those side effects before suppressing its local count in SyncMode.
+        for sync in [false, true] {
+            let mut audio = AudioRegistry::new();
+            audio.set_available_music([
+                "Pack/Theme.mid",
+                "theme-extra.ogg",
+                "Other.mid",
+                "Duplicate/Theme.mid",
+                "Credits.ogg",
+            ]);
+            let audio_guard = enter_audio_context(audio);
+            let world = HostWorldContext::default().with_control_sync_mode(sync);
+            let (result, outcome) = with_object_host_context_with_world(world, || {
+                let mut script = lc_script::Engine::new();
+                register_host_functions(&mut script);
+                script
+                    .load_script(
+                        r#"
+                        #strict 3
+                        func Probe() {
+                            return SetPlayList("*.mid;THEME*", true, "ignored");
+                        }
+                        "#,
+                    )
+                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                script
+                    .call("Probe", &[])
+                    .map_err(|error| RuntimeError::new(error.to_string()))
+            });
+            let retained = audio_guard.finish();
+
+            assert_eq!(
+                result.expect("SetPlayList probe runs"),
+                if sync { Value::Nil } else { Value::Int(4) }
+            );
+            assert_eq!(retained.music_playlist(), Some("*.mid;THEME*"));
+            assert_eq!(outcome.audio.state.music_playlist(), Some("*.mid;THEME*"));
+            assert_eq!(
+                outcome.audio.events,
+                vec![AudioCommand::SetMusicPlaylist {
+                    playlist: Some("*.mid;THEME*".to_string()),
+                    restart: true,
+                }]
+            );
+        }
     }
 
     #[test]

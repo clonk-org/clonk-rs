@@ -5039,10 +5039,17 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
+        runtime_music_enabled: &mut bool,
     ) {
         let events = &snapshot.audio;
         if !events.is_empty() {
-            self.handle_events(events, snapshot, focus, viewport_center);
+            self.handle_events(
+                events,
+                snapshot,
+                focus,
+                viewport_center,
+                runtime_music_enabled,
+            );
         }
         self.update_channels(snapshot, focus, viewport_center);
     }
@@ -5106,6 +5113,14 @@ impl AudioContext {
         self.resolver.sample_names()
     }
 
+    fn available_music_tracks(&self) -> Vec<String> {
+        self.music_resolver.active_filenames()
+    }
+
+    fn set_music_playlist(&mut self, playlist: Option<String>) {
+        self.music_resolver.set_playlist(playlist);
+    }
+
     fn music_enabled(&self) -> bool {
         self.options.music_enabled
     }
@@ -5152,6 +5167,7 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
+        runtime_music_enabled: &mut bool,
     ) {
         for event in events {
             match event {
@@ -5198,6 +5214,7 @@ impl AudioContext {
                     );
                 }
                 AudioCommand::PlayMusic { name, looped } => {
+                    *runtime_music_enabled = true;
                     let result = if name.is_empty() {
                         self.load_default_music().and_then(|data| {
                             let Some(data) = data else {
@@ -5220,9 +5237,37 @@ impl AudioContext {
                         }
                     }
                 }
-                AudioCommand::StopMusic => self.stop_music(),
+                AudioCommand::StopMusic => {
+                    *runtime_music_enabled = false;
+                    self.stop_music();
+                }
                 AudioCommand::SetMusicLevel { level } => {
                     self.set_scenario_music_level(Some(*level));
+                }
+                AudioCommand::SetMusicPlaylist { playlist, restart } => {
+                    self.set_music_playlist(playlist.clone());
+                    if !*restart || !*runtime_music_enabled {
+                        continue;
+                    }
+                    let result = self.load_default_music().and_then(|data| {
+                        let Some(data) = data else {
+                            return Ok(false);
+                        };
+                        self.play_music(&data, false)
+                            .context("failed to restart filtered music")?;
+                        Ok(true)
+                    });
+                    match result {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(
+                                "playlist has no matching music asset; keeping current playback"
+                            )
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to restart filtered music")
+                        }
+                    }
                 }
             }
         }
@@ -5454,6 +5499,7 @@ fn configure_scenario_sound_samples(
     let Some(audio) = audio else {
         return Vec::new();
     };
+    audio.set_music_playlist(None);
     audio.configure_scenario(Some(path));
     scenario.visit_definition_groups(|id, group| {
         audio.register_definition_sounds(id, group);
@@ -29224,16 +29270,6 @@ impl GameApp {
     }
 
     fn update_audio(&mut self) {
-        // Script Music(nil/name) mutates Game.IsMusicEnabled before asking
-        // the music system to stop/play. Keep the app-owned analogue in step
-        // even when the requested asset is missing or playback later fails.
-        for event in &self.snapshot.audio {
-            match event {
-                AudioCommand::PlayMusic { .. } => self.runtime_music_enabled = true,
-                AudioCommand::StopMusic => self.runtime_music_enabled = false,
-                _ => {}
-            }
-        }
         let fallback_center = {
             let surface = self.graphics.surface();
             Vector2::new((surface.width() as i32) / 2, (surface.height() as i32) / 2)
@@ -29243,13 +29279,27 @@ impl GameApp {
             .as_ref()
             .map(|object| object.position)
             .unwrap_or(fallback_center);
+        // Script Music(nil/name) mutates Game.IsMusicEnabled before asking
+        // the music system to stop/play. Fold that flag in command order so
+        // a SetPlayList restart sees the state at its exact event position.
+        let mut runtime_music_enabled = self.runtime_music_enabled;
         if let Some(audio) = self.audio.as_mut() {
             audio.process_audio(
                 &self.snapshot,
                 self.focus_snapshot.as_ref(),
                 viewport_center,
+                &mut runtime_music_enabled,
             );
+        } else {
+            for event in &self.snapshot.audio {
+                match event {
+                    AudioCommand::PlayMusic { .. } => runtime_music_enabled = true,
+                    AudioCommand::StopMusic => runtime_music_enabled = false,
+                    _ => {}
+                }
+            }
         }
+        self.runtime_music_enabled = runtime_music_enabled;
         // C4MusicSystem::Execute chooses another enabled song whenever a
         // non-looping track ends. A pending worker load counts as playback so
         // this cannot spawn replacement workers every frame.
@@ -33351,12 +33401,15 @@ impl GameApp {
             engine.set_control_host(false);
         }
 
-        let sound_samples = configure_scenario_sound_samples(
-            self.audio.as_mut(),
-            &scenario_data,
-            &path,
-        );
+        let sound_samples =
+            configure_scenario_sound_samples(self.audio.as_mut(), &scenario_data, &path);
+        let music_tracks = self
+            .audio
+            .as_ref()
+            .map(AudioContext::available_music_tracks)
+            .unwrap_or_default();
         engine.configure_sound_samples(sound_samples);
+        engine.configure_music_tracks(music_tracks);
 
         let apply_result = match (
             network_game,
@@ -34034,12 +34087,15 @@ impl GameApp {
                     self.engine.set_control_rate(parameters.control_rate());
                 }
             }
-            let sound_samples = configure_scenario_sound_samples(
-                self.audio.as_mut(),
-                &scenario_data,
-                path,
-            );
+            let sound_samples =
+                configure_scenario_sound_samples(self.audio.as_mut(), &scenario_data, path);
+            let music_tracks = self
+                .audio
+                .as_ref()
+                .map(AudioContext::available_music_tracks)
+                .unwrap_or_default();
             self.engine.configure_sound_samples(sound_samples);
+            self.engine.configure_music_tracks(music_tracks);
             if let Some(audio) = self.audio.as_mut() {
                 audio.reset_sfx();
             }
@@ -34082,6 +34138,10 @@ impl GameApp {
             self.runtime_music_enabled = enabled;
         }
         self.active_scenario = Some(frontend.clone());
+
+        if let Some(audio) = self.audio.as_mut() {
+            audio.set_music_playlist(save.engine_state.play_list.clone());
+        }
 
         if scenario_info.sandbox {
             self.play_sandbox_audio();
@@ -36935,13 +36995,14 @@ fn configure_sandbox_engine(
     mut audio: Option<&mut AudioContext>,
 ) -> Result<String, EngineError> {
     if let Some(audio) = audio.as_deref_mut() {
+        audio.set_music_playlist(None);
         audio.configure_scenario(None);
         audio.reset_sfx();
     }
     if let Ok(paths) = cached_app_paths() {
         match load_install_definitions(engine, &paths, audio.as_deref_mut()) {
             Ok(Some(spawn_definition)) => {
-                sync_engine_sound_samples(engine, audio.as_deref());
+                sync_engine_audio_catalogs(engine, audio.as_deref());
                 engine.set_environment(EnvironmentSettings::default());
                 engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
                 return Ok(spawn_definition);
@@ -36963,7 +37024,7 @@ fn configure_sandbox_engine(
         match Definition::from_resource(&resource_def) {
             Ok(definition) => {
                 engine.register_definition(definition)?;
-                sync_engine_sound_samples(engine, audio.as_deref());
+                sync_engine_audio_catalogs(engine, audio.as_deref());
                 engine.set_environment(EnvironmentSettings::default());
                 engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
                 return Ok(resource_def.core.id);
@@ -36991,16 +37052,21 @@ fn configure_sandbox_engine(
         .with_walk_acceleration(2);
     definition.set_movement_profile(profile);
     engine.register_definition(definition)?;
-    sync_engine_sound_samples(engine, audio.as_deref());
+    sync_engine_audio_catalogs(engine, audio.as_deref());
     engine.set_environment(EnvironmentSettings::default());
     engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
     Ok("Walker".to_string())
 }
 
-fn sync_engine_sound_samples(engine: &mut Engine, audio: Option<&AudioContext>) {
+fn sync_engine_audio_catalogs(engine: &mut Engine, audio: Option<&AudioContext>) {
     engine.configure_sound_samples(
         audio
             .map(AudioContext::available_sound_samples)
+            .unwrap_or_default(),
+    );
+    engine.configure_music_tracks(
+        audio
+            .map(AudioContext::available_music_tracks)
             .unwrap_or_default(),
     );
 }
@@ -37268,6 +37334,12 @@ fn scenario_root_key(path: &Path) -> String {
 
 const MUSIC_FILE_EXTENSIONS: [&str; 7] = ["it", "mid", "mod", "mp3", "ogg", "s3m", "xm"];
 
+fn music_playlist_matches(playlist: &str, filename: &str) -> bool {
+    playlist
+        .split(';')
+        .any(|pattern| lc_core::std_file::wildcard_match(pattern, filename))
+}
+
 struct MusicCatalog {
     assets: Vec<MusicAsset>,
 }
@@ -37314,12 +37386,20 @@ impl MusicCatalog {
             })
     }
 
-    fn first_default(&self) -> Option<&MusicAsset> {
-        self.assets.iter().find(|asset| {
-            !["@", "Credits.", "Frontend."]
+    fn first_enabled(&self, playlist: Option<&str>) -> Option<&MusicAsset> {
+        self.assets.iter().find(|asset| match playlist {
+            Some(playlist) => music_playlist_matches(playlist, &asset.file_name),
+            None => !["@", "Credits.", "Frontend."]
                 .iter()
-                .any(|prefix| asset.file_name.starts_with(prefix))
+                .any(|prefix| asset.file_name.starts_with(prefix)),
         })
+    }
+
+    fn filenames(&self) -> Vec<String> {
+        self.assets
+            .iter()
+            .map(|asset| asset.file_name.clone())
+            .collect()
     }
 }
 
@@ -37359,6 +37439,7 @@ struct MusicResolver {
     scenario: MusicCatalog,
     scenario_has_local_sources: bool,
     scenario_root: Option<PathBuf>,
+    playlist: Option<String>,
 }
 
 impl MusicResolver {
@@ -37376,6 +37457,7 @@ impl MusicResolver {
                 scenario: MusicCatalog::empty(),
                 scenario_has_local_sources: false,
                 scenario_root: None,
+                playlist: None,
             },
             Err(error) => {
                 tracing::warn!(%error, "global music catalog discovery skipped");
@@ -37384,6 +37466,7 @@ impl MusicResolver {
                     scenario: MusicCatalog::empty(),
                     scenario_has_local_sources: false,
                     scenario_root: None,
+                    playlist: None,
                 }
             }
         }
@@ -37395,6 +37478,7 @@ impl MusicResolver {
             scenario: MusicCatalog::empty(),
             scenario_has_local_sources: false,
             scenario_root: None,
+            playlist: None,
         })
     }
 
@@ -37412,6 +37496,7 @@ impl MusicResolver {
         self.scenario = scenario;
         self.scenario_has_local_sources = has_local_sources;
         self.scenario_root = path.map(Path::to_path_buf);
+        self.playlist = None;
         Ok(true)
     }
 
@@ -37427,8 +37512,17 @@ impl MusicResolver {
         self.active_catalog().resolve(name)
     }
 
+    fn active_filenames(&self) -> Vec<String> {
+        self.active_catalog().filenames()
+    }
+
+    fn set_playlist(&mut self, playlist: Option<String>) {
+        self.playlist = playlist;
+    }
+
     fn first_default(&self) -> Option<&MusicAsset> {
-        self.active_catalog().first_default()
+        self.active_catalog()
+            .first_enabled(self.playlist.as_deref())
     }
 }
 
@@ -37520,7 +37614,7 @@ fn find_music_asset(group: &Group) -> Result<Option<Vec<u8>>, lc_resources::Grou
     // descend into definitions: their WAV files are sound effects.
     let catalog = MusicCatalog::from_group(group.clone())?;
     catalog
-        .first_default()
+        .first_enabled(None)
         .map(MusicAsset::load_audio)
         .transpose()
 }
@@ -49627,6 +49721,168 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn music_playlist_filter_uses_raw_semicolon_patterns_and_basename_matching() {
+        assert!(music_playlist_matches("NoMatch;*.mId", "Theme.MID"));
+        assert!(music_playlist_matches("NoMatch;Ambient.*", "Ambient.ogg"));
+        assert!(
+            !music_playlist_matches("NoMatch; Ambient.*", "Ambient.ogg"),
+            "C++ does not trim playlist sections"
+        );
+
+        let dir = tempdir().expect("tempdir");
+        let group = Group::open(dir.path()).expect("open music fixture root");
+        let asset = MusicAsset::new(Arc::new(group), PathBuf::from("nested/Theme.MID"));
+        let catalog = MusicCatalog {
+            assets: vec![asset],
+        };
+        assert_eq!(
+            catalog
+                .first_enabled(Some("*.mid"))
+                .map(|asset| asset.file_name.as_str()),
+            Some("Theme.MID"),
+            "playlist matching uses GetFilename rather than the full asset path"
+        );
+    }
+
+    #[test]
+    fn music_playlist_explicit_filter_allows_frontend_and_default_excludes_special_tracks() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create music group");
+        for name in ["@Hidden.ogg", "Credits.ogg", "Frontend.ogg", "Theme.ogg"] {
+            fs::write(global.join(name), name.as_bytes()).expect("write music fixture");
+        }
+
+        let group = Group::open(&global).expect("open global music");
+        let mut resolver = MusicResolver::with_global_group(group).expect("build resolver");
+        assert_eq!(
+            resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Theme.ogg")
+        );
+
+        resolver.set_playlist(Some("Frontend.*".to_string()));
+        assert_eq!(
+            resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Frontend.ogg"),
+            "an explicit playlist replaces the default exclusions"
+        );
+
+        resolver.set_playlist(None);
+        assert_eq!(
+            resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Theme.ogg"),
+            "restoring the default playlist excludes frontend/credits/@ tracks again"
+        );
+    }
+
+    #[test]
+    fn set_music_playlist_command_restarts_only_when_enabled_at_its_event_position() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create music group");
+        fs::write(global.join("Frontend.ogg"), silent_pcm_wav(20))
+            .expect("write decodable music fixture");
+
+        let group = Group::open(&global).expect("open global music");
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.music_resolver =
+            MusicResolver::with_global_group(group).expect("build music resolver");
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+        let event = AudioCommand::SetMusicPlaylist {
+            playlist: Some("Frontend.*".to_string()),
+            restart: true,
+        };
+
+        let initial_generation = lock_unpoisoned(&audio.music_control).generation;
+        let mut runtime_music_enabled = false;
+        audio.handle_events(
+            &[event.clone()],
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).generation,
+            initial_generation,
+            "a restart request must not start music while Game.IsMusicEnabled is false"
+        );
+        assert_eq!(
+            audio
+                .music_resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Frontend.ogg"),
+            "the filter still applies while playback is disabled"
+        );
+
+        runtime_music_enabled = true;
+        audio.handle_events(
+            &[event.clone()],
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert_ne!(
+            lock_unpoisoned(&audio.music_control).generation,
+            initial_generation,
+            "an enabled restart replaces the current music generation"
+        );
+
+        let before_play_restart_stop = lock_unpoisoned(&audio.music_control).generation;
+        runtime_music_enabled = false;
+        audio.handle_events(
+            &[
+                AudioCommand::PlayMusic {
+                    name: "__missing__".to_string(),
+                    looped: false,
+                },
+                event.clone(),
+                AudioCommand::StopMusic,
+            ],
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(!runtime_music_enabled);
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).generation,
+            before_play_restart_stop + 2,
+            "PlayMusic enables the intervening playlist restart before StopMusic disables it"
+        );
+
+        let before_stop_restart_play = lock_unpoisoned(&audio.music_control).generation;
+        audio.handle_events(
+            &[
+                AudioCommand::StopMusic,
+                event,
+                AudioCommand::PlayMusic {
+                    name: "__missing__".to_string(),
+                    looped: false,
+                },
+            ],
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(runtime_music_enabled);
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).generation,
+            before_stop_restart_play + 1,
+            "StopMusic suppresses the intervening restart before the later PlayMusic"
+        );
+    }
+
+    #[test]
     fn music_resolver_keeps_global_catalog_when_scenario_has_no_music_source() {
         // PlayScenarioMusic only clears the constructor-loaded global catalog
         // when it discovers at least one local music directory
@@ -49690,6 +49946,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let global = Group::open(&global).expect("open global music");
         let mut resolver = MusicResolver::with_global_group(global).expect("build global resolver");
+        resolver.set_playlist(Some("Frontend.*".to_string()));
         resolver
             .configure_scenario(Some(&scenario))
             .expect("configure local scenario");
@@ -49705,6 +49962,13 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .load_audio()
                 .expect("read local theme"),
             b"local"
+        );
+        assert_eq!(
+            resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Local Theme.ogg"),
+            "loading a new scenario music catalog restores the default playlist"
         );
     }
 

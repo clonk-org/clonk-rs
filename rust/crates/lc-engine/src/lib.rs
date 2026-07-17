@@ -8722,6 +8722,11 @@ pub struct EngineState {
     /// `Gamma` with default controls for legacy saves (C4Weather.cpp:302-309).
     #[serde(default, skip_serializing_if = "GammaControlState::is_default")]
     pub gamma: GammaControlState,
+    /// Raw `Game.PlayList` filter persisted in Game.txt. `None` is the
+    /// internal default playlist; `Some("")` is an explicit filter matching
+    /// no normally named song. Older Rust saves predate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_list: Option<String>,
     pub next_object_id: u64,
     #[serde(default)]
     pub landscape: Option<Landscape>,
@@ -8939,6 +8944,7 @@ impl EngineState {
             physics,
             environment: snapshot.environment.settings,
             gamma: snapshot.environment.gamma,
+            play_list: None,
             next_object_id,
             landscape: snapshot.landscape.clone(),
             scenario_values: None,
@@ -14517,6 +14523,10 @@ pub enum AudioCommand {
     SetMusicLevel {
         level: u8,
     },
+    SetMusicPlaylist {
+        playlist: Option<String>,
+        restart: bool,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -17174,6 +17184,23 @@ impl Engine {
         S: AsRef<str>,
     {
         self.audio_registry.set_available_samples(samples);
+    }
+
+    /// Install the client-local filenames represented by the active music
+    /// resource chain. Script `SetPlayList` uses this presentation inventory
+    /// for its immediate local match count.
+    #[doc(hidden)]
+    pub fn configure_music_tracks<I, S>(&mut self, tracks: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.audio_registry.set_available_music(tracks);
+    }
+
+    #[doc(hidden)]
+    pub fn music_playlist(&self) -> &str {
+        self.audio_registry.music_playlist().unwrap_or_default()
     }
 
     pub fn set_construction_needs_material(&mut self, enabled: bool) {
@@ -30048,6 +30075,7 @@ impl Engine {
             physics: self.physics,
             environment: self.environment,
             gamma: self.gamma,
+            play_list: self.audio_registry.music_playlist().map(str::to_owned),
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             scenario_values: Some(self.scenario_values.as_ref().clone()),
@@ -30157,6 +30185,13 @@ impl Engine {
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
         self.gamma = state.gamma;
+        let music_playlist = state.play_list.clone();
+        self.audio_registry
+            .restore_music_playlist(music_playlist.clone());
+        self.pending_audio.push(AudioCommand::SetMusicPlaylist {
+            playlist: music_playlist,
+            restart: false,
+        });
         self.landscape_insert_thrust = state.landscape_insert_thrust;
         self.structures_snow_in = state.structures_snow_in;
         self.flag_removeable = state.flag_removeable;
@@ -47104,7 +47139,8 @@ impl Engine {
             } => *audio_target != Some(target),
             AudioCommand::PlayMusic { .. }
             | AudioCommand::StopMusic
-            | AudioCommand::SetMusicLevel { .. } => true,
+            | AudioCommand::SetMusicLevel { .. }
+            | AudioCommand::SetMusicPlaylist { .. } => true,
         });
         self.clear_effect_command_target(target);
 
@@ -53783,6 +53819,112 @@ func RegisterFromEval()
             true,
         ));
         assert_eq!(probe(&engine), Value::Int(73));
+    }
+}
+
+#[cfg(test)]
+mod music_playlist_regression {
+    use super::*;
+
+    #[test]
+    fn set_playlist_roundtrips_engine_state_and_initial_game_data() {
+        let mut engine = Engine::new();
+        engine.configure_music_tracks([
+            "Pack/Theme.mid",
+            "theme-extra.ogg",
+            "Other.mid",
+            "Duplicate/Theme.mid",
+            "Credits.ogg",
+        ]);
+        engine
+            .load_scenario_script_with_convention(
+                "SetPlayList.c",
+                "#strict 3\nfunc Probe() { return SetPlayList(\"*.mid;THEME*\", true); }\n",
+                true,
+            )
+            .expect("SetPlayList probe compiles");
+
+        assert_eq!(
+            engine
+                .call_scenario_script_value("Probe", &[])
+                .expect("SetPlayList probe executes"),
+            Some(Value::Int(4))
+        );
+        assert_eq!(engine.music_playlist(), "*.mid;THEME*");
+        assert_eq!(
+            engine.pending_audio.last(),
+            Some(&AudioCommand::SetMusicPlaylist {
+                playlist: Some("*.mid;THEME*".to_owned()),
+                restart: true,
+            })
+        );
+
+        let state = engine.capture_state();
+        assert_eq!(state.play_list.as_deref(), Some("*.mid;THEME*"));
+        assert_eq!(
+            InitialNetworkGameData::from_engine(&engine)
+                .expect("playlist-only engine is representable in JoinData")
+                .play_list,
+            "*.mid;THEME*"
+        );
+
+        let encoded = state
+            .to_json_string()
+            .expect("music playlist state serializes");
+        let decoded =
+            EngineState::from_json_str(&encoded).expect("music playlist state deserializes");
+        let mut restored = Engine::new();
+        restored.configure_music_tracks(["Theme.mid", "Other.ogg"]);
+        restored
+            .restore_state(&decoded)
+            .expect("music playlist state restores");
+        assert_eq!(restored.music_playlist(), "*.mid;THEME*");
+        assert_eq!(
+            restored.pending_audio.last(),
+            Some(&AudioCommand::SetMusicPlaylist {
+                playlist: Some("*.mid;THEME*".to_owned()),
+                restart: false,
+            })
+        );
+        assert_eq!(
+            InitialNetworkGameData::from_engine(&restored)
+                .expect("restored playlist is representable in JoinData")
+                .play_list,
+            "*.mid;THEME*"
+        );
+    }
+
+    #[test]
+    fn explicit_empty_playlist_remains_distinct_from_default_after_restore() {
+        let mut engine = Engine::new();
+        engine.configure_music_tracks(["Theme.mid"]);
+        engine
+            .load_scenario_script_with_convention(
+                "EmptySetPlayList.c",
+                "#strict 3\nfunc Probe() { return SetPlayList(nil, false); }\n",
+                true,
+            )
+            .expect("empty SetPlayList probe compiles");
+        assert_eq!(
+            engine
+                .call_scenario_script_value("Probe", &[])
+                .expect("empty SetPlayList probe executes"),
+            Some(Value::Int(0))
+        );
+        assert_eq!(engine.capture_state().play_list, Some(String::new()));
+
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&engine.capture_state())
+            .expect("explicit empty playlist restores");
+        assert_eq!(restored.capture_state().play_list, Some(String::new()));
+        assert_eq!(
+            restored.pending_audio.last(),
+            Some(&AudioCommand::SetMusicPlaylist {
+                playlist: Some(String::new()),
+                restart: false,
+            })
+        );
     }
 }
 

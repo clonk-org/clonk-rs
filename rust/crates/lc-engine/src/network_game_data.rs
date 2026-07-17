@@ -148,7 +148,7 @@ impl InitialNetworkGameData {
             tick1000: frame % 1000,
             object_enumeration_index,
             rules,
-            play_list: String::new(),
+            play_list: engine.music_playlist().to_owned(),
             current_scenario_section: String::new(),
             resort_any_object: !engine.pending_object_order_commands.is_empty(),
             music_enabled: false,
