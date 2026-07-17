@@ -1815,6 +1815,13 @@ pub struct Landscape {
     /// normal drawing; any other value is applied during presentation.
     #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
     modulation: u32,
+    /// C4SLandscape::ShadeMaterials: enable Placement-based relief shading
+    /// while the frontend rebuilds C4Landscape's presentation Surface32.
+    #[serde(
+        default = "default_shade_materials",
+        skip_serializing_if = "bool_is_true"
+    )]
+    shade_materials: bool,
     #[serde(default)]
     liquids: Vec<LiquidColumn>,
     #[serde(default)]
@@ -1879,12 +1886,20 @@ fn default_top_open() -> bool {
     true
 }
 
+fn default_shade_materials() -> bool {
+    true
+}
+
 fn landscape_mode_is_undefined(mode: &i32) -> bool {
     *mode == LANDSCAPE_MODE_UNDEFINED
 }
 
 fn bool_is_false(value: &bool) -> bool {
     !*value
+}
+
+fn bool_is_true(value: &bool) -> bool {
+    *value
 }
 
 /// What `C4Landscape::GetPix` (C4Landscape.h:144-161) reads beyond the
@@ -2067,6 +2082,7 @@ impl Landscape {
             surface,
             mode: LANDSCAPE_MODE_UNDEFINED,
             modulation: 0,
+            shade_materials: true,
             liquids: vec![LiquidColumn::default(); size],
             solid_materials: vec![default_material; size],
             default_solid_material: default_material,
@@ -2108,6 +2124,14 @@ impl Landscape {
 
     pub(crate) fn set_modulation(&mut self, modulation: u32) {
         self.modulation = modulation;
+    }
+
+    pub fn shade_materials(&self) -> bool {
+        self.shade_materials
+    }
+
+    pub fn set_shade_materials(&mut self, shade_materials: bool) {
+        self.shade_materials = shade_materials;
     }
 
     pub fn scan_x(&self) -> u32 {
@@ -2887,6 +2911,32 @@ impl Landscape {
 
     pub fn grid_byte_at(&self, x: i32, y: i32) -> Option<u8> {
         self.pixels.as_ref().and_then(|grid| grid.byte_at(x, y))
+    }
+
+    /// C4Landscape::GetPix for Surface8 presentation consumers, including
+    /// open-sky and closed-MCVehic border bytes.
+    pub fn grid_byte_with_border(&self, x: i32, y: i32) -> Option<u8> {
+        let grid = self.pixels.as_ref()?;
+        let open = |is_open: bool| {
+            if is_open {
+                Some(0)
+            } else {
+                self.grid_vehicle_byte()
+            }
+        };
+        if x < 0 {
+            return open(y < self.left_open);
+        }
+        if x as u32 >= grid.width {
+            return open(y < self.right_open);
+        }
+        if y < 0 {
+            return open(self.top_open);
+        }
+        if y as u32 >= grid.height {
+            return open(self.bottom_open);
+        }
+        grid.byte_at(x, y)
     }
 
     /// Texture-map indices present in C4Landscape::Surface8. The IFT bit is
@@ -6305,6 +6355,8 @@ impl<'de> Deserialize<'de> for Landscape {
             mode: i32,
             #[serde(default)]
             modulation: u32,
+            #[serde(default = "default_shade_materials")]
+            shade_materials: bool,
             #[serde(default)]
             liquids: Vec<LiquidColumn>,
             #[serde(default)]
@@ -6365,6 +6417,7 @@ impl<'de> Deserialize<'de> for Landscape {
             Landscape::with_default_material(data.width, data.surface, data.default_solid_material)
                 .map_err(|error| D::Error::custom(error.to_string()))?;
         landscape.modulation = data.modulation;
+        landscape.shade_materials = data.shade_materials;
         landscape.mode = data.mode;
         landscape.liquids = data.liquids;
         landscape.solid_materials = data.solid_materials;
@@ -6519,6 +6572,43 @@ mod tests {
             reloaded.save_diff(false).expect("round-trip diff builds"),
             Some(masked)
         );
+    }
+
+    #[test]
+    fn shade_materials_surface8_reads_use_getpix_border_rules() {
+        let mut landscape = raster_grid_landscape(2, 3, vec![1; 6]);
+        landscape.set_border_open(2, 1, true, false);
+
+        assert_eq!(landscape.grid_byte_with_border(0, 2), Some(1));
+        assert_eq!(landscape.grid_byte_with_border(-1, 1), Some(0));
+        assert_eq!(landscape.grid_byte_with_border(-1, 2), Some(2));
+        assert_eq!(landscape.grid_byte_with_border(2, 0), Some(0));
+        assert_eq!(landscape.grid_byte_with_border(2, 1), Some(2));
+        assert_eq!(landscape.grid_byte_with_border(0, -1), Some(0));
+        assert_eq!(landscape.grid_byte_with_border(0, 3), Some(2));
+        assert_eq!(
+            landscape.grid_byte_with_border(-1, -1),
+            Some(0),
+            "the C++ branch order checks side openness before top openness"
+        );
+    }
+
+    #[test]
+    fn shade_materials_default_and_disabled_override_round_trip() {
+        let mut landscape = Landscape::flat(1, 1);
+        assert!(landscape.shade_materials());
+        let default_json = serde_json::to_value(&landscape).expect("landscape serializes");
+        assert!(default_json.get("shade_materials").is_none());
+        let restored: Landscape =
+            serde_json::from_value(default_json).expect("default landscape restores");
+        assert!(restored.shade_materials());
+
+        landscape.set_shade_materials(false);
+        let disabled_json = serde_json::to_value(&landscape).expect("landscape serializes");
+        assert_eq!(disabled_json.get("shade_materials"), Some(&serde_json::json!(false)));
+        let restored: Landscape =
+            serde_json::from_value(disabled_json).expect("disabled landscape restores");
+        assert!(!restored.shade_materials());
     }
 
     #[test]

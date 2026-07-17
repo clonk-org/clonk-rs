@@ -8880,6 +8880,7 @@ fn load_legacy_landscape(
     )? else {
         return Ok(None);
     };
+    landscape.set_shade_materials(manifest.core.landscape.shade_materials);
     // C4Landscape::Init captures pInitial before attempting to load the
     // optional legacy diff. ApplyDiff failure is non-fatal, including a
     // missing or unreadable DiffLandscape.bmp.
@@ -24459,6 +24460,53 @@ public func ActualizePhase(pClonk)
             saved.indices, expected_diff,
             "SaveInitial ran before ApplyDiff, preserving the original comparison plane"
         );
+    }
+
+    #[test]
+    fn legacy_landscape_shade_materials_reaches_runtime_landscape() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("Shade.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[1]]),
+        )
+        .expect("write exact landscape");
+        let source = "[Landscape]\nExactLandscape=1\nShadeMaterials=0\n";
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text(source).expect("scenario core parses");
+        let mut densities = [0i32; 128];
+        densities[1] = 100;
+        let mut names = vec![None; 128];
+        names[1] = Some("Earth".into());
+        let mut shapes = vec![None; 128];
+        shapes[1] = Some(crate::chunky::ChunkShape::Flat);
+        let mut classifier =
+            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
+        let mut callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
+
+        let landscape = load_legacy_landscape(
+            &group,
+            &manifest,
+            false,
+            Some(&mut classifier),
+            0,
+            1,
+            &HashSet::new(),
+            &mut callbacks,
+        )
+        .expect("legacy landscape loads")
+        .expect("legacy landscape exists");
+
+        assert!(
+            !landscape.shade_materials(),
+            "the parsed scenario flag rides the runtime landscape snapshot"
+        );
+        let restored: Landscape = serde_json::from_str(
+            &serde_json::to_string(&landscape).expect("landscape serializes"),
+        )
+        .expect("landscape restores");
+        assert!(!restored.shade_materials());
     }
 
     #[test]

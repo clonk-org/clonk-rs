@@ -11977,6 +11977,34 @@ fn material_int_array<const N: usize>(values: Option<Vec<i32>>) -> [i32; N] {
     result
 }
 
+fn material_render_placement(material: &lc_resources::MaterialDefinition) -> i32 {
+    if let Some(placement) = material.int("Placement").filter(|placement| *placement != 0) {
+        return placement;
+    }
+    let density = material.int("Density").unwrap_or(0);
+    if density >= 50 {
+        let mut placement = 30;
+        if !material.bool_flag("DigFree").unwrap_or(false) {
+            placement += 20;
+        }
+        if !material.bool_flag("BlastFree").unwrap_or(false) {
+            placement += 10;
+        }
+        if !material
+            .bool_flag("Dig2ObjectRequest")
+            .or_else(|| material.bool_flag("Dig2ObjectOnRequestOnly"))
+            .unwrap_or(false)
+        {
+            placement += 10;
+        }
+        placement
+    } else if density >= 25 {
+        10
+    } else {
+        5
+    }
+}
+
 fn material_render_info(
     material: &lc_resources::MaterialDefinition,
 ) -> lc_frontend::MaterialRenderInfo {
@@ -12003,6 +12031,7 @@ fn material_render_info(
         material.int("OverlayType").unwrap_or(0),
         material.int("Density").unwrap_or(0),
     )
+    .with_placement(material_render_placement(material))
     .with_pxs_graphics(pxs_gfx, pxs_gfx_rect, pxs_gfx_size)
 }
 
@@ -62358,7 +62387,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                 Some("HostTexture".to_string()),
                 0,
                 50,
-            )),
+            )
+            .with_placement(70)),
         );
         assert!(app.material_texture_images.contains_key("hosttexture"));
         assert!(!app.material_render_info.contains_key("fallbackonly"));
@@ -83957,6 +83987,7 @@ protected func InputCallback(string answer, int player)
                 8,
                 50,
             )
+            .with_placement(70)
             .with_pxs_graphics(Some("Snow".to_string()), [1, 2, 16, 8, -8, -4], 10),
         );
     }
@@ -83973,11 +84004,13 @@ protected func InputCallback(string answer, int player)
 
         assert_eq!(
             material_render_info(definition),
-            lc_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 0).with_pxs_graphics(
-                Some("Lava".to_string()),
-                [0, 0, 32, 32, -16, -16],
-                32
-            ),
+            lc_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 0)
+                .with_placement(5)
+                .with_pxs_graphics(
+                    Some("Lava".to_string()),
+                    [0, 0, 32, 32, -16, -16],
+                    32
+                ),
         );
     }
 
@@ -84008,7 +84041,8 @@ protected func InputCallback(string answer, int player)
                 Some("Liquid".to_string()),
                 0,
                 25,
-            )),
+            )
+            .with_placement(10)),
         );
         assert_eq!(
             render_info.get("ashes"),
@@ -84020,6 +84054,7 @@ protected func InputCallback(string answer, int player)
                     0,
                     50,
                 )
+                .with_placement(30)
                 .with_pxs_graphics(
                     Some("Ashes".to_string()),
                     [0, 0, 32, 32, -16, -16],

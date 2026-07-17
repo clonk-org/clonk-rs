@@ -121,6 +121,9 @@ pub struct MaterialRenderInfo {
     texture_overlay: Option<String>,
     overlay_type: i32,
     density: i32,
+    /// C4MaterialCore::Placement after its load-time defaulting. ApplyLighting
+    /// compares this value around each Surface8 pixel.
+    placement: i32,
     /// Loose-material sprite sheet (`C4MaterialCore::sPXSGfx`). The sheet is
     /// resolved through the same texture map as landscape patterns.
     pxs_gfx: Option<String>,
@@ -137,16 +140,29 @@ impl MaterialRenderInfo {
         overlay_type: i32,
         density: i32,
     ) -> Self {
+        let placement = if density >= 50 {
+            70
+        } else if density >= 25 {
+            10
+        } else {
+            5
+        };
         Self {
             color,
             alpha,
             texture_overlay,
             overlay_type,
             density,
+            placement,
             pxs_gfx: None,
             pxs_gfx_rect: [0; 6],
             pxs_gfx_size: 0,
         }
+    }
+
+    pub fn with_placement(mut self, placement: i32) -> Self {
+        self.placement = placement;
+        self
     }
 
     pub fn with_pxs_graphics(
@@ -299,6 +315,20 @@ fn compose_material_pixel(
         pixel.blue,
         255u8.saturating_sub(pixel.transparency),
     )
+}
+
+fn lighten_material_color(color: &mut Color, amount: i32) {
+    let amount = amount.clamp(0, 255) as u8;
+    color.r = color.r.saturating_add(amount);
+    color.g = color.g.saturating_add(amount);
+    color.b = color.b.saturating_add(amount);
+}
+
+fn darken_material_color(color: &mut Color, amount: i32) {
+    let amount = amount.clamp(0, 255) as u8;
+    color.r = color.r.saturating_sub(amount);
+    color.g = color.g.saturating_sub(amount);
+    color.b = color.b.saturating_sub(amount);
 }
 
 const DEFAULT_PLAYER_COLORS: [Color; 12] = [
@@ -1129,6 +1159,8 @@ struct LandscapeRenderCache {
     grid: PixelGrid,
     width: u32,
     height: u32,
+    shade_materials: bool,
+    border_state: (i32, i32, bool, bool, Option<u8>),
     pixels: Vec<u8>,
 }
 
@@ -2831,38 +2863,76 @@ impl GraphicsSystem {
         }
         enum CacheUpdate {
             Reuse,
-            Patch(Vec<lc_engine::landscape::PixelGridDirtyRect>),
+            Patch {
+                rects: Vec<lc_engine::landscape::PixelGridDirtyRect>,
+                surface8_changed: bool,
+            },
             Rebuild,
         }
         let width = grid.width();
         let height = grid.height();
+        let shade_materials = landscape.shade_materials();
+        let border_state = (
+            landscape.left_open(),
+            landscape.right_open(),
+            landscape.top_open(),
+            landscape.bottom_open(),
+            landscape.grid_vehicle_byte(),
+        );
         let expected_bytes = width as usize * height as usize * 4;
         let update = match self.landscape_cache.as_ref() {
             None => CacheUpdate::Rebuild,
             Some(cache)
                 if (cache.width, cache.height) != (width, height)
-                    || cache.pixels.len() != expected_bytes =>
+                    || cache.pixels.len() != expected_bytes
+                    || cache.shade_materials != shade_materials
+                    || cache.border_state != border_state =>
             {
                 CacheUpdate::Rebuild
             }
             Some(cache) => match grid.render_dirty_rects_since(&cache.grid) {
                 Some(rects) if rects.is_empty() => CacheUpdate::Reuse,
-                Some(rects) => CacheUpdate::Patch(rects),
+                Some(rects) => CacheUpdate::Patch {
+                    rects,
+                    surface8_changed: grid.bytes().as_ptr() != cache.grid.bytes().as_ptr(),
+                },
                 None => CacheUpdate::Rebuild,
             },
         };
         if !matches!(&update, CacheUpdate::Reuse) {
             let regions = match update {
                 CacheUpdate::Reuse => unreachable!(),
-                CacheUpdate::Patch(rects) => rects
+                CacheUpdate::Patch {
+                    rects,
+                    surface8_changed,
+                } => rects
                     .into_iter()
-                    .map(|rect| (rect.x(), rect.y(), rect.width(), rect.height()))
+                    .map(|rect| {
+                        if !shade_materials || !surface8_changed {
+                            return (rect.x(), rect.y(), rect.width(), rect.height());
+                        }
+                        let x = rect.x().saturating_sub(1);
+                        let y = rect.y().saturating_sub(8);
+                        let right = rect
+                            .x()
+                            .saturating_add(rect.width())
+                            .saturating_add(1)
+                            .min(width);
+                        let bottom = rect
+                            .y()
+                            .saturating_add(rect.height())
+                            .saturating_add(8)
+                            .min(height);
+                        (x, y, right.saturating_sub(x), bottom.saturating_sub(y))
+                    })
                     .collect(),
                 CacheUpdate::Rebuild => {
                     self.landscape_cache = Some(LandscapeRenderCache {
                         grid: grid.clone(),
                         width,
                         height,
+                        shade_materials,
+                        border_state,
                         pixels: vec![0; expected_bytes],
                     });
                     vec![(0, 0, width, height)]
@@ -2874,6 +2944,18 @@ impl GraphicsSystem {
             let materials = grid.material_names();
             let material_textures = Arc::clone(&self.material_textures);
             let material_render_info = Arc::clone(&self.material_render_info);
+            let mut placements: Vec<i32> = (0..128usize)
+                .map(|index| {
+                    materials
+                        .get(index)
+                        .and_then(|name| name.as_deref())
+                        .and_then(|name| material_render_info.get(&name.to_ascii_lowercase()))
+                        .map_or(0, |material| material.placement)
+                })
+                .collect();
+            // UpdatePixMaps forces sky to zero even if slot zero happens to
+            // carry stale material metadata.
+            placements[0] = 0;
             // Per texmap slot: C4TexMapEntry's primary pattern plus the
             // material's secondary pattern.
             enum Slot<'a> {
@@ -2922,18 +3004,43 @@ impl GraphicsSystem {
                     }
                 })
                 .collect();
+            let placement_at = |x: i32, y: i32| {
+                landscape
+                    .grid_byte_with_border(x, y)
+                    .map_or(0, |byte| placements[usize::from(byte & 0x7f)])
+            };
             let cache = self
                 .landscape_cache
                 .as_mut()
                 .expect("rebuild installs cache and patch retains it");
             for (region_x, region_y, region_width, region_height) in regions {
-                for y in region_y as usize..(region_y + region_height) as usize {
-                    for x in region_x as usize..(region_x + region_width) as usize {
-                        let out = (y * width as usize + x) * 4;
+                for x in region_x as usize..(region_x + region_width) as usize {
+                    let x = x as i32;
+                    let first_y = region_y as i32;
+                    let mut above_density = 0;
+                    let mut below_density = 0;
+                    if shade_materials {
+                        for offset in 1..=8 {
+                            above_density += placement_at(x, first_y - offset - 1);
+                            below_density += placement_at(x, first_y + offset - 1);
+                        }
+                    }
+                    for y in region_y as usize..(region_y + region_height) as usize {
+                        let y = y as i32;
+                        if shade_materials {
+                            // Slide to the eight rows immediately above and
+                            // below this pixel before testing sky, exactly as
+                            // C4Landscape::ApplyLighting does.
+                            above_density -= placement_at(x, y - 9);
+                            above_density += placement_at(x, y - 1);
+                            below_density -= placement_at(x, y);
+                            below_density += placement_at(x, y + 8);
+                        }
+                        let out = (y as usize * width as usize + x as usize) * 4;
                         let output = &mut cache.pixels[out..out + 4];
                         output.fill(0);
                         if has_surface32_pixels {
-                            if let Some(color) = grid.surface32_pixel_at(x as i32, y as i32) {
+                            if let Some(color) = grid.surface32_pixel_at(x, y) {
                                 let [red, green, blue, transparency] = split_c4_color(color);
                                 output.copy_from_slice(&[
                                     red,
@@ -2944,7 +3051,7 @@ impl GraphicsSystem {
                                 continue;
                             }
                         }
-                        let byte = bytes[y * width as usize + x];
+                        let byte = bytes[y as usize * width as usize + x as usize];
                         // Pixel zero is sky. C4Landscape::GetClrByTex only
                         // applies material patterns when `pix` is nonzero
                         // (C4Landscape.cpp:2622-2632).
@@ -2959,9 +3066,38 @@ impl GraphicsSystem {
                                 texture,
                                 overlay,
                             } => {
-                                let color = compose_material_pixel(
-                                    material, byte, x as i32, y as i32, texture, *overlay,
+                                let mut color = compose_material_pixel(
+                                    material, byte, x, y, texture, *overlay,
                                 );
+                                if shade_materials {
+                                    let mut own_density = placements[index];
+                                    if own_density == 0 {
+                                        continue;
+                                    }
+                                    own_density = (2 * own_density
+                                        + placement_at(x - 1, y)
+                                        + placement_at(x + 1, y))
+                                        / 4;
+                                    let compare_density = above_density / 8;
+                                    if own_density > compare_density {
+                                        lighten_material_color(
+                                            &mut color,
+                                            (2 * (own_density - compare_density)).min(30),
+                                        );
+                                    } else if own_density < compare_density && own_density < 30 {
+                                        darken_material_color(
+                                            &mut color,
+                                            (2 * (compare_density - own_density)).min(30),
+                                        );
+                                    }
+                                    let compare_density = below_density / 8;
+                                    if own_density > compare_density {
+                                        darken_material_color(
+                                            &mut color,
+                                            (2 * (own_density - compare_density)).min(30),
+                                        );
+                                    }
+                                }
                                 output.copy_from_slice(&[color.r, color.g, color.b, color.a]);
                             }
                         }
@@ -10762,7 +10898,8 @@ mod tests {
             acid.value("TextureOverlay").map(ToOwned::to_owned),
             acid.int("OverlayType").unwrap_or(0),
             acid.int("Density").unwrap_or(0),
-        );
+        )
+        .with_placement(acid.int("Placement").unwrap_or(0));
         let mut graphics = GraphicsSystem::new(
             16,
             16,
@@ -14737,6 +14874,7 @@ mod tests {
             "width": 1,
             "surface": [1],
             "world_height": 1,
+            "shade_materials": false,
             "pixels": {
                 "width": 1,
                 "height": 1,
@@ -14937,6 +15075,7 @@ mod tests {
             "width": 1,
             "surface": [1],
             "world_height": 1,
+            "shade_materials": false,
             "pixels": {
                 "width": 1,
                 "height": 1,
@@ -15000,6 +15139,7 @@ mod tests {
             "width": 1,
             "surface": [1],
             "world_height": 1,
+            "shade_materials": false,
             "pixels": {
                 "width": 1,
                 "height": 1,
@@ -15036,6 +15176,8 @@ mod tests {
             grid: cached_grid,
             width: 1,
             height: 1,
+            shade_materials: false,
+            border_state: (0, 0, true, false, None),
             pixels: vec![64, 128, 192, 128],
         });
         graphics
@@ -15077,6 +15219,7 @@ mod tests {
                 "surface": [1],
                 "modulation": modulation,
                 "world_height": 1,
+                "shade_materials": false,
                 "pixels": {
                     "width": 1,
                     "height": 1,
@@ -15109,6 +15252,8 @@ mod tests {
                 grid: landscape.pixel_grid().expect("pixel grid").clone(),
                 width: 1,
                 height: 1,
+                shade_materials: false,
+                border_state: (0, 0, true, false, None),
                 pixels: vec![96, 144, 208, 255],
             });
             graphics
@@ -15184,6 +15329,192 @@ mod tests {
     }
 
     #[test]
+    fn landscape_placement_shading_matches_apply_lighting() {
+        fn render_rows(rows: &[u8], shade_materials: bool) -> Vec<Color> {
+            const WIDTH: u32 = 3;
+            let height = rows.len() as u32;
+            let bytes = rows
+                .iter()
+                .flat_map(|&byte| [byte; WIDTH as usize])
+                .collect();
+            let mut landscape = Landscape::flat(WIDTH, height as i32);
+            landscape.set_pixel_grid(PixelGrid::new(
+                WIDTH,
+                height,
+                bytes,
+                vec![0, 50, 50, 50],
+                vec![
+                    None,
+                    Some("High".to_string()),
+                    Some("Low".to_string()),
+                    Some("Threshold".to_string()),
+                ],
+                vec![
+                    None,
+                    Some("Neutral".to_string()),
+                    Some("Neutral".to_string()),
+                    Some("Neutral".to_string()),
+                ],
+            ));
+            landscape.set_shade_materials(shade_materials);
+
+            let mut graphics = GraphicsSystem::new(
+                WIDTH,
+                height,
+                height as i32,
+                "placement shading",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_material_textures(Arc::new(HashMap::from([(
+                "neutral".to_string(),
+                ImageData::new(1, 1, vec![128, 128, 128, 255]),
+            )])));
+            let base = [100, 100, 100, 0, 0, 0, 0, 0, 0];
+            graphics.set_material_render_info(Arc::new(HashMap::from([
+                (
+                    "high".to_string(),
+                    MaterialRenderInfo::new(base, [0; 6], None, 0, 50).with_placement(70),
+                ),
+                (
+                    "low".to_string(),
+                    MaterialRenderInfo::new(base, [0; 6], None, 0, 50).with_placement(10),
+                ),
+                (
+                    "threshold".to_string(),
+                    MaterialRenderInfo::new(base, [0; 6], None, 0, 50).with_placement(30),
+                ),
+            ])));
+            assert!(graphics.draw_ground_textured(Some(&landscape), None));
+            let cache = graphics.landscape_cache.as_ref().expect("cache built");
+            (0..height as usize)
+                .map(|y| {
+                    let offset = (y * WIDTH as usize + 1) * 4;
+                    Color::new(
+                        cache.pixels[offset],
+                        cache.pixels[offset + 1],
+                        cache.pixels[offset + 2],
+                        cache.pixels[offset + 3],
+                    )
+                })
+                .collect()
+        }
+
+        let mut sky_to_high = vec![0; 8];
+        sky_to_high.extend(vec![1; 22]);
+        let shaded = render_rows(&sky_to_high, true);
+        assert_eq!(shaded[7], Color::new(0, 0, 0, 0));
+        assert_eq!(
+            shaded[8],
+            Color::opaque(130, 130, 130),
+            "the first dense row lightens by the capped above-placement delta"
+        );
+        assert_eq!(shaded[16], Color::opaque(100, 100, 100));
+        assert_eq!(
+            render_rows(&sky_to_high, false)[8],
+            Color::opaque(100, 100, 100),
+            "ShadeMaterials=0 retains the unshaded material pattern"
+        );
+
+        let mut high_to_sky = vec![1; 9];
+        high_to_sky.extend(vec![0; 21]);
+        assert_eq!(
+            render_rows(&high_to_sky, true)[8],
+            Color::opaque(70, 70, 70),
+            "a dense row over lower placement darkens through BelowDensity"
+        );
+
+        let mut high_to_low = vec![1; 8];
+        high_to_low.extend(vec![2; 22]);
+        assert_eq!(
+            render_rows(&high_to_low, true)[8],
+            Color::opaque(70, 70, 70),
+            "placement below 30 darkens against denser rows above"
+        );
+        let mut high_to_threshold = vec![1; 8];
+        high_to_threshold.extend(vec![3; 22]);
+        assert_eq!(
+            render_rows(&high_to_threshold, true)[8],
+            Color::opaque(100, 100, 100),
+            "the asymmetric above-darkening arm excludes own placement 30"
+        );
+    }
+
+    #[test]
+    fn landscape_placement_shading_expands_warm_cache_relight_region() {
+        const WIDTH: u32 = 25;
+        const HEIGHT: u32 = 25;
+        const CHANGE_X: i32 = 12;
+        const CHANGE_Y: i32 = 12;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            vec![0, 50, 50],
+            vec![None, Some("High".to_string()), Some("Low".to_string())],
+            vec![
+                None,
+                Some("Neutral".to_string()),
+                Some("Neutral".to_string()),
+            ],
+        ));
+        landscape.set_shade_materials(true);
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            HEIGHT,
+            HEIGHT as i32,
+            "placement shading cache",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "neutral".to_string(),
+            ImageData::new(1, 1, vec![128, 128, 128, 255]),
+        )])));
+        let base = [100, 100, 100, 0, 0, 0, 0, 0, 0];
+        graphics.set_material_render_info(Arc::new(HashMap::from([
+            (
+                "high".to_string(),
+                MaterialRenderInfo::new(base, [0; 6], None, 0, 50).with_placement(70),
+            ),
+            (
+                "low".to_string(),
+                MaterialRenderInfo::new(base, [0; 6], None, 0, 50).with_placement(10),
+            ),
+        ])));
+
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 2);
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            3 * 17,
+            "Relight expands one Surface8 change by x=1 and y=8"
+        );
+        let cache = graphics.landscape_cache.as_ref().expect("cache patched");
+        let color_at = |x: i32, y: i32| {
+            let offset = (y as usize * WIDTH as usize + x as usize) * 4;
+            Color::new(
+                cache.pixels[offset],
+                cache.pixels[offset + 1],
+                cache.pixels[offset + 2],
+                cache.pixels[offset + 3],
+            )
+        };
+        assert_eq!(color_at(CHANGE_X, CHANGE_Y - 1), Color::opaque(84, 84, 84));
+        assert_eq!(
+            color_at(CHANGE_X, CHANGE_Y + 1),
+            Color::opaque(116, 116, 116)
+        );
+    }
+
+    #[test]
     fn opaque_landscape_blit_does_not_sample_the_destination() {
         // GL_SRC_ALPHA with source alpha one is algebraically a source copy;
         // C++ submits the visible Surface32 as one hardware blit instead of
@@ -15202,6 +15533,7 @@ mod tests {
             vec![None, Some("Earth".to_string())],
             vec![None, Some("Rough".to_string())],
         ));
+        landscape.set_shade_materials(false);
         let mut graphics = GraphicsSystem::new(
             WIDTH,
             HEIGHT,
@@ -15255,6 +15587,7 @@ mod tests {
             vec![None, Some("Earth".to_string())],
             vec![None, Some("Rough".to_string())],
         ));
+        landscape.set_shade_materials(false);
         let mut graphics = GraphicsSystem::new(
             WIDTH,
             1,
@@ -15338,6 +15671,7 @@ mod tests {
             vec![None, Some("Earth".to_string()), Some("Earth".to_string())],
             vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
         ));
+        landscape.set_shade_materials(false);
         let mut graphics = GraphicsSystem::new(
             1,
             1,
@@ -15454,6 +15788,7 @@ mod tests {
             vec![None, Some("Earth".to_string())],
             vec![None, Some("Rough".to_string())],
         ));
+        resized.set_shade_materials(false);
         reset_material_composition_calls();
         assert!(graphics.draw_ground_textured(Some(&resized), None));
         assert_eq!(
