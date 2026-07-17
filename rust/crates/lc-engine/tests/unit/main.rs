@@ -28341,6 +28341,82 @@ protected func Activity() { SetActionTargets(); return(1); }
     }
 
     #[test]
+    fn pxs_wind_drift_uses_the_grid_ift_bit() {
+        // GBackIFT reads the live landscape byte's 0x80 bit through GetPix,
+        // not only the fixture tunnel columns (C4Wrappers.h:159-162). PXS
+        // therefore sees wind zero at an IFT grid pixel (C4PXS.cpp:62-74).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Dust]
+            Name=Dust
+            Density=25
+            WindDrift=30
+            SplashRate=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let dust = materials.id_of("Dust").expect("dust exists");
+
+        let build_engine = |ift: bool| {
+            let mut engine = Engine::with_seed(21);
+            engine.set_materials(materials.clone());
+            let mut bytes = vec![0_u8; 8 * 100];
+            if ift {
+                bytes[5 * 8 + 2] = 0x80;
+            }
+            let grid = landscape::PixelGrid::new(
+                8,
+                100,
+                bytes,
+                vec![0],
+                vec![None],
+                vec![None],
+            );
+            let mut landscape = Landscape::flat(8, 100);
+            landscape.set_pixel_grid(grid);
+            engine.set_landscape(landscape);
+            engine.set_environment(EnvironmentSettings::new(80));
+            assert!(engine.pxs_system.create(
+                dust,
+                math::itofix(2),
+                math::itofix(5),
+                math::C4Fixed::ZERO,
+                math::C4Fixed::ZERO,
+            ));
+            engine
+        };
+
+        let mut ift_engine = build_engine(true);
+        assert!(ift_engine
+            .landscape()
+            .is_some_and(|landscape| landscape.is_ift_at(2, 5)));
+        let mut mirror = ift_engine.rng.clone();
+        let r1 = mirror.random(1200);
+        let _ = mirror.random(1200);
+        let expected_ift_xdir =
+            math::fixed256(r1 - 600) * 10 * math::itofix_prec(1, 800);
+        ift_engine.tick_pxs();
+        let ift_pixel: Vec<pxs::Pxs> = ift_engine.pxs_system.iter().copied().collect();
+        assert_eq!(ift_pixel.len(), 1);
+        assert_eq!(ift_pixel[0].xdir, expected_ift_xdir, "IFT grid byte reads wind 0");
+        assert_eq!(ift_engine.rng, mirror, "jitter draws remain unconditional");
+
+        let mut open_engine = build_engine(false);
+        assert!(open_engine
+            .landscape()
+            .is_some_and(|landscape| !landscape.is_ift_at(2, 5)));
+        open_engine.tick_pxs();
+        let open_pixel: Vec<pxs::Pxs> = open_engine.pxs_system.iter().copied().collect();
+        assert_eq!(open_pixel.len(), 1);
+        let open_txdir = math::itofix_prec(80, 15) + math::fixed256(r1 - 600);
+        let expected_open_xdir = open_txdir * 10 * math::itofix_prec(1, 800);
+        assert_eq!(open_pixel[0].xdir, expected_open_xdir);
+        assert_ne!(open_pixel[0].xdir, ift_pixel[0].xdir);
+        assert_eq!(open_engine.rng, mirror, "both paths consume two draws");
+    }
+
+    #[test]
     fn dig_procedure_uses_dig_physical_speed() {
         let script = r#"
         global func Initialize(state, random) {

@@ -40522,7 +40522,7 @@ impl Engine {
         let in_tunnel = self
             .landscape
             .as_ref()
-            .map(|landscape| landscape.is_tunnel_at(x, y))
+            .map(|landscape| landscape.is_ift_at(x, y))
             .unwrap_or(false);
         if in_tunnel {
             0
