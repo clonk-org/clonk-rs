@@ -671,31 +671,53 @@ impl Tree {
         false
     }
 
+    /// AlgoPolygon's backward `u` scan and `pStartChild` selection
+    /// (src/C4MapCreatorS2.cpp:1487-1497).
+    fn algo_polygon_start_state(
+        &self,
+        id: NodeId,
+        iy: i32,
+    ) -> Option<(usize, i32, i32, i32)> {
+        let children = &self.nodes[id].children;
+        if children.is_empty() {
+            return None;
+        }
+
+        // C++ scans ChildL backwards only while pChild->Prev exists. Child0
+        // is therefore never examined here, even when it is a point. The
+        // cursor still ends on Child0, so pStartChild is its Next sibling.
+        let (mut ux, mut uy, mut lx) = (0, 0, 0);
+        let mut scan = children.len() - 1;
+        while scan > 0 {
+            if let NodeKind::Point(point) = &self.nodes[children[scan]].kind {
+                ux = point.x * 100;
+                lx = ux;
+                uy = point.y * 100;
+                if uy != iy {
+                    break;
+                }
+            }
+            scan -= 1;
+        }
+        let start = (scan + 1) % children.len();
+        Some((start, ux, uy, lx))
+    }
+
     /// AlgoPolygon (src/C4MapCreatorS2.cpp:1474-1564): even-odd ray cast
     /// over the overlay's child points (coordinates scaled by 100).
     fn algo_polygon(&self, id: NodeId, ix: i32, iy: i32) -> bool {
-        let points: Vec<(i32, i32)> = self.nodes[id]
-            .children
-            .iter()
-            .filter_map(|&child| match &self.nodes[child].kind {
-                NodeKind::Point(point) => Some((point.x * 100, point.y * 100)),
-                _ => None,
-            })
-            .collect();
-        if points.is_empty() {
+        let children = &self.nodes[id].children;
+        let Some((start, mut ux, mut uy, mut lx)) = self.algo_polygon_start_state(id, iy) else {
             return false;
-        }
-        // Get a start point with uY != iY, or the first.
-        let start = points
-            .iter()
-            .rposition(|&(_, y)| y != iy)
-            .unwrap_or(points.len() - 1);
-        let (mut ux, mut uy) = points[start];
-        let mut lx = ux;
+        };
         let mut count = 0;
         let mut ignore = false;
-        for offset in 1..=points.len() {
-            let (cx, cy) = points[(start + offset) % points.len()];
+        for offset in 0..children.len() {
+            let child = children[(start + offset) % children.len()];
+            let NodeKind::Point(point) = &self.nodes[child].kind else {
+                continue;
+            };
+            let (cx, cy) = (point.x * 100, point.y * 100);
             if ignore {
                 if cy == iy {
                     if ((lx < ix) == (ix < cx)) || cx == ix {
@@ -1597,6 +1619,127 @@ mod tests {
             LegacyC4SVal::new(20, 0, 10, 250),
             LegacyC4SVal::new(10, 0, 10, 250),
         )
+    }
+
+    fn polygon_tree(points: &[(i32, i32)]) -> (Tree, NodeId) {
+        let mut tree = Tree::new();
+        let mut overlay = Overlay::default_template();
+        overlay.algorithm = Algo::Poly;
+        let polygon = tree.add(0, String::new(), NodeKind::Overlay(overlay));
+        for &(x, y) in points {
+            tree.add(
+                polygon,
+                String::new(),
+                NodeKind::Point(Point {
+                    x,
+                    y,
+                    ..Point::default()
+                }),
+            );
+        }
+        (tree, polygon)
+    }
+
+    fn bitmap_indices(rows: &[&str], filled: u8) -> Vec<u8> {
+        rows.iter()
+            .flat_map(|row| row.bytes())
+            .map(|byte| if byte == b'#' { filled } else { 0 })
+            .collect()
+    }
+
+    #[test]
+    fn polygon_start_scan_excludes_child_zero_node_like_cpp() {
+        let (triangle, polygon) = polygon_tree(&[(5, 0), (3, 10), (7, 10)]);
+        for ix in [0, 100, 200] {
+            assert!(
+                triangle.algo_polygon(polygon, ix, 1000),
+                "the closing edge includes ix={ix} on the horizontal base row"
+            );
+        }
+
+        let (all_on_row, polygon) = polygon_tree(&[(5, 10), (3, 10), (7, 10)]);
+        assert_eq!(
+            all_on_row.algo_polygon_start_state(polygon, 1000),
+            Some((1, 300, 1000, 300)),
+            "scan exhaustion leaves u at child 1 and starts at child 1"
+        );
+
+        // The exclusion is by child NODE, not filtered point index. Child 1
+        // is a non-point start while u/lx remain the on-row point at child 2.
+        let (mut mixed, polygon) = polygon_tree(&[(5, 0)]);
+        mixed.add(
+            polygon,
+            String::new(),
+            NodeKind::Overlay(Overlay::default_template()),
+        );
+        for x in [3, 7] {
+            mixed.add(
+                polygon,
+                String::new(),
+                NodeKind::Point(Point {
+                    x,
+                    y: 10,
+                    ..Point::default()
+                }),
+            );
+        }
+        assert_eq!(
+            mixed.algo_polygon_start_state(polygon, 1000),
+            Some((1, 300, 1000, 300))
+        );
+    }
+
+    #[test]
+    fn polygon_triangle_and_quad_match_cpp_full_grid_golden() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let triangle = create_s2_map(
+            "map Triangle { seed=1; mat=Earth; tex=Smooth3; sub=0; algo=poly; \
+             point { x=5px; y=0px; }; point { x=3px; y=10px; }; \
+             point { x=7px; y=10px; }; };",
+            &mut classifier,
+            LegacyC4SVal::new(10, 0, 10, 10),
+            LegacyC4SVal::new(11, 0, 11, 11),
+            false,
+            1,
+            &mut rng,
+        )
+        .expect("triangle map renders");
+        assert_eq!(
+            triangle.indices,
+            bitmap_indices(
+                &[
+                    ".....#....",
+                    ".....#....",
+                    ".....#....",
+                    ".....#....",
+                    ".....#....",
+                    "....###...",
+                    "....###...",
+                    "....###...",
+                    "....###...",
+                    "....###...",
+                    "########..",
+                ],
+                1,
+            )
+        );
+
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let quad = create_s2_map(
+            "map Quad { seed=1; mat=Earth; tex=Smooth3; sub=0; algo=poly; \
+             point { x=0px; y=0px; }; point { x=10px; y=0px; }; \
+             point { x=10px; y=10px; }; point { x=0px; y=10px; }; };",
+            &mut classifier,
+            LegacyC4SVal::new(11, 0, 11, 11),
+            LegacyC4SVal::new(11, 0, 11, 11),
+            false,
+            1,
+            &mut rng,
+        )
+        .expect("quad map renders");
+        assert_eq!(quad.indices, vec![1; 11 * 11]);
     }
 
     #[test]
