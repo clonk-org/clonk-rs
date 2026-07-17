@@ -3484,7 +3484,13 @@ impl GraphicsSystem {
         let bottom = Self::sky_fade_color(settings, view_bottom, self.world_height);
         let top = Color::opaque(top.r, top.g, top.b);
         let bottom = Color::opaque(bottom.r, bottom.g, bottom.b);
-        self.fill_vertical_gradient(top, bottom, lighting, gamma);
+        self.fill_vertical_gradient_modulated(
+            top,
+            bottom,
+            lighting,
+            settings.modulation,
+            gamma,
+        );
     }
 
     /// C4Sky::GetSkyFadeClr (C4Sky.cpp:230-236): integer fade between
@@ -3512,15 +3518,33 @@ impl GraphicsSystem {
         lighting: f32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        self.fill_vertical_gradient_modulated(top, bottom, lighting, None, gamma);
+    }
+
+    fn fill_vertical_gradient_modulated(
+        &mut self,
+        top: Color,
+        bottom: Color,
+        lighting: f32,
+        modulation: Option<u32>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
         if self.surface_width == 0 || self.surface_height == 0 {
             return;
         }
         let fog = self.fog_box_sampler(true);
         let height = self.surface_height.saturating_sub(1).max(1);
+        // DrawBoxFade applies the active Sky.Modulation to each color vertex
+        // before DrawQuadDw adds ClrModMap modulation at that same vertex.
+        let color_at_y = |t: f32| {
+            let color = Self::apply_lighting(Self::lerp_color(top, bottom, t), lighting);
+            modulation.map_or(color, |modulation| {
+                modulate_surface_color(color, modulation)
+            })
+        };
         for y in 0..self.surface_height {
             let t = y as f32 / height as f32;
-            let blended = Self::lerp_color(top, bottom, t);
-            let tinted = Self::apply_lighting(blended, lighting);
+            let tinted = color_at_y(t);
             for x in 0..self.surface_width {
                 let tinted = fog.as_ref().map_or(tinted, |(fog, sampler)| {
                     sampler.as_ref().map_or_else(
@@ -3533,10 +3557,7 @@ impl GraphicsSystem {
                                     let t = (vertex_y * self.surface_height as f32
                                         / height as f32)
                                         .clamp(0.0, 1.0);
-                                    Self::apply_lighting(
-                                        Self::lerp_color(top, bottom, t),
-                                        lighting,
-                                    )
+                                    color_at_y(t)
                                 },
                             )
                         },
@@ -3646,6 +3667,15 @@ impl GraphicsSystem {
                 |x, y| (x, y),
             )
         });
+        // C4Sky leaves this packed modulation active while PerformBlt folds
+        // the ClrModMap into every vertex. Keeping the two values in the blit
+        // state preserves native `ModulateClr` ordering and transparency.
+        let base_blit = SpriteBlitState {
+            mode: 0,
+            modulation,
+            fog_modulation: None,
+        };
+        let uses_blit_modulation = fog.is_some() || modulation.is_some();
         for y in source_top as u32..source_bottom as u32 {
             let target_y = dest_y + y as i32;
             for x in source_left as u32..source_right as u32 {
@@ -3654,24 +3684,21 @@ impl GraphicsSystem {
                 if idx + 3 >= pixels.len() {
                     continue;
                 }
-                let mut color = Color::new(
+                let color = Color::new(
                     pixels[idx],
                     pixels[idx + 1],
                     pixels[idx + 2],
                     pixels[idx + 3],
-                );
+                )
+                .modulate(lighting);
                 if color.a == 0 {
                     continue;
                 }
-                if let Some(modulation) = modulation {
-                    color = Self::apply_modulation(color, modulation);
-                }
-                color = color.modulate(lighting);
-                if let Some(fog) = fog.as_ref() {
+                if uses_blit_modulation {
                     let pixel_blit = fog_sprite_blit_at(
                         fog_sampler.as_ref(),
-                        Some(fog),
-                        SpriteBlitState::normal(),
+                        fog.as_ref(),
+                        base_blit,
                         (x as f32 + 0.5 - source_left as f32) / visible_width as f32,
                         (y as f32 + 0.5 - source_top as f32) / visible_height as f32,
                         target_x,
@@ -3733,16 +3760,6 @@ impl GraphicsSystem {
         let g = ((value >> 8) & 0xff) as u8;
         let b = (value & 0xff) as u8;
         Color::opaque(r, g, b)
-    }
-
-    fn apply_modulation(color: Color, modulation: u32) -> Color {
-        let mod_r = ((modulation >> 16) & 0xff) as u8;
-        let mod_g = ((modulation >> 8) & 0xff) as u8;
-        let mod_b = (modulation & 0xff) as u8;
-        let r = ((color.r as u16 * mod_r as u16) / 255) as u8;
-        let g = ((color.g as u16 * mod_g as u16) / 255) as u8;
-        let b = ((color.b as u16 * mod_b as u16) / 255) as u8;
-        Color::new(r, g, b, color.a)
     }
 
     fn draw_pxs(
@@ -9527,6 +9544,80 @@ mod tests {
             graphics.surface().get_pixel(0, 0),
             Some(Color::opaque(0, 255, 0))
         );
+    }
+
+    #[test]
+    fn sky_modulation_combines_with_fog_vertices_and_keeps_packed_alpha() {
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "FoW sky modulation",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 255, 0));
+        graphics.active_fog_map = Some(Arc::new(ClrModMap {
+            resolution_x: 64,
+            resolution_y: 64,
+            width: 2,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: vec![0x00ff_ffff; 4],
+        }));
+
+        graphics.blit_sky_tile(
+            &ImageData::new(1, 1, vec![255, 0, 0, 255]),
+            0,
+            0,
+            Some(0x80ff_ffff),
+            1.0,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::opaque(127, 128, 0)),
+            "Sky.Modulation is combined with GetModAt by packed ModulateClr before blending",
+        );
+    }
+
+    #[test]
+    fn fogged_sky_gradient_applies_global_modulation_before_the_map() {
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "FoW gradient modulation",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.active_fog_map = Some(Arc::new(ClrModMap {
+            resolution_x: 64,
+            resolution_y: 64,
+            width: 2,
+            height: 2,
+            origin_x: 0,
+            origin_y: 0,
+            fade_transparent: false,
+            cells: vec![0x00ff_ffff; 4],
+        }));
+        let settings = SkySettings {
+            fade_top: RgbColor::new(255, 255, 255),
+            fade_bottom: RgbColor::new(255, 255, 255),
+            modulation: Some(0x0080_8080),
+            ..SkySettings::default()
+        };
+
+        graphics.fill_sky_gradient(&settings, 1.0, None);
+
+        assert_eq!(graphics.surface().get_pixel(0, 0), Some(gray(126)));
     }
 
     #[test]
