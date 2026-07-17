@@ -7950,6 +7950,38 @@ fn select_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(true))
 }
 
+/// FnClearMenuItems (C4Script.cpp:5149-5159) -> C4Menu::ClearItems(true)
+/// (C4Menu.cpp:975-988): delete every item, reset the selection, and keep
+/// the menu open. The `true` is fResetSelection; SetSelection receives
+/// fDoCalls=false, so OnMenuSelection deliberately does not run.
+fn clear_menu_items(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "ClearMenuItems",
+        "obj",
+    )?;
+    let Some(target) = target.or(active_object_id()) else {
+        return Ok(Value::Bool(false));
+    };
+    let menu = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_menu(target))
+    });
+    let Some(mut menu) = menu else {
+        return Ok(Value::Bool(false));
+    };
+    menu.items.clear();
+    menu.selection = -1;
+    let stored = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.set_object_menu(target, Some(menu)))
+            .unwrap_or(false)
+    });
+    Ok(Value::Bool(stored))
+}
+
 /// FnCloseMenu (C4Script.cpp:4309-4314): pObj->CloseMenu(true) — the
 /// forced close never asks MenuQueryCancel and always reports success.
 fn close_menu(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -13893,6 +13925,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
     script.register_host_function("AddMenuItem", add_menu_item);
+    script.register_host_function("ClearMenuItems", clear_menu_items);
     script.register_host_function("CloseMenu", close_menu);
     script.register_host_function("CreateMenu", create_menu);
     script.register_host_function("GetMenu", get_menu);
@@ -47271,6 +47304,7 @@ mod tests {
         "CheckEffect",
         "CheckEnergyNeedChain",
         "ClearLastPlrCom",
+        "ClearMenuItems",
         "ClearParticles",
         "CloseMenu",
         "Collect",

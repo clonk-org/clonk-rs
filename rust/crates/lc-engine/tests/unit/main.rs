@@ -21599,6 +21599,91 @@ func Trigger() {
     }
 
     #[test]
+    fn clear_menu_items_resets_without_callback_and_keeps_the_menu_open() {
+        // FnClearMenuItems -> C4Menu::ClearItems(true) (C4Script.cpp:
+        // 5149-5159; C4Menu.cpp:975-988): `true` resets the selection, but
+        // SetSelection receives fDoCalls=false, so OnMenuSelection does NOT
+        // run. The menu allocation and identity remain active.
+        let script = r#"#strict
+local selection_calls, last_selection, cancel_calls;
+func OnMenuSelection(selection, menu_object) {
+    selection_calls += 1;
+    last_selection = selection;
+}
+func MenuQueryCancel() { cancel_calls += 1; return true; }
+func ClearWithoutObject() { return ClearMenuItems(); }
+func NoObject() { return DefinitionCall(CLNK, "ClearWithoutObject"); }
+func NoMenu() { return ClearMenuItems(); }
+func OpenMenu() {
+    CreateMenu(WIPF, this(), this(), 0, "Choose");
+    AddMenuItem("A", "CmdA", WIPF, this());
+    AddMenuItem("B", "CmdB", WIPF, this());
+    SelectMenuItem(1, this());
+    return true;
+}
+func ResetCallbacks() {
+    selection_calls = 0;
+    last_selection = 99;
+    cancel_calls = 0;
+    return true;
+}
+func Clear() { return ClearMenuItems(); }
+func AddAgain() { return AddMenuItem("C", "CmdC", WIPF, this()); }
+func ReadMenu() { return GetMenu(); }
+"#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str| {
+            let index = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(index, name, Vec::new())
+                .expect("call succeeds")
+        };
+        assert_eq!(call(&mut engine, "NoObject"), Value::Bool(false));
+        assert_eq!(call(&mut engine, "NoMenu"), Value::Bool(false));
+        assert_eq!(call(&mut engine, "OpenMenu"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "ResetCallbacks"), Value::Bool(true));
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.items.len(), 2);
+        assert_eq!(menu.selection, 1);
+
+        assert_eq!(call(&mut engine, "Clear"), Value::Bool(true));
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("ClearMenuItems keeps the menu open");
+        assert!(menu.items.is_empty());
+        assert_eq!(menu.selection, -1);
+        assert_eq!(call(&mut engine, "ReadMenu"), Value::C4Id("WIPF".into()));
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        let locals = &engine.objects[index].state.local_vars;
+        assert_eq!(locals.get("selection_calls"), Some(&Value::Nil));
+        assert_eq!(locals.get("last_selection"), Some(&Value::Int(99)));
+        assert_eq!(locals.get("cancel_calls"), Some(&Value::Nil));
+
+        assert_eq!(call(&mut engine, "AddAgain"), Value::Bool(true));
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("same menu remains open");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.selection, 0);
+        assert_eq!(call(&mut engine, "Clear"), Value::Bool(true));
+    }
+
+    #[test]
     fn exit_closes_the_object_menu_like_cpp() {
         // C4Object::Exit (C4Object.cpp:1530-1562) force-closes the exiting
         // object's menu among its "Misc updates" (CloseMenu(true),
