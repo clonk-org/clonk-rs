@@ -39350,6 +39350,21 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             tracing::debug!(?section, %entry, "GetObjectInfoCoreVal section not modeled; nil");
             return Ok(Value::Nil);
         }
+        if entry == "ExtraData" {
+            let path = ["ObjectInfo", "ExtraData"];
+            let mut reflection = ObjectValueReflection::default();
+            reflection.push(
+                &path,
+                Value::Int(i32::try_from(info.extra_data.len()).unwrap_or(i32::MAX)),
+            );
+            for (name, value) in &info.extra_data {
+                reflection.push(&path, Value::String(name.clone()));
+                push_reflected_c4value(&mut reflection, &path, value);
+            }
+            return Ok(reflection
+                .get(&entry, section.as_deref(), entry_number)
+                .unwrap_or(Value::Nil));
+        }
         if entry_number != 0 {
             return Ok(Value::Nil);
         }
@@ -39373,7 +39388,6 @@ fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Birthday" => Value::Int(info.birthday),
             "TotalPlayingTime" => Value::Int(info.total_playing_time),
             "Age" => Value::Int(info.age),
-            "ExtraData" => Value::Int(i32::try_from(info.extra_data.len()).unwrap_or(i32::MAX)),
             other => {
                 tracing::debug!(entry = other, "GetObjectInfoCoreVal entry not modeled; nil");
                 Value::Nil

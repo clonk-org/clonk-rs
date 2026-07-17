@@ -45784,6 +45784,33 @@ func RemoveAndRecruit(object target) {
         }
     }
 
+    fn crew_info_with_extra_data(
+        extra_data: Vec<(String, Value)>,
+    ) -> player_file::CrewInfo {
+        player_file::CrewInfo {
+            id: "CLNK".to_string(),
+            name: "Extra data crew".to_string(),
+            death_message: String::new(),
+            core: CrewInfoCoreFields::default(),
+            rank: 0,
+            rank_name: "Clonk".to_string(),
+            experience: 0,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data,
+            portraits: Default::default(),
+        }
+    }
+
     #[test]
     fn object_info_core_reflects_fresh_custom_progression_and_all_scalar_fields() {
         let script = r#"#strict 2
@@ -45899,6 +45926,146 @@ func ReadCore()
             Value::String("123456789012345678901234567890".to_string())
         );
         assert_eq!(half[10], Value::Int(500));
+    }
+
+    #[test]
+    fn object_info_core_extra_data_reflects_scalar_compiler_primitives() {
+        // C4ValueMapData::CompileFunc emits the count, then each raw name and
+        // C4Value's type tag/payload. C4Value::CompileFunc serializes bool,
+        // C4ID, object, and string payloads as integer primitives; a runtime
+        // string that has not passed EnumStrings still carries enum ID -1.
+        let script = r#"#strict 2
+func ReadExtra(int entry_nr)
+{
+    return GetObjectInfoCoreVal("ExtraData", "ObjectInfo", nil, entry_nr);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target definition registers");
+        let mut crew = Definition::from_script("CLNK", "Clonk", script)
+            .expect("extra-data reflection fixture compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("object-payload target spawns");
+
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CLNK".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(rank_join_config(vec![crew_info_with_extra_data(vec![
+                ("number".to_string(), Value::Int(-7)),
+                ("flag".to_string(), Value::Bool(true)),
+                ("kind".to_string(), Value::C4Id("ABCD".to_string())),
+                ("target".to_string(), Value::Object(target.as_u64())),
+                ("text".to_string(), Value::String("hello".to_string())),
+            ])]))
+            .expect("extra-data owner joins");
+        let crew = engine.player(0).expect("owner exists").crew()[0];
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let mut read = |entry_nr| {
+            engine
+                .call_object_function(crew_index, "ReadExtra", vec![Value::Int(entry_nr)])
+                .expect("extra-data primitive reflects")
+        };
+
+        let expected = [
+            Value::Int(5),
+            Value::String("number".to_string()),
+            Value::String("i".to_string()),
+            Value::Int(-7),
+            Value::String("flag".to_string()),
+            Value::String("b".to_string()),
+            Value::Int(1),
+            Value::String("kind".to_string()),
+            Value::String("I".to_string()),
+            Value::Int(lc_script::c4_id_raw("ABCD") as i32),
+            Value::String("target".to_string()),
+            Value::String("O".to_string()),
+            Value::Int(target.as_u64() as i32),
+            Value::String("text".to_string()),
+            Value::String("S".to_string()),
+            Value::Int(-1),
+        ];
+        let out_of_range = expected.len() as i32;
+        for (entry_nr, expected) in expected.into_iter().enumerate() {
+            assert_eq!(read(entry_nr as i32), expected, "EntryNr {entry_nr}");
+        }
+        assert_eq!(read(out_of_range), Value::Nil);
+        assert_eq!(read(-1), Value::Nil);
+        assert_eq!(read(i32::MIN), Value::Nil, "signed-overflow input is hardened");
+    }
+
+    #[test]
+    fn object_info_core_extra_data_recurses_through_arrays_and_maps() {
+        // C4Value arrays and maps serialize depth-first. C4ValueHash iterates
+        // its stable keyOrder, represented by ValueMap's insertion order.
+        let script = r#"#strict 2
+func ReadExtra(int entry_nr)
+{
+    return GetObjectInfoCoreVal("ExtraData", "ObjectInfo", nil, entry_nr);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut crew = Definition::from_script("CLNK", "Clonk", script)
+            .expect("recursive extra-data fixture compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+
+        let mut map = lc_script::ValueMap::new();
+        map.insert_key(Value::Int(1), Value::Bool(true));
+        map.insert_key(
+            Value::C4Id("ABCD".to_string()),
+            Value::Array(vec![Value::Int(-3), Value::Nil]),
+        );
+        let tree = Value::Array(vec![Value::Int(7), Value::Proplist(map)]);
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CLNK".to_string(), 1)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(rank_join_config(vec![crew_info_with_extra_data(vec![(
+                "tree".to_string(),
+                tree,
+            )])]))
+            .expect("recursive extra-data owner joins");
+        let crew = engine.player(0).expect("owner exists").crew()[0];
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        let mut read = |entry_nr| {
+            engine
+                .call_object_function(crew_index, "ReadExtra", vec![Value::Int(entry_nr)])
+                .expect("recursive extra-data primitive reflects")
+        };
+
+        let expected = [
+            Value::Int(1),
+            Value::String("tree".to_string()),
+            Value::String("a".to_string()),
+            Value::Int(2),
+            Value::String("i".to_string()),
+            Value::Int(7),
+            Value::String("m".to_string()),
+            Value::Int(2),
+            Value::String("i".to_string()),
+            Value::Int(1),
+            Value::String("b".to_string()),
+            Value::Int(1),
+            Value::String("I".to_string()),
+            Value::Int(lc_script::c4_id_raw("ABCD") as i32),
+            Value::String("a".to_string()),
+            Value::Int(2),
+            Value::String("i".to_string()),
+            Value::Int(-3),
+            Value::String("A".to_string()),
+            Value::Int(0),
+        ];
+        let out_of_range = expected.len() as i32;
+        for (entry_nr, expected) in expected.into_iter().enumerate() {
+            assert_eq!(read(entry_nr as i32), expected, "EntryNr {entry_nr}");
+        }
+        assert_eq!(read(out_of_range), Value::Nil);
     }
 
     #[test]
