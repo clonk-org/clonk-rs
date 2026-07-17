@@ -1257,6 +1257,26 @@ fn resolve_reaction_targets(
     by_name: &HashMap<String, MaterialId>,
 ) -> Vec<Option<MaterialId>> {
     let normalized = normalize_key(target_spec);
+    // C4MaterialMap::CrossMapMaterials tries a literal material first and
+    // only interprets TargetSpec as a category keyword when Get() fails
+    // (C4Material.cpp:392-411). Thus a real material named "Solid", "Sky",
+    // etc. shadows the corresponding keyword.
+    if let Some(&id) = by_name.get(&normalized) {
+        if inverse {
+            let mut targets = Vec::with_capacity(materials.len() + 1);
+            targets.push(None);
+            targets.extend(materials.iter().filter_map(|material| {
+                let candidate = material.id();
+                if candidate == id {
+                    None
+                } else {
+                    Some(Some(candidate))
+                }
+            }));
+            return targets;
+        }
+        return vec![Some(id)];
+    }
     match normalized.as_str() {
         "all" => {
             if inverse {
@@ -1311,27 +1331,7 @@ fn resolve_reaction_targets(
         "corrode" => {
             collect_targets_by_predicate(materials, inverse, true, |mat| mat.corrode() > 0)
         }
-        _ => {
-            if let Some(&id) = by_name.get(&normalized) {
-                if inverse {
-                    let mut targets = Vec::with_capacity(materials.len() + 1);
-                    targets.push(None);
-                    targets.extend(materials.iter().filter_map(|material| {
-                        let candidate = material.id();
-                        if candidate == id {
-                            None
-                        } else {
-                            Some(Some(candidate))
-                        }
-                    }));
-                    targets
-                } else {
-                    vec![Some(id)]
-                }
-            } else {
-                Vec::new()
-            }
-        }
+        _ => Vec::new(),
     }
 }
 
@@ -1708,6 +1708,88 @@ mod tests {
             MaterialReactionKind::None,
             "a [Reaction] without Type= also binds NoReaction",
         );
+    }
+
+    #[test]
+    fn custom_reaction_literal_name_shadows_keyword_with_inverse_sky_semantics() {
+        let set = build_material_set(
+            r#"
+            [Material Direct]
+            Name=Direct
+            Density=20
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=sOlId
+
+            [Material Inverse]
+            Name=Inverse
+            Density=20
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=SOLID
+            InverseSpec=1
+
+            [Material Solid]
+            Name=Solid
+            Density=10
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+            "#,
+        );
+        let direct = set.id_of("Direct").expect("direct source exists");
+        let inverse = set.id_of("Inverse").expect("inverse source exists");
+        let literal = set.id_of("Solid").expect("literal Solid exists");
+        let rock = set.id_of("Rock").expect("solid-density material exists");
+
+        let direct_literal = set.reaction(Some(direct), Some(literal));
+        assert!(direct_literal.user_defined);
+        assert_eq!(direct_literal.kind, MaterialReactionKind::Poof);
+        assert!(!set.reaction(Some(direct), Some(rock)).user_defined);
+        assert!(!set.reaction(Some(direct), None).user_defined);
+
+        assert!(!set.reaction(Some(inverse), Some(literal)).user_defined);
+        let inverse_rock = set.reaction(Some(inverse), Some(rock));
+        assert!(inverse_rock.user_defined);
+        assert_eq!(inverse_rock.kind, MaterialReactionKind::Poof);
+        let inverse_sky = set.reaction(Some(inverse), None);
+        assert!(inverse_sky.user_defined);
+        assert_eq!(inverse_sky.kind, MaterialReactionKind::Poof);
+    }
+
+    #[test]
+    fn custom_reaction_keyword_fallback_remains_when_name_is_absent() {
+        let set = build_material_set(
+            r#"
+            [Material Source]
+            Name=Source
+            Density=20
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Solid
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+
+            [Material Dust]
+            Name=Dust
+            Density=10
+            "#,
+        );
+        let source = set.id_of("Source").expect("source exists");
+        let rock = set.id_of("Rock").expect("solid-density material exists");
+        let dust = set.id_of("Dust").expect("non-solid material exists");
+
+        let rock_reaction = set.reaction(Some(source), Some(rock));
+        assert!(rock_reaction.user_defined);
+        assert_eq!(rock_reaction.kind, MaterialReactionKind::Poof);
+        assert!(!set.reaction(Some(source), Some(dust)).user_defined);
+        assert!(!set.reaction(Some(source), None).user_defined);
     }
 
     #[test]
