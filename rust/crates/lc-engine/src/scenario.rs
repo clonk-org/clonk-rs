@@ -196,6 +196,7 @@ pub(crate) struct ScenarioSpawn {
 pub(crate) struct ScenarioSectionSpec {
     pub(crate) name: String,
     pub(crate) landscape: Option<Landscape>,
+    pub(crate) landscape_systems: ScenarioLandscapeSystems,
     pub(crate) post_init_map_callbacks: crate::map_creator_s2::PostInitMapCallbacks,
     pub(crate) keep_map_creator: bool,
     pub(crate) no_initialize: bool,
@@ -204,6 +205,12 @@ pub(crate) struct ScenarioSectionSpec {
     pub(crate) base_reject_entrance_enabled: bool,
     pub(crate) base_extinguish_enabled: bool,
     pub(crate) environment: EnvironmentSettings,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScenarioLandscapeSystems {
+    pub(crate) pxs: Option<crate::pxs::PxsSystem>,
+    pub(crate) mass_movers: Option<crate::mass_mover::MassMoverSet>,
 }
 
 #[derive(Debug, Clone)]
@@ -2288,12 +2295,14 @@ impl Scenario {
         let landscape = load_legacy_landscape(
             group,
             &manifest,
+            false,
             classifier.as_mut(),
             random_seed,
             startup_player_count,
             &map_callback_functions,
             &mut post_init_map_callbacks,
         )?;
+        let landscape_systems = load_legacy_landscape_systems(group)?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -2322,6 +2331,7 @@ impl Scenario {
             random_seed,
             startup_player_count,
             &landscape,
+            &landscape_systems,
             &initial_spawns,
             environment,
             sky.surface.is_some(),
@@ -2723,6 +2733,16 @@ impl Scenario {
         } else {
             engine.clear_landscape();
         }
+        let main_landscape_systems = self
+            .scenario_sections
+            .iter()
+            .find(|section| section.name.eq_ignore_ascii_case("main"))
+            .map(|section| section.landscape_systems.clone())
+            .unwrap_or_default();
+        engine.load_scenario_landscape_systems(
+            &main_landscape_systems,
+            self.landscape.is_some() || self.scenario_sections.is_empty(),
+        );
 
         // C4Landscape::ScenarioInit evaluates Gravity through the synced
         // ledger (C4Landscape.cpp:66) BEFORE Weather.Init's draws —
@@ -8840,6 +8860,7 @@ fn classified_landscape(
 fn load_legacy_landscape(
     group: &Group,
     manifest: &LegacyScenarioManifest,
+    overload_current: bool,
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
     startup_player_count: i32,
@@ -8850,6 +8871,7 @@ fn load_legacy_landscape(
     let Some(mut landscape) = load_legacy_landscape_body(
         group,
         manifest,
+        overload_current,
         classifier,
         random_seed,
         startup_player_count,
@@ -8901,6 +8923,7 @@ fn load_legacy_landscape(
 fn load_legacy_landscape_body(
     group: &Group,
     manifest: &LegacyScenarioManifest,
+    overload_current: bool,
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
     startup_player_count: i32,
@@ -9046,6 +9069,14 @@ fn load_legacy_landscape_body(
         return Ok(None);
     }
 
+    let landscape_script = read_optional("Landscape.txt")?;
+    if overload_current && landscape_script.is_none() {
+        // C4Landscape::Init only falls back to the core-driven basic map for
+        // the main scenario. A section without its own map leaves the live
+        // landscape (and therefore PXS/MassMover state) untouched.
+        return Ok(None);
+    }
+
     // Dynamic map (C4Landscape::Init, C4Landscape.cpp:606-614): a
     // Landscape.txt map description renders through C4MapCreatorS2
     // (CreateMapS2, C4Landscape.cpp:530-546); otherwise the basic
@@ -9057,9 +9088,9 @@ fn load_legacy_landscape_body(
         let players = startup_player_count;
         let landscape_core = &manifest.core.landscape;
         let mut retained_creator = None;
-        let bitmap = if let Some(bytes) = read_optional("Landscape.txt")? {
+        let bitmap = if let Some(bytes) = landscape_script.as_deref() {
             let creation = crate::map_creator_s2::create_s2_map_with_state_and_functions(
-                &String::from_utf8_lossy(&bytes),
+                &String::from_utf8_lossy(bytes),
                 classifier,
                 landscape_core.map_width,
                 landscape_core.map_height,
@@ -9073,12 +9104,22 @@ fn load_legacy_landscape_body(
             // placements and PostInitMap even when KeepMapCreator is false;
             // PostInitMap performs the conditional destruction afterward.
             retained_creator = Some(creation.creator);
-            creation.bitmap.unwrap_or_else(|| {
-                // Dynamic map by scenario (C4Landscape.cpp:612-614) —
-                // also the fallback when the exmap yields no map node.
-                let params = basic_map_params(landscape_core);
-                crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
-            })
+            match creation.bitmap {
+                Some(bitmap) => bitmap,
+                None if overload_current => return Ok(None),
+                None => {
+                    // Dynamic map by scenario (C4Landscape.cpp:612-614) —
+                    // also the main-scenario fallback when the exmap yields
+                    // no map node.
+                    let params = basic_map_params(landscape_core);
+                    crate::map_creator::create_basic_map(
+                        &params,
+                        classifier,
+                        players,
+                        &mut map_rng,
+                    )
+                }
+            }
         } else {
             let params = basic_map_params(landscape_core);
             crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
@@ -9109,9 +9150,9 @@ fn load_legacy_landscape_body(
     let players = startup_player_count;
     let landscape_core = &manifest.core.landscape;
     let mut discarded_classifier = MapPixelClassifier::empty_for_map_creation();
-    if let Some(bytes) = read_optional("Landscape.txt")? {
+    if let Some(bytes) = landscape_script.as_deref() {
         let creation = crate::map_creator_s2::create_s2_map_with_state_and_functions(
-            &String::from_utf8_lossy(&bytes),
+            &String::from_utf8_lossy(bytes),
             &mut discarded_classifier,
             landscape_core.map_width,
             landscape_core.map_height,
@@ -9122,6 +9163,9 @@ fn load_legacy_landscape_body(
         );
         *post_init_map_callbacks = creation.callbacks;
         if creation.bitmap.is_none() {
+            if overload_current {
+                return Ok(None);
+            }
             let params = basic_map_params(landscape_core);
             let _ = crate::map_creator::create_basic_map(
                 &params,
@@ -9574,6 +9618,24 @@ fn legacy_scenario_section_name(path: &Path) -> Option<String> {
     filename.get(4..filename.len() - 4).map(str::to_owned)
 }
 
+fn load_legacy_landscape_systems(
+    group: &Group,
+) -> Result<ScenarioLandscapeSystems, ScenarioError> {
+    let pxs = read_optional_legacy_entry(group, "PXS.c4b")?
+        .map(|bytes| {
+            crate::pxs::PxsSystem::from_c4b(&bytes)
+                .map_err(|error| ScenarioError::LegacyParse(error.to_string()))
+        })
+        .transpose()?;
+    let mass_movers = read_optional_legacy_entry(group, "MassMover.c4b")?
+        .map(|bytes| {
+            crate::mass_mover::MassMoverSet::from_c4b(&bytes)
+                .map_err(|error| ScenarioError::LegacyParse(error.to_string()))
+        })
+        .transpose()?;
+    Ok(ScenarioLandscapeSystems { pxs, mass_movers })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn load_legacy_scenario_sections(
     group: &Group,
@@ -9583,6 +9645,7 @@ fn load_legacy_scenario_sections(
     random_seed: u64,
     startup_player_count: i32,
     main_landscape: &Option<Landscape>,
+    main_landscape_systems: &ScenarioLandscapeSystems,
     main_objects: &[ScenarioSpawn],
     main_environment: EnvironmentSettings,
     has_sky_surface: bool,
@@ -9592,6 +9655,7 @@ fn load_legacy_scenario_sections(
     let mut sections = vec![ScenarioSectionSpec {
         name: "main".to_string(),
         landscape: main_landscape.clone(),
+        landscape_systems: main_landscape_systems.clone(),
         post_init_map_callbacks: main_post_init_map_callbacks.clone(),
         keep_map_creator: main_manifest.core.landscape.keep_map_creator,
         no_initialize: main_manifest.core.head.no_initialize != 0,
@@ -9633,12 +9697,14 @@ fn load_legacy_scenario_sections(
         let landscape = load_legacy_landscape(
             &section_group,
             &manifest,
+            true,
             classifier.as_deref_mut(),
             random_seed,
             startup_player_count,
             map_callback_functions,
             &mut post_init_map_callbacks,
         )?;
+        let landscape_systems = load_legacy_landscape_systems(&section_group)?;
         let objects = collect_legacy_objects(&section_group, definitions)?;
         let environment = derive_legacy_environment(&manifest)?;
         let scenario_values =
@@ -9646,6 +9712,7 @@ fn load_legacy_scenario_sections(
         sections.push(ScenarioSectionSpec {
             name,
             landscape,
+            landscape_systems,
             post_init_map_callbacks,
             keep_map_creator: manifest.core.landscape.keep_map_creator,
             no_initialize: manifest.core.head.no_initialize != 0,
@@ -16069,6 +16136,7 @@ global func Step(state, frame, random)
         load_legacy_landscape_body(
             group,
             manifest,
+            false,
             classifier,
             random_seed,
             startup_player_count,
@@ -22999,6 +23067,114 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn scenario_section_loads_pxs_and_mass_mover_c4b_components() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "#strict\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Binary section\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=1,0,1,1\nMapHeight=1,0,1,1\nMapZoom=5,0,5,5\n",
+        )
+        .expect("write scenario core");
+        let section = scenario_dir.join("SectNext.c4g");
+        std::fs::create_dir_all(&section).expect("section dir");
+        std::fs::write(section.join("Scenario.txt"), "[Head]\nTitle=Next\n")
+            .expect("write section core");
+        std::fs::write(
+            section.join("Landscape.txt"),
+            "map Next { seed=1; mat=Earth; tex=Rough; };",
+        )
+        .expect("write section landscape");
+        let keep_section = scenario_dir.join("SectKeep.c4g");
+        std::fs::create_dir_all(&keep_section).expect("mapless section dir");
+        std::fs::write(
+            keep_section.join("Scenario.txt"),
+            "[Head]\nTitle=Keep current landscape\n",
+        )
+        .expect("write mapless section core");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write material");
+        write_test_texture(&materials, "Rough");
+
+        let mut pxs = vec![0; 4 + crate::pxs::PXS_CHUNK_SIZE * 20];
+        pxs[..4].copy_from_slice(&1i32.to_le_bytes());
+        for record in pxs[4..].chunks_exact_mut(20) {
+            record[..4].copy_from_slice(&(-1i32).to_le_bytes());
+        }
+        let record = &mut pxs[4 + 3 * 20..4 + 4 * 20];
+        for (field, value) in [0i32, 98_304, -147_456, 8_192, -32_768]
+            .into_iter()
+            .enumerate()
+        {
+            record[field * 4..field * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(scenario_dir.join("PXS.c4b"), pxs.clone())
+            .expect("write main PXS component");
+        std::fs::write(section.join("PXS.c4b"), pxs).expect("write section PXS component");
+        let mut mover = Vec::new();
+        for value in [0i32, 4, 7] {
+            mover.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(scenario_dir.join("MassMover.c4b"), mover.clone())
+            .expect("write main mover component");
+        std::fs::write(section.join("MassMover.c4b"), mover)
+            .expect("write section mover component");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        assert!(
+            scenario
+                .scenario_sections
+                .iter()
+                .find(|section| section.name.eq_ignore_ascii_case("keep"))
+                .expect("mapless section discovered")
+                .landscape
+                .is_none(),
+            "section core values alone do not set C++ LandscapeLoaded"
+        );
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(engine.pxs_system.peek_slot(0, 3).is_some());
+        assert_eq!(engine.mass_movers.slot(0).map(|mover| (mover.x, mover.y)), Some((4, 7)));
+        engine.pxs_system.note_executed();
+        assert!(
+            engine
+                .load_scenario_section("Keep", 0, Vec::new())
+                .expect("mapless section load succeeds")
+        );
+        assert!(engine.pxs_system.peek_slot(0, 3).is_some());
+        assert_eq!(engine.mass_movers.slot(0).map(|mover| (mover.x, mover.y)), Some((4, 7)));
+        assert_eq!(engine.pxs_system.execute_count(), 1);
+        assert!(
+            engine
+                .load_scenario_section("Next", 0, Vec::new())
+                .expect("section load succeeds")
+        );
+
+        let pixel = engine.pxs_system.peek_slot(0, 3).expect("PXS slot restores");
+        assert_eq!(pixel.mat.index(), 0);
+        assert_eq!(
+            [pixel.x.val(), pixel.y.val(), pixel.xdir.val(), pixel.ydir.val()],
+            [98_304, -147_456, 8_192, -32_768]
+        );
+        let mover = engine.mass_movers.slot(0).expect("mover slot restores");
+        assert_eq!((mover.mat.index(), mover.x, mover.y), (0, 4, 7));
+        assert_eq!(engine.mass_movers.count(), 1);
+        assert_eq!(engine.mass_movers.create_ptr(), 0);
+        assert_eq!(engine.pxs_system.execute_count(), 1, "PXS Load leaves Count intact");
+    }
+
+    #[test]
     fn ancestor_texmap_overloads_global_water_material() {
         // C4Game::InitMaterialTexture walks the ordered NRT_Material chain
         // while each source's OverloadMaterials/OverloadTextures flags admit
@@ -23827,6 +24003,7 @@ public func ActualizePhase(pClonk)
         let landscape = load_legacy_landscape_body(
             &group,
             &manifest,
+            false,
             None,
             0,
             1,
@@ -24256,6 +24433,7 @@ public func ActualizePhase(pClonk)
         let landscape = load_legacy_landscape(
             &group,
             &manifest,
+            false,
             Some(&mut classifier),
             0,
             1,

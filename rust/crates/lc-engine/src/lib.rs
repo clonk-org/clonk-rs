@@ -14844,6 +14844,7 @@ pub struct ScenarioBatch {
 struct RuntimeScenarioSection {
     name: String,
     landscape: Option<Landscape>,
+    landscape_systems: scenario::ScenarioLandscapeSystems,
     post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks,
     keep_map_creator: bool,
     no_initialize: bool,
@@ -17776,6 +17777,7 @@ impl Engine {
                     RuntimeScenarioSection {
                         name: section.name.clone(),
                         landscape: section.landscape.clone(),
+                        landscape_systems: section.landscape_systems.clone(),
                         post_init_map_callbacks: section.post_init_map_callbacks.clone(),
                         keep_map_creator: section.keep_map_creator,
                         no_initialize: section.no_initialize,
@@ -20456,6 +20458,23 @@ impl Engine {
         self.landscape = None;
         self.sectors = None;
         self.pxs_system.clear();
+    }
+
+    pub(crate) fn load_scenario_landscape_systems(
+        &mut self,
+        systems: &scenario::ScenarioLandscapeSystems,
+        clear_missing: bool,
+    ) {
+        match &systems.pxs {
+            Some(pxs) => self.pxs_system = pxs.clone(),
+            None if clear_missing => self.pxs_system.clear(),
+            None => {}
+        }
+        match &systems.mass_movers {
+            Some(mass_movers) => self.mass_movers = mass_movers.clone(),
+            None if clear_missing => self.mass_movers.clear(),
+            None => {}
+        }
     }
 
     pub fn landscape(&self) -> Option<&Landscape> {
@@ -32709,8 +32728,21 @@ impl Engine {
         }
 
         let preserved = preserve_ids.into_iter().collect::<HashSet<_>>();
+        let departing_pxs = self.pxs_system.clone();
+        let departing_mass_movers = self.mass_movers.clone();
         let mut state = self.capture_state();
         let changing_section = key != self.current_scenario_section.to_ascii_lowercase();
+        let saved_landscape_systems =
+            (changing_section && flags & 1 != 0).then(|| scenario::ScenarioLandscapeSystems {
+                pxs: self.pxs_system.to_c4b().map(|bytes| {
+                    pxs::PxsSystem::from_c4b(&bytes)
+                        .expect("an engine-produced PXS component must reload")
+                }),
+                mass_movers: self.mass_movers.to_c4b().map(|bytes| {
+                    MassMoverSet::from_c4b(&bytes)
+                        .expect("an engine-produced MassMover component must reload")
+                }),
+            });
         if changing_section && flags & 3 != 0 {
             let saved_objects = (flags & 2 != 0).then(|| {
                 state
@@ -32753,6 +32785,9 @@ impl Engine {
                         self.base_reject_entrance_enabled;
                     current.base_extinguish_enabled = self.base_extinguish_enabled;
                     current.environment = self.environment;
+                    current.landscape_systems = saved_landscape_systems
+                        .clone()
+                        .expect("landscape-save state captured above");
                 }
                 if let Some(objects) = saved_objects {
                     current.saved_objects = Some(objects);
@@ -32767,6 +32802,8 @@ impl Engine {
             .cloned()
             .expect("section presence checked above");
         let run_post_init_map = !target.no_initialize && target.landscape.is_some();
+        let target_landscape_loaded = target.landscape.is_some();
+        let target_landscape_systems = target.landscape_systems.clone();
         let post_init_map_callbacks = target.post_init_map_callbacks.clone();
         let keep_map_creator = target.keep_map_creator;
         let retained = state
@@ -32789,7 +32826,9 @@ impl Engine {
         // (C4Landscape.cpp:564,579,735; C4Game.cpp:2642-2657).
         self.fix_random();
         state.rng = self.rng.clone();
-        state.landscape = target.landscape.clone();
+        if let Some(landscape) = target.landscape.clone() {
+            state.landscape = Some(landscape);
+        }
         state.scenario_values = Some(target.scenario_values.clone());
         state.base_reject_entrance_enabled = Some(target.base_reject_entrance_enabled);
         state.environment = target.environment;
@@ -32812,6 +32851,21 @@ impl Engine {
 
         self.base_extinguish_enabled = target.base_extinguish_enabled;
         self.restore_state(&state)?;
+        match target_landscape_systems.pxs {
+            Some(mut pxs) => {
+                // C4PXSSystem::Load clears chunks but deliberately leaves the
+                // public per-Execute Count ledger unchanged.
+                pxs.set_execute_count(departing_pxs.execute_count());
+                self.pxs_system = pxs;
+            }
+            None if target_landscape_loaded => self.pxs_system.clear(),
+            None => self.pxs_system = departing_pxs,
+        }
+        match target_landscape_systems.mass_movers {
+            Some(mass_movers) => self.mass_movers = mass_movers,
+            None if target_landscape_loaded => self.mass_movers.clear(),
+            None => self.mass_movers = departing_mass_movers,
+        }
         // Objects.Load follows Landscape.Init's second FixRandom. Keep the
         // same boundary before fresh section objects run Construction or
         // Initialize callbacks.
@@ -60161,6 +60215,7 @@ mod scenario_section_random_regression {
         scenario::ScenarioSectionSpec {
             name: name.to_string(),
             landscape: Some(Landscape::flat(width, 40)),
+            landscape_systems: scenario::ScenarioLandscapeSystems::default(),
             post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks::default(),
             keep_map_creator: false,
             no_initialize: false,
@@ -60191,6 +60246,7 @@ mod scenario_section_random_regression {
         scenario::ScenarioSectionSpec {
             name: name.to_string(),
             landscape: Some(landscape),
+            landscape_systems: scenario::ScenarioLandscapeSystems::default(),
             post_init_map_callbacks: map_creator_s2::PostInitMapCallbacks::default(),
             keep_map_creator: false,
             no_initialize: false,
@@ -60331,6 +60387,150 @@ mod scenario_section_random_regression {
             Some(1),
             "opening the restored gate must reveal its original Earth byte"
         );
+    }
+
+    #[test]
+    fn section_save_landscape_restores_c4b_pxs_and_consolidated_movers() {
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+            "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("Earth exists");
+        let water = materials.id_of("Water").expect("Water exists");
+        let mut engine = Engine::with_seed(37);
+        engine.set_materials(materials);
+        engine.configure_scenario_sections(&[
+            section("main", 20, true),
+            section("next", 20, true),
+        ]);
+        engine.set_landscape(Landscape::flat(20, 40));
+        assert!(engine.pxs_system.create_at(
+            3,
+            4,
+            pxs::Pxs {
+                mat: earth,
+                x: C4Fixed::from_raw(98_304),
+                y: C4Fixed::from_raw(-147_456),
+                xdir: C4Fixed::from_raw(8_192),
+                ydir: C4Fixed::from_raw(-32_768),
+            },
+        ));
+        engine.mass_movers.fill_slot(
+            5,
+            mass_mover::MassMover {
+                mat: water,
+                x: 3,
+                y: 7,
+            },
+        );
+        engine.mass_movers.fill_slot(
+            19,
+            mass_mover::MassMover {
+                mat: water,
+                x: 9,
+                y: 11,
+            },
+        );
+        engine.pxs_system.note_executed();
+
+        assert!(
+            engine
+                .load_scenario_section("next", 1, Vec::new())
+                .expect("next section loads")
+        );
+        assert_eq!(engine.pxs_system.count(), 0);
+        assert_eq!(engine.pxs_system.execute_count(), 0);
+        assert_eq!(engine.mass_movers.live_movers(), 0);
+        assert!(
+            engine
+                .load_scenario_section("main", 1, Vec::new())
+                .expect("main section reloads")
+        );
+
+        let pixel = engine.pxs_system.peek_slot(0, 4).expect("packed PXS restores");
+        assert_eq!(pixel.mat, earth);
+        assert_eq!(
+            [pixel.x.val(), pixel.y.val(), pixel.xdir.val(), pixel.ydir.val()],
+            [98_304, -147_456, 8_192, -32_768]
+        );
+        assert!(!engine.pxs_system.chunk_allocated(3));
+        assert_eq!(engine.mass_movers.create_ptr(), 0);
+        assert_eq!(engine.mass_movers.count(), 2);
+        assert_eq!(
+            engine.mass_movers.slot(0),
+            Some(mass_mover::MassMover {
+                mat: water,
+                x: 3,
+                y: 7,
+            })
+        );
+        assert_eq!(
+            engine.mass_movers.slot(1),
+            Some(mass_mover::MassMover {
+                mat: water,
+                x: 9,
+                y: 11,
+            })
+        );
+        assert_eq!(engine.mass_movers.slot(5), None);
+        assert_eq!(engine.mass_movers.slot(19), None);
+    }
+
+    #[test]
+    fn section_without_landscape_or_components_retains_pxs_and_movers() {
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\n",
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("Earth exists");
+        let mut next = section("next", 20, true);
+        next.landscape = None;
+        let mut engine = Engine::with_seed(41);
+        engine.set_materials(materials);
+        engine.configure_scenario_sections(&[section("main", 20, true), next]);
+        engine.set_landscape(Landscape::flat(20, 40));
+        assert!(engine.pxs_system.create_at(
+            0,
+            6,
+            pxs::Pxs {
+                mat: earth,
+                x: itofix(2),
+                y: itofix(3),
+                xdir: C4Fixed::ZERO,
+                ydir: C4Fixed::ZERO,
+            },
+        ));
+        engine.mass_movers.fill_slot(
+            4,
+            mass_mover::MassMover {
+                mat: earth,
+                x: 2,
+                y: 3,
+            },
+        );
+
+        assert!(
+            engine
+                .load_scenario_section("next", 0, Vec::new())
+                .expect("section loads")
+        );
+        assert_eq!(
+            engine.landscape().map(|landscape| landscape.width()),
+            Some(20),
+            "a section without a map keeps the departing landscape"
+        );
+        assert!(engine.pxs_system.peek_slot(0, 6).is_some());
+        assert_eq!(engine.mass_movers.slot(4).map(|mover| (mover.x, mover.y)), Some((2, 3)));
     }
 }
 

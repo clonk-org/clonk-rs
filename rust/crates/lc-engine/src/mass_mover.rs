@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 /// `C4MassMoverChunk` (C4MassMover.h:25).
 pub(crate) const MASS_MOVER_CHUNK: i32 = 10_000;
 const CHUNK: usize = MASS_MOVER_CHUNK as usize;
+const MASS_MOVER_RECORD_BYTES: usize = 3 * std::mem::size_of::<i32>();
+const M_NONE: i32 = -1;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum MassMoverComponentError {
+    #[error("MassMover.c4b has invalid byte length {0}")]
+    InvalidSize(usize),
+    #[error("MassMover.c4b contains {0} records; maximum is {CHUNK}")]
+    TooManyMovers(usize),
+    #[error("MassMover.c4b contains unrepresentable material index {0}")]
+    InvalidMaterial(i32),
+}
+
+fn read_component_i32(bytes: &[u8]) -> i32 {
+    i32::from_le_bytes(bytes.try_into().expect("four-byte component field"))
+}
 
 /// One `C4MassMover` slot (C4MassMover.h:29-41): a material pinned to the
 /// pixel it was created on. The mover NEVER re-seeks the liquid surface —
@@ -168,6 +184,72 @@ impl MassMoverSet {
     /// `Count` ledger).
     pub fn live_movers(&self) -> usize {
         self.slots.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Decode `MassMover.c4b`: raw 12-byte records occupy leading slots,
+    /// `Count` is the file record count, and `CreatePtr` remains zero after
+    /// `Default` (C4MassMover.cpp:204-217).
+    pub(crate) fn from_c4b(bytes: &[u8]) -> Result<Self, MassMoverComponentError> {
+        if bytes.len() % MASS_MOVER_RECORD_BYTES != 0 {
+            return Err(MassMoverComponentError::InvalidSize(bytes.len()));
+        }
+        let record_count = bytes.len() / MASS_MOVER_RECORD_BYTES;
+        if record_count > CHUNK {
+            return Err(MassMoverComponentError::TooManyMovers(record_count));
+        }
+        let mut set = Self {
+            slots: Vec::new(),
+            create_ptr: 0,
+            count: record_count as i32,
+        };
+        if record_count != 0 {
+            set.ensure_slots();
+        }
+        for (index, record) in bytes.chunks_exact(MASS_MOVER_RECORD_BYTES).enumerate() {
+            let raw_material = read_component_i32(&record[..4]);
+            if raw_material == M_NONE {
+                continue;
+            }
+            let material = usize::try_from(raw_material)
+                .ok()
+                .and_then(MaterialId::new)
+                .ok_or(MassMoverComponentError::InvalidMaterial(raw_material))?;
+            set.slots[index] = Some(MassMover {
+                mat: material,
+                x: read_component_i32(&record[4..8]),
+                y: read_component_i32(&record[8..12]),
+            });
+        }
+        Ok(set)
+    }
+
+    /// Encode C++ Save's clone/consolidate/recount sequence. Its consolidate
+    /// loop can leave a newly-created gap behind, yet Save still writes only
+    /// the first `Count` raw slots; retaining that quirk is byte-significant.
+    /// `None` matches deletion of an empty component; the running set is not
+    /// mutated.
+    pub(crate) fn to_c4b(&self) -> Option<Vec<u8>> {
+        let mut saved = self.clone();
+        saved.consolidate();
+        let count = saved.live_movers();
+        if count == 0 {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(count * MASS_MOVER_RECORD_BYTES);
+        for slot in saved.slots.iter().take(count) {
+            match slot {
+                Some(mover) => {
+                    bytes.extend_from_slice(&(mover.mat.index() as i32).to_le_bytes());
+                    bytes.extend_from_slice(&mover.x.to_le_bytes());
+                    bytes.extend_from_slice(&mover.y.to_le_bytes());
+                }
+                None => {
+                    bytes.extend_from_slice(&M_NONE.to_le_bytes());
+                    bytes.extend_from_slice(&[0; MASS_MOVER_RECORD_BYTES - 4]);
+                }
+            }
+        }
+        Some(bytes)
     }
 
     pub(crate) fn check_instability_range_for_landscape(
@@ -459,6 +541,10 @@ mod tests {
     use crate::landscape::Landscape;
     use crate::{MaterialInteractionEvent, MaterialSet};
     use lc_resources::MaterialLibrary;
+
+    fn mat(index: usize) -> MaterialId {
+        MaterialId::new(index).expect("valid material id")
+    }
 
     fn materials(source: &str) -> MaterialSet {
         MaterialSet::from_resource_library(
@@ -1741,5 +1827,51 @@ mod tests {
         assert_eq!(restored.count(), 1);
         assert_eq!(restored.slot(5).map(|m| (m.x, m.y)), Some((1, 0)));
         assert_eq!(restored.live_movers(), 1);
+    }
+
+    #[test]
+    fn c4b_round_trip_loads_leading_slots_count_and_zero_create_ptr() {
+        let mut bytes = Vec::new();
+        for value in [3i32, -7, 12, 5, 99, -4] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(bytes.len(), 2 * MASS_MOVER_RECORD_BYTES);
+        let restored = MassMoverSet::from_c4b(&bytes).expect("C++ mover component loads");
+
+        assert_eq!(restored.create_ptr(), 0);
+        assert_eq!(restored.count(), 2);
+        assert_eq!(restored.live_movers(), 2);
+        assert_eq!(restored.slot(0), Some(MassMover { mat: mat(3), x: -7, y: 12 }));
+        assert_eq!(restored.slot(1), Some(MassMover { mat: mat(5), x: 99, y: -4 }));
+        assert_eq!(restored.slot(9), None);
+        assert_eq!(restored.to_c4b(), Some(bytes));
+    }
+
+    #[test]
+    fn c4b_load_rejects_partial_and_oversized_components() {
+        assert_eq!(
+            MassMoverSet::from_c4b(&[0]).unwrap_err(),
+            MassMoverComponentError::InvalidSize(1)
+        );
+        let oversized = vec![0; (CHUNK + 1) * MASS_MOVER_RECORD_BYTES];
+        assert_eq!(
+            MassMoverSet::from_c4b(&oversized).unwrap_err(),
+            MassMoverComponentError::TooManyMovers(CHUNK + 1)
+        );
+    }
+
+    #[test]
+    fn c4b_save_retains_cpp_consolidate_gap_quirk() {
+        let mut source = MassMoverSet::new();
+        source.fill_slot(1, MassMover { mat: mat(3), x: 10, y: 20 });
+        source.fill_slot(2, MassMover { mat: mat(4), x: 30, y: 40 });
+
+        let bytes = source.to_c4b().expect("component saves");
+        assert_eq!(bytes.len(), 2 * MASS_MOVER_RECORD_BYTES);
+        assert_eq!(read_component_i32(&bytes[..4]), 3);
+        assert_eq!(read_component_i32(&bytes[12..16]), M_NONE);
+        let restored = MassMoverSet::from_c4b(&bytes).expect("component reloads");
+        assert_eq!(restored.count(), 2, "Load uses the raw record count");
+        assert_eq!(restored.live_movers(), 1, "the second live slot lay beyond Count");
     }
 }

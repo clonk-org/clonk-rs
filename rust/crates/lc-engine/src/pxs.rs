@@ -14,6 +14,25 @@ use serde::{Deserialize, Serialize};
 /// `PXSChunkSize` / `PXSMaxChunk` (C4PXS.h:40).
 pub const PXS_CHUNK_SIZE: usize = 500;
 pub const PXS_MAX_CHUNK: usize = 20;
+const PXS_RECORD_BYTES: usize = 5 * std::mem::size_of::<i32>();
+const PXS_CHUNK_BYTES: usize = PXS_CHUNK_SIZE * PXS_RECORD_BYTES;
+const M_NONE: i32 = -1;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PxsComponentError {
+    #[error("PXS.c4b has invalid byte length {0}")]
+    InvalidSize(usize),
+    #[error("PXS.c4b uses unsupported numeric format {0}")]
+    InvalidNumberFormat(i32),
+    #[error("PXS.c4b contains {0} chunks; maximum is {PXS_MAX_CHUNK}")]
+    TooManyChunks(usize),
+    #[error("PXS.c4b contains unrepresentable material index {0}")]
+    InvalidMaterial(i32),
+}
+
+fn read_component_i32(bytes: &[u8]) -> i32 {
+    i32::from_le_bytes(bytes.try_into().expect("four-byte component field"))
+}
 
 /// One pixel sprite (C4PXS.h:25-38). `Mat == MNone` (a free slot) is modeled
 /// as `None` in the chunk arrays instead of a sentinel.
@@ -143,6 +162,10 @@ impl PxsSystem {
         self.execute_count = 0;
     }
 
+    pub(crate) fn set_execute_count(&mut self, count: usize) {
+        self.execute_count = count;
+    }
+
     /// `C4PXSSystem::SyncClearance` (C4PXS.cpp:405-420): delete empty
     /// chunks and compact surviving chunks toward index zero while retaining
     /// their relative order and every in-chunk slot coordinate.
@@ -260,6 +283,93 @@ impl PxsSystem {
             self.chunk_counts[chunk] += 1;
         }
         true
+    }
+
+    /// Decode the raw `PXS.c4b` component written by `C4PXSSystem::Save`.
+    /// Modern files start with numeric-format tag 1; untagged files are also
+    /// fixed-point, while historical tag 2 stores four native IEEE floats.
+    pub(crate) fn from_c4b(bytes: &[u8]) -> Result<Self, PxsComponentError> {
+        let (number_format, payload) = if bytes.len() % PXS_CHUNK_BYTES == 4 {
+            let number_format = read_component_i32(&bytes[..4]);
+            if !(1..=2).contains(&number_format) {
+                return Err(PxsComponentError::InvalidNumberFormat(number_format));
+            }
+            (number_format, &bytes[4..])
+        } else if bytes.len() % PXS_CHUNK_BYTES == 0 {
+            (1, bytes)
+        } else {
+            return Err(PxsComponentError::InvalidSize(bytes.len()));
+        };
+        let chunk_count = payload.len() / PXS_CHUNK_BYTES;
+        if chunk_count > PXS_MAX_CHUNK {
+            return Err(PxsComponentError::TooManyChunks(chunk_count));
+        }
+
+        let mut system = Self::default();
+        system.ensure_layout();
+        for chunk_index in 0..chunk_count {
+            system.chunks[chunk_index] = Some(vec![None; PXS_CHUNK_SIZE]);
+            let chunk_start = chunk_index * PXS_CHUNK_BYTES;
+            for slot in 0..PXS_CHUNK_SIZE {
+                let record_start = chunk_start + slot * PXS_RECORD_BYTES;
+                let record = &payload[record_start..record_start + PXS_RECORD_BYTES];
+                let raw_material = read_component_i32(&record[..4]);
+                if raw_material == M_NONE {
+                    continue;
+                }
+                let material = usize::try_from(raw_material)
+                    .ok()
+                    .and_then(MaterialId::new)
+                    .ok_or(PxsComponentError::InvalidMaterial(raw_material))?;
+                let fixed = |field: usize| {
+                    let raw = read_component_i32(&record[field * 4..field * 4 + 4]);
+                    if number_format == 2 {
+                        crate::math::ftofix(f32::from_bits(raw as u32))
+                    } else {
+                        C4Fixed::from_raw(raw)
+                    }
+                };
+                system.chunks[chunk_index]
+                    .as_mut()
+                    .expect("chunk allocated above")[slot] = Some(Pxs {
+                    mat: material,
+                    x: fixed(1),
+                    y: fixed(2),
+                    xdir: fixed(3),
+                    ydir: fixed(4),
+                });
+                system.chunk_counts[chunk_index] += 1;
+            }
+        }
+        Ok(system)
+    }
+
+    /// Encode the modern fixed-point `PXS.c4b` form. `None` matches C++
+    /// Save's deletion of the component when no live PXS exists.
+    pub(crate) fn to_c4b(&self) -> Option<Vec<u8>> {
+        if self.count() == 0 {
+            return None;
+        }
+        let allocated_chunks = self.chunks.iter().filter(|chunk| chunk.is_some()).count();
+        let mut bytes = Vec::with_capacity(4 + allocated_chunks * PXS_CHUNK_BYTES);
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        for chunk in self.chunks.iter().filter_map(Option::as_ref) {
+            for slot in chunk {
+                match slot {
+                    Some(pxs) => {
+                        bytes.extend_from_slice(&(pxs.mat.index() as i32).to_le_bytes());
+                        for value in [pxs.x, pxs.y, pxs.xdir, pxs.ydir] {
+                            bytes.extend_from_slice(&value.val().to_le_bytes());
+                        }
+                    }
+                    None => {
+                        bytes.extend_from_slice(&M_NONE.to_le_bytes());
+                        bytes.extend_from_slice(&[0; PXS_RECORD_BYTES - 4]);
+                    }
+                }
+            }
+        }
+        Some(bytes)
     }
 
     pub fn clear(&mut self) {
@@ -422,5 +532,62 @@ mod tests {
             assert_eq!(pxs.xdir, C4Fixed::from_raw(itofix(r1 - 10).val() / 10));
             assert_eq!(pxs.ydir, C4Fixed::from_raw(itofix(r2 - 20).val() / 10));
         }
+    }
+
+    const CPP_PXS_FORM1: &[u8] = include_bytes!("../tests/fixtures/cpp_pxs_form1.c4b");
+    const CPP_PXS_FORM2: &[u8] = include_bytes!("../tests/fixtures/cpp_pxs_form2.c4b");
+
+    #[test]
+    fn c4b_load_restores_fixed_and_historical_float_chunks_and_slots() {
+        for fixture in [CPP_PXS_FORM1, CPP_PXS_FORM2] {
+            let system = PxsSystem::from_c4b(fixture)
+                .expect("C++ PXS component loads");
+            let slots = system.iter_slots().collect::<Vec<_>>();
+            assert_eq!(slots.len(), 2);
+            assert_eq!((slots[0].0, slots[0].1, slots[0].2.mat), (0, 7, mat(2)));
+            assert_eq!((slots[1].0, slots[1].1, slots[1].2.mat), (2, 499, mat(4)));
+            assert!(system.chunk_allocated(1), "serialized empty chunks stay allocated");
+            let expected = [78_643, -327_680, 32_768, -6_553].map(C4Fixed::from_raw);
+            assert_eq!(
+                [slots[0].2.x, slots[0].2.y, slots[0].2.xdir, slots[0].2.ydir],
+                expected
+            );
+
+            let modern = system.to_c4b().expect("live PXS component saves");
+            assert_eq!(read_component_i32(&modern[..4]), 1);
+            assert_eq!(modern.len(), 30_004);
+            assert_eq!(modern, CPP_PXS_FORM1);
+            let restored = PxsSystem::from_c4b(&modern).expect("saved component reloads");
+            assert_eq!(
+                restored
+                    .iter_slots()
+                    .map(|(chunk, slot, pxs)| (chunk, slot, *pxs))
+                    .collect::<Vec<_>>(),
+                system
+                    .iter_slots()
+                    .map(|(chunk, slot, pxs)| (chunk, slot, *pxs))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let untagged = PxsSystem::from_c4b(&CPP_PXS_FORM1[4..])
+            .expect("legacy untagged fixed-point component loads");
+        assert_eq!(untagged.peek_slot(2, 499).map(|pxs| pxs.mat), Some(mat(4)));
+    }
+
+    #[test]
+    fn c4b_load_rejects_invalid_tag_size_and_chunk_count() {
+        assert_eq!(
+            PxsSystem::from_c4b(&3i32.to_le_bytes()).unwrap_err(),
+            PxsComponentError::InvalidNumberFormat(3)
+        );
+        assert_eq!(
+            PxsSystem::from_c4b(&[0]).unwrap_err(),
+            PxsComponentError::InvalidSize(1)
+        );
+        let oversized = vec![0; (PXS_MAX_CHUNK + 1) * PXS_CHUNK_BYTES];
+        assert_eq!(
+            PxsSystem::from_c4b(&oversized).unwrap_err(),
+            PxsComponentError::TooManyChunks(PXS_MAX_CHUNK + 1)
+        );
     }
 }
