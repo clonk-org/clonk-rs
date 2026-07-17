@@ -16783,7 +16783,9 @@ impl EnvironmentDelta {
 
     pub fn apply(&self, environment: &mut EnvironmentSettings) {
         if let Some(wind) = self.wind {
-            environment.wind = wind.clamp(-100, 100);
+            let clamped = wind.clamp(-100, 100);
+            environment.wind = clamped;
+            environment.wind_target = clamped;
         }
         if let Some(temperature) = self.temperature {
             environment.temperature = temperature.clamp(-100, 100);
@@ -16816,7 +16818,9 @@ impl EnvironmentContext {
 
     fn set_wind(&self, wind: i32) {
         let clamped = wind.clamp(-100, 100);
-        self.settings.borrow_mut().wind = clamped;
+        let mut settings = self.settings.borrow_mut();
+        settings.wind = clamped;
+        settings.wind_target = clamped;
         self.pending.borrow_mut().wind = Some(clamped);
     }
 
@@ -62861,14 +62865,31 @@ func Missing() { return ComponentAll(nil, WOOD); }
 
     #[test]
     fn set_wind_records_environment_update() {
-        let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+        let mut initial = EnvironmentSettings::new(5).with_wind_variation(4, 2_000);
+        initial.wind_target = -20;
+        let (result, delta) = with_environment_context(initial, 0, || {
             set_wind(&[Value::Int(75)])?;
+            ENVIRONMENT_CONTEXT.with(|cell| {
+                let context = cell.borrow();
+                let settings = context
+                    .as_ref()
+                    .expect("environment context exists")
+                    .settings
+                    .borrow();
+                assert_eq!((settings.wind, settings.wind_target), (75, 75));
+                assert_eq!(settings.base_wind, 5, "scenario Wind.Std is unchanged");
+            });
             get_wind(&[])
         });
 
         let value = result.expect("SetWind/GetWind succeeds");
         assert_eq!(value, Value::Int(75));
         assert_eq!(delta.wind, Some(75));
+
+        let mut applied = initial;
+        delta.apply(&mut applied);
+        assert_eq!((applied.wind, applied.wind_target), (75, 75));
+        assert_eq!(applied.base_wind, 5, "delta keeps scenario Wind.Std");
     }
 
     #[test]

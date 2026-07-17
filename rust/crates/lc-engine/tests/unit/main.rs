@@ -7673,6 +7673,79 @@ global func MenuCommand(state, kind, selection)
     "#;
 
     #[test]
+    fn script_set_wind_holds_target_until_next_tick1000_evaluation() {
+        let script = r#"#strict
+func ForceWind()
+{
+    SetWind(80);
+    return(GetWind(0, 0, true));
+}
+
+func ReadWind()
+{
+    return(GetWind(0, 0, true));
+}
+"#;
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(
+                Definition::from_script("WIND", "Wind probe", script)
+                    .expect("wind probe compiles"),
+            )
+            .expect("wind probe registers");
+
+        // Keep nonzero scenario variation so the legacy runtime-field
+        // compatibility path cannot mask a stale TargetWind. SetWind must
+        // change only the live Wind/TargetWind pair, not scenario Wind.Std.
+        let mut weather = EnvironmentSettings::new(5).with_wind_variation(4, 2_000);
+        weather.wind_target = -20;
+        engine.set_environment(weather);
+
+        let probe = engine
+            .spawn_object(SpawnConfig::new("WIND"))
+            .expect("wind probe spawns");
+        let probe_index = engine.find_object_index(probe).expect("probe exists");
+        assert_eq!(
+            engine
+                .call_object_function(probe_index, "ForceWind", Vec::new())
+                .expect("SetWind executes"),
+            Value::Int(80)
+        );
+        assert_eq!(
+            (engine.environment().wind, engine.environment().wind_target),
+            (80, 80)
+        );
+        assert_eq!(engine.environment().base_wind, 5);
+
+        for expected_frame in 1..1_000 {
+            engine.tick().expect("weather tick succeeds");
+            let probe_index = engine.find_object_index(probe).expect("probe remains");
+            assert_eq!(
+                engine
+                    .call_object_function(probe_index, "ReadWind", Vec::new())
+                    .expect("GetWind executes"),
+                Value::Int(80),
+                "script-set wind decayed on frame {expected_frame}"
+            );
+            assert_eq!(engine.environment().wind_target, 80);
+        }
+        assert_eq!(engine.frame(), 999);
+
+        engine.tick().expect("Tick1000 succeeds");
+        let weather = engine.environment();
+        assert_eq!(weather.base_wind, 5);
+        assert!(
+            (1..=9).contains(&weather.wind_target),
+            "Tick1000 must evaluate around scenario Std 5 +/- Rnd 4, got {}",
+            weather.wind_target
+        );
+        assert_eq!(
+            weather.wind, 79,
+            "Tick1000 evaluates the scenario target, then steps toward it"
+        );
+    }
+
+    #[test]
     fn wind_variation_adjusts_over_time() {
         // C4Weather::Execute (C4Weather.cpp:94-100): TargetWind re-evaluates
         // only on Tick1000 frames with ONE synced draw
