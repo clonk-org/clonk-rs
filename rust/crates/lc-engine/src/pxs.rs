@@ -166,9 +166,13 @@ impl PxsSystem {
         self.execute_count = count;
     }
 
-    /// `C4PXSSystem::SyncClearance` (C4PXS.cpp:405-420): delete empty
-    /// chunks and compact surviving chunks toward index zero while retaining
-    /// their relative order and every in-chunk slot coordinate.
+    /// Safely compact the chunks in `C4PXSSystem::SyncClearance` order.
+    ///
+    /// The C++ loop copies a surviving pointer downward but never nulls its
+    /// moved-from slot (C4PXS.cpp:406-424). A gap before a live chunk therefore
+    /// aliases one allocation from two slots; it can be executed twice and
+    /// later `delete[]`d twice. Rust deliberately diverges from that undefined
+    /// behavior: `take` transfers unique ownership and the tail is cleared.
     pub(crate) fn sync_clearance(&mut self) {
         self.ensure_layout();
         let mut destination = 0;
@@ -451,10 +455,10 @@ mod tests {
     }
 
     #[test]
-    fn sync_clearance_compacts_nonempty_chunks_in_cpp_order() {
-        // C4PXSSystem::SyncClearance removes empty chunks and moves every
-        // surviving chunk toward index zero without reordering it (pristine
-        // 9ffa0a5d src/C4PXS.cpp:405-420).
+    fn sync_clearance_compacts_once_in_cpp_survivor_order() {
+        // Pin the accepted safety divergence: preserve C++ survivor order,
+        // but clear every moved-from slot instead of retaining duplicate
+        // owning pointers (pristine 9ffa0a5d src/C4PXS.cpp:406-424).
         let mut system = PxsSystem::default();
         assert!(system.create_at(
             0,
@@ -497,6 +501,7 @@ mod tests {
         assert!(system.chunk_allocated(1));
         assert!(!system.chunk_allocated(2));
         assert!(!system.chunk_allocated(3));
+        assert_eq!(system.count(), 2);
         assert_eq!(
             system.iter().map(|pxs| fixtoi(pxs.x)).collect::<Vec<_>>(),
             [11, 33]

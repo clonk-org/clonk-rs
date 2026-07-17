@@ -47,6 +47,16 @@ transitions after detection are covered. Validating the remaining loop requires
 running the full C++ engine on a content scenario via the `RustEngineBridge`
 live shadow-diff — see "Phase 2" below.
 
+## Accepted safety divergences
+
+- **PXS `SyncClearance` gap compaction:** C++ copies a surviving chunk pointer
+  downward without clearing the moved-from slot (C4PXS.cpp:406-424). If an
+  empty lower chunk precedes a live one, two slots alias the same allocation;
+  subsequent execution can process it twice and cleanup can `delete[]` it
+  twice. Rust intentionally transfers unique ownership and clears the tail.
+  Golden or live-shadow equality is therefore not expected at this undefined-
+  behavior boundary; Rust's single-copy survivor order is authoritative.
+
 ## How the oracle stays honest
 
 `oracle/gen_golden.sh` uses the actual engine code, not a hand-rewrite:
