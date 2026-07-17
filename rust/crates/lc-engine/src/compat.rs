@@ -44,6 +44,7 @@ use crate::{
 };
 #[cfg(test)]
 use crate::{LiquidSegment, PlayerViewport};
+use chrono::{Datelike, Local, Timelike};
 use lc_resources::PhysicalInfo;
 use lc_script::{Engine as ScriptEngine, HostCallArg, RuntimeError, Value, ValueMap};
 use std::mem;
@@ -6975,6 +6976,38 @@ fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
             .unwrap_or(0);
         Ok(Value::Int(frame))
     })
+}
+
+/// `FnGetSystemTime` (C4Script.cpp:4654-4684): expose one local wall-clock
+/// field only outside network, replay, and recording synchronization modes.
+fn get_system_time(args: &[Value]) -> Result<Value, RuntimeError> {
+    let field = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetSystemTime",
+        "field",
+    )?;
+    let sync_mode = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.world.control_sync_mode)
+    });
+    if sync_mode || !(0..=7).contains(&field) {
+        return Ok(Value::Nil);
+    }
+
+    let now = Local::now();
+    let value = match field {
+        0 => now.year(),
+        1 => now.month() as i32,
+        2 => now.weekday().num_days_from_sunday() as i32,
+        3 => now.day() as i32,
+        4 => now.hour() as i32,
+        5 => now.minute() as i32,
+        6 => now.second() as i32,
+        7 => (now.nanosecond() / 1_000_000) as i32,
+        _ => unreachable!("field range checked above"),
+    };
+    Ok(Value::Int(value))
 }
 
 /// The active object of the executing call (`cthr->Obj`).
@@ -13941,6 +13974,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetGameSpeed", set_game_speed);
     script.register_host_function("SetPreSend", set_pre_send);
     script.register_host_function("FrameCounter", frame_counter);
+    script.register_host_function("GetSystemTime", get_system_time);
     script.register_host_function("LandscapeWidth", landscape_width);
     script.register_host_function("LandscapeHeight", landscape_height);
     script.register_host_function("LaunchLightning", launch_lightning);
@@ -47494,6 +47528,7 @@ mod tests {
         "GetSelectCount",
         "GetSkyAdjust",
         "GetSkyColor",
+        "GetSystemTime",
         "GetTaggedPlayerName",
         "GetTeamByIndex",
         "GetTeamColor",
@@ -47721,6 +47756,39 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn get_system_time_reports_local_hour_and_rejects_sync_or_invalid_fields() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script("#strict 3\nfunc Probe(int field) { return GetSystemTime(field); }")
+            .expect("GetSystemTime probe compiles");
+
+        let query = |world, field| {
+            let (result, _) = with_effect_context(None, &[], world, 1, || {
+                script.call("Probe", &[Value::Int(field)])
+            });
+            result.expect("GetSystemTime executes")
+        };
+
+        let before = Local::now().hour() as i32;
+        let local = query(HostWorldContext::default(), 4);
+        let after = Local::now().hour() as i32;
+        assert!(
+            matches!(local, Value::Int(hour) if hour == before || hour == after),
+            "expected local hour {before} or {after}, got {local:?}"
+        );
+        assert_eq!(
+            query(
+                HostWorldContext::default().with_control_sync_mode(true),
+                4,
+            ),
+            Value::Nil
+        );
+        assert_eq!(query(HostWorldContext::default(), -1), Value::Nil);
+        assert_eq!(query(HostWorldContext::default(), 8), Value::Nil);
     }
 
     #[test]

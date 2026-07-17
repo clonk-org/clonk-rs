@@ -2106,6 +2106,7 @@ dependencies = [
 name = "lc-engine"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "criterion",
  "image",
  "indexmap 2.11.4",
