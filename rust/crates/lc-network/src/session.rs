@@ -16,9 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::interval;
 
-use crate::legacy::{
-    aggregate_control_packets_for_tick, decode_control_entry_payload, validate_control_envelope,
-};
+use crate::legacy::{decode_control_entry_payload, validate_control_envelope};
 use crate::{
     aggregate_ready_batch, reconcile_join_client_registry, run_client_connection_handshake,
     run_host_connection_handshake, AdmissionDecision, BarrierEffect, BarrierPhase, ClientId,
@@ -34,6 +32,7 @@ use crate::{
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_ROUTE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
+const CONTROL_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
 const CLIENT_MESH_PENDING_LIMIT: usize = 64;
 const HOST_CLIENT_ID: ClientId = 0;
@@ -1578,6 +1577,8 @@ where
                 "failed to initialize control after JoinData: {error}"
             ))
         })?;
+    resource_state.next_control_request_at =
+        tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL;
     bootstrap_local_candidates.extend_from_roots(&join_data, &local_resource_roots);
     if let Some(system_path) = local_system_path {
         for system in join_data
@@ -3086,6 +3087,7 @@ struct ClientResourceState {
     resource_directory: Option<PathBuf>,
     resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     control: ClientControlState,
+    next_control_request_at: tokio::time::Instant,
 }
 
 #[derive(Debug)]
@@ -3093,6 +3095,11 @@ struct ClientControlState {
     mode: i32,
     coordinator: ControlCoordinator,
     pending_unregistered: BTreeMap<ClientId, BTreeMap<Tick, ControlPacket>>,
+    target_tick: Option<Tick>,
+    central_expected_tick: Tick,
+    // The bool records whether central mode already surfaced this future
+    // complete packet before the contiguous ready cursor reached it.
+    pending_complete: BTreeMap<Tick, (ControlPacket, bool)>,
 }
 
 impl ClientControlState {
@@ -3102,6 +3109,9 @@ impl ClientControlState {
             mode: 1,
             coordinator: ControlCoordinator::with_start_tick(CLIENT_BACKLOG_LIMIT, start_tick),
             pending_unregistered: BTreeMap::new(),
+            target_tick: None,
+            central_expected_tick: start_tick,
+            pending_complete: BTreeMap::new(),
         }
     }
 
@@ -3116,6 +3126,16 @@ impl ClientControlState {
             mode: join_data.status.control_mode,
             coordinator: ControlCoordinator::with_start_tick(CLIENT_BACKLOG_LIMIT, start_tick),
             pending_unregistered: BTreeMap::new(),
+            target_tick: if matches!(
+                join_data.status.state,
+                NETWORK_STATE_GO | NETWORK_STATE_PAUSE
+            ) {
+                Tick::try_from(join_data.status.target_tick).ok()
+            } else {
+                None
+            },
+            central_expected_tick: start_tick,
+            pending_complete: BTreeMap::new(),
         };
         for core in join_data
             .parameters
@@ -3140,17 +3160,64 @@ impl ClientControlState {
         if self.mode == mode {
             return Ok((false, Vec::new()));
         }
+        let old_expected_tick = self.expected_tick();
         self.mode = mode;
-        let ready = self.coordinator.advance_to(current_tick);
+        let next_tick = current_tick.max(old_expected_tick);
+        let ready = if mode == 0 {
+            let ready = self.coordinator.advance_to(next_tick);
+            self.resolve_ready_with_completes(ready)?
+        } else {
+            // Central and asynchronous clients may only advance on complete
+            // broadcast controls. Buffered per-client contributions must not
+            // be packed locally while changing modes.
+            self.coordinator.skip_to(next_tick);
+            self.central_expected_tick = next_tick;
+            self.drain_central_completes()
+        };
         for pending in self.pending_unregistered.values_mut() {
             pending.retain(|tick, _| *tick >= current_tick);
         }
-        let ready = if mode == 0 {
-            Self::aggregate(ready)?
-        } else {
-            Vec::new()
-        };
         Ok((true, ready))
+    }
+
+    fn set_status_target(&mut self, status: NetworkStatus) {
+        self.target_tick = if matches!(status.state, NETWORK_STATE_GO | NETWORK_STATE_PAUSE) {
+            Tick::try_from(status.target_tick).ok()
+        } else {
+            None
+        };
+    }
+
+    fn clear_target(&mut self) {
+        self.target_tick = None;
+    }
+
+    fn expected_tick(&self) -> Tick {
+        if self.mode == 0 {
+            self.coordinator.current_tick()
+        } else {
+            self.central_expected_tick
+        }
+    }
+
+    fn recovery_tick(&self) -> Option<Tick> {
+        let target_tick = self.target_tick?;
+        let expected_tick = self.expected_tick();
+        let request_tick = if self.mode == 0 {
+            self.coordinator
+                .missing_ranges()
+                .into_iter()
+                .map(|range| range.from())
+                .min()
+                .unwrap_or(expected_tick)
+        } else {
+            expected_tick
+        };
+        (request_tick <= target_tick).then_some(request_tick)
+    }
+
+    fn is_registered(&self, client_id: ClientId) -> bool {
+        self.coordinator.client_ids().any(|id| id == client_id)
     }
 
     fn register(&mut self, client_id: ClientId) -> Result<Vec<ControlPacket>, String> {
@@ -3174,7 +3241,7 @@ impl ClientControlState {
                     .ready,
             );
         }
-        Self::aggregate(ready)
+        self.resolve_ready_with_completes(ready)
     }
 
     fn unregister(&mut self, client_id: ClientId) -> Result<Vec<ControlPacket>, String> {
@@ -3185,7 +3252,7 @@ impl ClientControlState {
             .coordinator
             .remove_client(client_id)
             .map_err(|error| error.to_string())?;
-        Self::aggregate(ready)
+        self.resolve_ready_with_completes(ready)
     }
 
     fn apply_membership(
@@ -3252,28 +3319,100 @@ impl ClientControlState {
             .coordinator
             .ingest(packet)
             .map_err(|error| error.to_string())?;
-        Self::aggregate(outcome.ready)
+        self.resolve_ready_with_completes(outcome.ready)
     }
 
     fn accept_network(&mut self, packet: ControlPacket) -> Result<Vec<ControlPacket>, String> {
+        validate_control_envelope(&packet).map_err(|error| error.to_string())?;
         if self.mode == 0 {
-            return self.ingest_contribution(packet);
+            if packet.client_id() != BROADCAST_CLIENT_ID {
+                return self.ingest_contribution(packet);
+            }
+            if packet.tick() < self.coordinator.current_tick() {
+                return Ok(Vec::new());
+            }
+            self.pending_complete
+                .entry(packet.tick())
+                .or_insert((packet, false));
+            return self.resolve_ready_with_completes(Vec::new());
         }
         if packet.client_id() != BROADCAST_CLIENT_ID {
             return Ok(Vec::new());
         }
-        validate_control_envelope(&packet).map_err(|error| error.to_string())?;
-        if packet.tick() < self.coordinator.current_tick() {
+        if packet.tick() < self.central_expected_tick {
             return Ok(Vec::new());
+        }
+        self.pending_complete
+            .entry(packet.tick())
+            .or_insert_with(|| (packet.clone(), true));
+        while self
+            .pending_complete
+            .remove(&self.central_expected_tick)
+            .is_some()
+        {
+            self.central_expected_tick = self.central_expected_tick.saturating_add(1);
         }
         Ok(vec![packet])
     }
 
-    fn aggregate(ready: Vec<ReadyBatch>) -> Result<Vec<ControlPacket>, String> {
-        ready
-            .iter()
-            .map(|batch| aggregate_ready_batch(batch).map_err(|error| error.to_string()))
-            .collect()
+    fn resolve_ready_with_completes(
+        &mut self,
+        ready: Vec<ReadyBatch>,
+    ) -> Result<Vec<ControlPacket>, String> {
+        // A stored C4ClientIDAll packet wins over locally available partials.
+        // Future complete replies remain pending until every earlier tick has
+        // advanced, matching CheckCompleteCtrl's complete-first walk.
+        let mut batches = VecDeque::from(ready);
+        let mut complete = Vec::new();
+        loop {
+            while let Some(batch) = batches.pop_front() {
+                if let Some((packet, published)) = self.pending_complete.remove(&batch.tick()) {
+                    if !published {
+                        complete.push(packet);
+                    }
+                } else {
+                    complete.push(
+                        aggregate_ready_batch(&batch).map_err(|error| error.to_string())?,
+                    );
+                }
+            }
+
+            let tick = self.coordinator.current_tick();
+            let Some((packet, published)) = self.pending_complete.remove(&tick) else {
+                break;
+            };
+            if !published {
+                complete.push(packet);
+            }
+            let next_tick = tick.saturating_add(1);
+            if next_tick == tick {
+                break;
+            }
+            batches.extend(self.coordinator.advance_to(next_tick));
+        }
+        let current_tick = self.coordinator.current_tick();
+        self.pending_complete
+            .retain(|tick, _| *tick >= current_tick);
+        Ok(complete)
+    }
+
+    fn drain_central_completes(&mut self) -> Vec<ControlPacket> {
+        let mut complete = Vec::new();
+        loop {
+            let tick = self.central_expected_tick;
+            let Some((packet, published)) = self.pending_complete.remove(&tick) else {
+                break;
+            };
+            if !published {
+                complete.push(packet);
+            }
+            let next_tick = tick.saturating_add(1);
+            if next_tick == tick {
+                break;
+            }
+            self.central_expected_tick = next_tick;
+        }
+        complete
     }
 }
 
@@ -3406,6 +3545,7 @@ impl ClientResourceState {
                 PathBuf::from("Network"),
             ),
             control: ClientControlState::central(0),
+            next_control_request_at: tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL,
         }
     }
 
@@ -3448,6 +3588,7 @@ impl ClientResourceState {
                 standalone_directory,
             ),
             control,
+            next_control_request_at: tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL,
         })
     }
 
@@ -6040,6 +6181,7 @@ async fn ingest_control(packet: ControlPacket, ingress: ControlIngress, state: &
     if ingress == ControlIngress::Local {
         state.local_control_backlog.record_packet(&packet);
     }
+    state.backlog.record_packet(&packet);
     // A host's own DoInput broadcasts before AddCtrl in CNM_Decentral. A raw
     // network PID_Control goes straight to HandleControl and is only stored;
     // client fallback fanout belongs to PID_FwdReq instead (pristine C++
@@ -6169,36 +6311,12 @@ async fn request_missing_controls(state: &mut HostState) {
 
 async fn fulfill_resync_request(client_id: ClientId, from_tick: Tick, state: &mut HostState) {
     let resend = state.backlog.fulfill_request(from_tick);
-    let mut packets_by_tick = BTreeMap::<Tick, Vec<ControlPacket>>::new();
     for packet in resend {
-        packets_by_tick
-            .entry(packet.tick())
-            .or_default()
-            .push(packet);
-    }
-    for (tick, packets) in packets_by_tick {
-        // A client requesting old host control needs the same C4ClientIDAll
-        // packet used during live play. C++ HandleControlReq sends the stored
-        // complete control packet for every contiguous tick
-        // (src/C4GameControlNetwork.cpp:531-544).
-        let aggregated = match aggregate_control_packets_for_tick(tick, &packets) {
-            Ok(packet) => packet,
-            Err(error) => {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: Some(client_id),
-                        error: format!("failed to aggregate resync tick {tick}: {error}"),
-                    })
-                    .await;
-                return;
-            }
-        };
         if !send_host_message(
             state,
             client_id,
             ConnectionTrafficClass::Message,
-            ControlMessage::Control(aggregated),
+            ControlMessage::Control(packet),
         )
         .await
         {
@@ -6223,6 +6341,7 @@ async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState) {
     };
 
     state.backlog.record_ready_batch(&batch);
+    state.backlog.record_packet(&aggregated);
     // Only central/async hosts transmit C4ClientIDAll. Decentralized peers
     // already received each contribution and pack this packet themselves
     // (src/C4GameControlNetwork.cpp:763-777).
@@ -6462,6 +6581,25 @@ fn validate_peer_control_packet(packet: &ControlPacket, peer_id: ClientId) -> Re
         return Err("peer control contribution contains a host-authority control".to_string());
     }
     Ok(())
+}
+
+fn validate_peer_control_or_recovery(
+    packet: &ControlPacket,
+    peer_id: ClientId,
+    recovery_from_tick: Option<Tick>,
+) -> Result<(), String> {
+    if recovery_from_tick.is_some_and(|from_tick| packet.tick() >= from_tick) {
+        return validate_control_envelope(packet)
+            .map(|_| ())
+            .map_err(|error| format!("invalid recovery control packet: {error}"));
+    }
+    validate_peer_control_packet(packet, peer_id)
+}
+
+fn extend_peer_recovery_window(recovery_from_tick: &mut Option<Tick>, from_tick: Tick) {
+    *recovery_from_tick = Some(
+        recovery_from_tick.map_or(from_tick, |outstanding| outstanding.min(from_tick)),
+    );
 }
 
 async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
@@ -6732,10 +6870,13 @@ fn contiguous_complete_controls(
         if tick != expected_tick {
             break;
         }
-        contiguous.push(
-            aggregate_control_packets_for_tick(tick, &packets)
-                .map_err(|error| format!("failed to aggregate control tick {tick}: {error}"))?,
-        );
+        let Some(complete) = packets
+            .into_iter()
+            .find(|packet| packet.client_id() == BROADCAST_CLIENT_ID)
+        else {
+            break;
+        };
+        contiguous.push(complete);
         expected_tick = expected_tick.saturating_add(1);
     }
     Ok(contiguous)
@@ -7942,6 +8083,51 @@ async fn replay_client_controls(
     Ok(ready)
 }
 
+fn eligible_client_recovery_tick(
+    resource_state: &ClientResourceState,
+    backlog: &ControlBacklog,
+) -> Option<Tick> {
+    let request_tick = resource_state.control.recovery_tick()?;
+    let local_client_id = ClientId::try_from(resource_state.catalog.local_client_id()).ok();
+    let local_activated = local_client_id
+        .is_some_and(|client_id| resource_state.control.is_registered(client_id));
+    (!local_activated
+        || local_client_id
+            .is_some_and(|client_id| backlog.contains_packet(client_id, request_tick)))
+    .then_some(request_tick)
+}
+
+async fn send_client_recovery_request(
+    transport: &mut ClientRouteManager,
+    control_mode: i32,
+    from_tick: Tick,
+) -> Result<(), TransportError> {
+    let request = ControlMessage::Request { from_tick };
+    if control_mode != 1 {
+        transport.send_to_connected_peers(request.clone());
+    }
+    transport.send_message(request).await
+}
+
+async fn publish_client_ready(
+    ready: Vec<ControlPacket>,
+    postpone_control_request: bool,
+    backlog: &mut ControlBacklog,
+    next_control_request_at: &mut tokio::time::Instant,
+    event_tx: &mpsc::Sender<ClientEvent>,
+) {
+    if postpone_control_request && !ready.is_empty() {
+        let postponed = tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL;
+        if *next_control_request_at < postponed {
+            *next_control_request_at = postponed;
+        }
+    }
+    for packet in ready {
+        backlog.record_packet(&packet);
+        let _ = event_tx.send(ClientEvent::Ready { packet }).await;
+    }
+}
+
 #[cfg(test)]
 async fn run_client_loop_with_addresses<S>(
     transport: crate::ControlTransport<S>,
@@ -8016,6 +8202,8 @@ async fn run_client_loop_with_routes(
     initial_puncher_addresses_changed: bool,
 ) {
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
+    let mut next_control_request_at = resource_state.next_control_request_at;
+    let mut peer_recovery_from_tick = None::<Tick>;
     let mut pending_sync = Vec::<lc_engine::ControlPacket>::new();
     let mut received_controls = BTreeSet::<(ClientId, Tick)>::new();
     let mut highest_received_tick = None::<Tick>;
@@ -8056,6 +8244,7 @@ async fn run_client_loop_with_routes(
         if received_controls.insert(key) {
             highest_received_tick =
                 Some(highest_received_tick.map_or(packet.tick(), |tick| tick.max(packet.tick())));
+            let backlog_packet = packet.clone();
             let ready = match resource_state.control.accept_network(packet) {
                 Ok(ready) => ready,
                 Err(error) => {
@@ -8067,9 +8256,15 @@ async fn run_client_loop_with_routes(
                     return;
                 }
             };
-            for packet in ready {
-                let _ = event_tx.send(ClientEvent::Ready { packet }).await;
-            }
+            backlog.record_packet(&backlog_packet);
+            publish_client_ready(
+                ready,
+                resource_state.control.mode == 0,
+                &mut backlog,
+                &mut next_control_request_at,
+                &event_tx,
+            )
+            .await;
         }
     }
 
@@ -8139,9 +8334,29 @@ async fn run_client_loop_with_routes(
             && pending_mesh_routes.len() < CLIENT_MESH_PENDING_LIMIT;
         let udp_retry_deadline = udp_retry_at.unwrap_or_else(tokio::time::Instant::now);
         let tcp_retry_deadline = tcp_retry_at.unwrap_or_else(tokio::time::Instant::now);
+        let control_recovery_tick = eligible_client_recovery_tick(&resource_state, &backlog);
+        let control_request_deadline = next_control_request_at;
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => break,
+            _ = tokio::time::sleep_until(control_request_deadline), if control_recovery_tick.is_some() => {
+                let from_tick = control_recovery_tick.expect("guarded recovery tick exists");
+                let control_mode = resource_state.control.mode;
+                let _ = send_client_recovery_request(
+                    &mut transport,
+                    control_mode,
+                    from_tick,
+                )
+                .await;
+                if control_mode != 1 {
+                    // A repeated request can race ahead of replies to the
+                    // prior request. Keep the earliest outstanding tick so
+                    // those trailing partial or complete replies stay valid.
+                    extend_peer_recovery_window(&mut peer_recovery_from_tick, from_tick);
+                }
+                next_control_request_at =
+                    tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL;
+            }
             completed = pending_mesh_routes.join_next(), if has_pending_mesh_route => {
                 match completed {
                     Some(Ok(completion)) => {
@@ -8343,6 +8558,7 @@ async fn run_client_loop_with_routes(
                                 .await;
                             break;
                         }
+                        resource_state.control.clear_target();
                     }
                     ClientCommand::SubmitReadyCheck(packet) => {
                         let raw_result = transport
@@ -8431,11 +8647,14 @@ async fn run_client_loop_with_routes(
                                 backlog.record_packet(&clone);
                                 match resource_state.control.ingest_contribution(clone) {
                                     Ok(ready) => {
-                                        for packet in ready {
-                                            let _ = event_tx
-                                                .send(ClientEvent::Ready { packet })
-                                                .await;
-                                        }
+                                        publish_client_ready(
+                                            ready,
+                                            resource_state.control.mode == 0,
+                                            &mut backlog,
+                                            &mut next_control_request_at,
+                                            &event_tx,
+                                        )
+                                        .await;
                                     }
                                     Err(error) => {
                                         let _ = event_tx
@@ -9138,10 +9357,12 @@ async fn run_client_loop_with_routes(
                     }
                     Ok(ControlMessage::Status(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::Status(status)) => {
+                        resource_state.control.set_status_target(status);
                         let _ = event_tx.send(ClientEvent::Status(status)).await;
                     }
                     Ok(ControlMessage::StatusAck(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::StatusAck(status)) => {
+                        resource_state.control.clear_target();
                         if status.state == NETWORK_STATE_GO {
                             let current_tick = Tick::try_from(status.target_tick).unwrap_or_else(
                                 |_| resource_state.control.coordinator.current_tick(),
@@ -9207,9 +9428,14 @@ async fn run_client_loop_with_routes(
                                     }
                                 }
                             }
-                            for packet in ready {
-                                let _ = event_tx.send(ClientEvent::Ready { packet }).await;
-                            }
+                            publish_client_ready(
+                                ready,
+                                resource_state.control.mode == 0,
+                                &mut backlog,
+                                &mut next_control_request_at,
+                                &event_tx,
+                            )
+                            .await;
                         }
                         let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
                     }
@@ -9233,7 +9459,12 @@ async fn run_client_loop_with_routes(
                     }
                     Ok(ControlMessage::Control(packet)) => {
                         if ingress_peer_id != HOST_CLIENT_ID
-                            && validate_peer_control_packet(&packet, ingress_peer_id).is_err()
+                            && validate_peer_control_or_recovery(
+                                &packet,
+                                ingress_peer_id,
+                                peer_recovery_from_tick,
+                            )
+                            .is_err()
                         {
                             transport.retire_peer(ingress_peer_id);
                             continue;
@@ -9249,11 +9480,18 @@ async fn run_client_loop_with_routes(
                             let threshold = highest.saturating_sub(CLIENT_BACKLOG_LIMIT as Tick);
                             received_controls.retain(|(_, tick)| *tick >= threshold);
                         }
+                        let backlog_packet = packet.clone();
                         match resource_state.control.accept_network(packet) {
                             Ok(ready) => {
-                                for packet in ready {
-                                    let _ = event_tx.send(ClientEvent::Ready { packet }).await;
-                                }
+                                backlog.record_packet(&backlog_packet);
+                                publish_client_ready(
+                                    ready,
+                                    resource_state.control.mode == 0,
+                                    &mut backlog,
+                                    &mut next_control_request_at,
+                                    &event_tx,
+                                )
+                                .await;
                             }
                             Err(error) => {
                                 let _ = event_tx
@@ -9350,11 +9588,14 @@ async fn run_client_loop_with_routes(
                                             });
                                         }
                                     }
-                                    for packet in ready {
-                                        let _ = event_tx
-                                            .send(ClientEvent::Ready { packet })
-                                            .await;
-                                    }
+                                    publish_client_ready(
+                                        ready,
+                                        resource_state.control.mode == 0,
+                                        &mut backlog,
+                                        &mut next_control_request_at,
+                                        &event_tx,
+                                    )
+                                    .await;
                                 }
                                 let _ = event_tx
                                     .send(ClientEvent::Direct {
@@ -9428,11 +9669,14 @@ async fn run_client_loop_with_routes(
                                         });
                                     }
                                 }
-                                for packet in ready {
-                                    let _ = event_tx
-                                        .send(ClientEvent::Ready { packet })
-                                        .await;
-                                }
+                                publish_client_ready(
+                                    ready,
+                                    resource_state.control.mode == 0,
+                                    &mut backlog,
+                                    &mut next_control_request_at,
+                                    &event_tx,
+                                )
+                                .await;
                             }
                             let _ = event_tx
                                 .send(ClientEvent::SyncScheduled {
@@ -9941,6 +10185,47 @@ mod tests {
             )
             .is_none());
         receiver
+    }
+
+    #[tokio::test]
+    async fn client_control_recovery_routes_central_to_host_and_decentral_to_all_peers() {
+        fn take_message(receiver: &mut mpsc::Receiver<ClientRouteCommand>) -> ControlMessage {
+            match receiver.try_recv().expect("recovery request is queued") {
+                ClientRouteCommand::Message(message) => message,
+                ClientRouteCommand::Flush(_) => panic!("unexpected recovery flush"),
+            }
+        }
+
+        let mut routes = ClientRouteManager::new();
+        let mut host = add_test_route_queue(
+            &mut routes,
+            1,
+            HOST_CLIENT_ID,
+            crate::NetworkProtocol::Tcp,
+        );
+        let mut peer =
+            add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Tcp);
+
+        send_client_recovery_request(&mut routes, 1, 17)
+            .await
+            .unwrap();
+        assert_eq!(
+            take_message(&mut host),
+            ControlMessage::Request { from_tick: 17 }
+        );
+        assert!(peer.try_recv().is_err());
+
+        send_client_recovery_request(&mut routes, 0, 18)
+            .await
+            .unwrap();
+        assert_eq!(
+            take_message(&mut host),
+            ControlMessage::Request { from_tick: 18 }
+        );
+        assert_eq!(
+            take_message(&mut peer),
+            ControlMessage::Request { from_tick: 18 }
+        );
     }
 
     fn take_queued_resource(
@@ -10687,6 +10972,32 @@ mod tests {
         drop(source);
         drop(observer_a);
         drop(observer_b);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_control_request_falls_back_to_unregistered_partial_packet() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        drain_raw_client(&mut source).await;
+
+        let partial = legacy_packet(source_id, 0, 0x22);
+        source
+            .send_message(ControlMessage::Control(partial.clone()))
+            .await
+            .unwrap();
+        raw_client_ping_barrier(&mut source).await;
+        source
+            .send_message(ControlMessage::Request { from_tick: 0 })
+            .await
+            .unwrap();
+
+        assert!(raw_client_received_control(&mut source, &partial, EVENT_WAIT).await);
+        assert_ne!(partial.client_id(), BROADCAST_CLIENT_ID);
+
+        drop(source);
         host.shutdown().await.unwrap();
     }
 
@@ -15201,6 +15512,29 @@ mod tests {
 
         assert!(validate_peer_control_packet(&queued, 8).is_ok());
         assert!(validate_peer_control_packet(&queued, 7).is_err());
+    }
+
+    #[test]
+    fn mesh_peer_recovery_may_relay_complete_and_partial_controls() {
+        let partial = legacy_packet(8, 12, 0x21);
+        assert!(validate_peer_control_packet(&partial, 7).is_err());
+        assert!(validate_peer_control_or_recovery(&partial, 7, Some(12)).is_ok());
+        assert!(validate_peer_control_or_recovery(&partial, 7, None).is_err());
+
+        let complete = legacy_packet(BROADCAST_CLIENT_ID, 12, 0x31);
+        assert!(validate_peer_control_packet(&complete, 7).is_err());
+        assert!(validate_peer_control_or_recovery(&complete, 7, Some(12)).is_ok());
+    }
+
+    #[test]
+    fn repeated_peer_recovery_keeps_the_earliest_outstanding_tick() {
+        let mut recovery_from_tick = None;
+        extend_peer_recovery_window(&mut recovery_from_tick, 12);
+        extend_peer_recovery_window(&mut recovery_from_tick, 14);
+        assert_eq!(recovery_from_tick, Some(12));
+
+        let trailing = legacy_packet(8, 12, 0x21);
+        assert!(validate_peer_control_or_recovery(&trailing, 7, recovery_from_tick).is_ok());
     }
 
     #[test]
@@ -20709,6 +21043,108 @@ mod tests {
         client_handle.await.expect("client loop exited");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn central_client_repeats_missing_control_request_on_cpp_interval() {
+        async fn next_request<S>(
+            transport: &mut crate::ControlTransport<S>,
+        ) -> ControlMessage
+        where
+            S: AsyncRead + AsyncWrite + Unpin,
+        {
+            loop {
+                match transport.read_message().await.unwrap() {
+                    request @ ControlMessage::Request { .. } => return request,
+                    ControlMessage::Ping(ping) => {
+                        transport
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("expected control request, got {other:?}"),
+                }
+            }
+        }
+
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 1,
+        };
+
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(event_rx.recv().await, Some(ClientEvent::Status(value)) if value == status));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let future = legacy_packet(BROADCAST_CLIENT_ID, 1, 0x31);
+        host_transport
+            .send_message(ControlMessage::Control(future.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(event_rx.recv().await, Some(ClientEvent::Ready { packet }) if packet == future));
+
+        tokio::time::advance(Duration::from_millis(998)).await;
+        assert!(timeout(
+            Duration::from_millis(1),
+            next_request(&mut host_transport)
+        )
+        .await
+        .is_err());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            next_request(&mut host_transport).await,
+            ControlMessage::Request { from_tick: 0 }
+        );
+
+        tokio::time::advance(CONTROL_REQUEST_INTERVAL - Duration::from_millis(2)).await;
+        assert!(timeout(
+            Duration::from_millis(1),
+            next_request(&mut host_transport)
+        )
+        .await
+        .is_err());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            next_request(&mut host_transport).await,
+            ControlMessage::Request { from_tick: 0 }
+        );
+
+        host_transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .unwrap();
+        loop {
+            match event_rx.recv().await {
+                Some(ClientEvent::StatusAck(value)) if value == status => break,
+                Some(ClientEvent::PingMeasured { .. }) => continue,
+                other => panic!("expected final status acknowledgement, got {other:?}"),
+            }
+        }
+        tokio::time::advance(CONTROL_REQUEST_INTERVAL + Duration::from_secs(1)).await;
+        assert!(timeout(
+            Duration::from_millis(1),
+            next_request(&mut host_transport)
+        )
+        .await
+        .is_err());
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn client_graceful_part_sends_exact_cpp_removal_frame_before_close() {
         // C4Network2ClientList::DeleteClient asks CloseConns to send a negative
@@ -21746,6 +22182,196 @@ mod tests {
         shutdown_tx.send(()).ok();
         drop(command_tx);
         client_handle.await.unwrap();
+    }
+
+    #[test]
+    fn central_recovery_cursor_waits_for_the_first_missing_complete_tick() {
+        let mut control = ClientControlState::central(42);
+        control.set_status_target(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 43,
+        });
+        assert_eq!(control.recovery_tick(), Some(42));
+
+        assert_eq!(
+            control
+                .accept_network(legacy_packet(BROADCAST_CLIENT_ID, 43, 0x31))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(control.recovery_tick(), Some(42));
+
+        assert_eq!(
+            control
+                .accept_network(legacy_packet(BROADCAST_CLIENT_ID, 42, 0x30))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(control.expected_tick(), 44);
+        assert_eq!(control.recovery_tick(), None);
+    }
+
+    #[test]
+    fn client_recovery_target_exists_only_while_chasing_go_or_pause() {
+        let mut control = ClientControlState::central(0);
+        control.set_status_target(NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 0,
+        });
+        assert_eq!(control.recovery_tick(), None);
+
+        control.set_status_target(NetworkStatus {
+            state: NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 0,
+        });
+        assert_eq!(control.recovery_tick(), Some(0));
+        control.clear_target();
+        assert_eq!(control.recovery_tick(), None);
+    }
+
+    #[test]
+    fn decentral_recovery_tick_is_derived_from_coordinator_missing_ranges() {
+        let mut control = ClientControlState::central(0);
+        control.register(0).unwrap();
+        control.register(1).unwrap();
+        control.change_mode(0, 0).unwrap();
+        control.set_status_target(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 1,
+        });
+
+        assert!(control
+            .ingest_contribution(legacy_packet(0, 1, 0x11))
+            .unwrap()
+            .is_empty());
+        assert!(control
+            .coordinator
+            .missing_ranges()
+            .iter()
+            .any(|range| range.from() == 0));
+        assert_eq!(control.recovery_tick(), Some(0));
+    }
+
+    #[test]
+    fn decentral_complete_recovery_advances_and_drains_future_ticks() {
+        let mut control = ClientControlState::central(0);
+        control.register(0).unwrap();
+        control.register(1).unwrap();
+        control.change_mode(0, 0).unwrap();
+        control.set_status_target(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 1,
+        });
+        assert!(control
+            .ingest_contribution(legacy_packet(1, 0, 0x11))
+            .unwrap()
+            .is_empty());
+
+        let future = legacy_packet(BROADCAST_CLIENT_ID, 1, 0x31);
+        assert!(control.accept_network(future.clone()).unwrap().is_empty());
+        let missing = legacy_packet(BROADCAST_CLIENT_ID, 0, 0x30);
+        assert_eq!(
+            control.accept_network(missing.clone()).unwrap(),
+            vec![missing, future]
+        );
+        assert_eq!(control.expected_tick(), 2);
+        assert_eq!(control.recovery_tick(), None);
+    }
+
+    #[test]
+    fn active_client_recovery_waits_until_own_control_was_sent() {
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        resource_state.control.register(1).unwrap();
+        resource_state.control.set_status_target(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        });
+        let mut backlog = ControlBacklog::new(8);
+
+        assert_eq!(eligible_client_recovery_tick(&resource_state, &backlog), None);
+        backlog.record_packet(&legacy_packet(1, 0, 0x11));
+        assert_eq!(
+            eligible_client_recovery_tick(&resource_state, &backlog),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn complete_replay_never_synthesizes_a_partial_tick() {
+        let mut backlog = ControlBacklog::new(8);
+        backlog.record_packet(&legacy_packet(1, 5, 0x11));
+        let later_complete = legacy_packet(BROADCAST_CLIENT_ID, 6, 0x22);
+        backlog.record_packet(&later_complete);
+        assert!(contiguous_complete_controls(&backlog, 5)
+            .unwrap()
+            .is_empty());
+
+        let complete = legacy_packet(BROADCAST_CLIENT_ID, 5, 0x33);
+        backlog.record_packet(&complete);
+        assert_eq!(
+            contiguous_complete_controls(&backlog, 5).unwrap(),
+            vec![complete, later_complete]
+        );
+    }
+
+    #[test]
+    fn central_mode_reentry_consumes_a_retained_future_complete_tick() {
+        let mut control = ClientControlState::central(0);
+        control.register(0).unwrap();
+        assert_eq!(
+            control
+                .accept_network(legacy_packet(BROADCAST_CLIENT_ID, 1, 0x21))
+                .unwrap()
+                .len(),
+            1
+        );
+        control.change_mode(0, 0).unwrap();
+        assert_eq!(
+            control
+                .ingest_contribution(legacy_packet(0, 0, 0x11))
+                .unwrap()
+                .len(),
+            1
+        );
+        control.change_mode(1, 1).unwrap();
+
+        assert_eq!(control.expected_tick(), 2);
+        assert!(control
+            .accept_network(legacy_packet(BROADCAST_CLIENT_ID, 1, 0x21))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn central_mode_switch_does_not_pack_buffered_partials() {
+        let mut control = ClientControlState::central(0);
+        control.register(0).unwrap();
+        control.change_mode(0, 0).unwrap();
+        assert!(control
+            .ingest_contribution(legacy_packet(0, 1, 0x11))
+            .unwrap()
+            .is_empty());
+
+        let (changed, ready) = control.change_mode(1, 1).unwrap();
+        assert!(changed);
+        assert!(ready.is_empty());
+        assert_eq!(control.expected_tick(), 1);
+
+        let complete = legacy_packet(BROADCAST_CLIENT_ID, 1, 0x21);
+        assert_eq!(
+            control.accept_network(complete.clone()).unwrap(),
+            vec![complete]
+        );
+        assert_eq!(control.expected_tick(), 2);
     }
 
     #[test]

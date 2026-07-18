@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crate::{ClientId, ControlPacket, MissingRange, ReadyBatch, Tick};
+use crate::{ClientId, ControlPacket, MissingRange, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 
 /// Keeps a backlog of control packets so that missing ticks can be replayed on
 /// demand to clients that fell behind.
@@ -67,6 +67,13 @@ impl ControlBacklog {
             .collect()
     }
 
+    /// Reports whether an exact per-client packet is retained for `tick`.
+    pub fn contains_packet(&self, client_id: ClientId, tick: Tick) -> bool {
+        self.entries
+            .get(&tick)
+            .is_some_and(|per_client| per_client.contains_key(&client_id))
+    }
+
     /// Returns control packets for all ticks beginning at `from_tick` until a
     /// gap is encountered, following the legacy host resync behaviour.
     pub fn fulfill_request(&self, from_tick: Tick) -> Vec<ControlPacket> {
@@ -75,8 +82,12 @@ impl ControlBacklog {
         loop {
             match self.entries.get(&tick) {
                 Some(per_client) if !per_client.is_empty() => {
-                    for packet in per_client.values() {
-                        resend.push(packet.clone());
+                    if let Some(complete) = per_client.get(&BROADCAST_CLIENT_ID) {
+                        resend.push(complete.clone());
+                    } else {
+                        for packet in per_client.values() {
+                            resend.push(packet.clone());
+                        }
                     }
                     tick = tick.saturating_add(1);
                 }
@@ -261,6 +272,27 @@ mod tests {
 
         let replay = backlog.fulfill_request(10);
         assert_eq!(replay, vec![packet(1, 10, b"x")]);
+    }
+
+    #[test]
+    fn backlog_prefers_complete_then_falls_back_to_partials() {
+        let mut backlog = ControlBacklog::new(8);
+        let complete = packet(BROADCAST_CLIENT_ID, 5, b"complete");
+        backlog.record_packet(&packet(2, 5, b"partial-b"));
+        backlog.record_packet(&complete);
+        backlog.record_packet(&packet(1, 5, b"partial-a"));
+        backlog.record_packet(&packet(2, 6, b"next-b"));
+        backlog.record_packet(&packet(1, 6, b"next-a"));
+        backlog.record_packet(&packet(BROADCAST_CLIENT_ID, 8, b"after-gap"));
+
+        assert_eq!(
+            backlog.fulfill_request(5),
+            vec![
+                complete,
+                packet(1, 6, b"next-a"),
+                packet(2, 6, b"next-b"),
+            ]
+        );
     }
 
     #[test]

@@ -172,13 +172,24 @@ impl ControlCoordinator {
         if next_tick <= self.current_tick {
             return Vec::new();
         }
+        self.skip_to(next_tick);
+        let ready = self.collect_ready();
+        self.enforce_backlog();
+        ready
+    }
+
+    /// Moves the cursor without collecting buffered contributions. Central
+    /// mode transitions discard old gaps but must wait for an actual complete
+    /// packet instead of locally packing per-client controls.
+    pub fn skip_to(&mut self, next_tick: Tick) {
+        if next_tick <= self.current_tick {
+            return;
+        }
         self.current_tick = next_tick;
         for state in self.clients.values_mut() {
             state.pending.retain(|tick, _| *tick >= next_tick);
         }
-        let ready = self.collect_ready();
         self.enforce_backlog();
-        ready
     }
 
     pub fn backlog_limit(&self) -> usize {
