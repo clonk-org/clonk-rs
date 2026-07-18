@@ -40757,11 +40757,23 @@ impl MusicCatalog {
     }
 
     fn extend_group(&mut self, group: Group) -> Result<(), lc_resources::GroupError> {
+        self.extend_group_matching(group, b"*")
+    }
+
+    fn extend_group_matching(
+        &mut self,
+        group: Group,
+        pattern: &[u8],
+    ) -> Result<(), lc_resources::GroupError> {
         let source = Arc::new(group);
         let mut entries: Vec<_> = source
             .entries()?
             .into_iter()
-            .filter(|entry| !entry.is_directory && is_music_path(&entry.relative_path))
+            .filter(|entry| {
+                !entry.is_directory
+                    && classic_wildcard_match(pattern, &entry.name_bytes)
+                    && is_music_path(&entry.relative_path)
+            })
             .map(|entry| entry.relative_path)
             .collect();
         entries.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
@@ -40878,6 +40890,82 @@ impl MusicAsset {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum MoreMusicDirective {
+    Clear,
+    Add(String),
+}
+
+fn parse_more_music(contents: &[u8]) -> Vec<MoreMusicDirective> {
+    String::from_utf8_lossy(contents)
+        .split('\n')
+        .filter_map(|line| {
+            let line = line.trim_matches(|character| matches!(character, ' ' | '\t' | '\r'));
+            match line {
+                "" => None,
+                "#clear" => Some(MoreMusicDirective::Clear),
+                comment if comment.starts_with('#') => None,
+                path => Some(MoreMusicDirective::Add(path.to_string())),
+            }
+        })
+        .collect()
+}
+
+fn add_more_music_spec(
+    catalog: &mut MusicCatalog,
+    base: &Path,
+    spec: &str,
+) -> Result<(), GroupError> {
+    let path = PathBuf::from(spec);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    };
+    let pattern = path
+        .file_name()
+        .map(|name| name.as_encoded_bytes().to_vec())
+        .unwrap_or_else(|| b"*".to_vec());
+    let has_wildcard = pattern.iter().any(|byte| matches!(byte, b'*' | b'?'));
+
+    if !has_wildcard {
+        if let Ok(group) = open_group_path_for_folder_map(&path) {
+            return catalog.extend_group(group);
+        }
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let group = open_group_path_for_folder_map(parent)?;
+    catalog.extend_group_matching(group, &pattern)
+}
+
+fn load_more_music(catalog: &mut MusicCatalog, manifest: &Path) -> io::Result<()> {
+    let contents = match fs::read(manifest) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let base = manifest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    for directive in parse_more_music(&contents) {
+        match directive {
+            MoreMusicDirective::Clear => catalog.assets.clear(),
+            MoreMusicDirective::Add(spec) => {
+                if let Err(error) = add_more_music_spec(catalog, base, &spec) {
+                    tracing::warn!(%spec, %error, "MoreMusic entry skipped");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 struct MusicResolver {
     global: MusicCatalog,
     extra: Option<Group>,
@@ -40909,13 +40997,22 @@ impl MusicResolver {
                 .with_context(|| format!("failed to open music group at {}", path.display()))?;
             MusicCatalog::from_group(group).map_err(anyhow::Error::from)
         })();
-        let global = match global {
+        let mut global = match global {
             Ok(global) => global,
             Err(error) => {
                 tracing::warn!(%error, "global music catalog discovery skipped");
                 MusicCatalog::empty()
             }
         };
+        let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
+        let more_music_path = exe_data_root.join("MoreMusic.txt");
+        if let Err(error) = load_more_music(&mut global, &more_music_path) {
+            tracing::warn!(
+                path = %more_music_path.display(),
+                %error,
+                "MoreMusic discovery skipped"
+            );
+        }
         let extra = match mapped_classic_extra_group_path(&paths) {
             Ok(Some(path)) => match Group::open(&path) {
                 Ok(extra) => Some(extra),
@@ -55519,6 +55616,95 @@ public func Grant(password) { return GainMissionAccess(password); }
         let decoded = decode_audio(audio).expect("sandbox music decodes");
         assert_eq!(decoded.sample_rate, 44_100);
         assert!(decoded.frames.len() > 2_000);
+    }
+
+    #[test]
+    fn more_music_parser_ignores_comments_and_ascii_whitespace() {
+        assert_eq!(
+            parse_more_music(
+                b" \r\n\t# comment with leading whitespace \r\n  #clear\t\r\n  Extra Music  \r\n"
+            ),
+            vec![
+                MoreMusicDirective::Clear,
+                MoreMusicDirective::Add("Extra Music".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn more_music_directory_after_clear_replaces_global_catalog() {
+        let root = tempdir().expect("MoreMusic directory fixture");
+        let global = root.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("fixture global music group");
+        fs::write(global.join("Default.ogg"), b"default").expect("default music fixture");
+
+        let extra = root.path().join("Extra Music");
+        fs::create_dir_all(&extra).expect("fixture extra music directory");
+        fs::write(extra.join("Added.ogg"), b"added").expect("added music fixture");
+        fs::write(extra.join("Effect.wav"), b"effect").expect("unsupported WAV fixture");
+        fs::write(extra.join("Notes.txt"), b"notes").expect("non-music fixture");
+        fs::write(root.path().join("Loose.mod"), b"loose")
+            .expect("plain music file fixture");
+        let manifest = root.path().join("MoreMusic.txt");
+        fs::write(
+            &manifest,
+            b" \r\n\t# ignored comment \r\n  #clear\t\r\n  Extra Music  \r\nLoose.mod\r\nLoose.mod\r\n",
+        )
+        .expect("MoreMusic fixture");
+
+        let mut catalog = MusicCatalog::from_group(
+            Group::open(&global).expect("open global music fixture"),
+        )
+        .expect("build global music catalog");
+        load_more_music(&mut catalog, &manifest).expect("load MoreMusic directory");
+
+        assert_eq!(
+            catalog.filenames(),
+            ["Added.ogg", "Loose.mod", "Loose.mod"]
+        );
+        assert_eq!(
+            catalog
+                .resolve("Added.ogg")
+                .expect("MoreMusic directory track")
+                .load_audio()
+                .expect("read MoreMusic directory track"),
+            b"added"
+        );
+    }
+
+    #[test]
+    fn more_music_mp3_wildcard_adds_only_matching_supported_files() {
+        let root = tempdir().expect("MoreMusic wildcard fixture");
+        let global = root.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("fixture global music group");
+        fs::write(global.join("Default.ogg"), b"default").expect("default music fixture");
+
+        let extra = root.path().join("Extras");
+        fs::create_dir_all(extra.join("Folder.mp3")).expect("matching directory fixture");
+        for name in [
+            "Keep.mp3",
+            "Upper.MP3",
+            "Other.ogg",
+            "LooksLike.mp3.bak",
+            "Readme.txt",
+        ] {
+            fs::write(extra.join(name), name.as_bytes()).expect("wildcard music fixture");
+        }
+        fs::write(extra.join("Folder.mp3/Inside.mp3"), b"nested")
+            .expect("nested music fixture");
+        let wildcard = PathBuf::from("Extras").join("*.mp3");
+        let manifest = root.path().join("MoreMusic.txt");
+        fs::write(&manifest, format!("{}\n", wildcard.display())).expect("MoreMusic fixture");
+
+        let mut catalog = MusicCatalog::from_group(
+            Group::open(&global).expect("open global music fixture"),
+        )
+        .expect("build global music catalog");
+        load_more_music(&mut catalog, &manifest).expect("load MoreMusic wildcard");
+        let mut filenames = catalog.filenames();
+        filenames.sort_by_cached_key(|name| name.to_ascii_lowercase());
+
+        assert_eq!(filenames, ["Default.ogg", "Keep.mp3", "Upper.MP3"]);
     }
 
     #[test]
