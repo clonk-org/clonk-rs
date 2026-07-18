@@ -899,6 +899,8 @@ impl ClientActivationState {
 #[derive(Debug)]
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
+    control_tick_tx: tokio_mpsc::UnboundedSender<ControlTickProbe>,
+    control_tick_probe: Mutex<Option<ControlTickProbe>>,
     current_frame: Arc<AtomicI32>,
     event_rx: Receiver<NetworkEvent>,
     telemetry_rx: Receiver<NetworkEvent>,
@@ -910,6 +912,14 @@ pub struct NetworkManager {
     league_start_response: Option<lc_network::LeagueStartResponse>,
     league_runtime_available: bool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ControlTickProbe {
+    tick: Tick,
+    control_rate: i32,
+    reached_at: tokio::time::Instant,
+    queued: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2011,6 +2021,7 @@ impl NetworkManager {
             WorkerMode::Client { .. } => NetworkRole::Client,
         };
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
+        let (control_tick_tx, control_tick_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) =
@@ -2035,6 +2046,7 @@ impl NetworkManager {
                     if let Err(err) = runtime.block_on(run_worker(
                         mode,
                         command_rx,
+                        control_tick_rx,
                         event_tx.clone(),
                         telemetry_tx,
                         local_id_tx,
@@ -2063,6 +2075,8 @@ impl NetworkManager {
         let league_runtime_available = ready.league_runtime_available;
         Ok(Self {
             command_tx,
+            control_tick_tx,
+            control_tick_probe: Mutex::new(None),
             current_frame,
             event_rx,
             telemetry_rx,
@@ -2722,6 +2736,28 @@ impl NetworkManager {
         let _ = self.command_tx.blocking_send(command);
     }
 
+    pub fn control_tick_reached(&self, tick: Tick, control_rate: i32) {
+        if self.role != NetworkRole::Host {
+            return;
+        }
+        let mut probe = self.control_tick_probe.lock();
+        if probe.as_ref().is_none_or(|probe| probe.tick != tick) {
+            *probe = Some(ControlTickProbe {
+                tick,
+                control_rate,
+                reached_at: tokio::time::Instant::now(),
+                queued: false,
+            });
+        }
+        let probe = probe.as_mut().expect("control-tick probe was initialized");
+        if probe.queued {
+            return;
+        }
+        if self.control_tick_tx.send(*probe).is_ok() {
+            probe.queued = true;
+        }
+    }
+
     pub fn set_join_allowed(&self, allowed: bool) -> Result<()> {
         if self.local_client_id != HOST_CLIENT_ID {
             return Err(anyhow!("only the network host may change join admission"));
@@ -2930,6 +2966,8 @@ impl NetworkManager {
         (
             Self {
                 command_tx,
+                control_tick_tx: tokio_mpsc::unbounded_channel().0,
+                control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
@@ -2956,6 +2994,8 @@ impl NetworkManager {
         (
             Self {
                 command_tx,
+                control_tick_tx: tokio_mpsc::unbounded_channel().0,
+                control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
@@ -3002,6 +3042,8 @@ impl NetworkManager {
         (
             Self {
                 command_tx,
+                control_tick_tx: tokio_mpsc::unbounded_channel().0,
+                control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
@@ -3535,6 +3577,7 @@ fn host_registration_addresses(
 async fn run_worker(
     mode: WorkerMode,
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
+    mut control_tick_rx: tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
@@ -3550,6 +3593,7 @@ async fn run_worker(
                 settings,
                 local_owner,
                 &mut command_rx,
+                &mut control_tick_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -3580,6 +3624,7 @@ async fn run_host_worker(
     settings: HostSettings,
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
+    control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
@@ -3808,6 +3853,15 @@ async fn run_host_worker(
     let worker_result: Result<()> = async {
         loop {
             tokio::select! {
+                Some(probe) = control_tick_rx.recv() => {
+                    host.control_tick_reached(
+                        probe.tick,
+                        probe.control_rate,
+                        probe.reached_at,
+                    )
+                    .await
+                    .map_err(|error| anyhow!("host control-tick stamp failed: {error}"))?;
+                }
                 maybe_event = host_events.recv() => {
                     match maybe_event {
                         Some(event) => handle_host_event(
@@ -5431,6 +5485,35 @@ mod tests {
     }
 
     #[test]
+    fn control_tick_probe_uses_dedicated_coalesced_channel() {
+        let (mut manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let (control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        manager.control_tick_tx = control_tick_tx;
+
+        manager.control_tick_reached(7, 2);
+        let reached_at = {
+            let probe = manager.control_tick_probe.lock();
+            let probe = probe.as_ref().unwrap();
+            assert!(probe.queued);
+            probe.reached_at
+        };
+        let queued = control_tick_rx.try_recv().unwrap();
+        assert_eq!(queued.tick, 7);
+        assert_eq!(queued.control_rate, 2);
+        assert_eq!(queued.reached_at, reached_at);
+
+        manager.control_tick_reached(7, 2);
+        assert!(matches!(
+            control_tick_rx.try_recv(),
+            Err(tokio_mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            commands.command_rx.try_recv(),
+            Err(tokio_mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn netpuncher_resolution_normalizes_default_port_and_family_order() {
         let addresses = normalize_resolved_netpuncher_addresses([
             "[2001:db8::2]:0".parse().unwrap(),
@@ -5992,6 +6075,7 @@ mod tests {
             prepared: None,
         };
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, _event_rx) = mpsc::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
@@ -6000,6 +6084,7 @@ mod tests {
                 settings,
                 0,
                 &mut command_rx,
+                &mut control_tick_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,

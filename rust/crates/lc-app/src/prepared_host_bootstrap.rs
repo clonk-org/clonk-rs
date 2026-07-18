@@ -49,6 +49,7 @@ use crate::host_game_resource_sources::{
 pub struct PreparedHostBootstrapConfig {
     pub control_mode: i32,
     pub control_rate: i32,
+    pub async_max_wait: i32,
     pub fair_crew: bool,
     pub fair_crew_strength: i32,
     pub auto_frame_skip: bool,
@@ -1085,6 +1086,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     let mut host_config = HostConfig {
         max_players,
         start_tick: 0,
+        async_max_wait_frames: spec.config.async_max_wait,
         local_core,
         initial_status: NetworkStatus {
             state: NETWORK_STATE_LOBBY,

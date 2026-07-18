@@ -53,6 +53,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
         config: PreparedHostBootstrapConfig {
             control_mode: 2,
             control_rate: 3,
+            async_max_wait: 7,
             fair_crew: true,
             fair_crew_strength: 4_321,
             auto_frame_skip: true,
@@ -69,6 +70,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     let host = prepared.host_config();
     assert!(!host.allow_join);
     assert_eq!(host.start_tick, 0);
+    assert_eq!(host.async_max_wait_frames, 7);
     // HandlePlayerInfo::LoadResources uses the same installed resource roots
     // after the initial JoinData bootstrap (pristine 9ffa0a5d
     // src/C4Network2Players.cpp:245-260; src/C4Network2Res.cpp:1473-1516).
@@ -730,6 +732,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
             config: PreparedHostBootstrapConfig {
                 control_mode: 0,
                 control_rate: 1,
+                async_max_wait: 2,
                 fair_crew: false,
                 fair_crew_strength: 0,
                 auto_frame_skip: false,
@@ -1095,6 +1098,7 @@ fn prepare_with_names(
         config: PreparedHostBootstrapConfig {
             control_mode: 0,
             control_rate: 1,
+            async_max_wait: 2,
             fair_crew: false,
             fair_crew_strength: 0,
             auto_frame_skip: false,

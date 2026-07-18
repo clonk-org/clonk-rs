@@ -15160,6 +15160,7 @@ fn build_network_host_preparation(
         config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
             control_mode: integer("Network", "ControlMode", 0),
             control_rate: integer("Network", "ControlRate", 2),
+            async_max_wait: integer("Network", "AsyncMaxWait", 2),
             fair_crew: app.startup_view_flags.fair_crew,
             fair_crew_strength: integer("General", "DefCrewStrength", 1_000),
             auto_frame_skip: boolean("Graphics", "AutoFrameSkip", true),
@@ -33345,10 +33346,6 @@ impl GameApp {
                     let Some(network) = self.network.as_ref() else {
                         return Ok(());
                     };
-                    for tick in due_ticks {
-                        network.finalize_tick(tick);
-                    }
-
                     let control_tick = match self.network_control_clock {
                         None => Some(u32::try_from(frame).unwrap_or(u32::MAX)),
                         Some(clock) => match clock.tick_for_frame(frame) {
@@ -33362,6 +33359,19 @@ impl GameApp {
                             },
                         },
                     };
+                    if let Some(tick) = control_tick {
+                        let control_rate = self
+                            .network_control_clock
+                            .map_or(1, NetworkControlClock::control_rate);
+                        // Native starts the async-client wait before DoInput.
+                        // Stamp this cadence attempt before local presend
+                        // frames can block on the network worker queue.
+                        network.control_tick_reached(tick, control_rate);
+                    }
+                    for tick in due_ticks {
+                        network.finalize_tick(tick);
+                    }
+
                     if let Some(tick) = control_tick {
                         let sync_controls = self.network_sync.take_exact(tick);
                         if !sync_controls.is_empty() {

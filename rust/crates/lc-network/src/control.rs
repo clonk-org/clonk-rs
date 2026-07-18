@@ -192,6 +192,24 @@ impl ControlCoordinator {
         self.enforce_backlog();
     }
 
+    /// Packs the current tick with whichever registered clients have
+    /// contributed, then resumes ordinary all-client packing for successors.
+    /// C++ uses this only after the host's `CNM_Async` wait budget expires.
+    pub fn force_current_tick(&mut self) -> Vec<ReadyBatch> {
+        let tick = self.current_tick;
+        let mut packets = Vec::with_capacity(self.clients.len());
+        for state in self.clients.values_mut() {
+            if let Some(packet) = state.pending.remove(&tick) {
+                packets.push(packet);
+            }
+        }
+        self.current_tick = self.current_tick.saturating_add(1);
+        let mut ready = vec![ReadyBatch { tick, packets }];
+        ready.extend(self.collect_ready());
+        self.enforce_backlog();
+        ready
+    }
+
     pub fn backlog_limit(&self) -> usize {
         self.backlog_limit
     }
@@ -483,6 +501,18 @@ mod tests {
         assert_eq!(ready[0].tick(), 137);
         assert_eq!(coord.current_tick(), 138);
         assert!(!coord.clients[&1].pending.contains_key(&12));
+    }
+
+    #[test]
+    fn forcing_empty_tick_advances_without_registered_clients() {
+        let mut coord = ControlCoordinator::new(100);
+
+        let ready = coord.force_current_tick();
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].tick(), 0);
+        assert!(ready[0].packets().is_empty());
+        assert_eq!(coord.current_tick(), 1);
     }
 
     #[test]

@@ -35,6 +35,7 @@ const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 const CONTROL_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
 const CLIENT_MESH_PENDING_LIMIT: usize = 64;
+const DEFAULT_CONTROL_TARGET_FPS: i64 = 38;
 const HOST_CLIENT_ID: ClientId = 0;
 static RESOURCE_RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
 
@@ -68,6 +69,8 @@ pub struct HostConfig {
     pub backlog_limit: usize,
     pub resync_interval: Duration,
     pub resync_cooldown: Duration,
+    /// `Config.Network.AsyncMaxWait`, measured in extra control frames.
+    pub async_max_wait_frames: i32,
     pub max_players: usize,
     pub start_tick: Tick,
     pub local_core: lc_engine::ClientCoreControlData,
@@ -138,6 +141,7 @@ impl Default for HostConfig {
             backlog_limit: 256,
             resync_interval: Duration::from_millis(200),
             resync_cooldown: Duration::from_secs(2),
+            async_max_wait_frames: 2,
             max_players: 8,
             start_tick: 0,
             local_core: local_core.clone(),
@@ -464,6 +468,11 @@ pub enum HostEvent {
 pub enum HostCommand {
     ChangeStatus(NetworkStatus),
     BroadcastStatusAck(NetworkStatus),
+    ControlTickReached {
+        tick: Tick,
+        control_rate: i32,
+        reached_at: tokio::time::Instant,
+    },
     StatusReachedCurrent,
     StatusReached {
         status: NetworkStatus,
@@ -583,6 +592,24 @@ impl HostHandle {
     pub async fn broadcast_status_ack(&self, status: NetworkStatus) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::BroadcastStatusAck(status))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Stamps the wall-clock instant at which the game first attempts this
+    /// control frame. Repeated stalled-frame probes retain the first stamp.
+    pub async fn control_tick_reached(
+        &self,
+        tick: Tick,
+        control_rate: i32,
+        reached_at: tokio::time::Instant,
+    ) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::ControlTickReached {
+                tick,
+                control_rate,
+                reached_at,
+            })
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -3902,6 +3929,30 @@ enum HostLoopMessage {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AsyncControlWait {
+    tick: Tick,
+    reached_at: tokio::time::Instant,
+    control_rate: i32,
+}
+
+impl AsyncControlWait {
+    fn deadline(self, async_max_wait_frames: i32) -> tokio::time::Instant {
+        self.reached_at + strict_async_control_wait(self.control_rate, async_max_wait_frames)
+    }
+}
+
+fn strict_async_control_wait(control_rate: i32, async_max_wait_frames: i32) -> Duration {
+    let max_wait_ms = i64::from(control_rate)
+        .saturating_mul(i64::from(async_max_wait_frames).saturating_mul(1_000))
+        / DEFAULT_CONTROL_TARGET_FPS;
+    if max_wait_ms < 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_millis((max_wait_ms as u64).saturating_add(1))
+    }
+}
+
 #[derive(Debug)]
 struct HostState {
     config: HostConfig,
@@ -3917,6 +3968,7 @@ struct HostState {
     last_chase_target_update: Option<tokio::time::Instant>,
     game_started: bool,
     control_mode: i32,
+    async_control_wait: Option<AsyncControlWait>,
     admission: HostAdmission,
     client_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
     client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
@@ -4519,6 +4571,7 @@ async fn run_host(
             NETWORK_STATE_GO | NETWORK_STATE_PAUSE
         ),
         control_mode: config.initial_status.control_mode,
+        async_control_wait: None,
         admission,
         client_cores,
         client_addresses,
@@ -4577,10 +4630,14 @@ async fn run_host(
         let chase_target_update_deadline = state
             .last_chase_target_update
             .map(|last_update| last_update + CHASE_TARGET_UPDATE_INTERVAL);
+        let async_control_deadline = state.async_control_deadline();
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
                 break;
+            }
+            _ = wait_for_async_control_deadline(async_control_deadline) => {
+                force_expired_async_control(&mut state).await;
             }
             event = next_host_puncher_event(&mut puncher_events) => {
                 handle_host_puncher_event(
@@ -4743,6 +4800,13 @@ async fn run_host(
                     }
                     HostCommand::BroadcastStatusAck(status) => {
                         broadcast_status(status, true, &mut state).await;
+                    }
+                    HostCommand::ControlTickReached {
+                        tick,
+                        control_rate,
+                        reached_at,
+                    } => {
+                        state.control_tick_reached(tick, control_rate, reached_at);
                     }
                     HostCommand::StatusReachedCurrent => {
                         let effects = state.status_barrier.local_reached();
@@ -5329,6 +5393,28 @@ async fn wait_for_chase_target_update(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+async fn wait_for_async_control_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn force_expired_async_control(state: &mut HostState) {
+    let Some(waiting) = state.async_control_wait else {
+        return;
+    };
+    if state.control_mode != 2
+        || waiting.tick != state.coordinator.current_tick()
+        || tokio::time::Instant::now() < waiting.deadline(state.config.async_max_wait_frames)
+    {
+        return;
+    }
+    for batch in state.coordinator.force_current_tick() {
+        publish_ready_batch(batch, state).await;
+    }
+}
+
 async fn update_chase_targets(state: &mut HostState) {
     let chasing_clients = state
         .status_barrier
@@ -5475,6 +5561,34 @@ impl HostState {
             self.coordinator.register_client(client_id)?;
         }
         Ok(())
+    }
+
+    fn control_tick_reached(
+        &mut self,
+        tick: Tick,
+        control_rate: i32,
+        reached_at: tokio::time::Instant,
+    ) {
+        if tick != self.coordinator.current_tick() {
+            return;
+        }
+        if self
+            .async_control_wait
+            .is_some_and(|waiting| waiting.tick == tick)
+        {
+            return;
+        }
+        self.async_control_wait = Some(AsyncControlWait {
+            tick,
+            reached_at,
+            control_rate,
+        });
+    }
+
+    fn async_control_deadline(&self) -> Option<tokio::time::Instant> {
+        let waiting = self.async_control_wait?;
+        (self.control_mode == 2 && waiting.tick == self.coordinator.current_tick())
+            .then(|| waiting.deadline(self.config.async_max_wait_frames))
     }
 }
 
@@ -17672,6 +17786,224 @@ mod tests {
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
+    }
+
+    fn take_queued_host_ready(events: &mut mpsc::Receiver<HostEvent>) -> Option<ControlPacket> {
+        while let Ok(event) = events.try_recv() {
+            match event {
+                HostEvent::Ready { packet } => return Some(packet),
+                HostEvent::TransportError { error, .. } => {
+                    panic!("host transport failed while checking async control: {error}")
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn take_queued_client_ready(events: &mut mpsc::Receiver<ClientEvent>) -> Option<ControlPacket> {
+        while let Ok(event) = events.try_recv() {
+            match event {
+                ClientEvent::Ready { packet } => return Some(packet),
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected while checking async control: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    async fn settle_paused_network() {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn async_host_forces_and_broadcasts_incomplete_tick_after_strict_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        config.initial_status.control_mode = 2;
+        config.async_max_wait_frames = 2;
+        config
+            .initial_join_snapshot
+            .as_mut()
+            .expect("default JoinData")
+            .parameters
+            .control_rate = 2;
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut client =
+            connect_client(address, ClientConfig::new("Slow", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let mut client_events = client.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
+
+        host.control_tick_reached(0, 2, tokio::time::Instant::now())
+            .await
+            .unwrap();
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
+            .await
+            .unwrap();
+        host.set_join_allowed(true).await.unwrap();
+
+        // floor(2 * 2 * 1000 / 38) = 105ms. Native still waits at
+        // equality and first permits the incomplete packet at 106ms.
+        tokio::time::advance(Duration::from_millis(105)).await;
+        host.set_join_allowed(true).await.unwrap();
+        settle_paused_network().await;
+        assert!(take_queued_host_ready(&mut host_events).is_none());
+        assert!(take_queued_client_ready(&mut client_events).is_none());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let mut host_ready = None;
+        let mut client_ready = None;
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+            host_ready = host_ready.or_else(|| take_queued_host_ready(&mut host_events));
+            client_ready = client_ready.or_else(|| take_queued_client_ready(&mut client_events));
+            if host_ready.is_some() && client_ready.is_some() {
+                break;
+            }
+        }
+        let host_ready = host_ready.expect("async host did not force the expired tick");
+        let client_ready = client_ready.expect("forced complete packet was not broadcast");
+        assert_eq!(host_ready.client_id(), BROADCAST_CLIENT_ID);
+        assert_eq!(host_ready.tick(), 0);
+        assert_eq!(control_commands(&host_ready), vec![0xA0]);
+        assert_eq!(client_ready, host_ready);
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn central_and_decentral_never_force_incomplete_ticks() {
+        for mode in [0, 1] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut config = HostConfig::default();
+            config.initial_status.control_mode = mode;
+            config.async_max_wait_frames = 2;
+            config
+                .initial_join_snapshot
+                .as_mut()
+                .expect("default JoinData")
+                .parameters
+                .control_rate = 2;
+            let mut host = start_host(listener, config).await.unwrap();
+            let mut host_events = host.take_event_receiver();
+            let mut client = connect_client(
+                address,
+                ClientConfig::new(format!("Slow-{mode}"), ParticipantKind::Player),
+            )
+            .await
+            .unwrap();
+            let mut client_events = client.take_event_receiver();
+            activate_joined_client(&host, &mut host_events, client.client_id()).await;
+
+            host.control_tick_reached(0, 2, tokio::time::Instant::now())
+                .await
+                .unwrap();
+            host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0 + mode))
+                .await
+                .unwrap();
+            host.set_join_allowed(true).await.unwrap();
+            tokio::time::advance(Duration::from_secs(1)).await;
+            host.set_join_allowed(true).await.unwrap();
+            settle_paused_network().await;
+
+            assert!(
+                take_queued_host_ready(&mut host_events).is_none(),
+                "mode {mode} forced an incomplete host tick"
+            );
+            assert!(
+                take_queued_client_ready(&mut client_events).is_none(),
+                "mode {mode} broadcast an incomplete complete packet"
+            );
+
+            client.shutdown().await.unwrap();
+            host.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn async_mode_commit_uses_tick_reach_stamped_in_central_mode() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        config.initial_status.control_mode = 1;
+        config.async_max_wait_frames = 2;
+        config
+            .initial_join_snapshot
+            .as_mut()
+            .expect("default JoinData")
+            .parameters
+            .control_rate = 2;
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut client =
+            connect_client(address, ClientConfig::new("Slow", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let mut client_events = client.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
+
+        host.control_tick_reached(0, 2, tokio::time::Instant::now())
+            .await
+            .unwrap();
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
+            .await
+            .unwrap();
+        host.set_join_allowed(true).await.unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        host.set_join_allowed(true).await.unwrap();
+        settle_paused_network().await;
+        assert!(take_queued_host_ready(&mut host_events).is_none());
+
+        let asynchronous = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 0,
+        };
+        host.change_status(asynchronous).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Status(status)) if status == asynchronous => break,
+                Some(_) => continue,
+                None => panic!("client event stream ended before async status"),
+            }
+        }
+        client.submit_status_ack(asynchronous).await.unwrap();
+        host.status_reached(asynchronous, asynchronous.target_tick)
+            .await
+            .unwrap();
+
+        let mut ready = None;
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusCommitted(status)) if status == asynchronous => break,
+                Some(HostEvent::Ready { packet }) => ready = Some(packet),
+                Some(_) => continue,
+                None => panic!("host event stream ended before async commit"),
+            }
+        }
+        for _ in 0..256 {
+            tokio::task::yield_now().await;
+            ready = ready.or_else(|| take_queued_host_ready(&mut host_events));
+            if ready.is_some() {
+                break;
+            }
+        }
+        let ready = ready.expect("expired pre-async tick reach did not force after mode commit");
+        assert_eq!(ready.tick(), 0);
+        assert_eq!(control_commands(&ready), vec![0xA0]);
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
