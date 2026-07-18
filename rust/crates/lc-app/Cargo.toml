@@ -35,4 +35,5 @@ thiserror = "1"
 gethostname = "1.0"
 
 [dev-dependencies]
+flate2 = "1"
 tempfile = "3.8"

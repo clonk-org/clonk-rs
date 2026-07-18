@@ -19,6 +19,7 @@ mod join_client_registry;
 mod join_player_registry;
 mod join_team_registry;
 mod league;
+mod league_stream;
 mod league_round_results_packet;
 mod legacy;
 mod lobby;
@@ -137,6 +138,12 @@ pub use league::{
     LeagueReferenceRequestEncodeError, LeagueResponseDecodeError, LeagueStartResponse,
     LeagueUpdateResponse, PlayerInfoListIniError, LEAGUE_HTTP_TIMEOUT, LEAGUE_HTTP_USER_AGENT,
     LEAGUE_MIN_UPDATE_INTERVAL_SECONDS, MAX_LEAGUES,
+};
+pub use league_stream::{
+    LeagueRecordStream, LeagueRecordStreamError, LeagueRecordUpload,
+    LEAGUE_STREAM_FILE_CHUNK_TYPE, LEAGUE_STREAM_INTERVAL_SECONDS,
+    LEAGUE_STREAM_MAX_BLOCK_SIZE, LEAGUE_STREAM_MIN_BLOCK_SIZE,
+    encode_league_stream_file_chunk,
 };
 pub use league_round_results_packet::{
     decode_league_round_results_payload, encode_league_round_results_payload,

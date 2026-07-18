@@ -561,9 +561,20 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
         if std::env::var("LC_C4P_DEBUG").is_ok() {
             eprintln!("C4P entry: {entry:?}");
         }
-        let name = entry.relative_path.to_string_lossy().to_string();
-        let is_info = name.to_ascii_lowercase().ends_with(".c4i");
-        let Ok(child) = group.open_child(&entry.relative_path) else {
+        let is_info = entry
+            .name_bytes
+            .get(entry.name_bytes.len().saturating_sub(4)..)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4i"));
+        let child = if group.is_directory() {
+            group.open_child(&entry.relative_path)
+        } else {
+            group
+                .read_entry_bytes_exact(&entry)
+                .and_then(|bytes| {
+                    Group::from_raw_memory(path_from_group_name_bytes(&entry.name_bytes), bytes)
+                })
+        };
+        let Ok(child) = child else {
             continue;
         };
         if is_info {
@@ -573,14 +584,26 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
                 let info = CrewInfo::from_object_info_source(&text, has_custom_portrait);
                 crew.push(info);
             }
-        } else if entry.is_directory {
-            subgroups.push(child);
         }
+        subgroups.push(child);
     }
     for child in subgroups {
         collect_crew(&child, crew)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn path_from_group_name_bytes(bytes: &[u8]) -> std::path::PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    std::path::PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_group_name_bytes(bytes: &[u8]) -> std::path::PathBuf {
+    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 fn custom_portrait_loads(group: &Group) -> bool {

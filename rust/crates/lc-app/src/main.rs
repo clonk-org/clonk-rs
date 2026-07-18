@@ -9081,12 +9081,15 @@ fn restore_or_render_backdrop(
 struct RecordingTemplate {
     group: MutableGroup,
     output_path: PathBuf,
+    initial_stream_chunk: Vec<u8>,
 }
 
 struct RecordingSession {
     writer: ControlRecordWriter,
     group: MutableGroup,
     output_path: PathBuf,
+    league_streaming: bool,
+    stream_writer_pos: usize,
 }
 
 struct StartupNetworkConnection {
@@ -9096,13 +9099,148 @@ struct StartupNetworkConnection {
 }
 
 impl RecordingSession {
-    fn new(template: RecordingTemplate) -> Self {
+    fn new(template: RecordingTemplate, league_streaming: bool) -> Self {
         Self {
             writer: ControlRecordWriter::new(),
             group: template.group,
             output_path: template.output_path,
+            league_streaming,
+            stream_writer_pos: 0,
         }
     }
+
+    fn take_stream_delta(&mut self) -> Option<Vec<u8>> {
+        if !self.league_streaming {
+            return None;
+        }
+        let bytes = self.writer.bytes();
+        debug_assert!(self.stream_writer_pos <= bytes.len());
+        let delta = bytes[self.stream_writer_pos..].to_vec();
+        self.stream_writer_pos = bytes.len();
+        (!delta.is_empty()).then_some(delta)
+    }
+}
+
+fn record_scenario_origin(
+    scenario_path: &Path,
+    app_paths: Option<&AppPaths>,
+    fallback: &str,
+) -> String {
+    let relative = if scenario_path.is_relative() {
+        Some(scenario_path.to_path_buf())
+    } else {
+        app_paths.and_then(|paths| {
+            scenario_path
+                .strip_prefix(paths.install_root())
+                .ok()
+                .map(Path::to_path_buf)
+        })
+    };
+    let origin = relative.map_or_else(
+        || c4_filename_from_path(scenario_path),
+        |path| path.to_string_lossy().replace('\\', "/"),
+    );
+    if origin.is_empty() {
+        fallback.to_string()
+    } else {
+        origin
+    }
+}
+
+fn c4_filename_from_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let bytes = path.as_bytes();
+    let mut filename_start = 0;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte != b'/' && !(cfg!(windows) && byte == b'\\') {
+            continue;
+        }
+        if index >= 4 && bytes[index - 4..index - 1].eq_ignore_ascii_case(b".c4") {
+            return path[filename_start..].replace('\\', "/");
+        }
+        filename_start = index + 1;
+    }
+    path[filename_start..].replace('\\', "/")
+}
+
+fn recorded_player_resource_name(core: &lc_engine::NetworkResourceCore) -> Vec<u8> {
+    let basename = core
+        .filename
+        .as_bytes()
+        .rsplit(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
+        .next()
+        .unwrap_or_default();
+    let mut target = core.id.to_string().into_bytes();
+    target.push(b'-');
+    target.extend_from_slice(basename);
+    target
+}
+
+fn has_player_group_extension(name: &[u8]) -> bool {
+    name.get(name.len().saturating_sub(4)..)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4p"))
+}
+
+#[cfg(unix)]
+fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn path_from_group_name_bytes(bytes: &[u8]) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_group_name_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn collect_stream_player_crew_files(
+    group: &Group,
+    crew_files: &mut Vec<(Vec<u8>, Vec<u8>)>,
+) -> std::result::Result<usize, String> {
+    let mut subgroups = Vec::new();
+    let mut direct_crew = 0;
+    for entry in group.entries().map_err(|error| error.to_string())? {
+        let is_crew = entry
+            .name_bytes
+            .get(entry.name_bytes.len().saturating_sub(4)..)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4i"));
+        let child = if group.is_directory() {
+            group.open_child(&entry.relative_path)
+        } else {
+            group
+                .read_entry_bytes_exact(&entry)
+                .and_then(|bytes| {
+                    Group::from_raw_memory(path_from_group_name_bytes(&entry.name_bytes), bytes)
+                })
+        };
+        let Ok(child) = child else {
+            continue;
+        };
+        if is_crew {
+            if let Ok(object_info) = child.read_file("ObjectInfo.txt") {
+                crew_files.push((entry.name_bytes, object_info));
+                direct_crew += 1;
+            }
+        }
+        subgroups.push(child);
+    }
+    for subgroup in subgroups {
+        collect_stream_player_crew_files(&subgroup, crew_files)?;
+    }
+    Ok(direct_crew)
 }
 
 const SEARCH_EDIT_MAX_BYTES: usize = 254;
@@ -33364,6 +33502,7 @@ impl GameApp {
             self.publish_running_host_reference();
         }
         self.tick_league_update_at(now);
+        self.tick_league_record_stream_at(now);
         Ok(status_reached == RuntimeStatusReachOutcome::Reported
             || lobby_countdown_changed
             || ready_check_changed
@@ -33382,6 +33521,18 @@ impl GameApp {
         };
         if let Err(error) = network.update_league_reference(now, reference) {
             tracing::error!(%error, "failed to queue league reference update");
+        }
+    }
+
+    fn tick_league_record_stream_at(&self, now: i64) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.pump_league_record_stream(now) {
+            tracing::error!(%error, "failed to queue league record stream pump");
         }
     }
 
@@ -37299,11 +37450,16 @@ impl GameApp {
         ));
         record_title.truncate(512);
         let record_title = lc_script::c4_string_from_bytes(&record_title);
+        let scenario_origin = record_scenario_origin(
+            scenario_path,
+            self.app_paths.as_ref(),
+            &scenario.identifier,
+        );
         let scenario_core = scenario_data
             .serialize_initial_record_scenario(
                 &record_title,
                 &definition_modules,
-                &scenario.identifier,
+                &scenario_origin,
             )
             .map_err(|error| error.to_string())?;
         let source = open_group_path_for_folder_map(scenario_path)
@@ -37323,6 +37479,48 @@ impl GameApp {
             &self.recording_player_info_snapshot(),
         )
         .map_err(|error| error.to_string())?;
+
+        let initial_stream_chunk = if self
+            .network
+            .as_ref()
+            .is_some_and(NetworkManager::league_record_stream_available)
+        {
+            // C4Record::StartStreaming saves a second, no-copy record group
+            // and inserts that packed image as the leading RCT_File. The
+            // original scenario is recovered from Scenario.Head.Origin.
+            let stream_group_name = output_path
+                .file_name()
+                .map(|name| path_to_legacy_bytes(Path::new(name)))
+                .unwrap_or_else(|| b"Record.c4s".to_vec());
+            let mut stream_initial_group = MutableGroup::new_bytes(stream_group_name);
+            stream_initial_group
+                .add_file("Parameters.txt", parameters.clone())
+                .map_err(|error| error.to_string())?;
+            stream_initial_group
+                .add_file("Scenario.txt", scenario_core.clone())
+                .map_err(|error| error.to_string())?;
+            if let Some(game) = game.as_ref() {
+                stream_initial_group
+                    .add_file("Game.txt", game.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            stream_initial_group
+                .add_file("PlayerInfos.txt", player_infos.clone())
+                .map_err(|error| error.to_string())?;
+            let stream_initial_file = stream_initial_group
+                .pack()
+                .map_err(|error| error.to_string())?;
+            let stream_record_name = LegacyCString::from_bytes(path_to_legacy_bytes(&output_path))
+                .ok_or_else(|| "record stream filename contains an interior NUL".to_string())?;
+            lc_network::encode_league_stream_file_chunk(
+                &stream_record_name,
+                &stream_initial_file,
+            )
+            .map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
+
         let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
         let stale_presentation_entries = group
             .entry_names()
@@ -37363,7 +37561,11 @@ impl GameApp {
         group.remove_entry("CtrlRec.c4b");
         group.remove_entry("CtrlRec.txt");
         group.remove_entry("RecPlayerInfos.txt");
-        self.recording_template = Some(RecordingTemplate { group, output_path });
+        self.recording_template = Some(RecordingTemplate {
+            group,
+            output_path,
+            initial_stream_chunk,
+        });
         Ok(())
     }
 
@@ -37391,7 +37593,24 @@ impl GameApp {
                 template.output_path.display()
             )
         })?;
-        self.recording = Some(RecordingSession::new(template));
+        let league_streaming = self
+            .network
+            .as_ref()
+            .is_some_and(NetworkManager::league_record_stream_available);
+        if league_streaming {
+            let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+            let network = self
+                .network
+                .as_ref()
+                .expect("stream availability requires a network manager");
+            network
+                .start_league_record_stream(now)
+                .map_err(|error| error.to_string())?;
+            network
+                .append_league_record_bytes(&template.initial_stream_chunk)
+                .map_err(|error| error.to_string())?;
+        }
+        self.recording = Some(RecordingSession::new(template, league_streaming));
         self.engine.set_recording_active(true);
         Ok(true)
     }
@@ -37399,11 +37618,17 @@ impl GameApp {
     fn record_control_packet(&mut self, packet: &lc_engine::ControlPacket) {
         self.record_control_resource_file(packet);
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-        if let Some(session) = self.recording.as_mut() {
+        let stream_delta = if let Some(session) = self.recording.as_mut() {
             if let Err(error) = session.writer.record_packet(frame, packet) {
                 tracing::warn!(%error, "failed to append immediate CtrlRec packet");
+                None
+            } else {
+                session.take_stream_delta()
             }
-        }
+        } else {
+            None
+        };
+        self.append_league_record_stream_bytes(stream_delta);
     }
 
     fn record_control_batch(&mut self, packets: &[lc_engine::ControlPacket]) {
@@ -37411,10 +37636,25 @@ impl GameApp {
             self.record_control_resource_file(packet);
         }
         let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-        if let Some(session) = self.recording.as_mut() {
+        let stream_delta = if let Some(session) = self.recording.as_mut() {
             if let Err(error) = session.writer.record_controls(frame, packets) {
                 tracing::warn!(%error, "failed to append CtrlRec control list");
+                None
+            } else {
+                session.take_stream_delta()
             }
+        } else {
+            None
+        };
+        self.append_league_record_stream_bytes(stream_delta);
+    }
+
+    fn append_league_record_stream_bytes(&self, bytes: Option<Vec<u8>>) {
+        let (Some(bytes), Some(network)) = (bytes, self.network.as_ref()) else {
+            return;
+        };
+        if let Err(error) = network.append_league_record_bytes(&bytes) {
+            tracing::error!(%error, "failed to queue league record bytes");
         }
     }
 
@@ -37433,30 +37673,97 @@ impl GameApp {
         else {
             return;
         };
-        let filename = core.filename.to_string_lossy();
-        let basename = filename
-            .rsplit(['/', '\\'])
-            .next()
-            .filter(|name| !name.is_empty())
-            .unwrap_or("Player.c4p");
-        let target = format!("{}-{basename}", core.id);
-        let child = Group::open(&path)
+        let Some(league_streaming) = self
+            .recording
+            .as_ref()
+            .map(|session| session.league_streaming)
+        else {
+            return;
+        };
+        let target = recorded_player_resource_name(core);
+        let prepared = Group::open(&path)
             .map_err(|error| error.to_string())
-            .and_then(|group| MutableGroup::from_group(&group).map_err(|error| error.to_string()));
+            .and_then(|group| {
+                let child =
+                    MutableGroup::from_group(&group).map_err(|error| error.to_string())?;
+                let stream_chunk = if league_streaming {
+                    let packed = if has_player_group_extension(&target) {
+                        self.pack_stripped_stream_player(&group, &target)?
+                    } else {
+                        child.pack().map_err(|error| error.to_string())?
+                    };
+                    let stream_name = LegacyCString::from_bytes(target.clone()).ok_or_else(|| {
+                        "streamed player filename contains an interior NUL".to_string()
+                    })?;
+                    Some(
+                        lc_network::encode_league_stream_file_chunk(&stream_name, &packed)
+                            .map_err(|error| error.to_string())?,
+                    )
+                } else {
+                    None
+                };
+                Ok((child, stream_chunk))
+            });
         let Some(session) = self.recording.as_mut() else {
             return;
         };
-        match child.and_then(|child| {
+        let stream_chunk = match prepared.and_then(|(child, stream_chunk)| {
             session
                 .group
-                .add_child(target, child)
-                .map_err(|error| error.to_string())
+                .add_child_bytes(target, child)
+                .map_err(|error| error.to_string())?;
+            Ok(stream_chunk)
         }) {
-            Ok(()) => {}
+            Ok(stream_chunk) => stream_chunk,
             Err(error) => {
                 tracing::warn!(resource_id = core.id, path = %path.display(), %error, "failed to copy player resource into record");
+                None
             }
+        };
+        self.append_league_record_stream_bytes(stream_chunk);
+    }
+
+    /// `C4Record::AddFile` strips a temporary `.c4p` copy before streaming;
+    /// the local replay group retains the complete original player resource.
+    fn pack_stripped_stream_player(
+        &self,
+        source: &Group,
+        target: &[u8],
+    ) -> std::result::Result<Vec<u8>, String> {
+        let player = PlayerFile::load(source).map_err(|error| error.to_string())?;
+        let mut crew_files = Vec::new();
+        let direct_crew = collect_stream_player_crew_files(source, &mut crew_files)?;
+        if direct_crew == 0 {
+            return Err("player group contains no loadable direct crew info".to_string());
         }
+        if crew_files.len() != player.crew.len() {
+            return Err(format!(
+                "player crew core count mismatch: {} files, {} parsed entries",
+                crew_files.len(),
+                player.crew.len()
+            ));
+        }
+
+        let mut stripped = MutableGroup::new_bytes(target.to_vec());
+        let player_core = source
+            .read_file("Player.txt")
+            .map_err(|error| error.to_string())?;
+        stripped
+            .add_file("Player.txt", player_core)
+            .map_err(|error| error.to_string())?;
+        for ((name, object_info), crew) in crew_files.into_iter().zip(player.crew) {
+            if self.engine.definition_name(&crew.id).is_none() {
+                continue;
+            }
+            let mut child = MutableGroup::new_bytes(name.clone());
+            child
+                .add_file("ObjectInfo.txt", object_info)
+                .map_err(|error| error.to_string())?;
+            stripped
+                .add_child_bytes(name, child)
+                .map_err(|error| error.to_string())?;
+        }
+        stripped.pack().map_err(|error| error.to_string())
     }
 
     fn replay_record_player_file(
@@ -37468,15 +37775,11 @@ impl GameApp {
             .as_ref()
             .and_then(|scenario| scenario.path.as_deref())
             .ok_or_else(|| "active replay has no record-group path".to_string())?;
-        let filename = core.filename.to_string_lossy();
-        let basename = filename
-            .rsplit(['/', '\\'])
-            .next()
-            .filter(|name| !name.is_empty())
-            .unwrap_or("Player.c4p");
-        let target = format!("{}-{basename}", core.id);
+        let target = recorded_player_resource_name(core);
         let record = open_group_path_for_folder_map(record_path).map_err(|error| error.to_string())?;
-        let player_group = record.open_child(&target).map_err(|error| error.to_string())?;
+        let player_group = record
+            .open_child(path_from_group_name_bytes(&target))
+            .map_err(|error| error.to_string())?;
         let bytes = match player_group.raw_image() {
             Ok(bytes) => bytes,
             Err(_) if player_group.is_directory() => MutableGroup::from_group(&player_group)
@@ -37485,13 +37788,27 @@ impl GameApp {
                 .map_err(|error| error.to_string())?,
             Err(error) => return Err(error.to_string()),
         };
-        PlayerFile::load_from_bytes(PathBuf::from(target), bytes).map_err(|error| error.to_string())
+        PlayerFile::load_from_bytes(path_from_group_name_bytes(&target), bytes)
+            .map_err(|error| error.to_string())
     }
 
     fn finish_recording(&mut self) -> Option<LeagueEndRecord> {
         self.engine.set_recording_active(false);
         if self.recording.is_none() {
             return None;
+        }
+        let (league_streaming, stream_delta) = {
+            let session = self.recording.as_mut().expect("recording checked above");
+            (session.league_streaming, session.take_stream_delta())
+        };
+        self.append_league_record_stream_bytes(stream_delta);
+        if league_streaming {
+            let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+            if let Some(network) = self.network.as_ref() {
+                if let Err(error) = network.finish_league_record_stream(now) {
+                    tracing::error!(%error, "failed to finish league record stream");
+                }
+            }
         }
         let final_player_infos = match lc_network::encode_player_info_list_ini(
             &self.recording_player_info_snapshot(),
@@ -37508,6 +37825,7 @@ impl GameApp {
             writer,
             mut group,
             output_path,
+            ..
         } = session;
         let stream = writer.finish(u32::try_from(self.engine.frame()).unwrap_or(u32::MAX));
         if let Err(error) = group.add_file("CtrlRec.c4b", stream) {
@@ -44341,6 +44659,7 @@ global func Step(state, frame, random) { return nil; }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::read::ZlibDecoder;
     use lc_audio::decode_audio;
     use lc_engine::command::CommandData;
     use lc_engine::{
@@ -44354,7 +44673,7 @@ mod tests {
     use std::env;
     use std::ffi::OsString;
     use std::fs;
-    use std::io::BufWriter;
+    use std::io::{BufWriter, Read, Write};
     use std::path::Path;
     use std::sync::OnceLock;
     use std::thread;
@@ -68939,7 +69258,53 @@ public func Grant(password) { return GainMissionAccess(password); }
         group
             .add_file("Sentinel.txt", b"preserved".to_vec())
             .expect("add copied scenario component");
-        app.recording_template = Some(RecordingTemplate { group, output_path });
+        app.recording_template = Some(RecordingTemplate {
+            group,
+            output_path,
+            initial_stream_chunk: Vec::new(),
+        });
+    }
+
+    fn serve_one_record_stream_upload() -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let request = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let header = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = header
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                    })
+                    .unwrap();
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            request
+        });
+        (format!("http://{address}/record?game=7&"), request)
     }
 
     fn recorded_right_control(player: i32) -> lc_engine::ControlPacket {
@@ -68995,6 +69360,252 @@ public func Grant(password) { return GainMissionAccess(password); }
         let stream = group.read_file("CtrlRec.c4b").expect("binary CtrlRec");
         let mut playback = ControlRecordPlayback::from_bytes(&stream).expect("CtrlRec opens");
         assert_eq!(playback.take_controls(0), vec![packet]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn league_record_stream_orders_initial_and_control_bytes_without_local_end() {
+        let directory = tempdir().expect("record directory");
+        let output_path = directory.path().join("001-Streamed.c4s");
+        let (endpoint, request) = serve_one_record_stream_upload();
+        let mut app = new_running_sandbox_app();
+        install_test_recording_template(&mut app, output_path.clone());
+        let initial_name = LegacyCString::from_bytes(b"Records/001-Streamed.c4s".to_vec()).unwrap();
+        let initial_chunk = lc_network::encode_league_stream_file_chunk(
+            &initial_name,
+            b"packed initial record",
+        )
+        .unwrap();
+        app.recording_template
+            .as_mut()
+            .unwrap()
+            .initial_stream_chunk = initial_chunk.clone();
+        let (network, _events) = NetworkManager::test_stub_with_league_record_stream(endpoint);
+        app.network = Some(network);
+        assert!(app.engine.definition_name("CLNK").is_some());
+
+        let player_path = directory.path().join("Alice.c4p");
+        let mut player_group = MutableGroup::new("Alice.c4p");
+        player_group
+            .add_file("Player.txt", b"[Player]\nName=Alice\n".to_vec())
+            .unwrap();
+        player_group
+            .add_file("BigIcon.png", b"large player icon".to_vec())
+            .unwrap();
+        player_group
+            .add_file("Private.bin", b"must stay local".to_vec())
+            .unwrap();
+        let mut valid_crew = MutableGroup::new("Alice.c4i");
+        valid_crew
+            .add_file(
+                "ObjectInfo.txt",
+                b"[ObjectInfo]\nid=CLNK\nName=Alice\n".to_vec(),
+            )
+            .unwrap();
+        valid_crew
+            .add_file("Portrait.png", b"portrait".to_vec())
+            .unwrap();
+        valid_crew
+            .add_file("Private.bin", b"crew extra".to_vec())
+            .unwrap();
+        player_group.add_child("Alice.c4i", valid_crew).unwrap();
+        let mut missing_crew = MutableGroup::new("Missing.c4i");
+        missing_crew
+            .add_file(
+                "ObjectInfo.txt",
+                b"[ObjectInfo]\nid=MISS\nName=Missing\n".to_vec(),
+            )
+            .unwrap();
+        player_group
+            .add_child("Missing.c4i", missing_crew)
+            .unwrap();
+        fs::write(&player_path, player_group.pack().unwrap()).unwrap();
+        app.admission_resources
+            .mark_complete(17, player_path.clone());
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 17,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Players/Alice.c4p".to_vec()).unwrap(),
+            ..lc_engine::NetworkResourceCore::default()
+        };
+        let packet = lc_engine::ControlPacket::JoinPlayer(lc_engine::JoinPlayerControlData {
+            filename: LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+            at_client: 0,
+            info_id: 1,
+            source: lc_engine::JoinPlayerSource::Resource(core),
+            by_client: 0,
+        });
+        app.start_recording(true).unwrap();
+        let frame = u32::try_from(app.engine.frame()).unwrap();
+        app.record_control_packet(&packet);
+
+        let mut expected_writer = ControlRecordWriter::new();
+        expected_writer.record_packet(frame, &packet).unwrap();
+        let control_bytes = expected_writer.bytes().to_vec();
+        app.finish_recording().expect("streamed record metadata");
+
+        let request = request.join().unwrap();
+        let header_end = request
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .unwrap();
+        let header = std::str::from_utf8(&request[..header_end]).unwrap();
+        assert!(header.starts_with(
+            "POST /record?game=7&pos=0&end=true HTTP/1."
+        ));
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(&request[header_end + 4..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert!(decoded.starts_with(&initial_chunk));
+        let mut cursor = initial_chunk.len();
+        assert_eq!(
+            &decoded[cursor..cursor + 2],
+            &[0, lc_network::LEAGUE_STREAM_FILE_CHUNK_TYPE]
+        );
+        cursor += 2;
+        let name_end = decoded[cursor..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|offset| cursor + offset)
+            .unwrap();
+        assert_eq!(&decoded[cursor..name_end], b"17-Alice.c4p");
+        cursor = name_end + 1;
+        let mut packed_size = 0_usize;
+        let mut shift = 0_u32;
+        loop {
+            let byte = decoded[cursor];
+            cursor += 1;
+            packed_size |= usize::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        let packed_end = cursor + packed_size;
+        let streamed_player = Group::from_memory(
+            PathBuf::from("17-Alice.c4p"),
+            decoded[cursor..packed_end].to_vec(),
+        )
+        .expect("stripped streamed player group opens");
+        assert!(streamed_player.exists("Player.txt"));
+        assert!(streamed_player.exists("Alice.c4i"));
+        assert!(!streamed_player.exists("Missing.c4i"));
+        assert!(!streamed_player.exists("BigIcon.png"));
+        assert!(!streamed_player.exists("Private.bin"));
+        let streamed_crew = streamed_player
+            .open_child("Alice.c4i")
+            .expect("valid streamed crew opens");
+        assert!(streamed_crew.exists("ObjectInfo.txt"));
+        assert!(!streamed_crew.exists("Portrait.png"));
+        assert!(!streamed_crew.exists("Private.bin"));
+        assert_eq!(&decoded[packed_end..], control_bytes);
+
+        let record = Group::open(&output_path).expect("record group");
+        let local_player = record
+            .open_child("17-Alice.c4p")
+            .expect("unstripped local player group");
+        assert!(local_player.exists("BigIcon.png"));
+        assert!(local_player.exists("Private.bin"));
+        assert!(local_player.exists("Missing.c4i"));
+        let local_crew = local_player
+            .open_child("Alice.c4i")
+            .expect("unstripped local crew group");
+        assert!(local_crew.exists("Portrait.png"));
+        assert!(local_crew.exists("Private.bin"));
+        let local = record.read_file("CtrlRec.c4b").expect("local CtrlRec");
+        assert_eq!(&local[..control_bytes.len()], control_bytes);
+        assert_eq!(local.len(), control_bytes.len() + 2);
+        assert_eq!(local.last(), Some(&lc_engine::RCT_END));
+    }
+
+    #[test]
+    fn league_stream_player_strip_requires_direct_crew_and_flattens_nested_valid_crew() {
+        let app = new_running_sandbox_app();
+        assert!(app.engine.definition_name("CLNK").is_some());
+
+        let mut no_crew = MutableGroup::new("Empty.c4p");
+        no_crew
+            .add_file("Player.txt", b"[Player]\nName=Empty\n".to_vec())
+            .unwrap();
+        let no_crew = Group::from_memory(PathBuf::from("Empty.c4p"), no_crew.pack().unwrap())
+            .expect("empty player opens");
+        assert!(
+            app.pack_stripped_stream_player(&no_crew, b"1-Empty.c4p")
+                .unwrap_err()
+                .contains("no loadable direct crew")
+        );
+
+        let mut source = MutableGroup::new("Nested.c4p");
+        source
+            .add_file("Player.txt", b"[Player]\nName=Nested\n".to_vec())
+            .unwrap();
+        let mut missing = MutableGroup::new("Missing.c4i");
+        missing
+            .add_file(
+                "ObjectInfo.txt",
+                b"[ObjectInfo]\nid=MISS\nName=Missing\n".to_vec(),
+            )
+            .unwrap();
+        source.add_child("Missing.c4i", missing).unwrap();
+        let mut nested = MutableGroup::new("Nested.c4i");
+        nested
+            .add_file(
+                "ObjectInfo.txt",
+                b"[ObjectInfo]\nid=CLNK\nName=Nested\n".to_vec(),
+            )
+            .unwrap();
+        nested
+            .add_file("Portrait.png", b"not streamed".to_vec())
+            .unwrap();
+        let mut folder = MutableGroup::new("Roster.c4f");
+        folder.add_child("Nested.c4i", nested).unwrap();
+        source.add_child("Roster.c4f", folder).unwrap();
+        let source = Group::from_memory(PathBuf::from("Nested.c4p"), source.pack().unwrap())
+            .expect("nested player opens");
+
+        let stripped = app
+            .pack_stripped_stream_player(&source, b"2-Nested.c4p")
+            .expect("direct invalid crew still lets native strip proceed");
+        let stripped = Group::from_memory(PathBuf::from("2-Nested.c4p"), stripped)
+            .expect("stripped player opens");
+        assert!(stripped.exists("Player.txt"));
+        assert!(stripped.exists("Nested.c4i"));
+        assert!(!stripped.exists("Missing.c4i"));
+        assert!(!stripped.exists("Roster.c4f"));
+        assert!(!stripped.open_child("Nested.c4i").unwrap().exists("Portrait.png"));
+    }
+
+    #[test]
+    fn league_record_resource_name_preserves_raw_legacy_basename() {
+        let core = lc_engine::NetworkResourceCore {
+            id: 23,
+            filename: LegacyCString::from_bytes(b"Players/Andr\xe9.c4p".to_vec()).unwrap(),
+            ..lc_engine::NetworkResourceCore::default()
+        };
+
+        assert_eq!(recorded_player_resource_name(&core), b"23-Andr\xe9.c4p");
+    }
+
+    #[test]
+    fn initial_record_origin_is_relative_to_cpp_executable_root() {
+        let paths = AppPaths::discover().expect("discover repository install");
+        let scenario = paths
+            .install_root()
+            .join("content/Missions.c4f/Deep/Game.c4s");
+
+        assert_eq!(
+            record_scenario_origin(&scenario, Some(&paths), "wrong-ui-identifier"),
+            "content/Missions.c4f/Deep/Game.c4s"
+        );
+        assert_eq!(
+            record_scenario_origin(
+                Path::new("/outside/Missions.c4f/Deep/Game.c4s"),
+                Some(&paths),
+                "wrong-ui-identifier",
+            ),
+            "Missions.c4f/Deep/Game.c4s"
+        );
     }
 
     #[test]

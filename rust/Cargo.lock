@@ -2045,6 +2045,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "clap",
+ "flate2",
  "freetype-rs",
  "gethostname",
  "gilrs",
