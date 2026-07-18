@@ -8,6 +8,12 @@ use thiserror::Error;
 
 use crate::decoder::{decode_audio, decode_audio_for_output, AudioDecodeError, DecodedAudio};
 
+const SDL_MIXER_MAX_VOLUME: f32 = 128.0;
+const SDL_MIXER_MAX_PANNING: f32 = 255.0;
+const MAXIMUM_MUSIC_VOLUME: f32 = 80.0;
+const MAXIMUM_SOUND_VOLUME: f32 = 100.0;
+const MAXIMUM_PANNING_VOLUME: f32 = 192.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelId(pub usize);
 
@@ -697,7 +703,8 @@ impl AudioMixer {
                         if !finished_music {
                             let frame = music.clip.frames[music.position];
                             music.position += 1;
-                            let mut volume = music.volume;
+                            let mut volume =
+                                music.volume * (MAXIMUM_MUSIC_VOLUME / SDL_MIXER_MAX_VOLUME);
                             if let Some(fade) = music.fade_out.as_mut() {
                                 if fade.remaining_samples > 0 {
                                     let ratio =
@@ -807,10 +814,13 @@ impl ChannelPlayback {
     fn recalculate_gains(&mut self) {
         let pan = self.pan.clamp(-1.0, 1.0);
         let volume = self.volume.clamp(0.0, 1.0);
-        let left = (1.0 - pan).clamp(0.0, 2.0) * 0.5;
-        let right = (1.0 + pan).clamp(0.0, 2.0) * 0.5;
-        self.left_gain = left * volume;
-        self.right_gain = right * volume;
+        let volume_gain = volume * (MAXIMUM_SOUND_VOLUME / SDL_MIXER_MAX_VOLUME);
+        let left = ((1.0 - pan) * MAXIMUM_PANNING_VOLUME).clamp(0.0, MAXIMUM_PANNING_VOLUME)
+            / SDL_MIXER_MAX_PANNING;
+        let right = ((1.0 + pan) * MAXIMUM_PANNING_VOLUME).clamp(0.0, MAXIMUM_PANNING_VOLUME)
+            / SDL_MIXER_MAX_PANNING;
+        self.left_gain = left * volume_gain;
+        self.right_gain = right * volume_gain;
     }
 }
 
@@ -866,6 +876,15 @@ mod tests {
             }
         }
         cursor.into_inner()
+    }
+
+    fn rms(samples: &[f32]) -> f64 {
+        let mean_square = samples
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>()
+            / samples.len() as f64;
+        mean_square.sqrt()
     }
 
     #[test]
@@ -946,6 +965,51 @@ mod tests {
             .map(|sample| (*sample as i32).abs() as i64)
             .sum();
         assert!(right_energy > left_energy);
+    }
+
+    #[test]
+    fn equal_script_volumes_match_sdl_music_to_centered_sound_balance() {
+        let data = generate_sine_wave(200, 440.0, 44_100);
+        let mixer = AudioMixer::new(44_100, 2);
+
+        let sound_id = mixer.load_sound(&data).unwrap();
+        let channel = mixer.play_sound(sound_id, true).unwrap();
+        mixer.channel_set_volume_and_pan(channel, 1.0, 0.0);
+        let mut sound_output = vec![0.0f32; 1_024 * 2];
+        mixer.mix_f32(&mut sound_output);
+        mixer.halt_channel(channel);
+
+        let music_id = mixer.load_music(&data).unwrap();
+        mixer.play_music(music_id, true).unwrap();
+        mixer.music_set_volume(1.0);
+        let mut music_output = vec![0.0f32; 1_024 * 2];
+        mixer.mix_f32(&mut music_output);
+
+        let ratio = rms(&music_output) / rms(&sound_output);
+        let expected = 17.0 / 16.0;
+        assert!(
+            (ratio - expected).abs() < 0.001,
+            "music:sound RMS ratio {ratio} differs from SDL ratio {expected}"
+        );
+    }
+
+    #[test]
+    fn fully_panned_sound_uses_sdl_side_gain_cap() {
+        let data = generate_sine_wave(20, 440.0, 44_100);
+        let mixer = AudioMixer::new(44_100, 1);
+        let sound_id = mixer.load_sound(&data).unwrap();
+        let channel = mixer.play_sound(sound_id, true).unwrap();
+        mixer.channel_set_volume_and_pan(channel, 1.0, 1.0);
+
+        let state = mixer.state.lock().unwrap();
+        let playback = state.channels[channel.0].as_ref().unwrap();
+        let expected_loud_side = 10.0f32 / 17.0;
+        assert_eq!(playback.left_gain, 0.0);
+        assert!(
+            (playback.right_gain - expected_loud_side).abs() < 1.0e-6,
+            "hard-pan gain {} exceeds SDL cap {expected_loud_side}",
+            playback.right_gain
+        );
     }
 
     #[test]
