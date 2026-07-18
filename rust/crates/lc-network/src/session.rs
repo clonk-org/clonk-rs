@@ -2773,7 +2773,7 @@ async fn handle_post_mortem_recovery(
     };
     for nested_packet in replay.packets {
         match crate::transport::parse_complete_packet(&nested_packet) {
-            Ok(message) => {
+            Ok(Some(message)) => {
                 Box::pin(handle_client_message(
                     replay.connection_id,
                     replay.client_id,
@@ -2783,6 +2783,7 @@ async fn handle_post_mortem_recovery(
                 ))
                 .await;
             }
+            Ok(None) => {}
             Err(error) => {
                 let _ = state
                     .event_tx
@@ -2813,7 +2814,8 @@ fn authenticated_forwarded_control(
     packet: &crate::ForwardPacket,
 ) -> Result<ControlPacket, String> {
     let nested = crate::transport::parse_complete_packet(&packet.nested_packet)
-        .map_err(|error| format!("invalid forwarded packet: {error}"))?;
+        .map_err(|error| format!("invalid forwarded packet: {error}"))?
+        .ok_or_else(|| "forwarded packet must contain one non-recursive PID_Control".to_string())?;
     let ControlMessage::Control(control) = nested else {
         return Err("forwarded packet must contain one non-recursive PID_Control".to_string());
     };
@@ -3823,10 +3825,18 @@ where
                         break;
                     }
                 }
-                result = self.transport.read_message() => {
-                    if let Ok(message) = &result {
-                        self.liveness.record_inbound_message(message);
-                    }
+                packet = self.transport.read_packet() => {
+                    let result = match packet {
+                        Ok(crate::transport::InboundPacket::Message(message)) => {
+                            self.liveness.record_inbound_message(&message);
+                            Ok(message)
+                        }
+                        Ok(crate::transport::InboundPacket::Ignored(packet_type)) => {
+                            self.liveness.record_inbound_packet(packet_type);
+                            continue;
+                        }
+                        Err(error) => Err(error),
+                    };
                     match result {
                         Ok(ControlMessage::Ping(packet)) => {
                             if let Err(error) = self
@@ -4289,17 +4299,29 @@ async fn run_client_loop_with_addresses<S>(
                     break;
                 }
             }
-            result = transport.read_message() => {
-                if let Ok(message) = &result {
-                    resource_state.liveness.record_inbound_message(message);
-                }
+            packet = transport.read_packet() => {
+                let result = match packet {
+                    Ok(crate::transport::InboundPacket::Message(message)) => {
+                        resource_state.liveness.record_inbound_message(&message);
+                        Ok(message)
+                    }
+                    Ok(crate::transport::InboundPacket::Ignored(packet_type)) => {
+                        resource_state.liveness.record_inbound_packet(packet_type);
+                        continue;
+                    }
+                    Err(error) => Err(error),
+                };
                 let result = match result {
                     Ok(ControlMessage::Forward(packet)) => {
                         let local_client_id = resource_state.catalog.local_client_id();
                         if !forward_selects(&packet, local_client_id) {
                             continue;
                         }
-                        crate::transport::parse_complete_packet(&packet.nested_packet)
+                        match crate::transport::parse_complete_packet(&packet.nested_packet) {
+                            Ok(Some(message)) => Ok(message),
+                            Ok(None) => continue,
+                            Err(error) => Err(error),
+                        }
                     }
                     other => other,
                 };
@@ -8058,7 +8080,7 @@ mod tests {
         assert!(recovery.packets.iter().any(|packet| {
             matches!(
                 crate::transport::parse_complete_packet(packet),
-                Ok(ControlMessage::LobbyCountdown(packet)) if packet == dead_route_countdown
+                Ok(Some(ControlMessage::LobbyCountdown(packet))) if packet == dead_route_countdown
             )
         }));
 
@@ -10534,7 +10556,7 @@ mod tests {
         assert_eq!(post_mortem.packets.len(), 1);
         assert_eq!(
             crate::transport::parse_complete_packet(&post_mortem.packets[0]).unwrap(),
-            ControlMessage::Status(status)
+            Some(ControlMessage::Status(status))
         );
     }
 

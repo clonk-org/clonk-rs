@@ -34,8 +34,10 @@ const PID_POST_MORTEM: u8 = 0x06;
 const PID_STATUS: u8 = 0x10;
 const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
+const PID_TCP_SIM_OPEN: u8 = 0x14;
 const PID_JOIN_DATA: u8 = 0x15;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
+const PID_LEAGUE_ROUND_RESULTS: u8 = 0x17;
 const PID_LOBBY_COUNTDOWN: u8 = 0x20;
 const PID_READY_CHECK: u8 = 0x21;
 const PID_CONTROL: u8 = 0x40;
@@ -268,6 +270,12 @@ pub enum ControlMessage {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InboundPacket {
+    Message(ControlMessage),
+    Ignored(u8),
+}
+
 /// Length of the frame header: prefix byte plus native-endian u32 size.
 const FRAME_HEADER_LEN: usize = 5;
 
@@ -309,19 +317,32 @@ where
             .create_post_mortem(remote_connection_id)
     }
 
-    /// Reads the next complete frame.
+    /// Reads the next supported logical message, transparently consuming any
+    /// known C++ packet types whose handlers have not been ported yet.
     ///
     /// Cancel-safe: this future may be dropped mid-frame (e.g. by
     /// `tokio::select!`) without corrupting the stream — partial frames are
     /// kept in the transport's buffer and completed by the next call.
     pub async fn read_message(&mut self) -> Result<ControlMessage, TransportError> {
         loop {
-            if let Some(message) = self.extract_frame()? {
-                if let ControlMessage::Ping(packet) = &message {
+            match self.read_packet().await? {
+                InboundPacket::Message(message) => return Ok(message),
+                InboundPacket::Ignored(_) => {}
+            }
+        }
+    }
+
+    /// Reads one framed packet, including known C++ packet types whose
+    /// handlers have not been ported yet. Session owners use this to preserve
+    /// C++ packet-counter accounting before ignoring those packets.
+    pub(crate) async fn read_packet(&mut self) -> Result<InboundPacket, TransportError> {
+        loop {
+            if let Some(packet) = self.extract_frame()? {
+                if let InboundPacket::Message(ControlMessage::Ping(ping)) = &packet {
                     self.outbound_packet_log
-                        .acknowledge_received(packet.packet_counter);
+                        .acknowledge_received(ping.packet_counter);
                 }
-                return Ok(message);
+                return Ok(packet);
             }
             let mut chunk = [0u8; 4096];
             let read = self.stream.read(&mut chunk).await?;
@@ -335,7 +356,7 @@ where
     /// Extracts one complete frame from the accumulated buffer, mirroring
     /// `C4NetIOTCP::UnpackPacket` (src/C4NetIO.cpp:1304). Returns `Ok(None)`
     /// while the frame is still incomplete.
-    fn extract_frame(&mut self) -> Result<Option<ControlMessage>, TransportError> {
+    fn extract_frame(&mut self) -> Result<Option<InboundPacket>, TransportError> {
         if self.read_buf.len() < FRAME_HEADER_LEN {
             return Ok(None);
         }
@@ -354,10 +375,13 @@ where
         if self.read_buf.len() < FRAME_HEADER_LEN + size {
             return Ok(None);
         }
-        let message =
-            parse_complete_packet(&self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size])?;
+        let body = &self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size];
+        let packet = match parse_complete_packet(body)? {
+            Some(message) => InboundPacket::Message(message),
+            None => InboundPacket::Ignored(body[0]),
+        };
         self.read_buf.drain(..FRAME_HEADER_LEN + size);
-        Ok(Some(message))
+        Ok(Some(packet))
     }
 
     /// Sends one message as a single contiguous frame, mirroring
@@ -486,10 +510,20 @@ where
     }
 }
 
-pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<ControlMessage, TransportError> {
+pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage>, TransportError> {
     if body.is_empty() {
         return Err(TransportError::Malformed("missing packet payload"));
     }
+    // Both IDs are present in C++'s typed packet table, but their main-thread
+    // handlers are not ported yet. The TCP frame already delimits their body,
+    // so consume them opaquely instead of treating them as unknown packets.
+    if matches!(body[0], PID_TCP_SIM_OPEN | PID_LEAGUE_ROUND_RESULTS) {
+        return Ok(None);
+    }
+    parse_control_message(body).map(Some)
+}
+
+fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> {
     match body[0] {
         PID_PING => parse_ping(&body[1..]).map(ControlMessage::Ping),
         PID_PONG => parse_ping(&body[1..]).map(ControlMessage::Pong),
@@ -995,6 +1029,71 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn known_cpp_packets_skip_without_losing_following_tcp_frame() {
+        // Real C++ bodies: packed client 7 + TCP IPv6 address for
+        // PID_TCPSimOpen, then a successful zero-player league result.
+        let tcp_sim_open = [
+            PID_TCP_SIM_OPEN,
+            0x07,
+            0x01,
+            b'[',
+            b'2',
+            b'0',
+            b'0',
+            b'1',
+            b':',
+            b'd',
+            b'b',
+            b'8',
+            b':',
+            b':',
+            b'7',
+            b']',
+            b':',
+            b'1',
+            b'1',
+            b'1',
+            b'1',
+            b'2',
+            0x00,
+        ];
+        let league_results = [PID_LEAGUE_ROUND_RESULTS, 0x01, b'O', b'K', 0x00, 0x00];
+        let ping = PingPacket {
+            sent_at: 0x1122_3344,
+            packet_counter: 7,
+        };
+        let mut ping_payload = vec![PID_PING];
+        encode_ping(ping, &mut ping_payload);
+
+        let mut frames = expect_frame(&tcp_sim_open);
+        frames.extend(expect_frame(&league_results));
+        frames.extend(expect_frame(&ping_payload));
+        let (client, mut server) = duplex(256);
+        server.write_all(&frames).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        let message =
+            tokio::time::timeout(std::time::Duration::from_secs(1), transport.read_message())
+                .await
+                .expect("known opaque packets blocked the following frame")
+                .expect("known opaque packet disconnected the transport");
+        assert_eq!(message, ControlMessage::Ping(ping));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn truly_unknown_cpp_packet_id_still_errors() {
+        let frame = expect_frame(&[0x7e, 0xde, 0xad]);
+        let (client, mut server) = duplex(32);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert!(matches!(
+            transport.read_message().await,
+            Err(TransportError::UnsupportedPacket(0x7e))
+        ));
     }
 
     async fn assert_resource_frame_round_trip(packet: ResourcePacket, payload: &[u8]) {
@@ -1833,7 +1932,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_complete_packet(payload).unwrap(),
-                ControlMessage::Request { from_tick }
+                Some(ControlMessage::Request { from_tick })
             );
         }
 
@@ -2107,7 +2206,7 @@ mod tests {
             assert_eq!(frame, expect_frame(&payload), "from_tick={from_tick}");
             assert_eq!(
                 parse_complete_packet(&payload).unwrap(),
-                ControlMessage::Request { from_tick },
+                Some(ControlMessage::Request { from_tick }),
                 "from_tick={from_tick}"
             );
         }

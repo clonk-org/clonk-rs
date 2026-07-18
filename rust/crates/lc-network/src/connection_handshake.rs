@@ -518,6 +518,7 @@ fn pre_join_forwarded_message(
     selected
         .then(|| crate::transport::parse_complete_packet(&packet.nested_packet))
         .transpose()
+        .map(Option::flatten)
         .map_err(ConnectionHandshakeError::from)
 }
 
@@ -531,10 +532,16 @@ where
     loop {
         let timer_deadline = liveness.next_timer_at();
         tokio::select! {
-            message = transport.read_message() => {
-                let message = message?;
-                liveness.record_inbound_message(&message);
-                return Ok(message);
+            packet = transport.read_packet() => {
+                match packet? {
+                    crate::transport::InboundPacket::Message(message) => {
+                        liveness.record_inbound_message(&message);
+                        return Ok(message);
+                    }
+                    crate::transport::InboundPacket::Ignored(packet_type) => {
+                        liveness.record_inbound_packet(packet_type);
+                    }
+                }
             }
             _ = tokio::time::sleep_until(timer_deadline) => {
                 drive_liveness_timer(transport, liveness).await?;
@@ -632,9 +639,17 @@ where
     loop {
         let timer_deadline = liveness.next_timer_at();
         tokio::select! {
-            message = transport.read_message() => {
-                let message = message?;
-                liveness.record_inbound_message(&message);
+            packet = transport.read_packet() => {
+                let message = match packet? {
+                    crate::transport::InboundPacket::Message(message) => {
+                        liveness.record_inbound_message(&message);
+                        message
+                    }
+                    crate::transport::InboundPacket::Ignored(packet_type) => {
+                        liveness.record_inbound_packet(packet_type);
+                        continue;
+                    }
+                };
                 match message {
                     ControlMessage::Ping(packet) => {
                         transport.send_message(ControlMessage::Pong(packet)).await?;
@@ -891,7 +906,7 @@ mod tests {
     use std::time::Duration;
 
     use lc_engine::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
-    use tokio::io::duplex;
+    use tokio::io::{duplex, AsyncWriteExt};
     use tokio::sync::mpsc;
     use tokio::time::{advance, timeout};
 
@@ -994,6 +1009,54 @@ mod tests {
         liveness.record_inbound_message(&ControlMessage::ForwardRequest(packet.clone()));
         liveness.record_inbound_message(&ControlMessage::Forward(packet));
 
+        assert_eq!(liveness.connection().inbound_packet_counter(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ignored_cpp_packets_survive_timer_cancellation_and_advance_the_counter() {
+        fn frame(payload: &[u8]) -> Vec<u8> {
+            let mut frame = vec![0xff];
+            frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+            frame.extend_from_slice(payload);
+            frame
+        }
+
+        let tcp_sim_open = [
+            0x14, 0x07, 0x01, b'[', b'2', b'0', b'0', b'1', b':', b'd', b'b', b'8', b':', b':',
+            b'7', b']', b':', b'1', b'1', b'1', b'1', b'2', 0x00,
+        ];
+        let league_results = [0x17, 0x01, b'O', b'K', 0x00, 0x00];
+        let ping = PingPacket {
+            sent_at: 0x1122_3344,
+            packet_counter: 7,
+        };
+        let mut ping_payload = vec![0x00];
+        ping_payload.extend_from_slice(&ping.sent_at.to_ne_bytes());
+        ping_payload.extend_from_slice(&ping.packet_counter.to_ne_bytes());
+
+        let (client, mut peer) = duplex(256);
+        peer.write_all(&frame(&tcp_sim_open)).await.unwrap();
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client);
+            let mut liveness = ConnectionLivenessState::new_test(0, 0);
+            let message = read_handshake_message(&mut transport, &mut liveness)
+                .await
+                .unwrap();
+            (message, liveness)
+        });
+
+        // The first ignored frame is accounted before the timer branch
+        // cancels and recreates the pending transport read.
+        tokio::task::yield_now().await;
+        advance(Duration::from_millis(500)).await;
+        tokio::task::yield_now().await;
+
+        let mut remaining_frames = frame(&league_results);
+        remaining_frames.extend(frame(&ping_payload));
+        peer.write_all(&remaining_frames).await.unwrap();
+        let (message, liveness) = task.await.unwrap();
+
+        assert_eq!(message, ControlMessage::Ping(ping));
         assert_eq!(liveness.connection().inbound_packet_counter(), 2);
     }
 
