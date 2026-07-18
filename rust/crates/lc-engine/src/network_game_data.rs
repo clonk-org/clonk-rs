@@ -120,6 +120,17 @@ impl Default for InitialNetworkGameData {
 }
 
 impl InitialNetworkGameData {
+    /// Captures the runtime fields present at initial-record start without
+    /// requiring the full exact-save object/effect surface. In particular,
+    /// landscape map identity must be frozen after creation so replay does
+    /// not regenerate a different dynamic map.
+    pub fn for_initial_record(engine: &Engine) -> Self {
+        Self {
+            landscape: landscape_game_data(engine),
+            ..Self::default()
+        }
+    }
+
     /// Captures fields the Rust engine currently represents without inventing
     /// encodings for unported C++ save components.
     pub fn from_engine(engine: &Engine) -> Result<Self, InitialNetworkGameError> {
@@ -170,22 +181,7 @@ impl InitialNetworkGameData {
             rules |= 16;
         }
 
-        let landscape = engine
-            .landscape
-            .as_ref()
-            .map(|landscape| LandscapeGameData {
-                map_seed: landscape
-                    .raster_state()
-                    .map(|state| state.map_seed())
-                    .unwrap_or(0),
-                left_open: landscape.left_open(),
-                right_open: landscape.right_open(),
-                top_open: landscape.top_open(),
-                bottom_open: landscape.bottom_open(),
-                gravity: engine.physics().gravity_as_c4fixed().val(),
-                mat_modulation: landscape.modulation(),
-                mode: landscape.mode(),
-            });
+        let landscape = landscape_game_data(engine);
 
         Ok(Self {
             time: engine.game_time,
@@ -220,6 +216,25 @@ impl InitialNetworkGameData {
             landscape,
         })
     }
+}
+
+fn landscape_game_data(engine: &Engine) -> Option<LandscapeGameData> {
+    engine
+        .landscape
+        .as_ref()
+        .map(|landscape| LandscapeGameData {
+            map_seed: landscape
+                .raster_state()
+                .map(|state| state.map_seed())
+                .unwrap_or(0),
+            left_open: landscape.left_open(),
+            right_open: landscape.right_open(),
+            top_open: landscape.top_open(),
+            bottom_open: landscape.bottom_open(),
+            gravity: engine.physics().gravity_as_c4fixed().val(),
+            mat_modulation: landscape.modulation(),
+            mode: landscape.mode(),
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1108,6 +1123,10 @@ mod tests {
                 mat_modulation: 0xaabb_ccdd,
                 mode: crate::LANDSCAPE_MODE_STATIC,
             })
+        );
+        assert_eq!(
+            InitialNetworkGameData::for_initial_record(&engine).landscape,
+            InitialNetworkGameData::from_engine(&engine).unwrap().landscape
         );
     }
 

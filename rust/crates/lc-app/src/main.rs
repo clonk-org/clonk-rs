@@ -90,7 +90,7 @@ use lc_engine::{
     MissionAccessStore,
     MouseDragSource,
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
-    PlayerConfig, PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
+    PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
     MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
     ShowCommandsRequestStore, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
     TeamConfiguration, Vector2,
@@ -139,11 +139,13 @@ use lc_graphics::clonk_font::{
     FontImageProvider, FontImageRef, font_image_lookup_tag, inline_image_token,
 };
 use lc_gui::{ButtonTextures, Rect as GuiRect};
-use lc_network::{ClientId, ParticipantKind, Tick};
+use lc_network::{
+    ClientId, ControlRecordPlayback, ControlRecordWriter, LeagueEndRecord, ParticipantKind, Tick,
+};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     DefCore as ResourceDefCore, DefinitionError as ResourceDefinitionError, FontCatalog, FontRole,
-    GraphicsError, GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks,
+    GraphicsError, GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks, MutableGroup,
     ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData, load_endeavour_font,
     scenario as resource_scenario,
 };
@@ -176,6 +178,7 @@ use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
 };
+use sha1::{Digest, Sha1};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
     StartupPlayerFile, delete_player_file, discover_player_files, persist_activations,
@@ -204,6 +207,7 @@ const GAME_MUSIC_FADE_OUT_MS: u32 = 2_000;
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const DEFAULT_SCENARIO_MAX_PLAYERS: usize = 12;
+const CLASSIC_ENGINE_BUILD: i32 = 362;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 const OFFICIAL_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
 
@@ -236,7 +240,6 @@ const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
 const SAVE_FILE_VERSION: SaveFileVersion = SaveFileVersion::new(1, 0, 0);
-const RECORD_FILE_VERSION: u32 = 1;
 const MOUSE_DRAG_THRESHOLD: f32 = 6.0;
 const MIN_THROW_DRAG_DISTANCE: f32 = 12.0;
 /// The SDL/X11 viewport paths synthesize LeftDouble when the second press
@@ -8890,7 +8893,9 @@ struct GameApp {
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
+    recording_template: Option<RecordingTemplate>,
     recording: Option<RecordingSession>,
+    control_playback: Option<ControlRecordPlayback>,
     local_owner: i32,
     player_name: String,
     selected_player_file: Option<PlayerFile>,
@@ -9073,12 +9078,15 @@ fn restore_or_render_backdrop(
     cache.pixels.extend_from_slice(surface.pixels());
 }
 
+struct RecordingTemplate {
+    group: MutableGroup,
+    output_path: PathBuf,
+}
+
 struct RecordingSession {
-    recorder: Recorder,
-    scenario_title: String,
-    scenario_identifier: String,
-    scenario_path: Option<PathBuf>,
-    started_at: SystemTime,
+    writer: ControlRecordWriter,
+    group: MutableGroup,
+    output_path: PathBuf,
 }
 
 struct StartupNetworkConnection {
@@ -9088,28 +9096,12 @@ struct StartupNetworkConnection {
 }
 
 impl RecordingSession {
-    fn new(
-        recorder: Recorder,
-        scenario_title: String,
-        scenario_identifier: String,
-        scenario_path: Option<PathBuf>,
-    ) -> Self {
+    fn new(template: RecordingTemplate) -> Self {
         Self {
-            recorder,
-            scenario_title,
-            scenario_identifier,
-            scenario_path,
-            started_at: SystemTime::now(),
+            writer: ControlRecordWriter::new(),
+            group: template.group,
+            output_path: template.output_path,
         }
-    }
-
-    fn sanitized_base_name(&self) -> String {
-        let raw = self
-            .scenario_path
-            .as_ref()
-            .and_then(|path| path.file_stem().and_then(|stem| stem.to_str()))
-            .unwrap_or(self.scenario_identifier.as_str());
-        sanitize_record_name(raw)
     }
 }
 
@@ -9578,17 +9570,6 @@ fn apply_scensel_search_paste(edit: &mut SearchEditState, text: &str) -> bool {
         }
     }
     false
-}
-
-#[derive(Serialize)]
-struct ScenarioRecordingFile {
-    version: u32,
-    scenario_title: String,
-    scenario_identifier: String,
-    scenario_path: Option<String>,
-    started_at_unix_millis: u128,
-    frame_count: u64,
-    frames: Vec<SimulationSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12196,6 +12177,18 @@ fn open_group_path_for_folder_map(path: &Path) -> std::result::Result<Group, Gro
     Ok(group)
 }
 
+fn packed_group_bytes(path: &Path) -> std::result::Result<Vec<u8>, String> {
+    let group = open_group_path_for_folder_map(path).map_err(|error| error.to_string())?;
+    match group.raw_image() {
+        Ok(bytes) => Ok(bytes),
+        Err(_) if group.is_directory() => MutableGroup::from_group(&group)
+            .map_err(|error| error.to_string())?
+            .pack()
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 impl MainMenuState {
     fn new(menu: StartupMainMenu, participants_label: String) -> Self {
         Self {
@@ -14720,6 +14713,24 @@ fn load_scenario_with_definition_load_and_startup_player_count(
     definition_load: &ScenarioDefinitionLoad,
     startup_player_count: i32,
 ) -> Result<Scenario, ScenarioError> {
+    load_scenario_with_definition_load_and_seed_and_startup_player_count(
+        path,
+        resolver,
+        languages,
+        definition_load,
+        0,
+        startup_player_count,
+    )
+}
+
+fn load_scenario_with_definition_load_and_seed_and_startup_player_count(
+    path: &Path,
+    resolver: &InstallDefinitionResolver,
+    languages: &[String],
+    definition_load: &ScenarioDefinitionLoad,
+    random_seed: u64,
+    startup_player_count: i32,
+) -> Result<Scenario, ScenarioError> {
     let group = open_group_path_for_folder_map(path)?;
     match definition_load {
         ScenarioDefinitionLoad::Fixed {
@@ -14729,7 +14740,7 @@ fn load_scenario_with_definition_load_and_startup_player_count(
             &group,
             resolver,
             languages,
-            0,
+            random_seed,
             &[] as &[String],
             Some(modules.as_slice()),
             definition_root.as_deref(),
@@ -14742,7 +14753,7 @@ fn load_scenario_with_definition_load_and_startup_player_count(
             &group,
             resolver,
             languages,
-            0,
+            random_seed,
             modules,
             None,
             definition_root.as_deref(),
@@ -16680,7 +16691,9 @@ impl GameApp {
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
+            recording_template: None,
             recording: None,
+            control_playback: None,
             local_owner: runtime.player_owner,
             player_name: player_name.clone(),
             selected_player_file,
@@ -20259,6 +20272,9 @@ impl GameApp {
                 return Ok(());
             }
         }
+        if let Some(packet) = (NetworkControl::Player { owner, event }).into_packet() {
+            self.record_control_batch(std::slice::from_ref(&packet));
+        }
         if let Err(err) = self.input.handle_event(&mut self.engine, owner, event) {
             let status = control_script_error_to_status(err)?;
             tracing::error!(status, "control script error (non-fatal like C++)");
@@ -20298,6 +20314,9 @@ impl GameApp {
             return Ok(());
         }
 
+        self.record_control_batch(std::slice::from_ref(
+            &lc_engine::ControlPacket::PlayerCommand(command),
+        ));
         self.execute_player_command_failsafe(command)
     }
 
@@ -20318,6 +20337,9 @@ impl GameApp {
             return Ok(());
         }
 
+        self.record_control_batch(std::slice::from_ref(
+            &lc_engine::ControlPacket::PlayerSelect(selection.clone()),
+        ));
         self.engine.execute_player_select(&selection).map(|_| ())
     }
 
@@ -20595,6 +20617,14 @@ impl GameApp {
             network.submit_local_control(owner, ControlEvent::ClearPressed, tick);
             return Ok(());
         }
+        if let Some(packet) = (NetworkControl::Player {
+            owner,
+            event: ControlEvent::ClearPressed,
+        })
+        .into_packet()
+        {
+            self.record_control_batch(std::slice::from_ref(&packet));
+        }
         let _ = self
             .input
             .handle_event(&mut self.engine, owner, ControlEvent::ClearPressed)?;
@@ -20738,6 +20768,15 @@ impl GameApp {
                 tracing::warn!(player = owner, team, %error, "failed to queue forced team selection");
             }
         } else {
+            self.record_control_batch(std::slice::from_ref(
+                &lc_engine::ControlPacket::InitScenarioPlayer(
+                    lc_engine::InitScenarioPlayerControlData {
+                        team,
+                        player: owner,
+                        by_client: 0,
+                    },
+                ),
+            ));
             self.execute_init_scenario_player_control(owner, team)?;
         }
         Ok(())
@@ -21274,9 +21313,12 @@ impl GameApp {
                         .player(player)
                         .map(|player| player.at_client().get())
                         .unwrap_or(-1);
-                    self.engine.execute_activate_game_goal_menu_control(
-                        &lc_engine::ActivateGameGoalMenuControlData { player, by_client },
-                    )?;
+                    let control = lc_engine::ActivateGameGoalMenuControlData { player, by_client };
+                    self.record_control_batch(std::slice::from_ref(
+                        &lc_engine::ControlPacket::ActivateGameGoalMenu(control),
+                    ));
+                    self.engine
+                        .execute_activate_game_goal_menu_control(&control)?;
                     self.apply_game_goal_menu_requests();
                 }
             }
@@ -21375,8 +21417,20 @@ impl GameApp {
                     {
                         tracing::warn!(player, %error, "failed to queue player surrender");
                     }
-                } else if let Err(err) = self.engine.set_player_surrendered(player, true) {
-                    tracing::error!(error = ?err, "surrender failed");
+                } else {
+                    let by_client = self
+                        .engine
+                        .player(player)
+                        .map(|player| player.at_client().get())
+                        .unwrap_or(-1);
+                    self.record_control_batch(std::slice::from_ref(
+                        &lc_engine::ControlPacket::SurrenderPlayer(
+                            lc_engine::SurrenderPlayerControlData { player, by_client },
+                        ),
+                    ));
+                    if let Err(err) = self.engine.set_player_surrendered(player, true) {
+                        tracing::error!(error = ?err, "surrender failed");
+                    }
                 }
             }
             MenuAction::Part => {
@@ -21506,6 +21560,15 @@ impl GameApp {
                         tracing::warn!(player, team, %error, "failed to queue team selection");
                     }
                 } else {
+                    self.record_control_batch(std::slice::from_ref(
+                        &lc_engine::ControlPacket::InitScenarioPlayer(
+                            lc_engine::InitScenarioPlayerControlData {
+                                team,
+                                player,
+                                by_client: 0,
+                            },
+                        ),
+                    ));
                     self.execute_init_scenario_player_control(player, team)?;
                 }
             }
@@ -21645,13 +21708,16 @@ impl GameApp {
                 .player(player)
                 .map(|player| player.at_client().get())
                 .unwrap_or(-1);
-            self.engine.execute_activate_game_goal_rule_control(
-                &lc_engine::ActivateGameGoalRuleControlData {
-                    object,
-                    player,
-                    by_client,
-                },
-            )?;
+            let control = lc_engine::ActivateGameGoalRuleControlData {
+                object,
+                player,
+                by_client,
+            };
+            self.record_control_batch(std::slice::from_ref(
+                &lc_engine::ControlPacket::ActivateGameGoalRule(control),
+            ));
+            self.engine
+                .execute_activate_game_goal_rule_control(&control)?;
         }
         Ok(())
     }
@@ -22768,7 +22834,7 @@ impl GameApp {
             .unwrap_or(target_tick);
         let sync_controls = self.network_sync.take_exact(sync_tick);
         if !sync_controls.is_empty() {
-            self.apply_ready_controls(sync_tick, sync_controls)?;
+            self.apply_synchronized_controls(sync_tick, sync_controls)?;
         }
         if runtime_commit.is_some()
             && (self.mode != AppMode::Running
@@ -23420,6 +23486,7 @@ impl GameApp {
             }
         } else {
             control.by_client = 0;
+            self.record_control_packet(&lc_engine::ControlPacket::Message(control.clone()));
             self.execute_message_control(control);
         }
     }
@@ -23796,7 +23863,7 @@ impl GameApp {
                     let NetworkEvent::ScheduledSync { tick, controls } = event else {
                         unreachable!("ScheduledSync was matched above");
                     };
-                    self.apply_ready_controls(tick, controls)?;
+                    self.apply_synchronized_controls(tick, controls)?;
                     continue;
                 }
                 if self.classic_host_lobby_active() {
@@ -24138,39 +24205,43 @@ impl GameApp {
                         let expected_tick = self.expected_network_control_tick();
                         self.network_sync.queue(expected_tick, tick, controls);
                     }
-                    NetworkEvent::DirectControl(control) => match control {
-                        NetworkControl::ClientJoin(join) => {
-                            if self.control_clients.apply_join(&join) {
-                                self.network_client_activity
-                                    .reset_client(join.core.client_id);
-                                self.publish_updated_host_join_snapshot();
-                            }
+                    NetworkEvent::DirectControl(control) => {
+                        if let Some(packet) = control.clone().into_packet() {
+                            self.record_control_packet(&packet);
                         }
-                        NetworkControl::SyncCheck(packet) => {
-                            self.handle_sync_check(packet);
-                        }
-                        NetworkControl::PlayerInfo(info) => {
-                            let follow_ups = self.apply_direct_player_info_control(info, true);
-                            for follow_up in follow_ups {
-                                if let Err(error) = self.broadcast_and_preexecute_player_info(
-                                    follow_up,
-                                    true,
-                                    false,
-                                )
-                                {
-                                    tracing::error!(%error, "failed to broadcast updated PlayerInfo follow-up");
+                        match control {
+                            NetworkControl::ClientJoin(join) => {
+                                if self.control_clients.apply_join(&join) {
+                                    self.network_client_activity
+                                        .reset_client(join.core.client_id);
+                                    self.publish_updated_host_join_snapshot();
                                 }
                             }
+                            NetworkControl::SyncCheck(packet) => {
+                                self.handle_sync_check(packet);
+                            }
+                            NetworkControl::PlayerInfo(info) => {
+                                let follow_ups = self.apply_direct_player_info_control(info, true);
+                                for follow_up in follow_ups {
+                                    if let Err(error) = self.broadcast_and_preexecute_player_info(
+                                        follow_up,
+                                        true,
+                                        false,
+                                    ) {
+                                        tracing::error!(%error, "failed to broadcast updated PlayerInfo follow-up");
+                                    }
+                                }
+                            }
+                            NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
+                            NetworkControl::Set(set) => self.execute_control_set(set),
+                            NetworkControl::Message(message) => {
+                                self.execute_message_control(message);
+                            }
+                            control => {
+                                tracing::warn!(?control, "ignoring unsupported direct control");
+                            }
                         }
-                        NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
-                        NetworkControl::Set(set) => self.execute_control_set(set),
-                        NetworkControl::Message(message) => {
-                            self.execute_message_control(message);
-                        }
-                        control => {
-                            tracing::warn!(?control, "ignoring unsupported direct control");
-                        }
-                    },
+                    }
                     NetworkEvent::PeerConnected {
                         client_id,
                         name,
@@ -31556,6 +31627,9 @@ impl GameApp {
             }
             let controls = self.engine.take_pending_remove_player_controls();
             for control in controls {
+                self.record_control_batch(std::slice::from_ref(
+                    &lc_engine::ControlPacket::RemovePlayer(control),
+                ));
                 self.execute_remove_player_control(control)?;
             }
             return Ok(());
@@ -32143,9 +32217,50 @@ impl GameApp {
         tick: Tick,
         controls: Vec<NetworkControl>,
     ) -> Result<(), EngineError> {
+        self.apply_ready_controls_from_queue(tick, controls, true)
+    }
+
+    fn apply_synchronized_controls(
+        &mut self,
+        tick: Tick,
+        controls: Vec<NetworkControl>,
+    ) -> Result<(), EngineError> {
+        self.apply_ready_controls_from_queue(tick, controls, false)
+    }
+
+    fn apply_ready_controls_from_queue(
+        &mut self,
+        tick: Tick,
+        controls: Vec<NetworkControl>,
+        queued_runtime_record_request: bool,
+    ) -> Result<(), EngineError> {
+        let packets = controls
+            .iter()
+            .cloned()
+            .filter_map(NetworkControl::into_packet)
+            .collect::<Vec<_>>();
+        let requests_runtime_record = queued_runtime_record_request
+            && self.recording.is_none()
+            && controls.iter().any(|control| {
+                matches!(
+                    control,
+                    NetworkControl::Synchronize(control) if control.sync_clearance
+                )
+            });
+        if requests_runtime_record {
+            // RequestRuntimeRecord queues Synchronize(false, true). Native
+            // StartRecord sees the currently executing C4Control and records
+            // that complete list as the first chunk.
+            if let Err(error) = self.start_recording(true) {
+                tracing::warn!(%error, "failed to start runtime control recording");
+            }
+        }
+        self.record_control_batch(&packets);
         debug_assert!(self.executing_ready_tick.is_none());
         self.executing_ready_tick = Some(tick);
         let stop_if_running_mode_exits = matches!(self.mode, AppMode::Running);
+        let require_live_network = self.network.is_some();
+        let replaying = self.control_playback.is_some();
         let mut result = Ok(());
         for control in controls {
             result = match control {
@@ -32229,7 +32344,11 @@ impl GameApp {
                     .engine
                     .execute_em_move_object_control(
                         &control,
-                        ScriptControlPolicy::live(false),
+                        if replaying {
+                            ScriptControlPolicy::replay(false)
+                        } else {
+                            ScriptControlPolicy::live(false)
+                        },
                     )
                     .map(|_| ()),
                 NetworkControl::EmDrawTool(control) => {
@@ -32276,7 +32395,14 @@ impl GameApp {
                 }
                 NetworkControl::Script(data) => self
                     .engine
-                    .execute_script_control(&data, ScriptControlPolicy::live(false))
+                    .execute_script_control(
+                        &data,
+                        if replaying {
+                            ScriptControlPolicy::replay(false)
+                        } else {
+                            ScriptControlPolicy::live(false)
+                        },
+                    )
                     .map(|_| ()),
                 NetworkControl::MessageBoardAnswer(data) => self
                     .engine
@@ -32459,7 +32585,7 @@ impl GameApp {
             };
             if result.is_err()
                 || (stop_if_running_mode_exits && !matches!(self.mode, AppMode::Running))
-                || self.network.is_none()
+                || (require_live_network && self.network.is_none())
             {
                 break;
             }
@@ -32826,15 +32952,24 @@ impl GameApp {
                 // Rust has no stable local temp path to serialize while this
                 // resource is loading. Resolve the completed registry entry by
                 // ID on the authoring host too, after PreExecute releases it.
-                let Some(path) = self.admission_resources.complete_path(core.id) else {
-                    return Ok(());
-                };
-                match PlayerFile::load_from_path(path) {
-                    Ok(file) => Some(file),
-                    Err(error) => {
-                        tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
-                        return Ok(());
+                if let Some(path) = self.admission_resources.complete_path(core.id) {
+                    match PlayerFile::load_from_path(path) {
+                        Ok(file) => Some(file),
+                        Err(error) => {
+                            tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
+                            return Ok(());
+                        }
                     }
+                } else if self.control_playback.is_some() {
+                    match self.replay_record_player_file(core) {
+                        Ok(file) => Some(file),
+                        Err(error) => {
+                            tracing::warn!(info_id = join.info_id, resource_id = core.id, %error, "failed to load player resource from replay group");
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    return Ok(());
                 }
             }
             lc_engine::JoinPlayerSource::Embedded(_)
@@ -33090,7 +33225,7 @@ impl GameApp {
                     if let Some(tick) = control_tick {
                         let sync_controls = self.network_sync.take_exact(tick);
                         if !sync_controls.is_empty() {
-                            self.apply_ready_controls(tick, sync_controls)?;
+                            self.apply_synchronized_controls(tick, sync_controls)?;
                         }
 
                         // Network mode mirrors C4Game::Execute's Prepare gate:
@@ -33121,6 +33256,25 @@ impl GameApp {
                         }
                     }
                 }
+                let replay_finished = if let Some(playback) = self.control_playback.as_mut() {
+                    let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                    let controls = playback
+                        .take_controls(frame)
+                        .into_iter()
+                        .filter_map(network::network_control_for_packet)
+                        .collect::<Vec<_>>();
+                    let finished = playback.is_finished();
+                    if !controls.is_empty() {
+                        self.apply_ready_controls_from_queue(frame, controls, false)?;
+                    }
+                    finished
+                } else {
+                    false
+                };
+                if replay_finished {
+                    self.control_playback = None;
+                    self.engine.finish_replay()?;
+                }
                 self.execute_local_team_selections()?;
                 self.snapshot = self
                     .engine
@@ -33140,7 +33294,6 @@ impl GameApp {
                 if self.snapshot.game_over && !self.game_over_handled {
                     self.handle_game_over()?;
                 }
-                self.record_current_snapshot();
                 self.refresh_object_menu();
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
                 for menu in self.ingame_menu.values_mut() {
@@ -33482,18 +33635,26 @@ impl GameApp {
         for player_info_id in winner_info_ids {
             self.control_player_infos.mark_winner(player_info_id);
         }
-        self.finish_recording();
+        let league_record = self.finish_recording();
         self.game_over_handled = true;
         self.publish_game_over_host_reference();
-        let league_result = if self.network_is_league {
+        let league_result = if self.network_is_league && league_record.is_none() {
+            // A league game is admitted only after its forced recorder has
+            // materialized. Never downgrade a failed close into a recordless
+            // End request, which the league server cannot validate.
+            tracing::error!("refusing to finish league game without its required record");
+            None
+        } else if self.network_is_league {
             match (self.network.as_ref(), self.advertised_game_reference.clone()) {
-                (Some(network), Some(reference)) => match network.end_league(reference, None) {
-                    Ok(packet) => packet,
-                    Err(error) => {
-                        tracing::error!(%error, "failed to finish league game");
-                        None
+                (Some(network), Some(reference)) => {
+                    match network.end_league(reference, league_record) {
+                        Ok(packet) => packet,
+                        Err(error) => {
+                            tracing::error!(%error, "failed to finish league game");
+                            None
+                        }
                     }
-                },
+                }
                 _ => None,
             }
         } else {
@@ -37012,110 +37173,373 @@ impl GameApp {
         }
     }
 
-    fn start_recording_for(&mut self, scenario: &FrontendScenario) {
-        self.engine.set_recording_active(false);
-        if !self.recording_enabled {
-            self.recording = None;
-            return;
-        }
-        if self.recordings_dir.is_none() {
-            self.recording = None;
-            return;
-        }
-        let mut recorder = Recorder::new();
-        recorder.record(&self.snapshot);
-        self.recording = Some(RecordingSession::new(
-            recorder,
-            scenario.title.clone(),
-            scenario.identifier.clone(),
-            scenario.path.clone(),
-        ));
-        self.engine.set_recording_active(true);
-    }
-
-    fn record_current_snapshot(&mut self) {
-        if !self.recording_enabled {
-            return;
-        }
-        if let Some(session) = self.recording.as_mut() {
-            session.recorder.record(&self.snapshot);
+    fn recording_player_info_snapshot(&self) -> lc_network::PlayerInfoListSnapshot {
+        let (last_player_id, clients) = self.control_player_infos.retained_rows_snapshot();
+        lc_network::PlayerInfoListSnapshot {
+            last_player_id,
+            clients: clients
+                .into_iter()
+                .map(
+                    |(client_id, flags, players)| lc_network::ClientPlayerInfosSnapshot {
+                        client_id,
+                        flags,
+                        players,
+                    },
+                )
+                .collect(),
         }
     }
 
-    fn finish_recording(&mut self) {
-        self.engine.set_recording_active(false);
-        let Some(session) = self.recording.take() else {
-            return;
-        };
-        if !self.recording_enabled {
-            return;
-        }
-        let base_name = session.sanitized_base_name();
-        let RecordingSession {
-            recorder,
-            scenario_title,
-            scenario_identifier,
-            scenario_path,
-            started_at,
-        } = session;
-        let recording = recorder.into_recording();
-        if recording.is_empty() {
-            return;
-        }
-        let Some(dir) = self.recordings_dir.as_ref() else {
-            return;
-        };
-        match self.write_scenario_recording(
-            dir,
-            base_name,
-            scenario_title,
-            scenario_identifier,
-            scenario_path,
-            started_at,
-            recording,
-        ) {
-            Ok(path) => {
-                tracing::info!(path = %path.display(), "saved scenario recording");
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to save scenario recording");
-            }
-        }
-    }
-
-    fn write_scenario_recording(
+    fn recording_parameters(
         &self,
-        dir: &Path,
-        base_name: String,
-        scenario_title: String,
-        scenario_identifier: String,
-        scenario_path: Option<PathBuf>,
-        started_at: SystemTime,
-        recording: Recording,
-    ) -> io::Result<PathBuf> {
-        fs::create_dir_all(dir)?;
-        let index = next_recording_index(dir)?;
-        let filename = format!("{index:03}-{base_name}.json");
-        let path = dir.join(filename);
-        let frames = recording.into_frames();
-        let frame_count = frames.len() as u64;
-        let started_at_unix_millis = started_at
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let record_file = ScenarioRecordingFile {
-            version: RECORD_FILE_VERSION,
-            scenario_title,
-            scenario_identifier,
-            scenario_path: scenario_path.map(|path| path.display().to_string()),
-            started_at_unix_millis,
-            frame_count,
-            frames,
+        scenario: &FrontendScenario,
+        scenario_data: &Scenario,
+    ) -> std::result::Result<
+        (
+            lc_network::JoinGameParametersEnvelope,
+            lc_network::InitialNetworkScenarioDefaults,
+        ),
+        String,
+    > {
+        let scenario_metadata = scenario_data
+            .initial_network_scenario_metadata()
+            .map_err(|error| error.to_string())?;
+        let defaults = lc_network::initial_network_scenario_defaults(&scenario_metadata)
+            .map_err(|error| error.to_string())?;
+        let teams = scenario_data
+            .initial_network_team_metadata()
+            .map(lc_network::join_team_list_snapshot)
+            .map_err(|error| error.to_string())?;
+        let empty_players = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 0,
+            clients: Vec::new(),
         };
-        let mut file = File::create(&path)?;
-        serde_json::to_writer_pretty(&mut file, &record_file)?;
-        file.flush()?;
-        Ok(path)
+        let legacy_text = |text: &[u8]| {
+            LegacyCString::from_bytes(
+                text.iter().copied().take_while(|byte| *byte != 0).collect(),
+            )
+            .unwrap_or_default()
+        };
+        let mut parameters = self
+            .host_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.clone())
+            .unwrap_or_else(|| lc_network::JoinGameParametersEnvelope {
+                random_seed: (self.engine.random_seed() as u32) as i32,
+                startup_player_count: 0,
+                max_players: self.engine.max_players().unwrap_or(defaults.max_players),
+                use_fair_crew: self.engine.use_fair_crew(),
+                fair_crew_forced: self.engine.fair_crew_forced(),
+                fair_crew_strength: self.engine.fair_crew_strength(),
+                allow_debug: self.engine.allow_debug(),
+                is_network_game: self.network.is_some(),
+                control_rate: self.engine.control_rate(),
+                auto_frame_skip: false,
+                rules: defaults.rules.clone(),
+                goals: defaults.goals.clone(),
+                league: legacy_text(&self.network_league_name),
+                league_address: LegacyCString::default(),
+                title: legacy_text(scenario.title.as_bytes()),
+                scenario: lc_engine::NetworkResourceCore::default(),
+                game_resources: Vec::new(),
+                player_infos: empty_players.clone(),
+                restore_player_infos: empty_players,
+                teams,
+                clients: lc_network::JoinClientRegistrySnapshot::new(Vec::new()),
+            });
+        parameters.random_seed = (self.engine.random_seed() as u32) as i32;
+        parameters.startup_player_count =
+            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX);
+        parameters.max_players = self.engine.max_players().unwrap_or(defaults.max_players);
+        parameters.use_fair_crew = self.engine.use_fair_crew();
+        parameters.fair_crew_forced = self.engine.fair_crew_forced();
+        parameters.fair_crew_strength = self.engine.fair_crew_strength();
+        parameters.allow_debug = self.engine.allow_debug();
+        parameters.is_network_game = self.network.is_some();
+        parameters.control_rate = self.engine.control_rate();
+        parameters.player_infos = self.recording_player_info_snapshot();
+        parameters.clients =
+            lc_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+        Ok((parameters, defaults))
+    }
+
+    fn prepare_recording_for(
+        &mut self,
+        scenario: &FrontendScenario,
+        scenario_data: &Scenario,
+    ) -> std::result::Result<(), String> {
+        self.recording_template = None;
+        let Some(dir) = self.recordings_dir.as_ref() else {
+            return Ok(());
+        };
+        let scenario_path = scenario
+            .path
+            .as_deref()
+            .ok_or_else(|| "recording requires a filesystem-backed scenario".to_string())?;
+        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        let index = next_recording_index(dir).map_err(|error| error.to_string())?;
+        let raw_base_name = scenario_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(scenario.identifier.as_str());
+        let output_path = dir.join(format!(
+            "{index:03}-{}.c4s",
+            sanitize_record_name(raw_base_name)
+        ));
+        let definition_modules = scenario_data
+            .definition_resource_paths()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let mut record_title = lc_script::c4_string_bytes(&format!(
+            "{index:03} {} [{CLASSIC_ENGINE_BUILD}]",
+            scenario.title
+        ));
+        record_title.truncate(512);
+        let record_title = lc_script::c4_string_from_bytes(&record_title);
+        let scenario_core = scenario_data
+            .serialize_initial_record_scenario(
+                &record_title,
+                &definition_modules,
+                &scenario.identifier,
+            )
+            .map_err(|error| error.to_string())?;
+        let source = open_group_path_for_folder_map(scenario_path)
+            .map_err(|error| error.to_string())?;
+        let (parameters, scenario_defaults) =
+            self.recording_parameters(scenario, scenario_data)?;
+        let parameters =
+            lc_network::serialize_initial_network_parameters(&parameters, &scenario_defaults)
+                .map_err(|error| error.to_string())?;
+        let original_game = source.read_file("Game.txt").ok();
+        let game = lc_engine::serialize_initial_network_game(
+            &lc_engine::InitialNetworkGameData::for_initial_record(&self.engine),
+            original_game.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let player_infos = lc_network::encode_player_info_list_ini(
+            &self.recording_player_info_snapshot(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
+        let stale_presentation_entries = group
+            .entry_names()
+            .into_iter()
+            .filter(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower == "title.bmp"
+                    || lower == "title.png"
+                    || lower == "icon.bmp"
+                    || lower == "icon.png"
+                    || lower == "info.txt"
+                    || (lower.starts_with("title") && lower.ends_with(".txt"))
+                    || (lower.starts_with("desc") && lower.ends_with(".rtf"))
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for entry in stale_presentation_entries {
+            group.remove_entry(&entry);
+        }
+        group
+            .add_file("Parameters.txt", parameters)
+            .map_err(|error| error.to_string())?;
+        group
+            .add_file("Scenario.txt", scenario_core)
+            .map_err(|error| error.to_string())?;
+        if let Some(game) = game {
+            group
+                .add_file("Game.txt", game)
+                .map_err(|error| error.to_string())?;
+        } else {
+            group.remove_entry("Game.txt");
+        }
+        group
+            .add_file("PlayerInfos.txt", player_infos)
+            .map_err(|error| error.to_string())?;
+        // A source replay may already contain a stream. A fresh record owns
+        // exactly one CtrlRec, installed only when it is closed.
+        group.remove_entry("CtrlRec.c4b");
+        group.remove_entry("CtrlRec.txt");
+        group.remove_entry("RecPlayerInfos.txt");
+        self.recording_template = Some(RecordingTemplate { group, output_path });
+        Ok(())
+    }
+
+    fn start_recording(&mut self, force: bool) -> std::result::Result<bool, String> {
+        self.engine.set_recording_active(false);
+        if !force && !self.recording_enabled {
+            self.recording = None;
+            return Ok(false);
+        }
+        let Some(mut template) = self.recording_template.take() else {
+            self.recording = None;
+            return Err("recording storage was not prepared".to_string());
+        };
+        // C++ creates and unpacks the record group before it opens CtrlRec.
+        // Persist the initial group now so a league start cannot succeed with
+        // an unwritable destination and a crash still leaves the initial save.
+        template
+            .group
+            .add_file("CtrlRec.c4b", Vec::new())
+            .map_err(|error| error.to_string())?;
+        let initial_group = template.group.pack().map_err(|error| error.to_string())?;
+        fs::write(&template.output_path, initial_group).map_err(|error| {
+            format!(
+                "failed to create {}: {error}",
+                template.output_path.display()
+            )
+        })?;
+        self.recording = Some(RecordingSession::new(template));
+        self.engine.set_recording_active(true);
+        Ok(true)
+    }
+
+    fn record_control_packet(&mut self, packet: &lc_engine::ControlPacket) {
+        self.record_control_resource_file(packet);
+        let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+        if let Some(session) = self.recording.as_mut() {
+            if let Err(error) = session.writer.record_packet(frame, packet) {
+                tracing::warn!(%error, "failed to append immediate CtrlRec packet");
+            }
+        }
+    }
+
+    fn record_control_batch(&mut self, packets: &[lc_engine::ControlPacket]) {
+        for packet in packets {
+            self.record_control_resource_file(packet);
+        }
+        let frame = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+        if let Some(session) = self.recording.as_mut() {
+            if let Err(error) = session.writer.record_controls(frame, packets) {
+                tracing::warn!(%error, "failed to append CtrlRec control list");
+            }
+        }
+    }
+
+    /// `C4ControlJoinPlayer::PreRec` copies resource-backed player groups into
+    /// the record as `<resource-id>-<basename>` before serializing the control.
+    /// Embedded player data remains entirely inside the control payload.
+    fn record_control_resource_file(&mut self, packet: &lc_engine::ControlPacket) {
+        let lc_engine::ControlPacket::JoinPlayer(lc_engine::JoinPlayerControlData {
+            source: lc_engine::JoinPlayerSource::Resource(core),
+            ..
+        }) = packet
+        else {
+            return;
+        };
+        let Some(path) = self.admission_resources.complete_path(core.id).map(Path::to_path_buf)
+        else {
+            return;
+        };
+        let filename = core.filename.to_string_lossy();
+        let basename = filename
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Player.c4p");
+        let target = format!("{}-{basename}", core.id);
+        let child = Group::open(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|group| MutableGroup::from_group(&group).map_err(|error| error.to_string()));
+        let Some(session) = self.recording.as_mut() else {
+            return;
+        };
+        match child.and_then(|child| {
+            session
+                .group
+                .add_child(target, child)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::warn!(resource_id = core.id, path = %path.display(), %error, "failed to copy player resource into record");
+            }
+        }
+    }
+
+    fn replay_record_player_file(
+        &self,
+        core: &lc_engine::NetworkResourceCore,
+    ) -> std::result::Result<PlayerFile, String> {
+        let record_path = self
+            .active_scenario
+            .as_ref()
+            .and_then(|scenario| scenario.path.as_deref())
+            .ok_or_else(|| "active replay has no record-group path".to_string())?;
+        let filename = core.filename.to_string_lossy();
+        let basename = filename
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Player.c4p");
+        let target = format!("{}-{basename}", core.id);
+        let record = open_group_path_for_folder_map(record_path).map_err(|error| error.to_string())?;
+        let player_group = record.open_child(&target).map_err(|error| error.to_string())?;
+        let bytes = match player_group.raw_image() {
+            Ok(bytes) => bytes,
+            Err(_) if player_group.is_directory() => MutableGroup::from_group(&player_group)
+                .map_err(|error| error.to_string())?
+                .pack()
+                .map_err(|error| error.to_string())?,
+            Err(error) => return Err(error.to_string()),
+        };
+        PlayerFile::load_from_bytes(PathBuf::from(target), bytes).map_err(|error| error.to_string())
+    }
+
+    fn finish_recording(&mut self) -> Option<LeagueEndRecord> {
+        self.engine.set_recording_active(false);
+        if self.recording.is_none() {
+            return None;
+        }
+        let final_player_infos = match lc_network::encode_player_info_list_ini(
+            &self.recording_player_info_snapshot(),
+        ) {
+            Ok(player_infos) => player_infos,
+            Err(error) => {
+                tracing::warn!(%error, "failed to serialize final record player infos");
+                self.recording = None;
+                return None;
+            }
+        };
+        let session = self.recording.take().expect("recording checked above");
+        let RecordingSession {
+            writer,
+            mut group,
+            output_path,
+        } = session;
+        let stream = writer.finish(u32::try_from(self.engine.frame()).unwrap_or(u32::MAX));
+        if let Err(error) = group.add_file("CtrlRec.c4b", stream) {
+            tracing::warn!(%error, "failed to install CtrlRec in record group");
+            return None;
+        }
+        if let Err(error) = group.add_file("RecPlayerInfos.txt", final_player_infos) {
+            tracing::warn!(%error, "failed to install final player infos in record group");
+            return None;
+        }
+        let packed = match group.pack() {
+            Ok(packed) => packed,
+            Err(error) => {
+                tracing::warn!(%error, "failed to pack scenario recording");
+                return None;
+            }
+        };
+        if let Err(error) = fs::write(&output_path, &packed) {
+            tracing::warn!(%error, path = %output_path.display(), "failed to write scenario recording");
+            return None;
+        }
+        let on_disk = match fs::read(&output_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, path = %output_path.display(), "failed to read closed scenario recording");
+                return None;
+            }
+        };
+        tracing::info!(path = %output_path.display(), "saved scenario recording");
+        let name = LegacyCString::from_bytes(output_path.to_string_lossy().as_bytes().to_vec())?;
+        Some(LeagueEndRecord {
+            name,
+            sha1: Sha1::digest(&on_disk).into(),
+        })
     }
 
     fn install_active_classic_fonts(
@@ -37174,6 +37598,8 @@ impl GameApp {
         self.close_context_menu_silently();
         self.host_lobby_countdown = None;
         self.finish_recording();
+        self.recording_template = None;
+        self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
         self.message_dialogs.clear();
         self.message_dialog_consumed_keys.clear();
@@ -37720,6 +38146,16 @@ impl GameApp {
         // scenario/Parameters capacity before landscape creation (pristine
         // 9ffa0a5d src/C4Game.cpp:361-364,231-248,2394-2431;
         // src/C4PlayerInfo.cpp:357-395,1273-1290).
+        let replay_startup = if self.network.is_none() {
+            open_group_path_for_folder_map(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|group| {
+                    Scenario::preflight_replay_startup_from_group(&group)
+                        .map_err(|error| error.to_string())
+                })
+        } else {
+            Ok(None)
+        };
         let offline_startup = if self.network.is_none() {
             self.app_paths.as_ref().map_or(Ok(None), |paths| {
                 let selection = snapshot_configured_client_player_selection(paths)
@@ -37733,6 +38169,9 @@ impl GameApp {
                     // existing synthetic single-player path isolated from the
                     // legacy C++ startup pipeline.
                     Err(ScenarioError::OfflineStartupJsonUnsupported) => Ok(None),
+                    // Replay player state is supplied by PlayerInfos/CtrlRec,
+                    // never by the process-local participant selection.
+                    Err(ScenarioError::OfflineStartupReplayUnsupported) => Ok(None),
                     Err(error) => Err(error.to_string()),
                 }
             })
@@ -37745,14 +38184,27 @@ impl GameApp {
             .and_then(Option::as_ref)
             .map(OfflineStartupPlayers::startup_player_count);
         let offline_startup_error = offline_startup.as_ref().err().cloned();
+        let replay_startup_error = replay_startup.as_ref().err().cloned();
         let offline_startup_players = offline_startup.ok().flatten();
+        let replay_startup = replay_startup.ok().flatten();
 
         thread::spawn(move || {
             let resolver = InstallDefinitionResolver::new(resolver_paths);
-            let scenario_data = match offline_startup_error {
+            let scenario_data = match offline_startup_error.or(replay_startup_error) {
                 Some(error) => Err(error),
-                None => match startup_player_count {
-                    Some(startup_player_count) => {
+                None => match (replay_startup, startup_player_count) {
+                    (Some(replay), _) => {
+                        load_scenario_with_definition_load_and_seed_and_startup_player_count(
+                            &path_for_thread,
+                            &resolver,
+                            &languages,
+                            &definition_load,
+                            u64::from(replay.random_seed as u32),
+                            replay.startup_player_count,
+                        )
+                        .map_err(|error| error.to_string())
+                    }
+                    (None, Some(startup_player_count)) => {
                         load_scenario_with_definition_load_and_startup_player_count(
                             &path_for_thread,
                             &resolver,
@@ -37762,7 +38214,7 @@ impl GameApp {
                         )
                         .map_err(|error| error.to_string())
                     }
-                    None => load_scenario_with_definition_load(
+                    (None, None) => load_scenario_with_definition_load(
                         &path_for_thread,
                         &resolver,
                         &languages,
@@ -37806,6 +38258,8 @@ impl GameApp {
         scenario_data: Scenario,
     ) -> std::result::Result<(), ScenarioActivationError> {
         self.finish_recording();
+        self.recording_template = None;
+        self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
         let path = scenario
             .path
@@ -37836,7 +38290,7 @@ impl GameApp {
             "applying loaded scenario"
         );
 
-        let prepared_random_seed = self
+        let mut prepared_random_seed = self
             .loading_state
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
@@ -37871,6 +38325,74 @@ impl GameApp {
         let replay = scenario_data
             .lobby_metadata()
             .is_some_and(|metadata| metadata.head().is_replay());
+        let replay_parameters = replay.then(|| {
+            scenario_data
+                .lobby_metadata()
+                .and_then(ScenarioLobbyMetadata::embedded_game_parameter_values)
+        }).flatten();
+        if prepared_random_seed.is_none() {
+            prepared_random_seed = replay_parameters
+                .as_ref()
+                .map(|parameters| u64::from(parameters.random_seed() as u32));
+        }
+        let replay_parameter_clients = replay_parameters
+            .as_ref()
+            .map(|parameters| {
+                parameters
+                    .clients()
+                    .iter()
+                    .map(|client| lc_engine::ClientCoreControlData {
+                        client_id: client.id(),
+                        activated: client.is_activated(),
+                        observer: client.is_observer(),
+                        name: LegacyCString::from_bytes(lc_script::c4_string_bytes(client.name()))
+                            .unwrap_or_default(),
+                        nick: LegacyCString::from_bytes(lc_script::c4_string_bytes(client.nick()))
+                            .unwrap_or_default(),
+                        lobby_ready: client.is_lobby_ready(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let (control_playback, replay_player_infos) = if replay {
+            let group = open_group_path_for_folder_map(&path).map_err(|error| {
+                ScenarioActivationError::Recoverable(format!(
+                    "Failed to open replay {}: {error}",
+                    scenario.title
+                ))
+            })?;
+            let bytes = group.read_file("CtrlRec.c4b").map_err(|error| {
+                ScenarioActivationError::Recoverable(format!(
+                    "Replay {} has no readable CtrlRec.c4b: {error}",
+                    scenario.title
+                ))
+            })?;
+            let playback = ControlRecordPlayback::from_bytes(&bytes).map_err(|error| {
+                ScenarioActivationError::Recoverable(format!(
+                    "Replay {} has an invalid CtrlRec stream: {error}",
+                    scenario.title
+                ))
+            })?;
+            let player_infos = if group.exists("PlayerInfos.txt") {
+                let bytes = group.read_file("PlayerInfos.txt").map_err(|error| {
+                    ScenarioActivationError::Recoverable(format!(
+                        "Replay {} has unreadable PlayerInfos.txt: {error}",
+                        scenario.title
+                    ))
+                })?;
+                Some(lc_network::decode_player_info_list_ini(&bytes).map_err(|error| {
+                    ScenarioActivationError::Recoverable(format!(
+                        "Replay {} has invalid PlayerInfos.txt: {error}",
+                        scenario.title
+                    ))
+                })?)
+            } else {
+                None
+            };
+            (Some(playback), player_infos)
+        } else {
+            (None, None)
+        };
         let mut offline_team_metadata = if network_game || replay {
             None
         } else {
@@ -37908,6 +38430,9 @@ impl GameApp {
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_smoke_level(self.graphics_smoke_level);
+        if let Some(parameters) = replay_parameters.as_ref() {
+            engine.set_control_rate(parameters.control_rate());
+        }
         let (use_fair_crew, fair_crew_strength, fair_crew_forced, allow_debug) = prepared_fair_crew
             .unwrap_or_else(|| {
                 if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
@@ -37960,7 +38485,7 @@ impl GameApp {
         }
         engine.set_network_game(network_game);
         engine.set_network_control_mode(network_game);
-        engine.set_recording_active(!network_game && self.recording_enabled);
+        engine.set_recording_active(false);
         engine.set_replay_control(replay);
         engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
@@ -38059,6 +38584,28 @@ impl GameApp {
         }
 
         self.engine = engine;
+        if !replay {
+            if let Err(error) = self.prepare_recording_for(&scenario, &scenario_data) {
+                let league_host = self.network_is_league
+                    && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
+                if league_host {
+                    return Err(ScenarioActivationError::Recoverable(format!(
+                        "League recording could not start: {error}"
+                    )));
+                }
+                tracing::warn!(%error, "failed to prepare C++-compatible recording");
+            }
+            if let Err(error) = self.start_recording(self.network_is_league) {
+                let league_host = self.network_is_league
+                    && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
+                if league_host {
+                    return Err(ScenarioActivationError::Recoverable(format!(
+                        "League recording could not start: {error}"
+                    )));
+                }
+                tracing::warn!(%error, "failed to start C++-compatible recording");
+            }
+        }
         self.film_view_player = None;
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
@@ -38074,7 +38621,7 @@ impl GameApp {
         if let Some(audio) = self.audio.as_mut() {
             audio.reset_sfx();
         }
-        if !network_game {
+        if !network_game && !replay {
             if let Some(startup) = offline_startup_players.as_ref() {
                 let startup_player_count = startup.startup_player_count();
                 let mut local_players = Vec::new();
@@ -38146,6 +38693,26 @@ impl GameApp {
                             continue;
                         }
                     };
+                    if self.recording.is_some() {
+                        match packed_group_bytes(selected.source_path()) {
+                            Ok(player_data) => {
+                                let mut recorded_join = join.clone();
+                                recorded_join.source =
+                                    lc_engine::JoinPlayerSource::Embedded(player_data);
+                                self.record_control_batch(std::slice::from_ref(
+                                    &lc_engine::ControlPacket::JoinPlayer(recorded_join),
+                                ));
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    info_id = join.info_id,
+                                    path = %selected.source_path().display(),
+                                    %error,
+                                    "failed to embed initial player in recording"
+                                );
+                            }
+                        }
+                    }
                     let predicted_owner = self.engine.next_player_number();
                     let control = self.local_controls.initialize(LocalControlInit {
                         owner: predicted_owner,
@@ -38254,6 +38821,46 @@ impl GameApp {
         self.active_game_graphics = Some(active_game_graphics);
         self.ingame_menu_gfx = None;
         self.configure_running_state(label, ground);
+        if !replay_parameter_clients.is_empty() {
+            self.control_clients
+                .replace_snapshot(replay_parameter_clients);
+        }
+        if let Some(player_infos) = replay_player_infos {
+            let mut clients = self.control_clients.snapshot();
+            for client in &player_infos.clients {
+                if !clients
+                    .iter()
+                    .any(|known| known.client_id == client.client_id)
+                {
+                    clients.push(lc_engine::ClientCoreControlData {
+                        client_id: client.client_id,
+                        activated: true,
+                        observer: false,
+                        name: LegacyCString::default(),
+                        nick: LegacyCString::default(),
+                        lobby_ready: false,
+                    });
+                }
+            }
+            self.control_clients.replace_snapshot(clients);
+            self.control_player_infos.replace_snapshot(
+                player_infos.last_player_id,
+                player_infos
+                    .clients
+                    .into_iter()
+                    .map(|client| lc_engine::PlayerInfoControlData {
+                        client_id: client.client_id,
+                        flags: client.flags,
+                        players: client.players,
+                        by_client: 0,
+                    }),
+            );
+            seed_engine_player_info_parameters(
+                &mut self.engine,
+                &self.network_league_name,
+                &self.control_player_infos,
+            );
+        }
         if !network_game {
             // C++ creates fullscreen viewports only after Script.Initialize
             // and player initialization have completed.
@@ -38289,11 +38896,9 @@ impl GameApp {
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
         self.active_definition_load = Some(effective_definition_load);
+        self.control_playback = control_playback;
         self.play_scenario_audio(&path);
         self.status_text.clear();
-        if !network_game {
-            self.start_recording_for(&scenario);
-        }
         Ok(())
     }
 
@@ -38316,9 +38921,6 @@ impl GameApp {
             .apply_gamma_now(&self.snapshot.environment.gamma);
         self.refresh_object_menu();
         self.refresh_focus();
-        if let Some(scenario) = self.active_scenario.clone() {
-            self.start_recording_for(&scenario);
-        }
         Ok(())
     }
 
@@ -38332,6 +38934,8 @@ impl GameApp {
         self.ingame_menu_gfx = None;
         self.active_global_gui_overrides.clear();
         self.finish_recording();
+        self.recording_template = None;
+        self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
         self.loading_state = None;
         self.engine = Engine::new();
@@ -38736,6 +39340,8 @@ impl GameApp {
         }
 
         self.finish_recording();
+        self.recording_template = None;
+        self.control_playback = None;
         self.engine = Engine::new();
         self.film_view_player = None;
         self.engine.set_smoke_level(self.graphics_smoke_level);
@@ -38768,6 +39374,7 @@ impl GameApp {
         self.mouse_control_allowed = true;
         self.mouse_control = true;
         self.active_definition_load = None;
+        let mut recording_scenario_data = None;
 
         if scenario_info.sandbox {
             match self.audio.as_mut() {
@@ -38872,6 +39479,7 @@ impl GameApp {
                     .collect(),
                 definition_root: None,
             });
+            recording_scenario_data = Some(scenario_data);
         }
 
         self.rebuild_definition_sprites();
@@ -39180,7 +39788,13 @@ impl GameApp {
         }
         self.refresh_focus();
 
-        self.start_recording_for(&frontend);
+        if let Some(scenario_data) = recording_scenario_data.as_ref() {
+            if let Err(error) = self.prepare_recording_for(&frontend, scenario_data) {
+                tracing::warn!(%error, "failed to prepare loaded-game recording");
+            } else if let Err(error) = self.start_recording(false) {
+                tracing::warn!(%error, "failed to start loaded-game recording");
+            }
+        }
         self.scenario_catalog
             .insert(frontend.identifier.clone(), frontend.clone());
 
@@ -68312,6 +68926,254 @@ public func Grant(password) { return GainMissionAccess(password); }
         app
     }
 
+    fn install_test_recording_template(app: &mut GameApp, output_path: PathBuf) {
+        let mut group = MutableGroup::new("Recorded.c4s");
+        group
+            .add_file(
+                "Scenario.txt",
+                b"[Head]\nTitle=Recorded\nReplay=1\nIcon=29\n".to_vec(),
+            )
+            .expect("add replay scenario core");
+        group
+            .add_file("Sentinel.txt", b"preserved".to_vec())
+            .expect("add copied scenario component");
+        app.recording_template = Some(RecordingTemplate { group, output_path });
+    }
+
+    fn recorded_right_control(player: i32) -> lc_engine::ControlPacket {
+        lc_engine::ControlPacket::PlayerControl(lc_engine::PlayerControlData {
+            player,
+            command: i32::from(lc_engine::COM_RIGHT),
+            data: 0,
+            by_client: 0,
+        })
+    }
+
+    #[test]
+    fn forced_recording_writes_replay_group_and_league_sha() {
+        let directory = tempdir().expect("record directory");
+        let output_path = directory.path().join("001-Scenario.c4s");
+        let mut app = new_running_sandbox_app();
+        install_test_recording_template(&mut app, output_path.clone());
+
+        app.start_recording(true).unwrap();
+        let initial = Group::open(&output_path).expect("initial record is durable at start");
+        assert_eq!(
+            initial.read_file("Sentinel.txt").expect("copied component"),
+            b"preserved"
+        );
+        assert_eq!(
+            initial.read_file("CtrlRec.c4b").expect("open CtrlRec"),
+            Vec::<u8>::new()
+        );
+        let packet = recorded_right_control(app.local_owner);
+        app.apply_ready_controls(
+            0,
+            vec![network::network_control_for_packet(packet.clone())
+                .expect("supported control")],
+        )
+        .expect("execute and record control");
+        let metadata = app.finish_recording().expect("league record metadata");
+
+        let packed = fs::read(&output_path).expect("packed record group");
+        assert_eq!(metadata.sha1, <[u8; 20]>::from(Sha1::digest(&packed)));
+        assert_eq!(
+            metadata.name.as_bytes(),
+            output_path.to_string_lossy().as_bytes()
+        );
+        let group = Group::open(&output_path).expect("C4Group record opens");
+        assert_eq!(
+            group.read_file("Sentinel.txt").expect("copied component"),
+            b"preserved"
+        );
+        let scenario = String::from_utf8(group.read_file("Scenario.txt").unwrap()).unwrap();
+        assert!(scenario.contains("Replay=1"));
+        assert!(scenario.contains("Icon=29"));
+        assert!(group.exists("RecPlayerInfos.txt"));
+        let stream = group.read_file("CtrlRec.c4b").expect("binary CtrlRec");
+        let mut playback = ControlRecordPlayback::from_bytes(&stream).expect("CtrlRec opens");
+        assert_eq!(playback.take_controls(0), vec![packet]);
+    }
+
+    #[test]
+    fn forced_recording_rejects_missing_prepared_storage() {
+        let mut app = new_running_sandbox_app();
+        assert_eq!(
+            app.start_recording(true),
+            Err("recording storage was not prepared".to_string())
+        );
+        assert!(app.recording.is_none());
+    }
+
+    #[test]
+    fn resource_join_record_copies_player_group_for_replay() {
+        let directory = tempdir().expect("record directory");
+        let player_path = directory.path().join("Alice.c4p");
+        let mut player_group = MutableGroup::new("Alice.c4p");
+        player_group
+            .add_file(
+                "Player.txt",
+                b"[Player]\nName=Alice\n[Preferences]\nColorDw=255\n".to_vec(),
+            )
+            .expect("add player core");
+        fs::write(&player_path, player_group.pack().expect("pack player"))
+            .expect("write player group");
+        let output_path = directory.path().join("001-Resource.c4s");
+        let mut app = new_running_sandbox_app();
+        install_test_recording_template(&mut app, output_path.clone());
+        app.admission_resources.mark_complete(17, player_path);
+        app.start_recording(true).unwrap();
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 17,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Players/Alice.c4p".to_vec()).unwrap(),
+            ..lc_engine::NetworkResourceCore::default()
+        };
+        let packet = lc_engine::ControlPacket::JoinPlayer(lc_engine::JoinPlayerControlData {
+            filename: LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+            at_client: 0,
+            info_id: 1,
+            source: lc_engine::JoinPlayerSource::Resource(core.clone()),
+            by_client: 0,
+        });
+
+        app.record_control_packet(&packet);
+        app.finish_recording().expect("resource record metadata");
+
+        let record = Group::open(&output_path).expect("record group");
+        let copied = record
+            .open_child("17-Alice.c4p")
+            .expect("recorded player child");
+        assert!(copied.exists("Player.txt"));
+        let mut scenario = FrontendScenario::fallback();
+        scenario.path = Some(output_path);
+        app.active_scenario = Some(scenario);
+        app.control_playback = Some(
+            ControlRecordPlayback::from_bytes(
+                &record.read_file("CtrlRec.c4b").expect("record stream"),
+            )
+            .expect("open record stream"),
+        );
+        assert_eq!(
+            app.replay_record_player_file(&core)
+                .expect("reload copied player")
+                .name,
+            "Alice"
+        );
+    }
+
+    #[test]
+    fn synchronize_record_request_starts_with_the_executing_control_list() {
+        let directory = tempdir().expect("record directory");
+        let output_path = directory.path().join("001-Runtime.c4s");
+        let mut app = new_running_sandbox_app();
+        app.recording_enabled = false;
+        install_test_recording_template(&mut app, output_path.clone());
+        let synchronize = lc_engine::SynchronizeControlData {
+            save_player_files: false,
+            sync_clearance: true,
+            by_client: 0,
+        };
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::Synchronize(synchronize.clone())],
+        )
+        .expect("execute runtime record synchronize");
+        assert!(app.recording.is_some(), "the sync request arms recording");
+        app.finish_recording().expect("runtime record is written");
+
+        let group = Group::open(output_path).expect("runtime record group");
+        let stream = group.read_file("CtrlRec.c4b").expect("runtime CtrlRec");
+        let mut playback = ControlRecordPlayback::from_bytes(&stream).expect("runtime playback");
+        assert_eq!(
+            playback.take_controls(0),
+            vec![lc_engine::ControlPacket::Synchronize(synchronize)]
+        );
+    }
+
+    #[test]
+    fn synchronized_runtime_join_clearance_does_not_request_a_record() {
+        let directory = tempdir().expect("record directory");
+        let mut app = new_running_sandbox_app();
+        install_test_recording_template(
+            &mut app,
+            directory.path().join("001-RuntimeJoin.c4s"),
+        );
+        app.apply_synchronized_controls(
+            0,
+            vec![NetworkControl::Synchronize(
+                lc_engine::SynchronizeControlData {
+                    save_player_files: false,
+                    sync_clearance: true,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute CDT_Sync clearance");
+
+        assert!(app.recording.is_none());
+        assert!(app.recording_template.is_some());
+    }
+
+    #[test]
+    fn ctrlrec_control_executes_at_start_of_recorded_frame() {
+        let mut app = new_running_sandbox_app();
+        let packet = recorded_right_control(app.local_owner);
+        let mut writer = ControlRecordWriter::new();
+        writer
+            .record_packet(1, &packet)
+            .expect("encode replay control");
+        app.control_playback = Some(
+            ControlRecordPlayback::from_bytes(&writer.finish(1)).expect("open replay stream"),
+        );
+        app.engine.set_replay_control(true);
+
+        app.update().expect("advance frame zero");
+        assert_eq!(app.engine.frame(), 1);
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_RIGHT),
+            0,
+            "frame-one control must not execute during frame zero"
+        );
+
+        app.update().expect("execute frame-one replay control");
+        assert_eq!(app.engine.frame(), 2);
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_RIGHT),
+            0,
+            "recorded control executes before frame one's simulation tick"
+        );
+    }
+
+    #[test]
+    fn ctrlrec_end_finishes_the_replay_and_restores_local_control() {
+        let mut app = new_running_sandbox_app();
+        app.control_playback = Some(
+            ControlRecordPlayback::from_bytes(&[0, lc_engine::RCT_END])
+                .expect("open end-only replay"),
+        );
+        app.engine.set_replay_control(true);
+        app.engine.set_control_host(false);
+
+        app.update().expect("finish replay");
+
+        assert!(app.control_playback.is_none());
+        assert!(app.engine.is_control_host());
+        assert!(app.snapshot.game_over);
+    }
+
     fn install_running_network_stub(
         app: &mut GameApp,
         local_client_id: lc_network::ClientId,
@@ -79040,7 +79902,12 @@ protected func InputCallback(string answer, int player)
         // the network is frozen in GS_Lobby, rather than waiting for a game
         // simulation tick (pristine 9ffa0a5d
         // src/C4GameControlNetwork.cpp:558-588).
+        let directory = tempdir().expect("record directory");
         let mut app = new_menu_app(320, 200);
+        install_test_recording_template(
+            &mut app,
+            directory.path().join("001-FrozenLobbySync.c4s"),
+        );
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -79053,14 +79920,19 @@ protected func InputCallback(string answer, int player)
         event_tx
             .send(NetworkEvent::ScheduledSync {
                 tick: 0,
-                controls: vec![NetworkControl::ClientUpdate(
-                    lc_engine::ClientUpdateControlData {
+                controls: vec![
+                    NetworkControl::Synchronize(lc_engine::SynchronizeControlData {
+                        save_player_files: false,
+                        sync_clearance: true,
+                        by_client: 0,
+                    }),
+                    NetworkControl::ClientUpdate(lc_engine::ClientUpdateControlData {
                         update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
                         client_id: 3,
                         data: 1,
                         by_client: 0,
-                    },
-                )],
+                    }),
+                ],
             })
             .expect("queue frozen activation");
 
@@ -79069,6 +79941,8 @@ protected func InputCallback(string answer, int player)
 
         assert!(app.control_clients.is_activated(3));
         assert!(app.network_sync.scheduled.is_empty());
+        assert!(app.recording.is_none());
+        assert!(app.recording_template.is_some());
     }
 
     #[test]
@@ -79875,7 +80749,12 @@ protected func InputCallback(string answer, int player)
         // PID_ExecSyncCtrl tick 3 must remain valid when ControlRate 2 has
         // already advanced FrameCounter to 6 (src/C4Network2.cpp:2062-2110;
         // src/C4Network2Players.cpp:465-482).
+        let directory = tempdir().expect("record directory");
         let mut app = new_running_sandbox_app();
+        install_test_recording_template(
+            &mut app,
+            directory.path().join("001-FinalGoSync.c4s"),
+        );
         app.network_control_clock = Some(NetworkControlClock::new(3, 2));
         app.engine.initialize_network_control_timing(
             lc_engine::NetworkControlTiming::new(0, 2).expect("valid network timing"),
@@ -79920,6 +80799,11 @@ protected func InputCallback(string answer, int player)
             .send(NetworkEvent::ScheduledSync {
                 tick: 3,
                 controls: vec![
+                    NetworkControl::Synchronize(lc_engine::SynchronizeControlData {
+                        save_player_files: false,
+                        sync_clearance: true,
+                        by_client: 0,
+                    }),
                     NetworkControl::ClientUpdate(lc_engine::ClientUpdateControlData {
                         update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
                         client_id: 3,
@@ -79952,6 +80836,8 @@ protected func InputCallback(string answer, int player)
         assert_eq!(joins[0].0, 3);
         assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 31));
         assert!(app.network_control_running);
+        assert!(app.recording.is_none());
+        assert!(app.recording_template.is_some());
     }
 
     #[test]

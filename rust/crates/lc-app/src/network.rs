@@ -1466,6 +1466,56 @@ pub enum NetworkControl {
     Set(LegacyControlSet),
 }
 
+impl NetworkControl {
+    /// Recover the exact legacy control packet represented by this app-facing
+    /// value. CtrlRec stores the packet/list compiler payload rather than the
+    /// reduced execution enum, so recording must make this conversion before
+    /// executing a batch.
+    pub(crate) fn into_packet(self) -> Option<lc_engine::ControlPacket> {
+        Some(match self {
+            Self::ClientJoin(value) => lc_engine::ControlPacket::ClientJoin(value),
+            Self::ClientUpdate(value) => lc_engine::ControlPacket::ClientUpdate(value),
+            Self::ClientRemove(value) => lc_engine::ControlPacket::ClientRemove(value),
+            Self::PlayerInfo(value) => lc_engine::ControlPacket::PlayerInfo(value),
+            Self::JoinPlayer(value) => lc_engine::ControlPacket::JoinPlayer(value),
+            Self::RemovePlayer(value) => lc_engine::ControlPacket::RemovePlayer(value),
+            Self::SurrenderPlayer(value) => lc_engine::ControlPacket::SurrenderPlayer(value),
+            Self::ActivateGameGoalMenu(value) => {
+                lc_engine::ControlPacket::ActivateGameGoalMenu(value)
+            }
+            Self::ToggleHostility(value) => lc_engine::ControlPacket::ToggleHostility(value),
+            Self::ActivateGameGoalRule(value) => {
+                lc_engine::ControlPacket::ActivateGameGoalRule(value)
+            }
+            Self::SetPlayerTeam(value) => lc_engine::ControlPacket::SetPlayerTeam(value),
+            Self::EliminatePlayer(value) => lc_engine::ControlPacket::EliminatePlayer(value),
+            Self::Vote(value) => lc_engine::ControlPacket::Vote(value),
+            Self::VoteEnd(value) => lc_engine::ControlPacket::VoteEnd(value),
+            Self::PlayerControl(value) => lc_engine::ControlPacket::PlayerControl(value),
+            Self::PlayerCommand(value) => lc_engine::ControlPacket::PlayerCommand(value),
+            Self::PlayerSelect(value) => lc_engine::ControlPacket::PlayerSelect(value),
+            Self::Script(value) => lc_engine::ControlPacket::Script(value),
+            Self::Message(value) => lc_engine::ControlPacket::Message(value),
+            Self::MessageBoardAnswer(value) => {
+                lc_engine::ControlPacket::MessageBoardAnswer(value)
+            }
+            Self::CustomCommand(value) => lc_engine::ControlPacket::CustomCommand(value),
+            Self::EmMoveObject(value) => lc_engine::ControlPacket::EmMoveObject(value),
+            Self::EmDrawTool(value) => lc_engine::ControlPacket::EmDrawTool(value),
+            Self::EmDropDef(value) => lc_engine::ControlPacket::EmDropDef(value),
+            Self::Player { owner, event } => {
+                return control_packet_for_event(owner, event, HOST_CLIENT_ID);
+            }
+            Self::InitScenarioPlayer(value) => {
+                lc_engine::ControlPacket::InitScenarioPlayer(value)
+            }
+            Self::Synchronize(value) => lc_engine::ControlPacket::Synchronize(value),
+            Self::SyncCheck(value) => lc_engine::ControlPacket::SyncCheck(value),
+            Self::Set(value) => value.into_control_packet(),
+        })
+    }
+}
+
 #[derive(Debug)]
 enum PlayerInfoEchoProvenance {
     Normal,
@@ -4735,7 +4785,9 @@ fn emit_scheduled_sync_controls(
     Ok(())
 }
 
-fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<NetworkControl> {
+pub(crate) fn network_control_for_packet(
+    control: lc_engine::ControlPacket,
+) -> Option<NetworkControl> {
     if let Some(set) = LegacyControlSet::from_control_packet(&control) {
         return Some(NetworkControl::Set(set));
     }

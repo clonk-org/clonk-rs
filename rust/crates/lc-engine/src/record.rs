@@ -81,7 +81,8 @@ impl BinaryControlRecord {
 
     pub fn rec(&mut self, frame: u32, payload: &[u8], chunk_type: u8) {
         // filler chunks (C4Record.cpp:245-247)
-        while frame > self.last_frame + 0xff {
+        while frame.saturating_sub(self.last_frame) > 0xff {
+            // The difference check guarantees this addition cannot overflow.
             let filler_frame = self.last_frame + 0xff;
             self.rec(filler_frame, &[], RCT_FRAME);
         }
@@ -97,7 +98,7 @@ impl BinaryControlRecord {
     /// Write the end marker (C4Record.cpp:194-197): an RCT_End head whose u8
     /// frame field carries `frame + 37` truncated.
     pub fn finish(&mut self, frame: u32) {
-        self.bytes.push(((frame + 37) & 0xff) as u8);
+        self.bytes.push(frame.wrapping_add(37) as u8);
         self.bytes.push(RCT_END);
     }
 
@@ -146,6 +147,14 @@ mod binary_record_tests {
         let bytes = record.into_bytes();
         assert_eq!(&bytes[0..2], &[10, RCT_CTRL]);
         assert_eq!(&bytes[2..4], &[0, RCT_CTRL]);
+    }
+
+    #[test]
+    fn binary_record_handles_uint32_end_frames_like_cpp() {
+        let mut record = BinaryControlRecord::new();
+        record.finish(u32::MAX);
+        let bytes = record.into_bytes();
+        assert_eq!(bytes, [36, RCT_END]);
     }
 }
 

@@ -107,6 +107,8 @@ pub enum ScenarioError {
     Engine(#[from] EngineError),
     #[error("initial network Scenario.txt serialization requires a legacy Scenario.txt core")]
     InitialNetworkScenarioUnsupported,
+    #[error("initial record Scenario.txt serialization requires a legacy Scenario.txt core")]
+    InitialRecordScenarioUnsupported,
     #[error("initial network team metadata requires a legacy Scenario.txt core")]
     InitialNetworkTeamMetadataUnsupported,
     #[error("initial network team {team_id} has no scenario-derived C++ default color")]
@@ -131,6 +133,15 @@ pub enum ScenarioError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OfflineScenarioStartupPreflight {
     pub max_players: i32,
+}
+
+/// Parameters that must be frozen before a replay's dynamic landscape is
+/// created. They come from the same Scenario.txt/Parameters.txt merge used by
+/// `C4GameParameters::Load` and therefore precede CtrlRec playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayScenarioStartupPreflight {
+    pub random_seed: i32,
+    pub startup_player_count: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1724,6 +1735,25 @@ impl Scenario {
         Ok(OfflineScenarioStartupPreflight { max_players })
     }
 
+    /// Reads replay-owned map inputs before definitions or landscape state
+    /// are loaded. Non-replay scenarios return `None`.
+    pub fn preflight_replay_startup_from_group(
+        group: &Group,
+    ) -> Result<Option<ReplayScenarioStartupPreflight>, ScenarioError> {
+        let manifest = parse_legacy_scenario_manifest(group)?;
+        if manifest.core.head.replay == 0 {
+            return Ok(None);
+        }
+        let defaults = game_parameter_defaults(&manifest.core);
+        let parameters = load_legacy_game_parameter_overrides(group, &defaults)?
+            .map(|overrides| overrides.apply_to(&defaults))
+            .unwrap_or(defaults);
+        Ok(Some(ReplayScenarioStartupPreflight {
+            random_seed: parameters.random_seed,
+            startup_player_count: parameters.startup_player_count,
+        }))
+    }
+
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
         let group = Group::open(path)?;
         Self::load_from_group(&group)
@@ -2306,6 +2336,30 @@ impl Scenario {
                     .into_bytes()
             })
             .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)
+    }
+
+    /// Serializes the initial `Scenario.txt` inside a C++ record group.
+    ///
+    /// Initial records use the same `C4GameSave::SaveCore` projection as an
+    /// initial network dynamic, but `C4GameSaveRecord::AdjustCore` marks the
+    /// result as a replay, selects the record icon, and leaves NetworkGame
+    /// cleared (C4GameSave.cpp:58-108,576-584; C4GameSave.h:148-168).
+    /// `record_title` is the already-formatted title stored by the caller
+    /// (`NNN <scenario title> [<build>]` in the C++ application).
+    pub fn serialize_initial_record_scenario(
+        &self,
+        record_title: &str,
+        definition_modules: &[String],
+        scenario_origin: &str,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        self.legacy_core
+            .as_ref()
+            .map(|core| {
+                core.initial_record_save(record_title, definition_modules, scenario_origin)
+                    .serialize()
+                    .into_bytes()
+            })
+            .ok_or(ScenarioError::InitialRecordScenarioUnsupported)
     }
 
     /// Returns the C4Scenario values consumed while creating the initial
@@ -5803,7 +5857,7 @@ impl LegacyScenarioCore {
         loaded
     }
 
-    fn initial_network_save(
+    fn initial_save_core(
         &self,
         scenario_title: &str,
         definition_modules: &[String],
@@ -5818,8 +5872,9 @@ impl LegacyScenarioCore {
             .copy_from_slice(&CURRENT_SCENARIO_VERSION);
         saved.head.title = scenario_title.to_owned();
         saved.head.mission_access.clear();
-        saved.head.network_game = true;
-        saved.head.network_runtime_join = false;
+        // SaveCore resets NetworkGame before the save specialization applies
+        // its own flags. NetworkRuntimeJoin is deliberately retained here.
+        saved.head.network_game = false;
         saved.head.forced_gfx_mode = 1;
 
         // C4SDefinitions::SetModules replaces the list and derives LocalOnly
@@ -5841,6 +5896,32 @@ impl LegacyScenarioCore {
 
         // fInitial intentionally leaves NoInitialize and SaveGame unchanged
         // (C4GameSave.cpp:65-75).
+        saved
+    }
+
+    fn initial_network_save(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        scenario_origin: &str,
+    ) -> Self {
+        let mut saved =
+            self.initial_save_core(scenario_title, definition_modules, scenario_origin);
+        saved.head.network_game = true;
+        saved.head.network_runtime_join = false;
+        saved
+    }
+
+    fn initial_record_save(
+        &self,
+        record_title: &str,
+        definition_modules: &[String],
+        scenario_origin: &str,
+    ) -> Self {
+        let mut saved =
+            self.initial_save_core(record_title, definition_modules, scenario_origin);
+        saved.head.replay = 1;
+        saved.head.icon = 29;
         saved
     }
 
@@ -14163,6 +14244,80 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn initial_record_scenario_matches_cpp_initial_save_flags() {
+        // C4GameSave::SaveCore resets NetworkGame, retains the initial
+        // SaveGame/NoInitialize and NetworkRuntimeJoin fields, installs the
+        // effective definition vector and origin, and updates only the first
+        // four version components. C4GameSaveRecord::AdjustCore then sets
+        // Replay, Icon and the already-formatted record title
+        // (C4GameSave.cpp:58-108,576-584).
+        let scenario = scenario_with_retained_legacy_core(
+            "[Head]\nIcon=7\nTitle=Old\nVersion=1,2,3,4,359\nSaveGame=1\nNoInitialize=1\nMissionAccess=MISS\nNetworkGame=true\nNetworkRuntimeJoin=true\nOrigin=Retained\\Game.c4s\n\n[Definitions]\nDefinitions=Old.c4d\n\n[Game]\nStructNeedEnergy=0\nLandscapeInsertThrust=0\n",
+        );
+
+        let actual = scenario
+            .serialize_initial_record_scenario(
+                "007 Test [362]",
+                &["Objects.c4d".to_owned(), "Folder.c4f".to_owned()],
+                "Fallback.c4s",
+            )
+            .expect("legacy initial record scenario serializes");
+
+        assert_eq!(
+            actual,
+            concat!(
+                "[Head]\r\n",
+                "Icon=29\r\n",
+                "Title=007 Test [362]\r\n",
+                "Version=4,9,11,0,359\r\n",
+                "SaveGame=1\r\n",
+                "Replay=1\r\n",
+                "NoInitialize=1\r\n",
+                "NetworkRuntimeJoin=true\r\n",
+                "ForcedGfxMode=1\r\n",
+                "Origin=Retained/Game.c4s\r\n",
+                "\r\n",
+                "[Definitions]\r\n",
+                "Definitions=\"Objects.c4d\",\"Folder.c4f\"\r\n",
+                "\r\n",
+                "[Game]\r\n",
+                "StructNeedEnergy=false\r\n",
+                "LandscapeInsertThrust=0\r\n",
+                "\r\n",
+                "[Landscape]\r\n",
+                "ShadeMaterials=false\r\n",
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
+    fn initial_record_scenario_uses_fallback_origin_and_rejects_json() {
+        let scenario = scenario_with_retained_legacy_core(
+            "[Head]\nNetworkGame=true\nMissionAccess=MISS\n\n[Game]\nStructNeedEnergy=0\n",
+        );
+        let actual = scenario
+            .serialize_initial_record_scenario("Record", &[], "Folder\\Game.c4s")
+            .expect("legacy initial record scenario serializes");
+        let actual = String::from_utf8(actual).expect("Scenario.txt is UTF-8");
+
+        assert!(actual.contains("Replay=1\r\n"));
+        assert!(actual.contains("Icon=29\r\n"));
+        assert!(actual.contains("LocalOnly=true\r\n"));
+        assert!(actual.contains("Origin=Folder/Game.c4s\r\n"));
+        assert!(!actual.contains("NetworkGame="));
+        assert!(!actual.contains("MissionAccess="));
+
+        let error = json_scenario_without_legacy_core()
+            .serialize_initial_record_scenario("JSON", &[], "JSON.c4s")
+            .expect_err("JSON scenarios must not fabricate record Scenario.txt");
+        assert!(matches!(
+            error,
+            ScenarioError::InitialRecordScenarioUnsupported
+        ));
+    }
+
+    #[test]
     fn initial_network_metadata_matches_cpp_scenario_defaults_and_conversion_order() {
         // C4Scenario::Load converts the old goal/rule selectors before
         // C4GameParameters::CompileFunc reads its scenario-derived defaults
@@ -15785,6 +15940,30 @@ RandomTeamCount=2
         assert_eq!(parameters.clients()[1].id(), 9);
         assert_eq!(parameters.clients()[1].name(), "Unknown");
         assert_eq!(parameters.clients()[1].nick(), "Unknown");
+    }
+
+    #[test]
+    fn replay_startup_preflight_merges_scenario_and_parameter_map_inputs() {
+        let directory = tempdir().expect("replay group");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nReplay=1\nRandomSeed=41\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("Parameters.txt"),
+            "[Parameters]\nRandomSeed=73\nStartupPlayerCount=4\n",
+        )
+        .unwrap();
+        let group = Group::open(directory.path()).unwrap();
+
+        assert_eq!(
+            Scenario::preflight_replay_startup_from_group(&group).unwrap(),
+            Some(ReplayScenarioStartupPreflight {
+                random_seed: 73,
+                startup_player_count: 4,
+            })
+        );
     }
 
     #[test]

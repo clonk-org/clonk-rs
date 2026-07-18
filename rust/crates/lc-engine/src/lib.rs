@@ -129,7 +129,10 @@ pub use player::{
     PlayerControlState, PlayerState, PlayerStatus, PlayerViewport, PLAYER_VIEW_MODE_CURSOR,
     PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
-pub use record::{Playback, PlaybackError, Recorder, Recording};
+pub use record::{
+    BinaryControlRecord, Playback, PlaybackError, Recorder, Recording, RCT_CTRL, RCT_CTRL_PKT,
+    RCT_END, RCT_FRAME,
+};
 pub use round_results::{
     LeagueRoundResultUpdate, RoundResultsNetworkResult, RoundResultsPlayerState, RoundResultsState,
 };
@@ -141,7 +144,8 @@ pub use scenario::{
     ScenarioIdListEntry, ScenarioLoaderMetadata, ScenarioLoaderSelection, ScenarioLobbyClient,
     ScenarioLobbyDefinitions, ScenarioLobbyHead, ScenarioLobbyIdEntry, ScenarioLobbyMetadata,
     ScenarioLobbyTeam, ScenarioLobbyTeams, ScenarioObjectives, ScenarioSavegameDefinitionOverride,
-    ScenarioTeamColor, ScenarioTeamDistribution, ScenarioTeamsSource, SkyConfig,
+    ReplayScenarioStartupPreflight, ScenarioTeamColor, ScenarioTeamDistribution,
+    ScenarioTeamsSource, SkyConfig,
     MAX_PLAYER_STARTS,
 };
 pub use scoreboard::{
@@ -18784,6 +18788,11 @@ impl Engine {
         engine
     }
 
+    /// The synchronized seed retained in `Game.Parameters.RandomSeed`.
+    pub fn random_seed(&self) -> u64 {
+        self.random_seed
+    }
+
     /// Apply the C++ network client's control clock before synchronized
     /// gameplay starts (`C4Network2.cpp:1607-1608`).
     pub fn initialize_network_control_timing(&mut self, timing: NetworkControlTiming) {
@@ -23343,6 +23352,17 @@ impl Engine {
 
     pub fn set_replay_control(&mut self, replay_control: bool) {
         self.replay_control = replay_control;
+    }
+
+    /// `C4Playback::Finish`: end the replayed round and return control to the
+    /// local host after the end marker has been consumed.
+    pub fn finish_replay(&mut self) -> Result<(), EngineError> {
+        self.request_game_over()?;
+        self.replay_control = false;
+        self.network_control_mode = false;
+        self.control_host = true;
+        self.control_rate = 1;
+        Ok(())
     }
 
     /// Set the app-owned physical viewport availability sampled by replay

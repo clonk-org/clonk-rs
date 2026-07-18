@@ -7,6 +7,7 @@ mod client_bootstrap;
 mod client_mesh;
 mod client_player_resource;
 mod control;
+mod control_record;
 mod forward_packet;
 mod host_resource_core;
 mod host_game_reference;
@@ -86,6 +87,10 @@ pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
     InsertStatus, MissingRange, ReadyBatch,
 };
+pub use control_record::{
+    decode_control_record, ControlRecordChunk, ControlRecordDecodeError, ControlRecordParser,
+    ControlRecordPlayback, ControlRecordWriter,
+};
 pub use forward_packet::{
     decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
     ForwardPacketCodecError, MAX_FORWARD_CLIENTS, PID_FORWARD, PID_FORWARD_REQUEST,
@@ -95,7 +100,8 @@ pub use host_resource_core::{
     HostResourcePublication, HostResourceType,
 };
 pub use host_game_reference::{
-    HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
+    encode_player_info_list_ini, HostGameReference, HostGameReferenceError,
+    HostGameReferenceMetadata,
 };
 pub use host_initial_resources::{
     publish_host_initial_resources, HostInitialResourcePublication,
@@ -136,15 +142,16 @@ pub use league_round_results_packet::{
     LeagueRoundResultsPacket, LeagueRoundResultsPlayer, PID_LEAGUE_ROUND_RESULTS,
 };
 pub use legacy::{
-    aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,
-    decode_control_payload, decode_init_scenario_player_control_entry_payload,
+    aggregate_ready_batch, decode_control_entry_payload, decode_control_entry_prefix,
+    decode_control_list_prefix, decode_control_packet, decode_control_payload,
+    decode_init_scenario_player_control_entry_payload,
     decode_join_data_envelope, decode_join_game_parameters_envelope,
-    decode_player_info_update_payload, encode_control_entry_payload, encode_control_packet,
-    encode_control_payload, encode_init_scenario_player_control_entry_payload,
-    encode_join_data_envelope, encode_join_game_parameters_envelope,
-    encode_player_info_update_payload, JoinDataC4Id, JoinDataEnvelope, JoinDataIdListEntry,
-    JoinGameParametersEnvelope, LegacyAggregateError, LegacyControlError, LegacyControlFrame,
-    LegacyControlSet, LegacyEncodeError,
+    decode_player_info_update_payload, encode_control_entry_payload, encode_control_list_payload,
+    encode_control_packet, encode_control_payload,
+    encode_init_scenario_player_control_entry_payload, encode_join_data_envelope,
+    encode_join_game_parameters_envelope, encode_player_info_update_payload, JoinDataC4Id,
+    JoinDataEnvelope, JoinDataIdListEntry, JoinGameParametersEnvelope, LegacyAggregateError,
+    LegacyControlError, LegacyControlFrame, LegacyControlSet, LegacyEncodeError,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use local_resource_resolution::{

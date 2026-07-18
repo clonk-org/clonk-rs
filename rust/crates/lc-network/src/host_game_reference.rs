@@ -580,17 +580,21 @@ fn push_player_info_list(output: &mut String, name: &str, list: &PlayerInfoListS
     begin_section(output, 2, name);
     push_i32(output, "LastPlayerID", list.last_player_id, 0, 2);
     for client in &list.clients {
-        push_client_player_infos(output, client);
+        push_client_player_infos(output, client, 4);
     }
 }
 
-fn push_client_player_infos(output: &mut String, client: &ClientPlayerInfosSnapshot) {
-    begin_section(output, 4, "Client");
-    push_i32(output, "ID", client.client_id, -1, 4);
+fn push_client_player_infos(
+    output: &mut String,
+    client: &ClientPlayerInfosSnapshot,
+    indent: usize,
+) {
+    begin_section(output, indent, "Client");
+    push_i32(output, "ID", client.client_id, -1, indent);
     if client.flags != 0 {
         push_line(
             output,
-            4,
+            indent,
             "Flags",
             &encode_bitfield(
                 client.flags,
@@ -599,13 +603,30 @@ fn push_client_player_infos(output: &mut String, client: &ClientPlayerInfosSnaps
         );
     }
     for player in &client.players {
-        push_player(output, player);
+        push_player(output, player, indent + 2);
     }
 }
 
-fn push_player(output: &mut String, player: &ControlPlayerInfoEntry) {
-    begin_section(output, 6, "Player");
-    append_player_info_fields(output, player, 6);
+fn push_player(output: &mut String, player: &ControlPlayerInfoEntry, indent: usize) {
+    begin_section(output, indent, "Player");
+    append_player_info_fields(output, player, indent);
+}
+
+/// Serializes the named `C4PlayerInfoList` form stored in `PlayerInfos.txt`
+/// and `SavePlayerInfos.txt`.
+pub fn encode_player_info_list_ini(
+    list: &PlayerInfoListSnapshot,
+) -> Result<Vec<u8>, HostGameReferenceError> {
+    validate_player_info_list(list)?;
+    let mut output = String::from("[PlayerInfoList]\r\n");
+    push_i32(&mut output, "LastPlayerID", list.last_player_id, 0, 0);
+    for client in &list.clients {
+        push_client_player_infos(&mut output, client, 2);
+    }
+    Ok(output
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
+        .collect())
 }
 
 pub(crate) fn append_player_info_fields(
@@ -965,5 +986,33 @@ fn team_distribution_name(value: u8) -> Option<&'static str> {
         3 => Some("Random"),
         4 => Some("RandomInv"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lc_engine::{ControlPlayerInfoEntry, LegacyCString};
+
+    use super::*;
+
+    #[test]
+    fn standalone_player_info_list_round_trips_through_the_cpp_ini_shape() {
+        let list = PlayerInfoListSnapshot {
+            last_player_id: 7,
+            clients: vec![ClientPlayerInfosSnapshot {
+                client_id: 3,
+                flags: 0,
+                players: vec![ControlPlayerInfoEntry {
+                    name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                    id: 7,
+                    league_progress_data_is_null: false,
+                    ..ControlPlayerInfoEntry::default()
+                }],
+            }],
+        };
+
+        let encoded = encode_player_info_list_ini(&list).unwrap();
+        assert!(encoded.starts_with(b"[PlayerInfoList]\r\nLastPlayerID=7\r\n"));
+        assert_eq!(crate::decode_player_info_list_ini(&encoded).unwrap(), list);
     }
 }

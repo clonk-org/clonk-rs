@@ -1,0 +1,477 @@
+use lc_engine::{
+    BinaryControlRecord, ControlPacket as EngineControlPacket, RCT_CTRL, RCT_CTRL_PKT, RCT_END,
+    RCT_FRAME,
+};
+use std::collections::VecDeque;
+use thiserror::Error;
+
+use crate::legacy::{
+    decode_control_entry_prefix, decode_control_list_prefix, encode_control_entry_payload,
+    encode_control_list_payload, LegacyControlError, LegacyEncodeError,
+};
+
+/// One typed chunk from a C++ `CtrlRec.c4b` stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlRecordChunk {
+    /// One queued/executed `C4Control` list (`RCT_Ctrl`).
+    Controls {
+        frame: u32,
+        controls: Vec<EngineControlPacket>,
+    },
+    /// One immediately executed `C4IDPacket` (`RCT_CtrlPkt`).
+    ControlPacket {
+        frame: u32,
+        control: EngineControlPacket,
+    },
+    /// Empty frame-distance filler (`RCT_Frame`).
+    Frame { frame: u32 },
+    /// End-of-record marker (`RCT_End`).
+    End { frame: u32 },
+}
+
+impl ControlRecordChunk {
+    pub fn frame(&self) -> u32 {
+        match self {
+            Self::Controls { frame, .. }
+            | Self::ControlPacket { frame, .. }
+            | Self::Frame { frame }
+            | Self::End { frame } => *frame,
+        }
+    }
+}
+
+/// Typed writer for the control-bearing subset of `CtrlRec.c4b`.
+///
+/// The raw chunk writer remains in `lc-engine`; this layer supplies the exact
+/// `C4Control`/`C4IDPacket` payload codecs and prevents client/tick transport
+/// metadata from being written into a record.
+#[derive(Debug, Clone, Default)]
+pub struct ControlRecordWriter {
+    record: BinaryControlRecord,
+}
+
+impl ControlRecordWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one executed control list. C++ omits empty lists.
+    pub fn record_controls(
+        &mut self,
+        frame: u32,
+        controls: &[EngineControlPacket],
+    ) -> Result<(), LegacyEncodeError> {
+        if controls.is_empty() {
+            return Ok(());
+        }
+        // Encode before touching the stream so an unsupported packet leaves
+        // the writer unchanged.
+        let payload = encode_control_list_payload(controls)?;
+        self.record.rec(frame, &payload, RCT_CTRL);
+        Ok(())
+    }
+
+    /// Record one immediately executed control packet. The payload excludes
+    /// the live `PID_ControlPkt` delivery byte.
+    pub fn record_packet(
+        &mut self,
+        frame: u32,
+        control: &EngineControlPacket,
+    ) -> Result<(), LegacyEncodeError> {
+        let payload = encode_control_entry_payload(control)?;
+        self.record.rec(frame, &payload, RCT_CTRL_PKT);
+        Ok(())
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        self.record.bytes()
+    }
+
+    /// Append C++'s end marker and consume the writer, preventing data from
+    /// being appended after the logical end of the record.
+    pub fn finish(mut self, frame: u32) -> Vec<u8> {
+        self.record.finish(frame);
+        self.record.into_bytes()
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ControlRecordDecodeError {
+    #[error("control record payload is invalid: {0}")]
+    Control(#[from] LegacyControlError),
+    #[error("control record chunk type {0:#x} is unsupported")]
+    UnsupportedChunkType(u8),
+    #[error("control record contains bytes after its end marker")]
+    DataAfterEnd,
+    #[error("control record ends in a partial chunk")]
+    Truncated,
+    #[error("control record has no end marker")]
+    MissingEnd,
+}
+
+/// Incremental parser for a C++ `CtrlRec.c4b` stream.
+///
+/// Chunk payloads have no lengths. The parser uses the control codec's exact
+/// consumed position and retains an incomplete header/payload until more bytes
+/// arrive, matching `C4Playback::ReadBinary`'s sequential-buffer behavior.
+#[derive(Debug, Clone, Default)]
+pub struct ControlRecordParser {
+    pending: Vec<u8>,
+    frame: u32,
+    ended: bool,
+}
+
+impl ControlRecordParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.ended
+    }
+
+    pub fn push(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<Vec<ControlRecordChunk>, ControlRecordDecodeError> {
+        if self.ended {
+            return if bytes.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(ControlRecordDecodeError::DataAfterEnd)
+            };
+        }
+        self.pending.extend_from_slice(bytes);
+
+        let mut cursor = 0usize;
+        let mut frame = self.frame;
+        let mut ended = false;
+        let mut chunks = Vec::new();
+
+        loop {
+            let available = &self.pending[cursor..];
+            if available.len() < 2 {
+                break;
+            }
+            let delta = available[0];
+            let chunk_type = available[1];
+            let payload = &available[2..];
+
+            let parsed = match chunk_type {
+                RCT_CTRL => match decode_control_list_prefix(payload) {
+                    Ok((controls, consumed)) => Some((
+                        ControlRecordChunk::Controls { frame: 0, controls },
+                        consumed,
+                    )),
+                    Err(LegacyControlError::UnexpectedEof) => None,
+                    Err(error) => return Err(error.into()),
+                },
+                RCT_CTRL_PKT => match decode_control_entry_prefix(payload) {
+                    Ok((control, consumed)) => Some((
+                        ControlRecordChunk::ControlPacket { frame: 0, control },
+                        consumed,
+                    )),
+                    Err(LegacyControlError::UnexpectedEof) => None,
+                    Err(error) => return Err(error.into()),
+                },
+                RCT_FRAME => Some((ControlRecordChunk::Frame { frame: 0 }, 0)),
+                RCT_END => Some((ControlRecordChunk::End { frame: 0 }, 0)),
+                other => return Err(ControlRecordDecodeError::UnsupportedChunkType(other)),
+            };
+
+            let Some((mut chunk, payload_len)) = parsed else {
+                break;
+            };
+            // C4Playback accumulates the uint8 delta into a uint32 frame and
+            // therefore wraps at the native unsigned boundary.
+            let next_frame = frame.wrapping_add(u32::from(delta));
+            match &mut chunk {
+                ControlRecordChunk::Controls { frame, .. }
+                | ControlRecordChunk::ControlPacket { frame, .. }
+                | ControlRecordChunk::Frame { frame }
+                | ControlRecordChunk::End { frame } => *frame = next_frame,
+            }
+
+            frame = next_frame;
+            cursor += 2 + payload_len;
+            ended = matches!(chunk, ControlRecordChunk::End { .. });
+            chunks.push(chunk);
+            if ended {
+                break;
+            }
+        }
+
+        if ended && cursor != self.pending.len() {
+            return Err(ControlRecordDecodeError::DataAfterEnd);
+        }
+
+        self.frame = frame;
+        self.ended = ended;
+        if cursor != 0 {
+            self.pending.drain(..cursor);
+        }
+        Ok(chunks)
+    }
+
+    /// Validate that the complete input ended on an `RCT_End` boundary.
+    pub fn finish(&self) -> Result<(), ControlRecordDecodeError> {
+        if self.ended {
+            debug_assert!(self.pending.is_empty());
+            return Ok(());
+        }
+        if self.pending.is_empty() {
+            Err(ControlRecordDecodeError::MissingEnd)
+        } else {
+            Err(ControlRecordDecodeError::Truncated)
+        }
+    }
+}
+
+/// Decode a complete `CtrlRec.c4b` byte stream.
+pub fn decode_control_record(
+    bytes: &[u8],
+) -> Result<Vec<ControlRecordChunk>, ControlRecordDecodeError> {
+    let mut parser = ControlRecordParser::new();
+    let chunks = parser.push(bytes)?;
+    parser.finish()?;
+    Ok(chunks)
+}
+
+/// Frame-ordered playback view of a complete `CtrlRec.c4b` stream.
+///
+/// [`take_controls`](Self::take_controls) mirrors
+/// `C4Playback::ExecuteControl`: every list or individual packet whose
+/// recorded frame is less than or equal to the requested frame is returned in
+/// file order. Callers execute the returned controls before simulating that
+/// frame.
+#[derive(Debug, Clone)]
+pub struct ControlRecordPlayback {
+    chunks: VecDeque<ControlRecordChunk>,
+    finished: bool,
+}
+
+impl ControlRecordPlayback {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ControlRecordDecodeError> {
+        Ok(Self {
+            chunks: decode_control_record(bytes)?.into(),
+            finished: false,
+        })
+    }
+
+    pub fn take_controls(&mut self, frame: u32) -> Vec<EngineControlPacket> {
+        if self.finished {
+            return Vec::new();
+        }
+
+        let mut controls = Vec::new();
+        while self
+            .chunks
+            .front()
+            .is_some_and(|chunk| chunk.frame() <= frame)
+        {
+            match self.chunks.pop_front().expect("front chunk exists") {
+                ControlRecordChunk::Controls {
+                    controls: recorded, ..
+                } => controls.extend(recorded),
+                ControlRecordChunk::ControlPacket { control, .. } => controls.push(control),
+                ControlRecordChunk::Frame { .. } => {}
+                ControlRecordChunk::End { .. } => {
+                    self.finished = true;
+                    break;
+                }
+            }
+        }
+        controls
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    pub fn next_frame(&self) -> Option<u32> {
+        self.chunks.front().map(ControlRecordChunk::frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lc_engine::{LegacyCString, ScriptControlData, ScriptStrictness, SynchronizeControlData};
+
+    use super::*;
+
+    fn synchronize() -> EngineControlPacket {
+        EngineControlPacket::Synchronize(SynchronizeControlData {
+            save_player_files: true,
+            sync_clearance: true,
+            by_client: 0,
+        })
+    }
+
+    fn script() -> EngineControlPacket {
+        EngineControlPacket::Script(ScriptControlData {
+            target_object: -1,
+            strictness: ScriptStrictness::Strict3,
+            script: LegacyCString::from_bytes(b"A\x01B".to_vec()).unwrap(),
+            by_client: 2,
+        })
+    }
+
+    #[test]
+    fn ctrl_rec_writer_matches_known_cpp_control_list_bytes() {
+        let control = synchronize();
+        let mut writer = ControlRecordWriter::new();
+        writer.record_controls(5, &[control.clone()]).unwrap();
+        let bytes = writer.finish(5);
+
+        // RCT_Ctrl head, CID_Synchronize body, PID_None, then C++'s raw
+        // `(frame + 37) & 0xff` RCT_End head.
+        assert_eq!(bytes, [5, RCT_CTRL, 0x86, 1, 1, 0, 0xff, 42, RCT_END]);
+        assert_eq!(
+            decode_control_record(&bytes).unwrap(),
+            vec![
+                ControlRecordChunk::Controls {
+                    frame: 5,
+                    controls: vec![control],
+                },
+                // C++ writes 42 into the delta field after the frame-5 chunk.
+                ControlRecordChunk::End { frame: 47 },
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_unlengthened_packet_and_list_decode_at_their_schema_boundaries() {
+        let direct = script();
+        let queued = synchronize();
+        let mut writer = ControlRecordWriter::new();
+        writer.record_packet(7, &direct).unwrap();
+        writer.record_controls(7, &[queued.clone()]).unwrap();
+        let bytes = writer.finish(7);
+
+        assert_eq!(
+            decode_control_record(&bytes).unwrap(),
+            vec![
+                ControlRecordChunk::ControlPacket {
+                    frame: 7,
+                    control: direct,
+                },
+                ControlRecordChunk::Controls {
+                    frame: 7,
+                    controls: vec![queued],
+                },
+                ControlRecordChunk::End { frame: 51 },
+            ]
+        );
+    }
+
+    #[test]
+    fn incremental_parser_retains_every_partial_header_and_payload() {
+        let mut writer = ControlRecordWriter::new();
+        writer.record_packet(9, &script()).unwrap();
+        writer.record_controls(10, &[synchronize()]).unwrap();
+        let bytes = writer.finish(10);
+        let expected = decode_control_record(&bytes).unwrap();
+
+        let mut parser = ControlRecordParser::new();
+        let mut actual = Vec::new();
+        for byte in bytes {
+            actual.extend(parser.push(&[byte]).unwrap());
+        }
+        parser.finish().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn large_frame_gap_decodes_the_cpp_filler_chunks() {
+        let mut writer = ControlRecordWriter::new();
+        writer.record_controls(600, &[synchronize()]).unwrap();
+        let bytes = writer.finish(600);
+        let chunks = decode_control_record(&bytes).unwrap();
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(ControlRecordChunk::frame)
+                .collect::<Vec<_>>(),
+            vec![255, 510, 600, 725]
+        );
+        assert!(matches!(chunks[0], ControlRecordChunk::Frame { .. }));
+        assert!(matches!(chunks[1], ControlRecordChunk::Frame { .. }));
+        assert!(matches!(chunks[2], ControlRecordChunk::Controls { .. }));
+        assert!(matches!(chunks[3], ControlRecordChunk::End { .. }));
+    }
+
+    #[test]
+    fn empty_control_list_is_not_written() {
+        let writer = {
+            let mut writer = ControlRecordWriter::new();
+            writer.record_controls(123, &[]).unwrap();
+            writer
+        };
+        assert!(writer.bytes().is_empty());
+        assert_eq!(writer.finish(0), [37, RCT_END]);
+    }
+
+    #[test]
+    fn parser_distinguishes_truncation_missing_end_and_unsupported_chunks() {
+        let mut truncated = ControlRecordParser::new();
+        assert!(truncated.push(&[5, RCT_CTRL, 0x86]).unwrap().is_empty());
+        assert_eq!(truncated.finish(), Err(ControlRecordDecodeError::Truncated));
+
+        let mut missing_end = ControlRecordParser::new();
+        assert_eq!(
+            missing_end.push(&[1, RCT_FRAME]).unwrap(),
+            vec![ControlRecordChunk::Frame { frame: 1 }]
+        );
+        assert_eq!(
+            missing_end.finish(),
+            Err(ControlRecordDecodeError::MissingEnd)
+        );
+
+        assert_eq!(
+            decode_control_record(&[0, 0x55]),
+            Err(ControlRecordDecodeError::UnsupportedChunkType(0x55))
+        );
+    }
+
+    #[test]
+    fn playback_returns_all_due_controls_in_file_order_before_the_frame_tick() {
+        let first = script();
+        let second = synchronize();
+        let third = script();
+        let mut writer = ControlRecordWriter::new();
+        writer.record_packet(2, &first).unwrap();
+        writer.record_controls(2, &[second.clone()]).unwrap();
+        writer.record_packet(4, &third).unwrap();
+        let bytes = writer.finish(4);
+
+        let mut playback = ControlRecordPlayback::from_bytes(&bytes).unwrap();
+        assert!(playback.take_controls(1).is_empty());
+        assert_eq!(playback.take_controls(2), vec![first, second]);
+        assert!(playback.take_controls(3).is_empty());
+        assert_eq!(playback.take_controls(4), vec![third]);
+        assert!(!playback.is_finished());
+        assert!(playback.take_controls(u32::MAX).is_empty());
+        assert!(playback.is_finished());
+    }
+
+    #[test]
+    fn prefix_decoders_report_the_exact_consumed_boundary() {
+        let control = synchronize();
+        let mut entry = encode_control_entry_payload(&control).unwrap();
+        let entry_len = entry.len();
+        entry.extend_from_slice(&[0, RCT_END]);
+        assert_eq!(
+            decode_control_entry_prefix(&entry),
+            Ok((control.clone(), entry_len))
+        );
+
+        let mut list = encode_control_list_payload(&[control.clone()]).unwrap();
+        let list_len = list.len();
+        list.extend_from_slice(&[0, RCT_END]);
+        assert_eq!(
+            decode_control_list_prefix(&list),
+            Ok((vec![control], list_len))
+        );
+    }
+}

@@ -566,12 +566,26 @@ pub fn decode_control_entry_payload(
     if payload.is_empty() {
         return Err(LegacyControlError::EmptyPayload);
     }
-    let mut reader = Reader::new(payload);
-    let control = decode_control(reader.read_u8()?, &mut reader)?;
-    if reader.remaining() != 0 {
+    let (control, consumed) = decode_control_entry_prefix(payload)?;
+    if consumed != payload.len() {
         return Err(LegacyControlError::TrailingData);
     }
     Ok(control)
+}
+
+/// Decode one binary `C4IDPacket` from the beginning of `payload` and return
+/// the number of bytes it consumed.
+///
+/// Unlike [`decode_control_entry_payload`], this accepts bytes belonging to a
+/// following value. `CtrlRec.c4b` needs this because record chunks have no
+/// explicit payload lengths; C++ advances by the binary compiler's consumed
+/// position (C4Record.cpp:503-538).
+pub fn decode_control_entry_prefix(
+    payload: &[u8],
+) -> Result<(EngineControlPacket, usize), LegacyControlError> {
+    let mut reader = Reader::new(payload);
+    let control = decode_control(reader.read_u8()?, &mut reader)?;
+    Ok((control, payload.len() - reader.remaining()))
 }
 
 /// Decode one binary `CID_InitScenarioPlayer` C4IDPacket body.
@@ -638,12 +652,25 @@ fn decode_control_list_payload(
     if payload.is_empty() {
         return Err(LegacyControlError::EmptyPayload);
     }
-    let mut reader = Reader::new(payload);
-    let controls = decode_control_list(&mut reader)?;
-    if reader.remaining() != 0 {
+    let (controls, consumed) = decode_control_list_prefix(payload)?;
+    if consumed != payload.len() {
         return Err(LegacyControlError::TrailingData);
     }
     Ok(controls)
+}
+
+/// Decode one terminated binary `C4Control` list from the beginning of
+/// `payload` and return the number of bytes it consumed, including the final
+/// `PID_None` byte.
+///
+/// This prefix form is the boundary primitive for `RCT_Ctrl` chunks, whose
+/// next two bytes are already the following record chunk header.
+pub fn decode_control_list_prefix(
+    payload: &[u8],
+) -> Result<(Vec<EngineControlPacket>, usize), LegacyControlError> {
+    let mut reader = Reader::new(payload);
+    let controls = decode_control_list(&mut reader)?;
+    Ok((controls, payload.len() - reader.remaining()))
 }
 
 fn decode_control(
@@ -1929,7 +1956,11 @@ fn encode_controls(
     Ok(())
 }
 
-fn encode_control_list_payload(
+/// Encode a binary `C4Control` list, including its final `PID_None` byte.
+///
+/// This is the exact payload written for an `RCT_Ctrl` record chunk. It does
+/// not contain a `C4GameControlPacket` client ID or control tick.
+pub fn encode_control_list_payload(
     controls: &[EngineControlPacket],
 ) -> Result<Vec<u8>, LegacyEncodeError> {
     let mut payload = Vec::new();
