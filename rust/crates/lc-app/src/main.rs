@@ -589,6 +589,7 @@ struct GameGraphicsResources {
     hud_graphics: Arc<HudGraphics>,
     options: Option<Arc<ImageData>>,
     palette: Arc<GamePalette>,
+    liquid_animation: Option<Arc<ImageData>>,
 }
 
 // C4LoaderScreen uses SafeRandom, which is the platform C library's global
@@ -1817,6 +1818,7 @@ fn resolve_game_graphics_resources(
     registrations: &[LoaderGroupRegistration],
     graphics: &Group,
     cached_cursor_atlas: Option<Arc<CursorAtlas>>,
+    liquid_animation_enabled: bool,
 ) -> Result<GameGraphicsResources> {
     let palette_source = select_exact_graphics_source("C4.pal", registrations, graphics)?;
     let palette_bytes = palette_source
@@ -1867,6 +1869,9 @@ fn resolve_game_graphics_resources(
         background: Some(load("Background")?),
     };
     let options = Some(Arc::new(load("Options")?));
+    let liquid_animation = liquid_animation_enabled
+        .then(|| load("Liquid").map(Arc::new))
+        .transpose()?;
 
     // PreInit fills fctCursors[0..7] from the sized files. Clear deliberately
     // keeps those cached facets. A valid game-local Cursor.* suppresses the
@@ -1904,6 +1909,7 @@ fn resolve_game_graphics_resources(
         hud_graphics: Arc::new(hud_graphics),
         options,
         palette: Arc::new(palette),
+        liquid_animation,
     })
 }
 
@@ -3296,10 +3302,15 @@ struct FrontendAssets {
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
     game_palette: Arc<GamePalette>,
+    /// Graphics.c4g/Liquid.png, present only when both legacy graphics
+    /// switches required for the landscape shader are enabled.
+    liquid_animation: Option<ImageData>,
+    liquid_animation_enabled: bool,
 }
 
 impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
+        let liquid_animation_enabled = load_graphics_color_animation(paths);
         let font = Self::load_font(paths);
         let classic_fonts = Self::load_classic_fonts(paths);
         let clonk_fonts = classic_fonts.as_ref().map(|bundle| bundle.fonts.clone());
@@ -3326,6 +3337,7 @@ impl FrontendAssets {
         let mut cursor_atlas = CursorAtlas::empty();
         let mut hud_graphics = HudGraphics::default();
         let mut game_palette = GamePalette::default();
+        let mut liquid_animation = None;
 
         if let Some(paths) = paths {
             let graphics_path = paths.planet_dir().join("Graphics.c4g");
@@ -3393,6 +3405,8 @@ impl FrontendAssets {
                     }
                     cursor_atlas = Self::load_cursor_atlas(&graphics);
                     hud_graphics = Self::load_hud_graphics(&graphics);
+                    liquid_animation =
+                        Self::load_liquid_animation(&graphics, liquid_animation_enabled);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -3441,11 +3455,14 @@ impl FrontendAssets {
                         &graphics_registrations,
                         &graphics,
                         None,
+                        liquid_animation_enabled,
                     ) {
                         Ok(resources) => {
                             cursor_atlas = resources.cursor_atlas.as_ref().clone();
                             hud_graphics = resources.hud_graphics.as_ref().clone();
                             game_palette = resources.palette.as_ref().clone();
+                            liquid_animation =
+                                resources.liquid_animation.as_deref().cloned();
                             if let Some(options) = resources.options {
                                 startup_dialog_images.insert(
                                     "Options.png".to_string(),
@@ -3506,6 +3523,8 @@ impl FrontendAssets {
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
             game_palette: Arc::new(game_palette),
+            liquid_animation,
+            liquid_animation_enabled,
         }
     }
 
@@ -4319,6 +4338,14 @@ impl FrontendAssets {
         Arc::clone(&self.game_palette)
     }
 
+    fn liquid_animation(&self) -> Option<ImageData> {
+        self.liquid_animation.clone()
+    }
+
+    fn liquid_animation_enabled(&self) -> bool {
+        self.liquid_animation_enabled
+    }
+
     fn base_sprite_map(&self) -> &HashMap<String, DefinitionSprite> {
         &self.base_sprites
     }
@@ -4361,6 +4388,22 @@ impl FrontendAssets {
         }
 
         hud
+    }
+
+    fn load_liquid_animation(
+        graphics: &GraphicsResource,
+        enabled: bool,
+    ) -> Option<ImageData> {
+        if !enabled {
+            return None;
+        }
+        match graphics.load_image("Liquid.png") {
+            Ok(image) => Some(Self::image_to_data(image)),
+            Err(err) => {
+                tracing::warn!(error = %err, "Liquid.png animation texture missing");
+                None
+            }
+        }
     }
 
     fn load_hud_image(
@@ -13584,6 +13627,18 @@ fn load_graphics_smoke_level(paths: Option<&AppPaths>) -> i32 {
         .unwrap_or(lc_engine::DEFAULT_SMOKE_LEVEL)
 }
 
+fn load_graphics_color_animation(paths: Option<&AppPaths>) -> bool {
+    let Some(config) = paths.and_then(|paths| Config::load(paths.config_file()).ok()) else {
+        return false;
+    };
+    ["ColorAnimation", "Shader"].into_iter().all(|key| {
+        config
+            .get_in(Some("Graphics"), key)
+            .map(parse_config_bool)
+            .unwrap_or(false)
+    })
+}
+
 fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     let Some(paths) = paths else {
         return false;
@@ -15509,6 +15564,7 @@ impl GameApp {
         );
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.set_game_palette(assets.game_palette());
+        graphics.set_liquid_animation(assets.liquid_animation());
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         let control_messages = ControlMessageState::new(
             load_sound_command_cooldown(paths),
@@ -16158,6 +16214,13 @@ impl GameApp {
             .unwrap_or_else(|| self.assets.game_palette())
     }
 
+    fn current_liquid_animation(&self) -> Option<ImageData> {
+        self.active_game_graphics
+            .as_ref()
+            .and_then(|resources| resources.liquid_animation.as_deref().cloned())
+            .or_else(|| self.assets.liquid_animation())
+    }
+
     fn current_options_graphic(&self) -> Option<ImageData> {
         self.active_game_graphics
             .as_ref()
@@ -16176,6 +16239,7 @@ impl GameApp {
                 .cloned()
                 .map(Arc::new),
             palette: self.assets.game_palette(),
+            liquid_animation: self.assets.liquid_animation().map(Arc::new),
         }
     }
 
@@ -16206,6 +16270,7 @@ impl GameApp {
         let cursor_atlas = self.current_cursor_atlas();
         let hud_graphics = self.current_hud_graphics();
         let game_palette = self.current_game_palette();
+        let liquid_animation = self.current_liquid_animation();
         let mut graphics = GraphicsSystem::new(
             width,
             height,
@@ -16218,6 +16283,7 @@ impl GameApp {
         );
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
+        graphics.set_liquid_animation(liquid_animation);
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
         self.sync_scenario_game_option_bounds();
@@ -34739,6 +34805,8 @@ impl GameApp {
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
         self.graphics
             .set_game_palette(self.assets.game_palette());
+        self.graphics
+            .set_liquid_animation(self.assets.liquid_animation());
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
@@ -36057,6 +36125,7 @@ impl GameApp {
             &graphics_registrations,
             &graphics,
             Some(self.assets.cursor_atlas()),
+            self.assets.liquid_animation_enabled(),
         )
     }
 
@@ -36672,6 +36741,7 @@ impl GameApp {
         let cursor_atlas = self.current_cursor_atlas();
         let hud_graphics = self.current_hud_graphics();
         let game_palette = self.current_game_palette();
+        let liquid_animation = self.current_liquid_animation();
         self.graphics = GraphicsSystem::new(
             width,
             height,
@@ -36685,6 +36755,7 @@ impl GameApp {
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
         self.graphics.set_game_palette(game_palette);
+        self.graphics.set_liquid_animation(liquid_animation);
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
@@ -58819,6 +58890,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "Gamepad",
             "Background",
             "Options",
+            "Liquid",
         ] {
             write_preview_png(&base_path.join(format!("{stem}.png")), [9, 8, 7, 255]);
         }
@@ -58849,7 +58921,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         base_palette[10 * 3..10 * 3 + 3].copy_from_slice(&[10, 0, 0]);
         fs::write(base_path.join("C4.pal"), base_palette).expect("base C4.pal");
         let base = Group::open(&base_path).expect("base graphics");
-        let startup = resolve_game_graphics_resources(&[], &base, None)
+        let startup = resolve_game_graphics_resources(&[], &base, None, true)
             .expect("startup graphics bundle");
 
         let mut scenario_palette = vec![0_u8; GamePalette::BYTE_LEN];
@@ -58860,6 +58932,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         write_preview_png(&scenario_path.join("Control.png"), [80, 90, 100, 255]);
         write_preview_png(&scenario_path.join("Gamepad.png"), [140, 150, 160, 255]);
         write_preview_png(&scenario_path.join("Options.png"), [110, 120, 130, 255]);
+        write_preview_png(&scenario_path.join("Liquid.png"), [170, 180, 190, 255]);
         let mut embedded_palette = [[0_u8; 3]; 256];
         embedded_palette[10] = [0, 255, 0];
         let indexed_rank = lc_resources::bitmap::IndexedBitmap {
@@ -58891,6 +58964,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &scenario_registrations,
             &base,
             Some(Arc::clone(&startup.cursor_atlas)),
+            true,
         )
         .expect("active scenario graphics bundle");
         assert_eq!(
@@ -58929,6 +59003,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         assert_eq!(
             active
+                .liquid_animation
+                .as_deref()
+                .expect("scenario liquid animation")
+                .pixels(),
+            [170, 180, 190, 255]
+        );
+        assert_eq!(
+            active
                 .cursor_atlas
                 .image_for_resolution(1280)
                 .expect("cached large cursor")
@@ -58951,6 +59033,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             }],
             &base,
             Some(Arc::clone(&startup.cursor_atlas)),
+            true,
         )
         .expect("sized cursor override bundle");
         let sized_large = sized
@@ -86275,6 +86358,49 @@ protected func InputCallback(string answer, int player)
             load_graphics_smoke_level(Some(&paths)),
             lc_engine::DEFAULT_SMOKE_LEVEL
         );
+    }
+
+    #[test]
+    fn liquid_animation_requires_both_legacy_graphics_switches() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("liquid-animation config install fixture");
+        let user_data = tempdir().expect("liquid-animation config user fixture");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System.c4g directory");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover liquid-animation fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+
+        assert!(!load_graphics_color_animation(Some(&paths)));
+        for config in [
+            "[Graphics]\nColorAnimation=1\n",
+            "[Graphics]\nShader=1\n",
+            "[Graphics]\nColorAnimation=1\nShader=invalid\n",
+        ] {
+            fs::write(paths.config_file(), config).expect("write disabled graphics matrix");
+            assert!(!load_graphics_color_animation(Some(&paths)));
+        }
+        fs::write(
+            paths.config_file(),
+            "[Graphics]\nColorAnimation=1\nShader=1\n",
+        )
+        .expect("write enabled graphics matrix");
+        assert!(load_graphics_color_animation(Some(&paths)));
+    }
+
+    #[test]
+    fn liquid_animation_asset_load_is_conditional() {
+        let graphics = GraphicsResource::open(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/Graphics.c4g"),
+        )
+        .expect("open shipped Graphics.c4g");
+        assert!(FrontendAssets::load_liquid_animation(&graphics, false).is_none());
+        let image = FrontendAssets::load_liquid_animation(&graphics, true)
+            .expect("load enabled Liquid.png animation texture");
+        assert_eq!((image.width(), image.height()), (64, 64));
     }
 
     #[test]

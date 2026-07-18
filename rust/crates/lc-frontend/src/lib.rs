@@ -1606,6 +1606,35 @@ fn prepare_sprite_fragment(
     shader_modulate_fragment(source, modulation, mod2)
 }
 
+/// Prepares the animated landscape shader's float RGB without quantizing the
+/// Liquid.png contribution before global modulation, fog, and gamma.
+fn prepare_liquid_animation_fragment(
+    source: Color,
+    liquid_delta: f32,
+    blit: SpriteBlitState,
+) -> PreparedSpriteFragment {
+    debug_assert_eq!(blit.mode & C4GFXBLIT_MOD2, 0);
+    let mut modulation = blit.modulation.unwrap_or(0x00ff_ffff);
+    if modulation != 0 {
+        if let Some(fog) = blit.fog_modulation {
+            modulation = fog.combine_with(modulation);
+        }
+    }
+    let modulation = split_c4_color(modulation);
+    let channel = |source: u8, modulation: u8| {
+        (f32::from(source) / 255.0 + liquid_delta).clamp(0.0, 1.0)
+            * f32::from(modulation)
+    };
+    PreparedSpriteFragment::Shader {
+        rgb: [
+            channel(source.r, modulation[0]),
+            channel(source.g, modulation[1]),
+            channel(source.b, modulation[2]),
+        ],
+        alpha: source.a.saturating_sub(modulation[3]),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewportPointer {
     pub owner: i32,
@@ -2198,6 +2227,53 @@ struct LandscapeRenderCache {
     pixels: Vec<u8>,
 }
 
+struct LiquidAnimation {
+    image: ImageData,
+    values: [f32; 3],
+}
+
+impl LiquidAnimation {
+    fn new(image: ImageData) -> Self {
+        Self {
+            image,
+            values: [-0.2, 0.0, 0.2],
+        }
+    }
+
+    /// Advances the process-presentation cycle once per landscape blit, as
+    /// StdGL::BlitLandscape does independently of the synchronized game tick.
+    fn advance(&mut self) -> [f32; 3] {
+        for value in &mut self.values {
+            *value += 0.05;
+            if *value > 0.9 {
+                *value = -0.3;
+            }
+        }
+        self.values
+            .map(|value| (if value > 0.3 { 0.6 - value } else { value }) / 3.0)
+    }
+
+    fn delta_at(image: &ImageData, x: i32, y: i32, modulation: [f32; 3]) -> f32 {
+        let width = image.width();
+        let height = image.height();
+        if width == 0 || height == 0 {
+            return 0.0;
+        }
+        let sample_x = x.rem_euclid(width as i32) as u32;
+        let sample_y = y.rem_euclid(height as i32) as u32;
+        let offset = ((sample_y * width + sample_x) * 4) as usize;
+        let pixels = image.pixels();
+        if offset + 3 > pixels.len() {
+            return 0.0;
+        }
+        (0..3)
+            .map(|channel| {
+                (f32::from(pixels[offset + channel]) / 255.0 - 0.5) * modulation[channel]
+            })
+            .sum()
+    }
+}
+
 /// Opaque continuation for the ordered HUD half of one [`GraphicsSystem`]
 /// frame. It owns the snapshot and gamma state captured when the world phase
 /// began, so later layers cannot accidentally use a newer frame.
@@ -2275,6 +2351,9 @@ pub struct GraphicsSystem {
     /// clone anchors COW ancestry, allowing changed rectangles to patch the
     /// RGBA bytes without rebuilding the complete landscape.
     landscape_cache: Option<LandscapeRenderCache>,
+    /// Optional Graphics.c4g/Liquid.png shader input and its presentation-only
+    /// call cycle. The density plane supplies C++'s separate alpha mask.
+    liquid_animation: Option<LiquidAnimation>,
     /// Presentation-only `SafeRandom` stream. C++ deliberately keeps this
     /// outside the synchronized game RNG; DrawBolt consumes it while drawing.
     presentation_rng: SafeRng,
@@ -2339,6 +2418,7 @@ impl GraphicsSystem {
             material_textures: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
             landscape_cache: None,
+            liquid_animation: None,
             presentation_rng: SafeRng::default(),
             active_fog_map: None,
             fog_suppression_depth: 0,
@@ -2377,6 +2457,11 @@ impl GraphicsSystem {
     ) {
         self.material_render_info = render_info;
         self.landscape_cache = None;
+    }
+
+    /// Installs the opt-in Graphics.c4g liquid-animation noise texture.
+    pub fn set_liquid_animation(&mut self, image: Option<ImageData>) {
+        self.liquid_animation = image.map(LiquidAnimation::new);
     }
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
@@ -4710,6 +4795,10 @@ impl GraphicsSystem {
                 |x, y| (x, y),
             )
         });
+        let liquid_animation = self.liquid_animation.as_mut().map(|animation| {
+            let modulation = animation.advance();
+            (animation.image.clone(), modulation)
+        });
         let Some(cache) = self.landscape_cache.as_mut() else {
             return false;
         };
@@ -4748,7 +4837,20 @@ impl GraphicsSystem {
                     screen_x as i32,
                     screen_y as i32,
                 );
-                let source = prepare_sprite_fragment(color, None, None, pixel_blit);
+                let source = liquid_animation
+                    .as_ref()
+                    .filter(|_| {
+                        grid.density_at(world_x, world_y)
+                            .is_some_and(|density| (25..50).contains(&density))
+                    })
+                    .map_or_else(
+                        || prepare_sprite_fragment(color, None, None, pixel_blit),
+                        |(image, modulation)| {
+                            let delta =
+                                LiquidAnimation::delta_at(image, world_x, world_y, *modulation);
+                            prepare_liquid_animation_fragment(color, delta, pixel_blit)
+                        },
+                    );
                 if source.alpha() == 0 {
                     continue;
                 }
@@ -19539,6 +19641,131 @@ mod tests {
         );
         let expected = blend_color_over(liquid, sky);
         assert_eq!(pixel, expected);
+    }
+
+    #[test]
+    fn liquid_animation_uses_stdgl_call_cycle_and_wrap() {
+        let mut animation = LiquidAnimation::new(ImageData::new(
+            1,
+            1,
+            vec![255, 128, 0, 255],
+        ));
+        let first = animation.advance();
+        let expected = [-0.15 / 3.0, 0.05 / 3.0, 0.25 / 3.0];
+        for (actual, expected) in first.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < f32::EPSILON);
+        }
+
+        animation.values = [0.9; 3];
+        assert_eq!(animation.advance(), [-0.1; 3]);
+    }
+
+    #[test]
+    fn liquid_animation_changes_only_liquids_and_reuses_static_cache() {
+        let landscape: Landscape = serde_json::from_value(serde_json::json!({
+            "width": 2,
+            "surface": [1, 1],
+            "world_height": 1,
+            "shade_materials": false,
+            "pixels": {
+                "width": 2,
+                "height": 1,
+                "bytes": "0102",
+                "texture_names": [null, "Smooth", "Smooth"],
+                "densities": [0, 25, 50],
+                "material_names": [null, "Water", "Earth"]
+            }
+        }))
+        .expect("liquid and solid pixel landscape");
+        let textures = Arc::new(HashMap::from([
+            (
+                "liquid".to_string(),
+                ImageData::new(1, 1, vec![128, 128, 128, 255]),
+            ),
+            (
+                "smooth".to_string(),
+                ImageData::new(1, 1, vec![128, 128, 128, 255]),
+            ),
+        ]));
+        let materials = Arc::new(HashMap::from([
+            (
+                "water".to_string(),
+                MaterialRenderInfo::new(
+                    [120, 140, 160, 120, 140, 160, 120, 140, 160],
+                    [0; 6],
+                    None,
+                    0,
+                    25,
+                ),
+            ),
+            (
+                "earth".to_string(),
+                MaterialRenderInfo::new(
+                    [80, 100, 120, 80, 100, 120, 80, 100, 120],
+                    [0; 6],
+                    None,
+                    0,
+                    50,
+                ),
+            ),
+        ]));
+        let make_graphics = || {
+            let mut graphics = GraphicsSystem::new(
+                2,
+                1,
+                1,
+                "Liquid animation",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_material_textures(Arc::clone(&textures));
+            graphics.set_material_render_info(Arc::clone(&materials));
+            graphics
+        };
+
+        let mut animated = make_graphics();
+        animated.set_liquid_animation(Some(ImageData::new(
+            1,
+            1,
+            vec![255, 128, 128, 255],
+        )));
+        assert!(animated.draw_ground_textured(Some(&landscape), None));
+        let first = [
+            animated.surface().get_pixel(0, 0),
+            animated.surface().get_pixel(1, 0),
+        ];
+        reset_material_composition_calls();
+        assert!(animated.draw_ground_textured(Some(&landscape), None));
+        let second = [
+            animated.surface().get_pixel(0, 0),
+            animated.surface().get_pixel(1, 0),
+        ];
+        assert_ne!(first[0], second[0], "liquid RGB must follow the next phase");
+        assert_eq!(first[1], second[1], "solid density must remain static");
+        assert_eq!(
+            material_composition_calls(),
+            0,
+            "animation must not invalidate the static Surface32 cache"
+        );
+
+        animated.set_liquid_animation(None);
+        assert!(animated.draw_ground_textured(Some(&landscape), None));
+        let disabled = [
+            animated.surface().get_pixel(0, 0),
+            animated.surface().get_pixel(1, 0),
+        ];
+        let mut baseline = make_graphics();
+        assert!(baseline.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            disabled,
+            [
+                baseline.surface().get_pixel(0, 0),
+                baseline.surface().get_pixel(1, 0),
+            ],
+            "disabling animation must retain the pre-animation renderer bytes"
+        );
     }
 
     #[test]
