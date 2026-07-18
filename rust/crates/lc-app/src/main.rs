@@ -22754,7 +22754,21 @@ impl GameApp {
             return None;
         }
         let viewport = self.graphics.viewport_rect(pointer.owner)?;
-        let cursor = self.engine.crew_cursor(pointer.owner)?;
+        let cursor = self
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == pointer.owner)
+            .and_then(|player| player.view_cursor.or(player.cursor))?;
+        let cursor_definition = &self.snapshot.object(cursor)?.definition_id;
+        if self
+            .engine
+            .definition_hide_hud_elements(cursor_definition)
+            & lc_engine::HIDE_HUD_ELEMENT_INVENTORY
+            != 0
+        {
+            return None;
+        }
         let inventory = collect_crew_inventory(&self.engine, &self.snapshot, cursor);
         let section = lc_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
         inventory.get(section).map(|item| item.object_id)
@@ -36669,9 +36683,17 @@ fn collect_player_overlays(
         .collect();
     let mut players = Vec::with_capacity(snapshot.hud.players.len());
     for player in &snapshot.hud.players {
-        let mut crew = Vec::with_capacity(player.crew.len());
-        let cursor = detail_map.get(&player.owner).and_then(|state| state.cursor);
-        for object_id in &player.crew {
+        let cursor = detail_map
+            .get(&player.owner)
+            .and_then(|state| state.view_cursor.or(state.cursor));
+        let mut overlay_objects = player.crew.clone();
+        if let Some(cursor) = cursor {
+            if !overlay_objects.contains(&cursor) && snapshot.object(cursor).is_some() {
+                overlay_objects.push(cursor);
+            }
+        }
+        let mut crew = Vec::with_capacity(overlay_objects.len());
+        for object_id in &overlay_objects {
             let (
                 label,
                 energy_fraction,
@@ -36680,6 +36702,8 @@ fn collect_player_overlays(
                 breath,
                 breath_capacity,
                 is_focus,
+                hide_hud_elements,
+                hide_hud_bars,
             ) = if let Some(object) = snapshot.object(*object_id) {
                 let label = format!("{} #{}", object.definition_id, object.id.as_u64());
                 let physical = engine
@@ -36703,6 +36727,10 @@ fn collect_player_overlays(
                     .unwrap_or(object.magic_capacity);
                 let breath_capacity = physical.map(|physical| physical.breath).unwrap_or(0);
                 let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
+                let hide_hud_elements = engine
+                    .definition_hide_hud_elements(object.definition_id.as_str());
+                let hide_hud_bars =
+                    engine.definition_hide_hud_bars(object.definition_id.as_str());
                 (
                     label,
                     energy_fraction,
@@ -36711,10 +36739,12 @@ fn collect_player_overlays(
                     object.breath,
                     breath_capacity,
                     is_focus,
+                    hide_hud_elements,
+                    hide_hud_bars,
                 )
             } else {
                 let label = format!("Object #{}", object_id.as_u64());
-                (label, 0.0, 0, 0, 0, 0, false)
+                (label, 0.0, 0, 0, 0, 0, false, 0, 0)
             };
             crew.push(CrewOverlay {
                 object_id: *object_id,
@@ -36725,6 +36755,8 @@ fn collect_player_overlays(
                 breath,
                 breath_capacity,
                 is_focus,
+                hide_hud_elements,
+                hide_hud_bars,
                 portrait: None,
                 rank: 0,
                 rank_symbols: None,
@@ -36790,6 +36822,9 @@ fn collect_player_overlays(
             wealth,
             score,
             cursor,
+            captain: detail_map
+                .get(&player.owner)
+                .and_then(|state| state.captain),
             eliminated: player.eliminated,
             owner_color,
             select_count,
@@ -36800,6 +36835,7 @@ fn collect_player_overlays(
             show_control_position,
             last_com,
             control_key_labels,
+            crew_count: player.crew.len() as i32,
             crew,
             commands: Vec::new(),
             flash_command: engine
@@ -36811,8 +36847,8 @@ fn collect_player_overlays(
     players
 }
 
-/// Populate the real cursor's inventory presentation. C++ only reaches the
-/// contents list after resolving `C4Player::Cursor`/`ViewCursor`
+/// Populate the effective cursor's inventory presentation. C++ only reaches
+/// the contents list after resolving `ViewCursor ?: Cursor`
 /// (src/C4Viewport.cpp:888-917); non-cursor crew therefore retain an empty
 /// presentation list.
 fn populate_crew_inventories(
@@ -39258,6 +39294,41 @@ mod tests {
             region_target, second,
             "runtime same-ID cluster is newest-first"
         );
+
+        let mut hidden_cursor_definition =
+            Definition::from_script("HINV", "Hidden inventory cursor", "")
+                .expect("hidden cursor definition compiles");
+        hidden_cursor_definition
+            .set_hide_hud_elements(lc_engine::HIDE_HUD_ELEMENT_INVENTORY);
+        app.engine
+            .register_definition(hidden_cursor_definition)
+            .expect("register hidden cursor definition");
+        let hidden_cursor = app
+            .engine
+            .spawn_object(SpawnConfig::new("HINV"))
+            .expect("spawn hidden ViewCursor");
+        app.engine
+            .spawn_object(SpawnConfig::new("MITM").with_container(hidden_cursor))
+            .expect("put a live item in the hidden ViewCursor");
+        app.engine
+            .player_mut(owner)
+            .expect("local player")
+            .set_view_cursor(Some(hidden_cursor));
+        app.snapshot = app.engine.snapshot();
+        assert!(
+            !collect_crew_inventory(&app.engine, &app.snapshot, hidden_cursor).is_empty(),
+            "the hidden cursor would expose an inventory region without its mask"
+        );
+        assert_eq!(
+            app.ingame_inventory_region_target(region_point),
+            None,
+            "HH_Inventory creates no invisible clickable region for ViewCursor"
+        );
+        app.engine
+            .player_mut(owner)
+            .expect("local player")
+            .set_view_cursor(None);
+        app.snapshot = app.engine.snapshot();
 
         let region_left = GuiPoint::new(
             (viewport.x + lc_frontend::hud::SYMBOL_BORDER + 1) as f32,
@@ -45950,6 +46021,7 @@ func Award()
             status: PlayerStatus::Active,
             wealth: 120,
             cursor: Some(focus),
+            captain: Some(focus),
             crew: vec![focus, teammate],
             select_count: 1,
             show_startup: true,
@@ -45963,7 +46035,22 @@ func Award()
         });
 
         let bindings = KeyboardBindings::load(None);
-        let engine = Engine::new();
+        let mut engine = Engine::new();
+        let mut clonk_definition =
+            Definition::from_script("Clonk", "Clonk", "").expect("Clonk definition");
+        clonk_definition.set_hide_hud_elements(0x3f);
+        clonk_definition.set_hide_hud_bars(
+            lc_engine::HIDE_HUD_BAR_ENERGY | lc_engine::HIDE_HUD_BAR_BREATH,
+        );
+        engine
+            .register_definition(clonk_definition)
+            .expect("register Clonk definition");
+        engine
+            .register_definition(
+                Definition::from_script("Balloon", "Balloon", "")
+                    .expect("Balloon definition"),
+            )
+            .expect("register Balloon definition");
         let overlay = collect_player_overlays(&engine, &snapshot, Some(focus), &bindings);
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
@@ -45971,7 +46058,9 @@ func Award()
         assert_eq!(player.name, "Alice");
         assert_eq!(player.wealth, 120);
         assert_eq!(player.cursor, Some(focus));
+        assert_eq!(player.captain, Some(focus));
         assert!(!player.eliminated);
+        assert_eq!(player.crew_count, 2);
         assert_eq!(player.crew.len(), 2);
         assert_eq!(player.owner_color, default_owner_color(1));
         // HUD projection consumes C4Player's cached SelectCount.
@@ -46004,6 +46093,11 @@ func Award()
         assert_eq!(focus_entry.breath, 50);
         assert_eq!(focus_entry.breath_capacity, 100);
         assert_eq!(focus_entry.object_id, focus);
+        assert_eq!(focus_entry.hide_hud_elements, 0x3f);
+        assert_eq!(
+            focus_entry.hide_hud_bars,
+            lc_engine::HIDE_HUD_BAR_ENERGY | lc_engine::HIDE_HUD_BAR_BREATH
+        );
         assert!(focus_entry.portrait.is_none());
 
         let other_entry = player
@@ -46014,6 +46108,8 @@ func Award()
         assert!(!other_entry.is_focus);
         assert!((other_entry.energy_fraction - 0.4).abs() < f32::EPSILON);
         assert_eq!(other_entry.object_id, teammate);
+        assert_eq!(other_entry.hide_hud_elements, 0);
+        assert_eq!(other_entry.hide_hud_bars, 0);
         assert!(other_entry.portrait.is_none());
 
         let raw_name = lc_script::c4_string_from_bytes(&[0xe9]);
@@ -46024,6 +46120,21 @@ func Award()
             lc_script::c4_string_bytes(&snapshot.players[0].name),
             [0xe9],
             "presentation decoding does not rewrite synchronized player state"
+        );
+
+        snapshot.hud.players[0].crew = vec![focus];
+        snapshot.players[0].view_cursor = Some(teammate);
+        let overlay = collect_player_overlays(&engine, &snapshot, Some(teammate), &bindings);
+        assert_eq!(overlay[0].cursor, Some(teammate));
+        assert_eq!(overlay[0].crew_count, 1, "ViewCursor is not roster crew");
+        assert_eq!(overlay[0].crew.len(), 2, "non-roster ViewCursor is projected");
+        assert_eq!(
+            overlay[0]
+                .crew
+                .iter()
+                .find(|crew| crew.object_id == teammate)
+                .map(|crew| (crew.hide_hud_elements, crew.hide_hud_bars)),
+            Some((0, 0))
         );
     }
 

@@ -771,6 +771,18 @@ pub const VIS_GOD: i32 = 32;
 pub const VIS_LAYER_TOGGLE: i32 = 64;
 pub const VIS_OVERLAY_ONLY: i32 = 128;
 
+/// `C4DefCore::HideBar` bits (src/C4Def.h:278-284).
+pub const HIDE_HUD_BAR_ENERGY: i32 = 0x01;
+pub const HIDE_HUD_BAR_MAGIC_ENERGY: i32 = 0x02;
+pub const HIDE_HUD_BAR_BREATH: i32 = 0x04;
+/// `C4DefCore::HideHud` bits (src/C4Def.h:286-295).
+pub const HIDE_HUD_ELEMENT_PORTRAIT: i32 = 0x01;
+pub const HIDE_HUD_ELEMENT_CAPTAIN: i32 = 0x02;
+pub const HIDE_HUD_ELEMENT_NAME: i32 = 0x04;
+pub const HIDE_HUD_ELEMENT_RANK: i32 = 0x08;
+pub const HIDE_HUD_ELEMENT_RANK_IMAGE: i32 = 0x10;
+pub const HIDE_HUD_ELEMENT_INVENTORY: i32 = 0x20;
+
 /// `BoundBy(value, 0, maximum)` as used by `C4Object::DoEnergy`.
 ///
 /// The C++ helper compares the lower bound first and does not normalize an
@@ -12194,6 +12206,22 @@ impl Definition {
 
     pub fn set_no_get(&mut self, no_get: bool) {
         self.no_get = no_get;
+    }
+
+    pub fn hide_hud_bars(&self) -> i32 {
+        self.hide_hud_bars
+    }
+
+    pub fn set_hide_hud_bars(&mut self, hide_hud_bars: i32) {
+        self.hide_hud_bars = hide_hud_bars;
+    }
+
+    pub fn hide_hud_elements(&self) -> i32 {
+        self.hide_hud_elements
+    }
+
+    pub fn set_hide_hud_elements(&mut self, hide_hud_elements: i32) {
+        self.hide_hud_elements = hide_hud_elements;
     }
 
     pub fn grab_put_get(&self) -> i32 {
@@ -25890,6 +25918,22 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .map(|definition| definition.grab_put_get())
+            .unwrap_or(0)
+    }
+
+    /// Raw DefCore `HideHUDBars`; missing definitions use C++'s zero default.
+    pub fn definition_hide_hud_bars(&self, definition_id: &str) -> i32 {
+        self.definitions
+            .get(definition_id)
+            .map(Definition::hide_hud_bars)
+            .unwrap_or(0)
+    }
+
+    /// Raw DefCore `HideHUDElements`; missing definitions use C++'s zero default.
+    pub fn definition_hide_hud_elements(&self, definition_id: &str) -> i32 {
+        self.definitions
+            .get(definition_id)
+            .map(Definition::hide_hud_elements)
             .unwrap_or(0)
     }
 

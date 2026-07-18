@@ -1839,7 +1839,12 @@ pub struct PlayerOverlay {
     pub name: String,
     pub wealth: i32,
     pub score: i32,
+    /// Effective HUD cursor (`ViewCursor ?: Cursor`). Commands still come
+    /// from the player's real cursor (src/C4Viewport.cpp:891-897,947-961).
     pub cursor: Option<ObjectId>,
+    /// Saved `C4Player::Captain`; the cursor-info star is shown only when
+    /// this exact object is the active cursor (src/C4Viewport.cpp:904-907).
+    pub captain: Option<ObjectId>,
     pub eliminated: bool,
     pub owner_color: Color,
     /// `C4Player::SelectCount` for the crew display value
@@ -1856,6 +1861,9 @@ pub struct PlayerOverlay {
     pub last_com: u8,
     /// Short `PlrControlKeyName` values in CON_* order.
     pub control_key_labels: Vec<String>,
+    /// Actual player crew count; `crew` may additionally carry a non-roster
+    /// ViewCursor so its HUD data can be presented without inflating this.
+    pub crew_count: i32,
     pub crew: Vec<CrewOverlay>,
     /// The cursor object's contextual command icons
     /// (C4Object::DrawCommands, src/C4Object.cpp:2940-3098), resolved by
@@ -1882,6 +1890,9 @@ pub struct CrewOverlay {
     pub breath: i32,
     pub breath_capacity: i32,
     pub is_focus: bool,
+    /// Raw cursor definition `HideHUDElements`/`HideHUDBars` masks.
+    pub hide_hud_elements: i32,
+    pub hide_hud_bars: i32,
     pub portrait: Option<ImageData>,
     /// `C4ObjectInfo::Rank` (src/C4ObjectInfo.cpp:330).
     pub rank: i32,
@@ -6400,39 +6411,50 @@ impl GraphicsSystem {
             // presentation is an empty corner.
             let cursor_crew = player
                 .cursor
-                .and_then(|id| player.crew.iter().find(|crew| crew.object_id == id))
-                .or_else(|| player.crew.iter().find(|crew| crew.is_focus))
-                .or_else(|| player.crew.first());
+                .and_then(|id| player.crew.iter().find(|crew| crew.object_id == id));
             if let Some(crew) = cursor_crew {
-                hud::draw_cursor_info_with_gamma(
-                    &mut self.surface,
-                    &font,
-                    &self.hud_graphics,
-                    rect,
-                    &crew.label,
-                    crew.rank,
-                    crew.rank_name.as_deref(),
-                    crew.portrait.as_ref(),
-                    crew.rank_symbols.as_ref(),
-                    crew.rank_symbol_count,
-                    gamma,
-                );
-                hud::draw_inventory_with_gamma(
-                    &mut self.surface,
-                    &font,
-                    rect,
-                    &crew.inventory,
-                    gamma,
-                );
-                hud::draw_energy_bar_with_gamma(
-                    &mut self.surface,
-                    &self.hud_graphics,
-                    rect,
-                    crew.energy_fraction,
-                    gamma,
-                );
-                let mut bar_slot = 1;
-                if crew.magic_energy != 0 {
+                // `cursor->Info` gates only C4ObjectInfo::Draw. Inventory
+                // and bars below remain visible for a non-crew ViewCursor.
+                if crew.info_name.is_some() {
+                    hud::draw_cursor_info_with_gamma(
+                        &mut self.surface,
+                        &font,
+                        &self.hud_graphics,
+                        rect,
+                        &crew.label,
+                        crew.rank,
+                        crew.rank_name.as_deref(),
+                        crew.portrait.as_ref(),
+                        crew.rank_symbols.as_ref(),
+                        crew.rank_symbol_count,
+                        player.captain == Some(crew.object_id),
+                        crew.hide_hud_elements,
+                        gamma,
+                    );
+                }
+                if crew.hide_hud_elements & lc_engine::HIDE_HUD_ELEMENT_INVENTORY == 0 {
+                    hud::draw_inventory_with_gamma(
+                        &mut self.surface,
+                        &font,
+                        rect,
+                        &crew.inventory,
+                        gamma,
+                    );
+                }
+                let mut bar_slot = 0;
+                if crew.hide_hud_bars & lc_engine::HIDE_HUD_BAR_ENERGY == 0 {
+                    hud::draw_energy_bar_with_gamma(
+                        &mut self.surface,
+                        &self.hud_graphics,
+                        rect,
+                        crew.energy_fraction,
+                        gamma,
+                    );
+                    bar_slot += 1;
+                }
+                if crew.magic_energy != 0
+                    && crew.hide_hud_bars & lc_engine::HIDE_HUD_BAR_MAGIC_ENERGY == 0
+                {
                     hud::draw_level_bar_with_gamma(
                         &mut self.surface,
                         &self.hud_graphics,
@@ -6445,7 +6467,10 @@ impl GraphicsSystem {
                     );
                     bar_slot += 1;
                 }
-                if crew.breath != 0 && crew.breath < crew.breath_capacity {
+                if crew.breath != 0
+                    && crew.breath < crew.breath_capacity
+                    && crew.hide_hud_bars & lc_engine::HIDE_HUD_BAR_BREATH == 0
+                {
                     hud::draw_level_bar_with_gamma(
                         &mut self.surface,
                         &self.hud_graphics,
@@ -6489,7 +6514,7 @@ impl GraphicsSystem {
                 player.wealth,
                 player.score,
                 player.select_count,
-                player.crew.len() as i32,
+                player.crew_count,
                 player.owner_color,
                 gamma,
             );
@@ -14474,6 +14499,7 @@ mod tests {
                 wealth: 0,
                 score: 0,
                 cursor: None,
+                captain: None,
                 eliminated: false,
                 owner_color: Color::opaque(0, 100, 200),
                 select_count: 0,
@@ -14482,6 +14508,7 @@ mod tests {
                 show_control_position: 0,
                 last_com: 5,
                 control_key_labels: Vec::new(),
+                crew_count: 0,
                 crew: Vec::new(),
                 commands: Vec::new(),
                 flash_command: 0,
@@ -16662,6 +16689,7 @@ mod tests {
             wealth: 0,
             score: 0,
             cursor: Some(object_id),
+            captain: None,
             eliminated: false,
             owner_color: Color::opaque(0, 100, 200),
             select_count: 1,
@@ -16670,6 +16698,7 @@ mod tests {
             show_control_position: 0,
             last_com: 0,
             control_key_labels: Vec::new(),
+            crew_count: 1,
             crew: vec![CrewOverlay {
                 object_id,
                 label: "Joe".to_string(),
@@ -16679,6 +16708,8 @@ mod tests {
                 breath: 0,
                 breath_capacity: 0,
                 is_focus: true,
+                hide_hud_elements: 0,
+                hide_hud_bars: 0,
                 portrait: None,
                 rank: 0,
                 rank_symbols: None,
@@ -16713,6 +16744,22 @@ mod tests {
             .count()
     }
 
+    fn count_cursor_info_white_pixels(graphics: &GraphicsSystem) -> usize {
+        let white = standard_gamma_color(Color::opaque(255, 255, 255));
+        let width = graphics.surface().width() as usize;
+        graphics
+            .surface()
+            .pixels()
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(index, chunk)| {
+                index % width < 100
+                    && index / width < 40
+                    && *chunk == [white.r, white.g, white.b, white.a]
+            })
+            .count()
+    }
+
     #[test]
     fn cursor_name_label_drawn_in_red_above_cursor_mark() {
         // C4Game::DrawCursors (src/C4Game.cpp:1873-1887): with cursor->Info,
@@ -16725,6 +16772,10 @@ mod tests {
         assert!(
             count_red_text_pixels(&graphics) > 0,
             "expected red 0xffff0000 name text above the cursor mark"
+        );
+        assert!(
+            count_cursor_info_white_pixels(&graphics) > 0,
+            "cursor object info also draws the white HUD row"
         );
     }
 
@@ -16796,6 +16847,11 @@ mod tests {
             count_red_text_pixels(&graphics),
             0,
             "objects without info draw no cursor label"
+        );
+        assert_eq!(
+            count_cursor_info_white_pixels(&graphics),
+            0,
+            "objects without info draw no cursor-info name/rank row"
         );
     }
 
@@ -16910,6 +16966,95 @@ mod tests {
             Some(standard_gamma_color(Color::opaque(0, 0, 220))),
             "breath shifts one compact slot right when magic is present"
         );
+    }
+
+    #[test]
+    fn focused_crew_hud_masks_hide_inventory_and_compact_bars() {
+        let render = |hide_hud_elements: i32, hide_hud_bars: i32| {
+            let (snapshot, mut graphics) = cursor_label_fixture(None);
+            let crew = &mut graphics.hud_players[0].crew[0];
+            crew.energy_fraction = 1.0;
+            crew.magic_energy = 1_000;
+            crew.magic_capacity = 2_000;
+            crew.breath = 50;
+            crew.breath_capacity = 100;
+            crew.hide_hud_elements = hide_hud_elements;
+            crew.hide_hud_bars = hide_hud_bars;
+            crew.inventory = vec![InventoryOverlay {
+                object_id: ObjectId::new(20),
+                definition_id: "ITEM".into(),
+                picture: Some(ImageData::new(
+                    hud::SYMBOL_SIZE as u32,
+                    hud::SYMBOL_SIZE as u32,
+                    std::iter::repeat_n(
+                        [220u8, 0, 220, 255],
+                        (hud::SYMBOL_SIZE * hud::SYMBOL_SIZE) as usize,
+                    )
+                    .flatten()
+                    .collect(),
+                )),
+                count: 1,
+            }];
+            let columns = [
+                [220, 0, 0, 255],
+                [70, 0, 0, 255],
+                [0, 220, 0, 255],
+                [0, 70, 0, 255],
+                [0, 0, 220, 255],
+                [0, 0, 70, 255],
+            ];
+            let pixels = (0..3)
+                .flat_map(|_| columns.into_iter().flatten())
+                .collect();
+            graphics.hud_graphics = Arc::new(HudGraphics {
+                energy_bars: Some(ImageData::new(6, 3, pixels)),
+                ..HudGraphics::default()
+            });
+            graphics.render_frame(
+                &snapshot,
+                &[ViewportInput::from_focus(&snapshot.objects[0])],
+            );
+            let bar_y = (180 - hud::SYMBOL_SIZE - hud::SYMBOL_BORDER - 1) as u32;
+            let inventory_y = (180 - hud::SYMBOL_BORDER - hud::SYMBOL_SIZE) as u32;
+            [
+                graphics
+                    .surface()
+                    .get_pixel(hud::SYMBOL_BORDER as u32, inventory_y),
+                graphics
+                    .surface()
+                    .get_pixel(hud::SYMBOL_BORDER as u32, bar_y),
+                graphics
+                    .surface()
+                    .get_pixel((hud::SYMBOL_BORDER + 2) as u32, bar_y),
+                graphics
+                    .surface()
+                    .get_pixel((hud::SYMBOL_BORDER + 4) as u32, bar_y),
+            ]
+        };
+        let magenta = Some(standard_gamma_color(Color::opaque(220, 0, 220)));
+        let red = Some(standard_gamma_color(Color::opaque(220, 0, 0)));
+        let green = Some(standard_gamma_color(Color::opaque(0, 220, 0)));
+        let blue = Some(standard_gamma_color(Color::opaque(0, 0, 220)));
+
+        let baseline = render(0, 0);
+        assert_eq!(baseline, [magenta, red, green, blue]);
+
+        let hidden_energy = render(0, lc_engine::HIDE_HUD_BAR_ENERGY);
+        assert_eq!(hidden_energy[1], green);
+        assert_eq!(hidden_energy[2], blue);
+
+        let hidden_magic = render(0, lc_engine::HIDE_HUD_BAR_MAGIC_ENERGY);
+        assert_eq!(hidden_magic[1], red);
+        assert_eq!(hidden_magic[2], blue);
+
+        let hidden_breath = render(0, lc_engine::HIDE_HUD_BAR_BREATH);
+        assert_eq!(hidden_breath[1], red);
+        assert_eq!(hidden_breath[2], green);
+        assert_ne!(hidden_breath[3], blue);
+
+        let hidden_inventory = render(lc_engine::HIDE_HUD_ELEMENT_INVENTORY, 0);
+        assert_ne!(hidden_inventory[0], magenta);
+        assert_eq!(&hidden_inventory[1..], &[red, green, blue]);
     }
 
     #[test]

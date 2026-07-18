@@ -672,6 +672,8 @@ pub fn draw_cursor_info(
         portrait,
         rank_symbols,
         None,
+        false,
+        0,
         None,
     );
 }
@@ -688,6 +690,8 @@ pub(crate) fn draw_cursor_info_with_gamma(
     portrait: Option<&ImageData>,
     rank_symbols: Option<&ImageData>,
     rank_symbol_count: Option<u32>,
+    is_captain: bool,
+    hide_hud_elements: i32,
     gamma: Option<&GammaRamp>,
 ) {
     // ccgo = (border, border, 3*C4SymbolSize, C4SymbolSize)
@@ -701,90 +705,125 @@ pub(crate) fn draw_cursor_info_with_gamma(
     let mut ix = 0;
 
     // Portrait: 4*Hgt/3+10 x Hgt+10 (src/C4ObjectInfo.cpp:308-320).
-    if let Some(portrait) = portrait {
-        let rect = SurfaceRect::new(
-            cgo.x + ix,
-            cgo.y,
-            (4 * SYMBOL_SIZE / 3 + 10) as u32,
-            (SYMBOL_SIZE + 10) as u32,
-        );
-        draw_image_aspect(surface, portrait, rect, gamma);
-        ix += 4 * SYMBOL_SIZE / 3;
+    if hide_hud_elements & lc_engine::HIDE_HUD_ELEMENT_PORTRAIT == 0 {
+        if let Some(portrait) = portrait {
+            let rect = SurfaceRect::new(
+                cgo.x + ix,
+                cgo.y,
+                (4 * SYMBOL_SIZE / 3 + 10) as u32,
+                (SYMBOL_SIZE + 10) as u32,
+            );
+            draw_image_aspect(surface, portrait, rect, gamma);
+            ix += 4 * SYMBOL_SIZE / 3;
+        }
+    }
+
+    // HH_Captain gates this status symbol independently of the extended-rank
+    // star below (src/C4ObjectInfo.cpp:323-328).
+    if is_captain && hide_hud_elements & lc_engine::HIDE_HUD_ELEMENT_CAPTAIN == 0 {
+        if let Some(captain) = hud.captain.as_ref() {
+            draw_hud_image_strip(
+                surface,
+                cgo.x + ix,
+                cgo.y,
+                captain,
+                0,
+                0,
+                captain.width(),
+                captain.height(),
+                gamma,
+            );
+            ix += captain.width() as i32;
+        }
     }
 
     // Rank symbol: C4RankSystem::DrawRankSymbol draws the phase cell 1:1
     // (src/C4RankSystem.cpp:305-307); cells are height-square
     // (C4FCT_Height load, src/C4GraphicsResource.cpp:215).
-    let custom_symbols = rank_symbols.is_some();
-    let symbols = rank_symbols.or(hud.rank.as_ref());
-    if let Some(symbols) = symbols {
-        let cell = symbols.height();
-        if cell > 0 && symbols.width() >= cell {
-            let total_count = (symbols.width() / cell).max(1);
-            let base_count = if custom_symbols {
-                rank_symbol_count
-                    .unwrap_or(total_count)
-                    .clamp(1, total_count)
-            } else {
-                total_count
-            };
-            let rank = rank.max(0) as u32;
-            let mut base_rank = rank % base_count;
-            let extension_level = rank / base_count;
-            let extension_phase = (extension_level > 0 && total_count > base_count).then(|| {
-                let requested = base_count + extension_level - 1;
-                if requested >= total_count {
-                    base_rank = base_count - 1;
-                    total_count - 1
+    if hide_hud_elements & lc_engine::HIDE_HUD_ELEMENT_RANK_IMAGE == 0 {
+        let custom_symbols = rank_symbols.is_some();
+        let symbols = rank_symbols.or(hud.rank.as_ref());
+        if let Some(symbols) = symbols {
+            let cell = symbols.height();
+            if cell > 0 && symbols.width() >= cell {
+                let total_count = (symbols.width() / cell).max(1);
+                let base_count = if custom_symbols {
+                    rank_symbol_count
+                        .unwrap_or(total_count)
+                        .clamp(1, total_count)
                 } else {
-                    requested
-                }
-            });
-            draw_hud_image_strip(
-                surface,
-                cgo.x + ix,
-                cgo.y,
-                symbols,
-                base_rank * cell,
-                0,
-                cell,
-                cell,
-                gamma,
-            );
-            if let Some(extension_phase) = extension_phase {
+                    total_count
+                };
+                let rank = rank.max(0) as u32;
+                let mut base_rank = rank % base_count;
+                let extension_level = rank / base_count;
+                let extension_phase = (extension_level > 0 && total_count > base_count).then(|| {
+                    let requested = base_count + extension_level - 1;
+                    if requested >= total_count {
+                        base_rank = base_count - 1;
+                        total_count - 1
+                    } else {
+                        requested
+                    }
+                });
                 draw_hud_image_strip(
                     surface,
-                    cgo.x + ix - 4,
-                    cgo.y - 3,
+                    cgo.x + ix,
+                    cgo.y,
                     symbols,
-                    extension_phase * cell,
+                    base_rank * cell,
                     0,
                     cell,
                     cell,
                     gamma,
                 );
-            } else if extension_level > 0 {
-                if let Some(captain) = hud.captain.as_ref() {
+                if let Some(extension_phase) = extension_phase {
                     draw_hud_image_strip(
                         surface,
                         cgo.x + ix - 4,
                         cgo.y - 3,
-                        captain,
+                        symbols,
+                        extension_phase * cell,
                         0,
-                        0,
-                        captain.width(),
-                        captain.height(),
+                        cell,
+                        cell,
                         gamma,
                     );
+                } else if extension_level > 0 {
+                    if let Some(captain) = hud.captain.as_ref() {
+                        draw_hud_image_strip(
+                            surface,
+                            cgo.x + ix - 4,
+                            cgo.y - 3,
+                            captain,
+                            0,
+                            0,
+                            captain.width(),
+                            captain.height(),
+                            gamma,
+                        );
+                    }
                 }
             }
-            ix += cell as i32;
         }
+        // C++ advances by the global fctRank width even when a definition
+        // supplies an invalid/missing custom strip or DrawRankSymbol fails.
+        ix += hud.rank.as_ref().map(ImageData::height).unwrap_or(0) as i32;
     }
 
     // Rank and name (src/C4ObjectInfo.cpp:353-370) — the C++ `|` separator
     // stacks the rank name above the crew name.
-    if let Some(rank_name) = rank_name.filter(|rank_name| rank > 0 && !rank_name.is_empty()) {
+    let rank_name = rank_name.filter(|rank_name| {
+        hide_hud_elements & lc_engine::HIDE_HUD_ELEMENT_RANK == 0
+            && rank > 0
+            && !rank_name.is_empty()
+    });
+    let name = if hide_hud_elements & lc_engine::HIDE_HUD_ELEMENT_NAME == 0 {
+        name
+    } else {
+        ""
+    };
+    if let Some(rank_name) = rank_name {
         font.draw_with_gamma(
             surface,
             cgo.x + ix,
@@ -2503,7 +2542,6 @@ mod tests {
         // Portrait aspect-fit into (border, border, 4*35/3+10, 45) and the
         // rank cell 1:1 at iX = 4*35/3 (src/C4ObjectInfo.cpp:308-341).
         let mut target = surface(200, 200);
-        let hud = HudGraphics::default();
         let portrait = solid_image(150, 150, [10, 200, 30, 255]);
         // Two 4x4 rank cells: rank 0 blue, rank 1 yellow.
         let mut rank_pixels = Vec::new();
@@ -2512,6 +2550,10 @@ mod tests {
             rank_pixels.extend(std::iter::repeat_n([220u8, 220, 0, 255], 4).flatten());
         }
         let ranks = ImageData::new(8, 4, rank_pixels);
+        let hud = HudGraphics {
+            rank: Some(ranks.clone()),
+            ..HudGraphics::default()
+        };
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         let viewport = SurfaceRect::new(0, 0, 200, 200);
@@ -2538,6 +2580,118 @@ mod tests {
     }
 
     #[test]
+    fn cursor_info_hide_bits_gate_and_compact_columns() {
+        let portrait = solid_image(150, 150, [10, 200, 30, 255]);
+        let captain = solid_image(6, 6, [220, 30, 20, 255]);
+        let global_ranks = solid_image(7, 7, [90, 90, 90, 255]);
+        let mut rank_pixels = Vec::new();
+        for _row in 0..4 {
+            rank_pixels.extend(std::iter::repeat_n([0u8, 0, 220, 255], 4).flatten());
+            rank_pixels.extend(std::iter::repeat_n([220u8, 220, 0, 255], 4).flatten());
+        }
+        let ranks = ImageData::new(8, 4, rank_pixels);
+        let hud = HudGraphics {
+            captain: Some(captain),
+            rank: Some(global_ranks),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let render = |hide_hud_elements| {
+            let mut target = surface(160, 80);
+            draw_cursor_info_with_gamma(
+                &mut target,
+                &HudFont::Fallback(&font),
+                &hud,
+                SurfaceRect::new(0, 0, 160, 80),
+                "WW",
+                1,
+                Some("I"),
+                Some(&portrait),
+                Some(&ranks),
+                None,
+                true,
+                hide_hud_elements,
+                None,
+            );
+            target
+        };
+        let white_pixels = |surface: &Surface| {
+            surface
+                .pixels()
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, pixel)| *pixel == [255, 255, 255, 255])
+                .map(|(index, _)| {
+                    (
+                        index % surface.width() as usize,
+                        index / surface.width() as usize,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let baseline = render(0);
+        let baseline_white = white_pixels(&baseline);
+        let baseline_min_x = baseline_white.iter().map(|(x, _)| *x).min().unwrap();
+        assert_eq!(baseline.get_pixel(11, 20), Some(Color::opaque(10, 200, 30)));
+        assert_eq!(baseline.get_pixel(51, 6), Some(Color::opaque(220, 30, 20)));
+        assert_eq!(baseline.get_pixel(57, 6), Some(Color::opaque(220, 220, 0)));
+
+        let hidden_portrait = render(lc_engine::HIDE_HUD_ELEMENT_PORTRAIT);
+        assert_ne!(
+            hidden_portrait.get_pixel(11, 20),
+            Some(Color::opaque(10, 200, 30))
+        );
+        assert_eq!(hidden_portrait.get_pixel(5, 6), Some(Color::opaque(220, 30, 20)));
+        assert_eq!(hidden_portrait.get_pixel(11, 6), Some(Color::opaque(220, 220, 0)));
+        assert_eq!(
+            white_pixels(&hidden_portrait)
+                .iter()
+                .map(|(x, _)| *x)
+                .min()
+                .unwrap(),
+            baseline_min_x - 46
+        );
+
+        let hidden_captain = render(lc_engine::HIDE_HUD_ELEMENT_CAPTAIN);
+        assert_eq!(hidden_captain.get_pixel(51, 6), Some(Color::opaque(220, 220, 0)));
+        assert_eq!(
+            white_pixels(&hidden_captain)
+                .iter()
+                .map(|(x, _)| *x)
+                .min()
+                .unwrap(),
+            baseline_min_x - 6
+        );
+
+        let hidden_rank_image = render(lc_engine::HIDE_HUD_ELEMENT_RANK_IMAGE);
+        assert_ne!(
+            hidden_rank_image.get_pixel(57, 6),
+            Some(Color::opaque(220, 220, 0))
+        );
+        assert_eq!(
+            white_pixels(&hidden_rank_image)
+                .iter()
+                .map(|(x, _)| *x)
+                .min()
+                .unwrap(),
+            baseline_min_x - 7
+        );
+
+        let hidden_rank = white_pixels(&render(lc_engine::HIDE_HUD_ELEMENT_RANK));
+        let hidden_name = white_pixels(&render(lc_engine::HIDE_HUD_ELEMENT_NAME));
+        let hidden_text = white_pixels(&render(
+            lc_engine::HIDE_HUD_ELEMENT_RANK | lc_engine::HIDE_HUD_ELEMENT_NAME,
+        ));
+        let second_line = (SYMBOL_BORDER + HudFont::Fallback(&font).line_height()) as usize;
+        assert!(hidden_rank.iter().all(|(_, y)| *y < second_line));
+        assert!(!hidden_name.is_empty(), "rank title survives HH_Name");
+        assert!(hidden_name.iter().all(|(_, y)| *y < second_line));
+        assert!(hidden_rank.len() > hidden_name.len(), "WW remains while I is hidden");
+        assert!(hidden_text.is_empty());
+    }
+
+    #[test]
     fn cursor_info_uses_definition_base_count_and_direct_extension_offset() {
         let mut colors = vec![[0, 0, 0, 255]; 29];
         colors[1] = [20, 40, 220, 255];
@@ -2557,6 +2711,8 @@ mod tests {
             None,
             Some(&ranks),
             Some(24),
+            false,
+            0,
             None,
         );
 
@@ -2588,6 +2744,8 @@ mod tests {
             None,
             Some(&ranks),
             Some(24),
+            false,
+            0,
             None,
         );
 
@@ -2617,9 +2775,13 @@ mod tests {
             None,
             None,
             Some(1),
+            false,
+            lc_engine::HIDE_HUD_ELEMENT_CAPTAIN,
             None,
         );
 
+        // HH_Captain gates only the standalone status column. This Captain
+        // texture is the extended-rank overlay and remains part of RankImage.
         assert_eq!(target.get_pixel(1, 2), Some(Color::opaque(220, 40, 20)));
         assert_eq!(target.get_pixel(10, 8), Some(Color::opaque(20, 40, 220)));
     }
@@ -2641,6 +2803,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            0,
             None,
         );
         let mut ranked = surface(120, 80);
@@ -2655,6 +2819,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            0,
             None,
         );
 
