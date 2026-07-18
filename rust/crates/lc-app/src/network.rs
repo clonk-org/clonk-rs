@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use lc_engine::{
     CommandKind, ControlButton, ControlCommand, ControlEvent,
     JoinPlayerControlData, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
@@ -17,7 +17,7 @@ use lc_engine::{
     COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use lc_network::{
-    connect_dual_client, decode_control_entry_payload, decode_control_packet,
+    connect_client_addresses, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
     ClientHandle, ClientId, ClientPlayerResourceRequest, ControlDelivery, ControlPacket,
     HostConfig, HostEvent, HostHandle, HostJoinSnapshot, LegacyControlFrame, LegacyControlSet,
@@ -48,8 +48,9 @@ pub struct HostSettings {
 
 #[derive(Debug, Clone)]
 pub struct ClientSettings {
-    pub server_addr: SocketAddr,
+    pub server_addresses: Vec<NetworkAddress>,
     pub player_name: String,
+    pub password: lc_engine::LegacyCString,
     pub resource_directory: PathBuf,
     pub local_system_path: Option<PathBuf>,
     pub local_resource_roots: Vec<PathBuf>,
@@ -58,12 +59,45 @@ pub struct ClientSettings {
 impl ClientSettings {
     pub fn new(server_addr: SocketAddr, player_name: impl Into<String>) -> Self {
         Self {
-            server_addr,
+            server_addresses: vec![
+                NetworkAddress::new(NetworkProtocol::Tcp, server_addr),
+                NetworkAddress::new(NetworkProtocol::Udp, server_addr),
+            ],
             player_name: player_name.into(),
+            password: lc_engine::LegacyCString::default(),
             resource_directory: PathBuf::from("Network"),
             local_system_path: None,
             local_resource_roots: Vec::new(),
         }
+    }
+
+    pub fn with_join_attempts(
+        mut self,
+        addresses: impl IntoIterator<Item = NetworkAddress>,
+    ) -> Self {
+        self.server_addresses = addresses.into_iter().collect();
+        self
+    }
+
+    pub fn with_password(mut self, password: lc_engine::LegacyCString) -> Self {
+        self.password = password;
+        self
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum NetworkStartError {
+    #[error("host rejected the client password: {message:?}")]
+    WrongPassword {
+        message: lc_engine::LegacyCString,
+    },
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<String> for NetworkStartError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
     }
 }
 
@@ -1133,7 +1167,10 @@ impl ControlFrameAccumulator {
 }
 
 impl NetworkManager {
-    pub fn for_mode(mode: NetworkMode, local_owner: i32) -> Result<Self> {
+    pub fn for_mode(
+        mode: NetworkMode,
+        local_owner: i32,
+    ) -> std::result::Result<Self, NetworkStartError> {
         let worker_mode = match mode {
             NetworkMode::Host(settings) => WorkerMode::Host {
                 settings,
@@ -1147,7 +1184,7 @@ impl NetworkManager {
         Self::spawn(worker_mode)
     }
 
-    fn spawn(mode: WorkerMode) -> Result<Self> {
+    fn spawn(mode: WorkerMode) -> std::result::Result<Self, NetworkStartError> {
         let role = match &mode {
             WorkerMode::Host { .. } => NetworkRole::Host,
             WorkerMode::Client { .. } => NetworkRole::Client,
@@ -1155,7 +1192,8 @@ impl NetworkManager {
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
-        let (local_id_tx, local_id_rx) = mpsc::channel::<Result<NetworkWorkerReady, String>>();
+        let (local_id_tx, local_id_rx) =
+            mpsc::channel::<std::result::Result<NetworkWorkerReady, NetworkStartError>>();
         let thread_name = match mode {
             WorkerMode::Host { .. } => "lc-network-host",
             WorkerMode::Client { .. } => "lc-network-client",
@@ -1180,13 +1218,19 @@ impl NetworkManager {
                     }
                 }
             })
-            .context("failed to spawn network worker thread")?;
+            .map_err(|error| {
+                NetworkStartError::Other(format!("failed to spawn network worker thread: {error}"))
+            })?;
         let ready = match local_id_rx
             .recv()
-            .context("network worker did not report local client id")?
+            .map_err(|error| {
+                NetworkStartError::Other(format!(
+                    "network worker did not report local client id: {error}"
+                ))
+            })?
         {
             Ok(ready) => ready,
-            Err(err) => return Err(anyhow!(err)),
+            Err(error) => return Err(error),
         };
 
         Ok(Self {
@@ -1849,7 +1893,7 @@ async fn run_worker(
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
-    local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
+    local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
 ) -> Result<()> {
     match mode {
         WorkerMode::Host {
@@ -1889,7 +1933,7 @@ async fn run_host_worker(
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
-    local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
+    local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
 ) -> Result<()> {
     let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
         .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
@@ -1898,7 +1942,7 @@ async fn run_host_worker(
             Ok(config) => config,
             Err(error) => {
                 let message = format!("prepared host launch rejected: {error}");
-                let _ = local_id_tx.send(Err(message.clone()));
+                let _ = local_id_tx.send(Err(message.clone().into()));
                 return Err(anyhow!(message));
             }
         },
@@ -1932,7 +1976,7 @@ async fn run_host_worker(
                 "failed to bind host socket at {}: {err}",
                 settings.bind_addr
             );
-            let _ = local_id_tx.send(Err(message.clone()));
+            let _ = local_id_tx.send(Err(message.clone().into()));
             return Err(anyhow!(message));
         }
     };
@@ -1940,7 +1984,7 @@ async fn run_host_worker(
         Ok(address) => address,
         Err(error) => {
             let message = format!("failed to read bound host socket address: {error}");
-            let _ = local_id_tx.send(Err(message.clone()));
+            let _ = local_id_tx.send(Err(message.clone().into()));
             return Err(anyhow!(message));
         }
     };
@@ -1949,7 +1993,7 @@ async fn run_host_worker(
         Ok(host) => host,
         Err(err) => {
             let message = format!("failed to start host session: {err}");
-            let _ = local_id_tx.send(Err(message.clone()));
+            let _ = local_id_tx.send(Err(message.clone().into()));
             return Err(anyhow!(message));
         }
     };
@@ -2314,26 +2358,27 @@ async fn run_client_worker(
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
-    local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
+    local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
     let mut client_config = ClientConfig::new(player_name.clone(), ParticipantKind::Player)
+        .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)
         .with_local_resource_roots(settings.local_resource_roots);
     if let Some(system_path) = settings.local_system_path {
         client_config = client_config.with_local_system_path(system_path);
     }
-    let mut client = match connect_dual_client(
-        settings.server_addr,
-        settings.server_addr,
-        client_config,
-    )
-    .await
-    {
+    let mut client = match connect_client_addresses(settings.server_addresses, client_config).await {
         Ok(client) => client,
+        Err(lc_network::ClientError::WrongPassword { message }) => {
+            let startup_error = NetworkStartError::WrongPassword { message };
+            let detail = startup_error.to_string();
+            let _ = local_id_tx.send(Err(startup_error));
+            return Err(anyhow!(detail));
+        }
         Err(err) => {
             let message = format!("failed to connect to host: {err}");
-            let _ = local_id_tx.send(Err(message.clone()));
+            let _ = local_id_tx.send(Err(message.clone().into()));
             return Err(anyhow!(message));
         }
     };
@@ -2682,13 +2727,13 @@ fn announce_connected_client(
     client: &mut ClientHandle,
     player_name: String,
     event_tx: &Sender<NetworkEvent>,
-    local_id_tx: &mpsc::Sender<Result<NetworkWorkerReady, String>>,
+    local_id_tx: &mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
 ) -> Result<(ClientId, NetworkStatus)> {
     let join_data = match client.take_join_data() {
         Some(join_data) => join_data,
         None => {
             let message = "connected client did not retain JoinData".to_string();
-            let _ = local_id_tx.send(Err(message.clone()));
+            let _ = local_id_tx.send(Err(message.clone().into()));
             return Err(anyhow!(message));
         }
     };
@@ -3437,6 +3482,61 @@ mod tests {
             .expect("join client worker")
             .expect("client worker exits cleanly");
         host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_join_flow_worker_uses_every_address_and_supplied_password() {
+        let closed = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind disposable route");
+        let closed_address = closed.local_addr().expect("disposable route address");
+        drop(closed);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind passworded host");
+        let live_address = listener.local_addr().expect("passworded host address");
+        let password = lc_engine::LegacyCString::from_bytes(b"join secret".to_vec())
+            .expect("fixture is NUL-free");
+        let mut host_config = HostConfig::default();
+        host_config.password = password.clone();
+        let host = start_host(listener, host_config).await.expect("start host");
+        let temporary = tempfile::tempdir().expect("temporary client work directory");
+        let mut settings = ClientSettings::new(closed_address, "Alice")
+            .with_join_attempts([
+                NetworkAddress::new(NetworkProtocol::Tcp, closed_address),
+                NetworkAddress::new(NetworkProtocol::Tcp, live_address),
+            ])
+            .with_password(password);
+        settings.resource_directory = temporary.path().join("Network");
+        let (command_tx, command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            let mut command_rx = command_rx;
+            run_client_worker(
+                settings,
+                0,
+                &mut command_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+            )
+            .await
+        });
+
+        assert!(matches!(
+            local_id_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker reports readiness"),
+            Ok(NetworkWorkerReady { local_client_id, .. }) if local_client_id > 0
+        ));
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop connected client worker");
+        worker.await.expect("join worker task").expect("stop worker");
+        host.shutdown().await.expect("stop host");
     }
 
     #[test]

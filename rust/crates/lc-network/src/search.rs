@@ -1,6 +1,8 @@
 //! Startup network-game discovery matching `C4StartupNetDlg` and
 //! `C4Network2IODiscoverClient`.
 
+#[cfg(unix)]
+use std::collections::BTreeSet;
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::mpsc;
@@ -144,6 +146,14 @@ impl NetworkGameReference {
         attempts
     }
 
+    /// Prepares the complete reference attempt list against this machine's
+    /// IPv6 capabilities, matching the inputs C++ obtains from its local
+    /// client/interface inventory before `InitClient` starts every route.
+    pub fn join_attempts_for_local_host(&self) -> Vec<NetworkAddress> {
+        let (have_global_ipv6, local_interface_ids) = local_join_capabilities();
+        self.join_attempts(have_global_ipv6, &local_interface_ids)
+    }
+
     fn is_same_host_and_address(&self, other: &Self) -> bool {
         self.host_name == other.host_name
             && if self.addresses.is_empty() || other.addresses.is_empty() {
@@ -164,6 +174,68 @@ impl NetworkGameReference {
             + i32::from(self.state == "Lobby") * 3
             + i32::from(!self.password_needed)
     }
+}
+
+#[cfg(unix)]
+fn local_join_capabilities() -> (bool, Vec<u32>) {
+    let mut addresses = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` initializes a linked list owned by the caller on
+    // success. Every pointer is checked before access and the list is released
+    // exactly once with `freeifaddrs` below.
+    if unsafe { libc::getifaddrs(&mut addresses) } != 0 {
+        return (false, Vec::new());
+    }
+    let mut have_global_ipv6 = false;
+    let mut interface_ids = BTreeSet::new();
+    let mut current = addresses;
+    while !current.is_null() {
+        // SAFETY: `current` belongs to the live list returned above.
+        let interface = unsafe { &*current };
+        let address = interface.ifa_addr;
+        if !address.is_null()
+            // SAFETY: all sockaddr variants begin with `sa_family`.
+            && unsafe { (*address).sa_family as i32 } == libc::AF_INET6
+            && interface.ifa_flags & (libc::IFF_LOOPBACK as u32) == 0
+        {
+            // SAFETY: the family check establishes an IPv6 sockaddr.
+            let address = unsafe { &*(address.cast::<libc::sockaddr_in6>()) };
+            let ip = Ipv6Addr::from(address.sin6_addr.s6_addr);
+            have_global_ipv6 |= cpp_is_global_ipv6(ip);
+            if ip.is_unicast_link_local() && !interface.ifa_name.is_null() {
+                // SAFETY: `ifa_name` is a NUL-terminated interface name for
+                // the lifetime of the enclosing `ifaddrs` node.
+                let index = if address.sin6_scope_id != 0 {
+                    address.sin6_scope_id
+                } else {
+                    unsafe { libc::if_nametoindex(interface.ifa_name) }
+                };
+                if index != 0 {
+                    interface_ids.insert(index);
+                }
+            }
+        }
+        current = interface.ifa_next;
+    }
+    // SAFETY: this is the successful allocation returned by `getifaddrs`.
+    unsafe { libc::freeifaddrs(addresses) };
+    (have_global_ipv6, interface_ids.into_iter().collect())
+}
+
+#[cfg(not(unix))]
+fn local_join_capabilities() -> (bool, Vec<u32>) {
+    // Conservative fallback: IPv4/global routes remain usable and global IPv6
+    // is ranked after them. Link-local expansion requires platform interface
+    // enumeration and is therefore omitted rather than guessing a scope.
+    (false, Vec::new())
+}
+
+fn cpp_is_global_ipv6(ip: Ipv6Addr) -> bool {
+    let first = ip.octets()[0];
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_multicast()
+        && !ip.is_unicast_link_local()
+        && first & 0xfe != 0xfc
 }
 
 fn cpp_join_address_rank(endpoint: SocketAddr, have_global_ipv6: bool) -> i32 {

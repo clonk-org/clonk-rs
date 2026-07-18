@@ -150,7 +150,7 @@ use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegist
 use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
 use network::{
     ClientSettings, HostSettings, NetworkControl, NetworkControlClock, NetworkEvent,
-    NetworkManager, NetworkMode,
+    NetworkManager, NetworkMode, NetworkStartError,
 };
 use network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
@@ -7880,6 +7880,7 @@ impl ScenarioSelectorMode {
 #[derive(Clone, Debug)]
 struct PendingGameOptionInputDialog {
     kind: GameOptionInputKind,
+    network_join_password: bool,
     controller: InputDialogController,
 }
 
@@ -8640,6 +8641,9 @@ struct GameApp {
     main_menu_state: MainMenuState,
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
     startup_game_search: Option<lc_network::StartupGameSearch>,
+    /// Complete references retained in the same order as the visible game
+    /// list. The frontend row projects only a display address.
+    startup_game_references: Vec<lc_network::NetworkGameReference>,
     network_game_advertiser: Option<lc_network::NetworkGameAdvertiser>,
     /// Last validated exact host reference. This state advances independently
     /// of optional listener I/O and is retained as the next InitLocal rebuild
@@ -8737,6 +8741,8 @@ struct GameApp {
     control_messages: ControlMessageState,
     league_votes: LeagueVoteState,
     startup_network_connection: Option<StartupNetworkConnection>,
+    /// Frozen C++-ordered address attempts retained across password prompts.
+    pending_network_join: Option<ClientSettings>,
     staged_network_host_scenario: Option<StagedNetworkHostScenario>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
@@ -8968,7 +8974,7 @@ struct RecordingSession {
 }
 
 struct StartupNetworkConnection {
-    receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
+    receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>>,
     selected_scenario: Option<(String, String)>,
     purpose: StartupNetworkPurpose,
 }
@@ -16396,6 +16402,7 @@ impl GameApp {
             main_menu_state,
             startup_network_dialog: None,
             startup_game_search: None,
+            startup_game_references: Vec::new(),
             network_game_advertiser: None,
             advertised_game_reference: None,
             startup_player_dialog: None,
@@ -16454,6 +16461,7 @@ impl GameApp {
             control_messages,
             league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
+            pending_network_join: None,
             staged_network_host_scenario: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
@@ -26934,6 +26942,22 @@ impl GameApp {
                     ));
                 }
                 NetDlgAction::JoinGame { address } => {
+                    let selected_reference = self
+                        .startup_network_dialog
+                        .as_ref()
+                        .filter(|dialog| {
+                            dialog.focused_control()
+                                != lc_frontend::startup_netdlg::NetDlgControl::JoinAddress
+                                || dialog.join_address().is_empty()
+                        })
+                        .and_then(|dialog| dialog.selected_game())
+                        .and_then(|index| self.startup_game_references.get(index))
+                        .filter(|reference| reference.is_joinable())
+                        .cloned();
+                    if let Some(reference) = selected_reference {
+                        self.activate_network_reference_join(reference)?;
+                        continue;
+                    }
                     let Some(address) = address else {
                         self.status_text.clear();
                         self.push_message_dialog(
@@ -26991,7 +27015,9 @@ impl GameApp {
 
     fn begin_startup_network_connection(
         &mut self,
-        receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
+        receiver: Receiver<
+            std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>,
+        >,
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
     ) {
@@ -27063,7 +27089,9 @@ impl GameApp {
             .spawn(move || {
                 let result = preparation
                     .prepare()
-                    .map_err(|error| format!("host preparation failed: {error}"))
+                    .map_err(|error| {
+                        NetworkStartError::Other(format!("host preparation failed: {error}"))
+                    })
                     .and_then(|prepared| {
                         let mode = NetworkMode::Host(HostSettings {
                             bind_addr,
@@ -27077,7 +27105,6 @@ impl GameApp {
                         });
                         NetworkManager::for_mode(mode.clone(), local_owner)
                             .map(|manager| (mode, manager))
-                            .map_err(|error| format!("{error:#}"))
                     });
                 let _ = sender.send(result);
             });
@@ -27115,7 +27142,11 @@ impl GameApp {
             .name("lc-startup-network".to_string())
             .spawn(move || {
                 let result = resolve_join_socket(&address, default_port)
-                    .map_err(|error| format!("invalid network address: {error:#}"))
+                    .map_err(|error| {
+                        NetworkStartError::Other(format!(
+                            "invalid network address: {error:#}"
+                        ))
+                    })
                     .and_then(|server_addr| {
                         let mode = NetworkMode::Client(client_settings_for_paths(
                             server_addr,
@@ -27124,7 +27155,6 @@ impl GameApp {
                         ));
                         NetworkManager::for_mode(mode.clone(), local_owner)
                             .map(|manager| (mode, manager))
-                            .map_err(|error| format!("{error:#}"))
                     });
                 let _ = sender.send(result);
             });
@@ -27136,6 +27166,90 @@ impl GameApp {
                 self.status_text = format!("Unable to start network worker: {error}");
             }
         }
+    }
+
+    fn activate_network_reference_join(
+        &mut self,
+        reference: lc_network::NetworkGameReference,
+    ) -> Result<(), EngineError> {
+        if self.startup_network_connection.is_some() {
+            self.status_text = "A network connection is already in progress".to_string();
+            return Ok(());
+        }
+        if let Err(error) = self.freeze_configured_client_players_for_game() {
+            self.status_text = format!("Unable to load configured players: {error}");
+            return Ok(());
+        }
+        let attempts = reference.join_attempts_for_local_host();
+        let settings = client_settings_for_paths(
+            reference.source_address,
+            self.player_name.clone(),
+            self.app_paths.as_ref(),
+        )
+        .with_join_attempts(attempts);
+        self.startup_game_search = None;
+        self.pending_network_join = Some(settings);
+        if reference.password_needed {
+            self.open_network_join_password_dialog()?;
+        } else {
+            self.launch_pending_network_join();
+        }
+        Ok(())
+    }
+
+    fn launch_pending_network_join(&mut self) {
+        let Some(settings) = self.pending_network_join.clone() else {
+            self.status_text = "Network join settings are unavailable".to_string();
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        let local_owner = self.local_owner;
+        let spawn = thread::Builder::new()
+            .name("lc-startup-network".to_string())
+            .spawn(move || {
+                let mode = NetworkMode::Client(settings);
+                let result = NetworkManager::for_mode(mode.clone(), local_owner)
+                    .map(|manager| (mode, manager));
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.begin_startup_network_connection(receiver, StartupNetworkPurpose::Join, None);
+            }
+            Err(error) => {
+                self.pending_network_join = None;
+                self.status_text = format!("Unable to start network worker: {error}");
+            }
+        }
+    }
+
+    fn open_network_join_password_dialog(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Network join password input dialog",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        self.close_context_menu_silently();
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.cancel_interaction();
+        }
+        let controller = InputDialogController::new(
+            "Enter password:",
+            "Enter password:",
+            InputDialogIcon::LOCKED,
+        );
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            kind: GameOptionInputKind::Password,
+            network_join_password: true,
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.status_text.clear();
+        self.mark_menu_dirty();
+        Ok(())
     }
 
     fn build_classic_host_lobby(
@@ -27246,14 +27360,17 @@ impl GameApp {
         {
             Some(Ok(result)) => result,
             Some(Err(TryRecvError::Empty)) | None => return,
-            Some(Err(TryRecvError::Disconnected)) => {
-                Err("network worker disconnected before reporting readiness".to_string())
-            }
+            Some(Err(TryRecvError::Disconnected)) => Err(NetworkStartError::Other(
+                "network worker disconnected before reporting readiness".to_string(),
+            )),
         };
         self.startup_network_connection = None;
         self.mark_menu_dirty();
         match result {
             Ok((mode, manager)) => {
+                if purpose == Some(StartupNetworkPurpose::Join) {
+                    self.pending_network_join = None;
+                }
                 // InitNetwork constructs a fresh C4Network2Client list; no
                 // activity timestamp survives into the new socket session.
                 self.network_client_activity.clear();
@@ -27497,7 +27614,19 @@ impl GameApp {
                 self.startup_view = StartupView::NetworkGame;
                 self.mode = AppMode::Menu;
             }
+            Err(NetworkStartError::WrongPassword { .. })
+                if purpose == Some(StartupNetworkPurpose::Join)
+                    && self.pending_network_join.is_some() =>
+            {
+                self.mode = AppMode::Menu;
+                if let Err(error) = self.open_network_join_password_dialog() {
+                    self.pending_network_join = None;
+                    self.status_text =
+                        format!("Unable to reopen the network password prompt: {error}");
+                }
+            }
             Err(error) => {
+                self.pending_network_join = None;
                 self.status_text = format!("Unable to start network session: {error}");
                 self.mode = AppMode::Menu;
             }
@@ -28040,6 +28169,7 @@ impl GameApp {
         for event in events {
             match event {
                 lc_network::StartupGameSearchEvent::Cleared => {
+                    self.startup_game_references.clear();
                     if let Some(dialog) = self.startup_network_dialog.as_mut() {
                         dialog.set_games(Vec::new());
                     }
@@ -28047,7 +28177,7 @@ impl GameApp {
                 }
                 lc_network::StartupGameSearchEvent::ReferencesUpdated(references) => {
                     let games = references
-                        .into_iter()
+                        .iter()
                         .map(|reference| {
                             let host = if reference.host_name.is_empty() {
                                 "unknown"
@@ -28073,6 +28203,7 @@ impl GameApp {
                             }
                         })
                         .collect::<Vec<_>>();
+                    self.startup_game_references = references;
                     let count = games.len();
                     if let Some(dialog) = self.startup_network_dialog.as_mut() {
                         dialog.set_games(games);
@@ -30002,6 +30133,8 @@ impl GameApp {
 
     fn open_network_game_dialog(&mut self) {
         self.close_context_menu_silently();
+        self.startup_game_references.clear();
+        self.pending_network_join = None;
         let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
             .assets
@@ -30186,6 +30319,8 @@ impl GameApp {
         self.definition_selector_pointer_capture = false;
         self.startup_network_connection = None;
         self.startup_game_search = None;
+        self.startup_game_references.clear();
+        self.pending_network_join = None;
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
         self.host_reference_paused = false;
@@ -32657,6 +32792,7 @@ impl GameApp {
             .with_input_text(&request.initial_text);
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             kind: request.kind,
+            network_join_password: false,
             controller,
         });
         self.game_option_input_consumed_keys.clear();
@@ -32734,6 +32870,27 @@ impl GameApp {
                     };
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
+                    if pending.network_join_password {
+                        if text.is_empty() {
+                            self.pending_network_join = None;
+                            self.status_text.clear();
+                            break;
+                        }
+                        let Some(password) = lc_engine::LegacyCString::from_bytes(text.into_bytes())
+                        else {
+                            self.pending_network_join = None;
+                            self.status_text =
+                                "Network password contains an unsupported NUL byte".to_string();
+                            break;
+                        };
+                        let Some(settings) = self.pending_network_join.as_mut() else {
+                            self.status_text = "Network join settings are unavailable".to_string();
+                            break;
+                        };
+                        settings.password = password;
+                        self.launch_pending_network_join();
+                        break;
+                    }
                     let actions = self.scenario_game_options.resolve_input_dialog(
                         pending.kind,
                         GameOptionInputDialogResult::Submitted(text),
@@ -32747,6 +32904,11 @@ impl GameApp {
                     };
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
+                    if pending.network_join_password {
+                        self.pending_network_join = None;
+                        self.status_text.clear();
+                        break;
+                    }
                     let actions = self
                         .scenario_game_options
                         .resolve_input_dialog(pending.kind, GameOptionInputDialogResult::Cancelled);
@@ -54653,7 +54815,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             join_before
         );
         sender
-            .send(Err("controlled host failure".to_string()))
+            .send(Err(NetworkStartError::Other(
+                "controlled host failure".to_string(),
+            )))
             .expect("resolve controlled transition");
         app.poll_startup_network_connection();
         assert!(!app.startup_network_transition_active());
@@ -63542,7 +63706,13 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let settings = client_settings_for_paths(address, "Client".to_string(), Some(&paths));
 
-        assert_eq!(settings.server_addr, address);
+        assert_eq!(
+            settings.server_addresses,
+            [
+                lc_network::NetworkAddress::new(lc_network::NetworkProtocol::Tcp, address),
+                lc_network::NetworkAddress::new(lc_network::NetworkProtocol::Udp, address),
+            ]
+        );
         assert_eq!(
             settings.resource_directory,
             paths.cache_dir().join("Network")
@@ -65290,6 +65460,203 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(app.startup_view, StartupView::NetworkGame);
         assert!(app.startup_network_connection.is_none());
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn client_join_flow_password_prompt_retains_the_complete_prepared_reference() {
+        let mut app = new_classic_menu_app(800, 600);
+        let global_tcp = lc_network::NetworkAddress::new(
+            lc_network::NetworkProtocol::Tcp,
+            "8.8.8.8:11112".parse().unwrap(),
+        );
+        let private_udp = lc_network::NetworkAddress::new(
+            lc_network::NetworkProtocol::Udp,
+            "10.0.0.7:11113".parse().unwrap(),
+        );
+        let reference = lc_network::NetworkGameReference {
+            title: "Passworded game".to_string(),
+            password_needed: true,
+            addresses: vec![private_udp, global_tcp],
+            source_address: "127.0.0.1:11111".parse().unwrap(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            ..Default::default()
+        };
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let mut network_dialog = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig {
+                masterserver_signup: false,
+                record: false,
+            },
+            metrics,
+        );
+        network_dialog.resize(800, 600);
+        network_dialog.set_games(vec![lc_frontend::startup_netdlg::NetDlgGameEntry {
+            title: reference.title.clone(),
+            details: String::new(),
+            address: None,
+            joinable: true,
+        }]);
+        assert!(network_dialog
+            .handle_key_down(KeyCode::Down)
+            .is_empty());
+        let _ = network_dialog.handle_key_down(KeyCode::Tab);
+        assert_eq!(
+            network_dialog.focused_control(),
+            lc_frontend::startup_netdlg::NetDlgControl::JoinAddress
+        );
+        let actions = network_dialog.handle_key_down(KeyCode::Enter);
+        assert_eq!(
+            actions,
+            [lc_frontend::startup_netdlg::NetDlgAction::JoinGame { address: None }]
+        );
+        app.startup_network_dialog = Some(network_dialog);
+        app.startup_game_references = vec![reference];
+
+        app.process_network_dialog_actions(actions)
+            .expect("selected complete reference opens the exact password prompt");
+
+        let settings = app
+            .pending_network_join
+            .as_ref()
+            .expect("prepared join is retained while prompting");
+        assert_eq!(settings.server_addresses, [global_tcp, private_udp]);
+        assert!(settings.password.is_empty());
+        let dialog = app
+            .game_option_input_dialog
+            .as_ref()
+            .expect("password prompt is modal");
+        assert!(dialog.network_join_password);
+        assert_eq!(dialog.controller.message(), "Enter password:");
+        assert_eq!(dialog.controller.caption(), "Enter password:");
+        assert_eq!(dialog.controller.icon(), InputDialogIcon::LOCKED);
+        assert!(dialog.controller.text().is_empty());
+
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+            .expect("cancel password prompt");
+        assert!(app.pending_network_join.is_none());
+        assert!(app.game_option_input_dialog.is_none());
+    }
+
+    #[test]
+    fn client_join_flow_wrong_password_reprompts_without_rebuilding_attempts() {
+        let mut app = new_classic_menu_app(800, 600);
+        let attempts = vec![
+            lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Tcp,
+                "127.0.0.1:30111".parse().unwrap(),
+            ),
+            lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Udp,
+                "127.0.0.1:30112".parse().unwrap(),
+            ),
+        ];
+        app.pending_network_join = Some(
+            ClientSettings::new(attempts[0].endpoint, "Player")
+                .with_join_attempts(attempts.clone())
+                .with_password(
+                    lc_engine::LegacyCString::from_bytes(b"rejected".to_vec()).unwrap(),
+                ),
+        );
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err(NetworkStartError::WrongPassword {
+                message: lc_engine::LegacyCString::from_bytes(b"wrong password".to_vec())
+                    .unwrap(),
+            }))
+            .expect("queue typed wrong-password result");
+        app.startup_network_connection = Some(StartupNetworkConnection {
+            receiver,
+            selected_scenario: None,
+            purpose: StartupNetworkPurpose::Join,
+        });
+
+        app.poll_startup_network_connection();
+
+        assert!(app.startup_network_connection.is_none());
+        assert_eq!(
+            app.pending_network_join
+                .as_ref()
+                .expect("same join remains pending")
+                .server_addresses,
+            attempts
+        );
+        let prompt = app
+            .game_option_input_dialog
+            .as_ref()
+            .expect("wrong password reopens prompt");
+        assert!(prompt.network_join_password);
+        assert!(prompt.controller.text().is_empty());
+
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            String::new(),
+        )])
+        .expect("empty replacement aborts like C++");
+        assert!(app.pending_network_join.is_none());
+        assert!(app.startup_network_connection.is_none());
+
+        app.pending_network_join = Some(
+            ClientSettings::new(attempts[0].endpoint, "Player")
+                .with_join_attempts(attempts),
+        );
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err(NetworkStartError::Other("join denied".to_string())))
+            .expect("queue terminal rejection");
+        app.startup_network_connection = Some(StartupNetworkConnection {
+            receiver,
+            selected_scenario: None,
+            purpose: StartupNetworkPurpose::Join,
+        });
+        app.poll_startup_network_connection();
+        assert!(app.pending_network_join.is_none());
+        assert!(app.game_option_input_dialog.is_none());
+        assert!(app.status_text.contains("join denied"));
+    }
+
+    #[test]
+    fn client_join_flow_submitted_password_is_frozen_for_the_worker() {
+        let mut app = new_classic_menu_app(800, 600);
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        app.pending_network_join = Some(
+            ClientSettings::new(address, "Player").with_join_attempts([
+                lc_network::NetworkAddress::new(lc_network::NetworkProtocol::Tcp, address),
+            ]),
+        );
+        app.open_network_join_password_dialog()
+            .expect("open network password prompt");
+
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "typed secret".to_string(),
+        )])
+        .expect("submit network password");
+
+        assert_eq!(
+            app.pending_network_join
+                .as_ref()
+                .expect("settings stay frozen while the worker starts")
+                .password
+                .as_bytes(),
+            b"typed secret"
+        );
+        assert!(app.startup_network_connection.is_some());
+        for _ in 0..100 {
+            app.poll_startup_network_connection();
+            if app.startup_network_connection.is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.pending_network_join.is_none());
     }
 
     #[test]

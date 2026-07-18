@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering},
     Arc,
 };
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -570,6 +572,10 @@ pub enum HostError {
 pub enum ClientError {
     #[error("failed to connect to host: {0}")]
     Connect(#[from] io::Error),
+    #[error("host rejected the client password: {message:?}")]
+    WrongPassword {
+        message: lc_engine::LegacyCString,
+    },
     #[error("handshake rejected: {0}")]
     Handshake(String),
     #[error("client resource publication failed: {0}")]
@@ -578,6 +584,138 @@ pub enum ClientError {
     GracefulPart(String),
     #[error("client loop terminated unexpectedly")]
     ClientLoopGone,
+}
+
+enum ClientAttemptError {
+    Retryable(ClientError),
+    WrongPassword(ClientError),
+    Terminal(ClientError),
+}
+
+impl ClientAttemptError {
+    fn into_error(self) -> ClientError {
+        match self {
+            Self::Retryable(error) | Self::WrongPassword(error) | Self::Terminal(error) => error,
+        }
+    }
+}
+
+impl From<ClientError> for ClientAttemptError {
+    fn from(error: ClientError) -> Self {
+        Self::Terminal(error)
+    }
+}
+
+enum ClientDialStream {
+    Tcp(TcpStream),
+    Udp(crate::ReliableUdpOwnedPeerStream),
+}
+
+type ClientConnectFuture =
+    Pin<Box<dyn Future<Output = Result<ClientDialStream, io::Error>> + Send + 'static>>;
+
+struct ClientDialAttempt {
+    index: usize,
+    future: Option<ClientConnectFuture>,
+    result: Option<Result<ClientDialStream, io::Error>>,
+}
+
+struct ClientDialRace {
+    attempts: Vec<ClientDialAttempt>,
+    deadline: tokio::time::Instant,
+}
+
+impl ClientDialRace {
+    fn new(addresses: impl IntoIterator<Item = crate::NetworkAddress>) -> Self {
+        Self {
+            attempts: addresses
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, address)| {
+                    if address.is_ip_null() {
+                        return None;
+                    }
+                    let endpoint = address.endpoint;
+                    let future: ClientConnectFuture = match address.protocol {
+                        crate::NetworkProtocol::Tcp => Box::pin(async move {
+                            TcpStream::connect(endpoint).await.map(ClientDialStream::Tcp)
+                        }),
+                        crate::NetworkProtocol::Udp => Box::pin(async move {
+                            let bind_address = if endpoint.is_ipv4() {
+                                SocketAddr::from(([0, 0, 0, 0], 0))
+                            } else {
+                                SocketAddr::from(([0_u16; 8], 0))
+                            };
+                            let hub = crate::ReliableUdpSessionHub::bind(bind_address)?;
+                            hub.connect_owned(endpoint).await.map(ClientDialStream::Udp)
+                        }),
+                        crate::NetworkProtocol::Unknown(_) => return None,
+                    };
+                    Some(ClientDialAttempt {
+                        index,
+                        future: Some(future),
+                        result: None,
+                    })
+                })
+                .collect(),
+            deadline: tokio::time::Instant::now() + HANDSHAKE_TIMEOUT,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.attempts.is_empty()
+    }
+
+    async fn next(&mut self) -> Option<(usize, Result<ClientDialStream, io::Error>)> {
+        if self.attempts.is_empty() {
+            return None;
+        }
+        let ready = tokio::time::timeout_at(
+            self.deadline,
+            poll_fn(|context| {
+                // Poll every fresh attempt before selecting a winner. This
+                // starts the transports together while retaining stable input
+                // order when multiple attempts are already ready.
+                for attempt in &mut self.attempts {
+                    let ready = attempt.future.as_mut().and_then(|future| {
+                        match future.as_mut().poll(context) {
+                            Poll::Ready(ready) => Some(ready),
+                            Poll::Pending => None,
+                        }
+                    });
+                    if let Some(ready) = ready {
+                        attempt.result = Some(ready);
+                        attempt.future = None;
+                    }
+                }
+                self.attempts
+                    .iter_mut()
+                    .enumerate()
+                    .find_map(|(position, attempt)| {
+                        attempt.result.take().map(|result| (position, result))
+                    })
+                    .map_or(Poll::Pending, Poll::Ready)
+            }),
+        )
+        .await;
+        match ready {
+            Ok((position, result)) => {
+                let attempt = self.attempts.remove(position);
+                Some((attempt.index, result))
+            }
+            Err(_) => {
+                let index = self.attempts[0].index;
+                self.attempts.clear();
+                Some((
+                    index,
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "connection attempt timed out",
+                    )),
+                ))
+            }
+        }
+    }
 }
 
 /// Starts the multiplayer host loop.
@@ -654,7 +792,11 @@ pub async fn connect_client(
     addr: SocketAddr,
     config: ClientConfig,
 ) -> Result<ClientHandle, ClientError> {
-    connect_client_from(TcpStream::connect(addr), config).await
+    connect_client_addresses(
+        [crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, addr)],
+        config,
+    )
+    .await
 }
 
 /// Connects one logical client over both session transports. Reliable UDP is
@@ -674,33 +816,109 @@ pub async fn connect_udp_client(
     addr: SocketAddr,
     config: ClientConfig,
 ) -> Result<ClientHandle, ClientError> {
-    let bind_address = if addr.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0_u16; 8], 0))
-    };
-    let hub = crate::ReliableUdpSessionHub::bind(bind_address).map_err(ClientError::Connect)?;
-    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, hub.connect_owned(addr))
-        .await
-        .map_err(|_| {
-            ClientError::Connect(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "reliable-UDP connection attempt timed out",
-            ))
-        })?
-        .map_err(ClientError::Connect)?;
-    let peer_addr = stream.peer_addr();
-    connect_client_stream(
-        stream,
-        Some(peer_addr),
-        crate::NetworkProtocol::Udp,
+    connect_client_addresses(
+        [crate::NetworkAddress::new(crate::NetworkProtocol::Udp, addr)],
         config,
-        None,
-        None,
     )
     .await
 }
 
+/// Connects through the first admitted route from an already prepared C++
+/// join-attempt list.
+///
+/// Callers joining from a game reference prepare that list with
+/// [`crate::NetworkGameReference::join_attempts`]. TCP and reliable-UDP
+/// transports are established concurrently, while their admission handshakes
+/// are serialized so only one route can create the logical client.
+pub async fn connect_client_addresses(
+    addresses: impl IntoIterator<Item = crate::NetworkAddress>,
+    config: ClientConfig,
+) -> Result<ClientHandle, ClientError> {
+    let addresses = addresses.into_iter().collect::<Vec<_>>();
+    let secondary_tcp_addr = addresses
+        .iter()
+        .find(|address| {
+            matches!(address.protocol, crate::NetworkProtocol::Tcp) && !address.is_ip_null()
+        })
+        .map(|address| address.endpoint);
+    let secondary_udp_addr = addresses
+        .iter()
+        .find(|address| {
+            matches!(address.protocol, crate::NetworkProtocol::Udp) && !address.is_ip_null()
+        })
+        .map(|address| address.endpoint);
+    let mut dials = ClientDialRace::new(addresses);
+    if dials.is_empty() {
+        return Err(ClientError::Connect(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "join address list contains no supported TCP or reliable-UDP endpoint",
+        )));
+    }
+    let mut failures = Vec::new();
+    let mut wrong_password: Option<(usize, ClientError)> = None;
+    while let Some((index, result)) = dials.next().await {
+        let stream = match result {
+            Ok(stream) => stream,
+            Err(error) => {
+                failures.push((index, ClientError::Connect(error)));
+                continue;
+            }
+        };
+        let admission = match stream {
+            ClientDialStream::Tcp(stream) => {
+                stream.set_nodelay(true).ok();
+                let peer_addr = stream.peer_addr().ok();
+                connect_client_stream_attempt(
+                    stream,
+                    peer_addr,
+                    crate::NetworkProtocol::Tcp,
+                    config.clone(),
+                    None,
+                    secondary_udp_addr,
+                    None,
+                )
+                .await
+            }
+            ClientDialStream::Udp(stream) => {
+                let peer_addr = stream.peer_addr();
+                connect_client_stream_attempt(
+                    stream,
+                    Some(peer_addr),
+                    crate::NetworkProtocol::Udp,
+                    config.clone(),
+                    None,
+                    None,
+                    secondary_tcp_addr,
+                )
+                .await
+            }
+        };
+        match admission {
+            Ok(client) => return Ok(client),
+            Err(ClientAttemptError::Retryable(error)) => failures.push((index, error)),
+            Err(ClientAttemptError::WrongPassword(error)) => {
+                if wrong_password
+                    .as_ref()
+                    .is_none_or(|(previous_index, _)| index < *previous_index)
+                {
+                    wrong_password = Some((index, error));
+                }
+            }
+            Err(ClientAttemptError::Terminal(error)) => return Err(error),
+        }
+    }
+    if let Some((_, error)) = wrong_password {
+        return Err(error);
+    }
+    failures.sort_by_key(|(index, _)| *index);
+    Err(failures
+        .into_iter()
+        .next()
+        .expect("a completed dial race retains its failure")
+        .1)
+}
+
+#[cfg(test)]
 async fn connect_client_from<F>(
     connection: F,
     config: ClientConfig,
@@ -711,6 +929,7 @@ where
     connect_client_from_inner(connection, config, None).await
 }
 
+#[cfg(test)]
 async fn connect_client_from_inner<F>(
     connection: F,
     config: ClientConfig,
@@ -750,6 +969,7 @@ where
         config,
         liveness,
         secondary_udp_addr,
+        None,
     )
     .await
 }
@@ -761,7 +981,33 @@ async fn connect_client_stream<S>(
     config: ClientConfig,
     liveness: Option<ConnectionLivenessState>,
     secondary_udp_addr: Option<SocketAddr>,
+    secondary_tcp_addr: Option<SocketAddr>,
 ) -> Result<ClientHandle, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    connect_client_stream_attempt(
+        stream,
+        host_peer_addr,
+        host_protocol,
+        config,
+        liveness,
+        secondary_udp_addr,
+        secondary_tcp_addr,
+    )
+    .await
+    .map_err(ClientAttemptError::into_error)
+}
+
+async fn connect_client_stream_attempt<S>(
+    stream: S,
+    host_peer_addr: Option<SocketAddr>,
+    host_protocol: crate::NetworkProtocol,
+    config: ClientConfig,
+    liveness: Option<ConnectionLivenessState>,
+    secondary_udp_addr: Option<SocketAddr>,
+    secondary_tcp_addr: Option<SocketAddr>,
+) -> Result<ClientHandle, ClientAttemptError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -803,7 +1049,26 @@ where
         }
         None => run_client_connection_handshake(&mut transport, request).await,
     }
-    .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    .map_err(|error| match error {
+        crate::ConnectionHandshakeError::PeerRejection {
+            message,
+            wrong_password: true,
+        } => ClientAttemptError::WrongPassword(ClientError::WrongPassword { message }),
+        error => {
+            let retryable = matches!(
+                &error,
+                crate::ConnectionHandshakeError::Transport(_)
+                    | crate::ConnectionHandshakeError::AdmissionTimeout
+                    | crate::ConnectionHandshakeError::PingTimeout
+            );
+            let error = ClientError::Handshake(error.to_string());
+            if retryable {
+                ClientAttemptError::Retryable(error)
+            } else {
+                ClientAttemptError::Terminal(error)
+            }
+        }
+    })?;
     let primary_local_connection_id = bootstrap.local_connection_id;
     let primary_remote_connection_id = bootstrap.remote_connection_id;
     let primary_liveness = bootstrap.liveness.clone();
@@ -812,7 +1077,8 @@ where
     if join_data.client_id < 0 {
         return Err(ClientError::Handshake(
             "host did not assign a client id in JoinData".to_string(),
-        ));
+        )
+        .into());
     }
     if !matches!(
         join_data.status.state,
@@ -821,7 +1087,8 @@ where
         return Err(ClientError::Handshake(format!(
             "host sent invalid JoinData status {}",
             join_data.status.state
-        )));
+        ))
+        .into());
     }
     let existing_clients = JoinClientRegistrySnapshot {
         clients: vec![local_core],
@@ -1029,32 +1296,40 @@ where
         transport,
         primary_liveness,
     );
-    let reconnect_addr = secondary_udp_addr.or_else(|| {
+    let udp_reconnect_addr = secondary_udp_addr.or_else(|| {
         matches!(host_protocol, crate::NetworkProtocol::Udp)
+            .then_some(host_peer_addr)
+            .flatten()
+    });
+    let tcp_reconnect_addr = secondary_tcp_addr.or_else(|| {
+        matches!(host_protocol, crate::NetworkProtocol::Tcp)
             .then_some(host_peer_addr)
             .flatten()
     });
     let connection_ids = Arc::new(AtomicU32::new(
         primary_local_connection_id.wrapping_add(1),
     ));
-    let mut udp_reconnect = reconnect_addr.map(|addr| ClientUdpReconnect {
+    let mut udp_reconnect = udp_reconnect_addr.map(|addr| ClientUdpReconnect {
         addr,
         local_core: assigned_local_core.clone(),
         expected_host_core: host_core.clone(),
         password: password.clone(),
         connection_ids: connection_ids.clone(),
     });
-    let tcp_reconnect = host_peer_addr
-        .filter(|_| matches!(host_protocol, crate::NetworkProtocol::Tcp))
-        .map(|addr| ClientTcpReconnect {
-            addr,
-            local_core: assigned_local_core,
-            expected_host_core: host_core,
-            password,
-            connection_ids,
-        });
+    let mut tcp_reconnect = tcp_reconnect_addr.map(|addr| ClientTcpReconnect {
+        addr,
+        local_core: assigned_local_core,
+        expected_host_core: host_core,
+        password,
+        connection_ids,
+    });
     let pending_secondary = if secondary_udp_addr.is_some() {
         udp_reconnect.as_mut().map(ClientUdpReconnect::start)
+    } else {
+        None
+    };
+    let pending_tcp = if secondary_tcp_addr.is_some() {
+        tcp_reconnect.as_mut().map(ClientTcpReconnect::start)
     } else {
         None
     };
@@ -1073,7 +1348,7 @@ where
         udp_reconnect,
         pending_secondary,
         tcp_reconnect,
-        None,
+        pending_tcp,
     ));
 
     Ok(ClientHandle {
@@ -11473,6 +11748,180 @@ mod tests {
             }
             other => panic!("expected bounded connection timeout, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_join_flow_races_prepared_tcp_addresses() {
+        // InitClient launches every prepared reference address before waiting
+        // for admission. Exclusive connection mode advances to another live
+        // route when the first transport drops during Conn/ConnRe
+        // (src/C4Network2.cpp:347-443; src/C4Network2IO.cpp:873-894).
+        let stale = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stale_address = stale.local_addr().unwrap();
+        let stale_route = tokio::spawn(async move {
+            let (mut stream, _) = stale.accept().await.unwrap();
+            let mut header_and_pid = [0; 6];
+            stream.read_exact(&mut header_and_pid).await.unwrap();
+            header_and_pid
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+
+        let mut client = connect_client_addresses(
+            [
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, stale_address),
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, live_address),
+            ],
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("the live route wins the transport race");
+
+        assert_eq!(
+            client
+                .take_join_data()
+                .expect("bootstrap JoinData remains available")
+                .client_id,
+            client.client_id() as i32
+        );
+        let stale_request = stale_route.await.unwrap();
+        assert_eq!(stale_request[0], 0xff);
+        assert_eq!(stale_request[5], 0x02, "the first route reached PID_Conn");
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_join_flow_accepts_a_udp_only_address_list() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = start_host(
+            listener,
+            HostConfig {
+                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let udp_address = host
+            .udp_local_addr()
+            .expect("configured reliable-UDP listener");
+        let mut client = connect_client_addresses(
+            [crate::NetworkAddress::new(
+                crate::NetworkProtocol::Udp,
+                udp_address,
+            )],
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("the UDP route completes admission");
+
+        assert_eq!(
+            client
+                .take_join_data()
+                .expect("bootstrap JoinData remains available")
+                .client_id,
+            client.client_id() as i32
+        );
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_join_flow_retains_a_prepared_opposite_transport_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp_address = listener.local_addr().unwrap();
+        let host = start_host(
+            listener,
+            HostConfig {
+                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let udp_address = host
+            .udp_local_addr()
+            .expect("configured reliable-UDP listener");
+        let client = connect_client_addresses(
+            [
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, tcp_address),
+                crate::NetworkAddress::new(crate::NetworkProtocol::Udp, udp_address),
+            ],
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("one prepared transport completes primary admission");
+
+        let routes = timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.accepted_routes().await;
+                if routes.len() == 2 {
+                    break routes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the prepared opposite transport was not retained");
+        assert!(routes.iter().all(|(_, client_id, _)| *client_id == client.client_id()));
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_join_flow_surfaces_wrong_password_and_allows_retry() {
+        // A negative ConnRe with WrongPassword set drives the outer password
+        // prompt loop; ordinary admission failures remain terminal
+        // (src/C4Network2.cpp:281-345,1448-1469).
+        let secret = lc_engine::LegacyCString::from_bytes(b"correct horse".to_vec()).unwrap();
+        let mut host_config = HostConfig::default();
+        host_config.password = secret.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+
+        let error = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player).with_password(
+                lc_engine::LegacyCString::from_bytes(b"wrong".to_vec()).unwrap(),
+            ),
+        )
+        .await
+        .expect_err("the first password is rejected");
+        assert!(matches!(
+            error,
+            ClientError::WrongPassword { message } if message.as_bytes() == b"wrong password"
+        ));
+
+        let client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player).with_password(secret),
+        )
+        .await
+        .expect("a fresh attempt with the replacement password succeeds");
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_join_flow_keeps_non_password_rejection_terminal() {
+        let mut host_config = HostConfig::default();
+        host_config.allow_join = false;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+
+        let error = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect_err("closed admission is not a password retry");
+        assert!(matches!(error, ClientError::Handshake(_)));
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

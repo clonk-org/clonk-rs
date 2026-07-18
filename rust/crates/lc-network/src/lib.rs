@@ -181,9 +181,9 @@ pub use search::{
     DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS, REFERENCE_QUERY_TIMEOUT,
 };
 pub use session::{
-    connect_client, connect_dual_client, connect_udp_client, start_host, ClientCommand,
-    ClientConfig, ClientError, ClientEvent, ClientHandle, HostCommand, HostConfig, HostError,
-    HostEvent, HostHandle, HostJoinSnapshot, HostedResourceFile, BROADCAST_CLIENT_ID,
+    connect_client, connect_client_addresses, connect_dual_client, connect_udp_client, start_host,
+    ClientCommand, ClientConfig, ClientError, ClientEvent, ClientHandle, HostCommand, HostConfig,
+    HostError, HostEvent, HostHandle, HostJoinSnapshot, HostedResourceFile, BROADCAST_CLIENT_ID,
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{
