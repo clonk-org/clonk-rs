@@ -73,7 +73,8 @@ fn is_wind_event(event: &AudioCommand) -> bool {
         AudioCommand::PlaySound { name, .. }
         | AudioCommand::StopSound { name, .. }
         | AudioCommand::SetSoundVolume { name, .. } => name.eq_ignore_ascii_case("Wind"),
-        AudioCommand::PlayMusic { .. }
+        AudioCommand::DetachObjectSounds { .. }
+        | AudioCommand::PlayMusic { .. }
         | AudioCommand::StopMusic
         | AudioCommand::SetMusicLevel { .. }
         | AudioCommand::SetMusicPlaylist { .. } => false,

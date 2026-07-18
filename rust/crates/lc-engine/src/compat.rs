@@ -10182,7 +10182,11 @@ fn mark_object_status_deleted(context: &mut EffectHostContext, target: ObjectId)
     }
 }
 
-fn retire_object_info_and_clear_references(context: &mut EffectHostContext, target: ObjectId) {
+fn retire_object_info_and_clear_references(
+    context: &mut EffectHostContext,
+    target: ObjectId,
+    last_position: Option<Vector2>,
+) {
     let link = context
         .object_scope(target)
         .and_then(ObjectScopeContext::info_link);
@@ -10197,7 +10201,7 @@ fn retire_object_info_and_clear_references(context: &mut EffectHostContext, targ
     if let Some(scope) = context.object_scope_mut(target) {
         scope.clear_info_for_removal();
     }
-    context.clear_non_player_script_object_references(target);
+    context.clear_non_player_script_object_references(target, last_position);
 }
 
 fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, RuntimeError> {
@@ -10251,8 +10255,16 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
     let exit_position = HOST_CONTEXT.with(|cell| {
         cell.borrow()
             .as_ref()
-            .and_then(|context| context.get_world_object(target))
-            .map(|object| object.position)
+            .and_then(|context| {
+                context
+                    .object_scope(target)
+                    .map(|scope| scope.current_position)
+                    .or_else(|| {
+                        context
+                            .get_world_object(target)
+                            .map(|object| object.position)
+                    })
+            })
     });
 
     HOST_CONTEXT.with(|cell| {
@@ -10304,7 +10316,7 @@ fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, Ru
             // SetOCF on the surviving parent (C4Object.cpp:297-305).
             refresh_container_collection_ocf(context, container);
         }
-        retire_object_info_and_clear_references(context, target);
+        retire_object_info_and_clear_references(context, target, exit_position);
     });
     clear_player_object_pointers_host(target);
     HOST_CONTEXT.with(|cell| {
@@ -41451,10 +41463,18 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 let Some(context) = borrow.as_mut() else {
                     return false;
                 };
+                let last_position = context
+                    .object_scope(target)
+                    .map(|scope| scope.current_position)
+                    .or_else(|| {
+                        context
+                            .get_world_object(target)
+                            .map(|object| object.position)
+                    });
                 mark_object_status_deleted(context, target);
                 let removed = context.cancel_pending_spawn(target);
                 if removed {
-                    retire_object_info_and_clear_references(context, target);
+                    retire_object_info_and_clear_references(context, target, last_position);
                 }
                 removed
             });
@@ -41955,6 +41975,10 @@ pub struct AudioRegistry {
     /// explicit empty filter produced by script nil/omitted arguments.
     music_playlist: Option<String>,
     looping: HashMap<AudioInstanceKey, AudioInstance>,
+    /// Object ids that may still own a frontend one-shot instance. The engine
+    /// cannot observe channel completion, so retain an id until its object is
+    /// removed; loops remain exact in `looping`.
+    attached_targets: HashSet<ObjectId>,
     events: Vec<AudioCommand>,
 }
 
@@ -41995,6 +42019,10 @@ impl AudioRegistry {
             .iter()
             .rev()
             .find_map(|event| match event {
+                AudioCommand::DetachObjectSounds {
+                    target: event_target,
+                    ..
+                } if key.target == Some(*event_target) => Some(false),
                 AudioCommand::PlaySound {
                     name,
                     target: event_target,
@@ -42095,6 +42123,11 @@ impl AudioRegistry {
         multiple: bool,
         custom_falloff: Option<i32>,
     ) {
+        if !looped {
+            if let Some(target) = target {
+                self.attached_targets.insert(target);
+            }
+        }
         if looped && !multiple {
             let key = AudioInstanceKey {
                 name: normalize_sound_name(name),
@@ -42132,6 +42165,38 @@ impl AudioRegistry {
             multiple,
             custom_falloff,
         });
+    }
+
+    pub(crate) fn note_attached_sound(&mut self, target: ObjectId) {
+        self.attached_targets.insert(target);
+    }
+
+    pub(crate) fn note_detached_sounds(&mut self, target: ObjectId) {
+        self.attached_targets.remove(&target);
+    }
+
+    pub(crate) fn clear_sound_instances(&mut self) {
+        self.looping.clear();
+        self.attached_targets.clear();
+        self.events.retain(|event| {
+            matches!(
+                event,
+                AudioCommand::PlayMusic { .. }
+                    | AudioCommand::StopMusic
+                    | AudioCommand::SetMusicLevel { .. }
+                    | AudioCommand::SetMusicPlaylist { .. }
+            )
+        });
+    }
+
+    pub(crate) fn detach_object_sounds(&mut self, target: ObjectId, position: Vector2) {
+        let was_attached = self.attached_targets.remove(&target);
+        let looping_before = self.looping.len();
+        self.looping
+            .retain(|key, _| key.target != Some(target));
+        if was_attached || self.looping.len() != looping_before {
+            self.events.push(AudioCommand::DetachObjectSounds { target, position });
+        }
     }
 
     pub fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
@@ -44794,7 +44859,23 @@ impl EffectHostContext {
         }
     }
 
-    fn clear_non_player_script_object_references(&mut self, target: ObjectId) {
+    fn clear_non_player_script_object_references(
+        &mut self,
+        target: ObjectId,
+        last_position: Option<Vector2>,
+    ) {
+        if let Some(position) = last_position
+            .or_else(|| {
+                self.object_scope(target)
+                    .map(|scope| scope.current_position)
+            })
+            .or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.position)
+            })
+        {
+            self.audio.detach_object_sounds(target, position);
+        }
         self.removed_object_references.insert(target);
         let removed = &self.removed_object_references;
 
@@ -54301,6 +54382,70 @@ func Announce()
         assert!(audio.is_looping(&split_utf8, target));
         audio.stop_sound(&split_utf8, target);
         assert!(!audio.is_looping("\u{ff}", target));
+    }
+
+    #[test]
+    fn remove_object_detaches_target_sounds_in_native_event_order() {
+        let target = ObjectId::new(1);
+        let (result, outcome) = with_object_host_context(|| {
+            sound(&[
+                Value::String("GlobalLoop".into()),
+                Value::Bool(true),
+                Value::Nil,
+                Value::Int(100),
+                Value::Int(0),
+                Value::Int(1),
+            ])?;
+            sound(&[
+                Value::String("Fire".into()),
+                Value::Bool(false),
+                Value::Nil,
+                Value::Int(100),
+                Value::Int(0),
+                Value::Int(1),
+            ])?;
+            sound(&[Value::String("Impact".into())])?;
+            remove_object(&[])
+        });
+
+        assert_eq!(result.expect("RemoveObject succeeds"), Value::Bool(true));
+        assert_eq!(
+            outcome.audio.events,
+            vec![
+                AudioCommand::PlaySound {
+                    name: "GlobalLoop".into(),
+                    target: None,
+                    volume: 100,
+                    looped: true,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+                AudioCommand::PlaySound {
+                    name: "Fire".into(),
+                    target: Some(target),
+                    volume: 100,
+                    looped: true,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+                AudioCommand::PlaySound {
+                    name: "Impact".into(),
+                    target: Some(target),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+                AudioCommand::DetachObjectSounds {
+                    target,
+                    position: Vector2::ZERO,
+                },
+            ]
+        );
+        assert!(outcome.audio.state.is_looping("GlobalLoop", None));
+        assert!(!outcome.audio.state.is_looping("Fire", Some(target)));
+        assert!(!outcome.audio.state.is_playing("Fire", Some(target)));
+        assert!(!outcome.audio.state.is_playing("Impact", Some(target)));
     }
 
     #[test]

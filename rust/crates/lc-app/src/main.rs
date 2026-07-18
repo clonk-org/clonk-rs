@@ -5902,6 +5902,15 @@ impl AudioContext {
                         tracing::error!(sound = %name, error = %err, "failed to play sound");
                     }
                 }
+                AudioCommand::DetachObjectSounds { target, position } => {
+                    self.detach_object_sounds(
+                        *target,
+                        *position,
+                        snapshot,
+                        focus,
+                        viewport_center,
+                    );
+                }
                 AudioCommand::StopSound { name, target } => {
                     self.stop_sound(name, *target);
                 }
@@ -6021,7 +6030,7 @@ impl AudioContext {
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
         // caller explicitly requests multiple instances (C4Script.cpp:
         // 2317-2319). Do this before asking the fixed-size mixer for a slot.
-        if !multiple && self.active_channels.contains_key(&key) {
+        if !multiple && self.active_channel_key(name, target).is_some() {
             return Ok(false);
         }
         let Some((handle, sample_key)) = self.ensure_sound_with_key(name)? else {
@@ -6057,7 +6066,7 @@ impl AudioContext {
         } else {
             None
         };
-        let info = ChannelInfo {
+        let mut info = ChannelInfo {
             channel,
             handle,
             duration_ms,
@@ -6067,8 +6076,10 @@ impl AudioContext {
             volume,
             custom_falloff,
             started_at: Instant::now(),
+            detached_mix: None,
         };
-        let (mut mix_volume, pan) = compute_mix_values(&info, snapshot, focus, viewport_center);
+        let (mut mix_volume, pan) =
+            compute_mix_values(&mut info, snapshot, focus, viewport_center);
         mix_volume *= self.options.sound_volume;
         if let Some(channel) = channel {
             self.system
@@ -6079,10 +6090,75 @@ impl AudioContext {
     }
 
     fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
-        let key = SoundInstanceKey::new(name, target);
+        let Some(key) = self.active_channel_key(name, target) else {
+            return;
+        };
         if let Some(info) = self.active_channels.remove(&key) {
             if let Some(channel) = info.channel {
                 self.system.halt_channel(channel);
+            }
+        }
+    }
+
+    fn active_channel_key(
+        &self,
+        name: &str,
+        target: Option<ObjectId>,
+    ) -> Option<SoundInstanceKey> {
+        let requested = SoundInstanceKey::new(name, target);
+        // Detached one-shots retain their storage key so they cannot replace
+        // an already-playing global channel, but C++ FindInst observes their
+        // cleared object pointer. Prefer the true global entry when both
+        // coexist, then fall back to a detached entry with the same request.
+        if self
+            .active_channels
+            .get(&requested)
+            .is_some_and(|info| info.target == target)
+        {
+            return Some(requested);
+        }
+        self.active_channels.iter().find_map(|(key, info)| {
+            (key.name == requested.name && info.target == target).then(|| key.clone())
+        })
+    }
+
+    fn detach_object_sounds(
+        &mut self,
+        target: ObjectId,
+        position: Vector2,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
+    ) {
+        let detached_mix = compute_positional_mix(position, snapshot, focus, viewport_center);
+        let mut looping = Vec::new();
+        let mut updates = Vec::new();
+        for (key, info) in &mut self.active_channels {
+            if info.target != Some(target) {
+                continue;
+            }
+            if info.looped {
+                looping.push(key.clone());
+                continue;
+            }
+            info.target = None;
+            info.detached_mix = Some(detached_mix);
+            if let Some(channel) = info.channel {
+                updates.push(channel);
+            }
+        }
+        for channel in updates {
+            self.system.channel_set_volume_and_pan(
+                channel,
+                detached_mix.0 * self.options.sound_volume,
+                detached_mix.1,
+            );
+        }
+        for key in looping {
+            if let Some(info) = self.active_channels.remove(&key) {
+                if let Some(channel) = info.channel {
+                    self.system.halt_channel(channel);
+                }
             }
         }
     }
@@ -6096,9 +6172,17 @@ impl AudioContext {
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
     ) {
-        let key = SoundInstanceKey::new(name, target);
+        let Some(key) = self.active_channel_key(name, target) else {
+            return;
+        };
         if let Some(info) = self.active_channels.get_mut(&key) {
             info.volume = volume;
+            if info.target.is_none() {
+                if let Some((_, pan)) = info.detached_mix {
+                    info.detached_mix =
+                        Some(((f32::from(volume) / 100.0).clamp(0.0, 1.0), pan));
+                }
+            }
             let Some(channel) = info.channel else {
                 return;
             };
@@ -6120,6 +6204,16 @@ impl AudioContext {
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
         if !self.options.sound_enabled {
             for (key, info) in self.active_channels.iter_mut() {
+                if info
+                    .target
+                    .is_some_and(|target| snapshot.object(target).is_none())
+                {
+                    if info.looped {
+                        finished.push(key.clone());
+                        continue;
+                    }
+                    info.target = None;
+                }
                 if let Some(channel) = info.channel {
                     if !self.system.channel_is_playing(channel) {
                         finished.push(key.clone());
@@ -6132,11 +6226,25 @@ impl AudioContext {
                 }
             }
             for key in finished {
-                self.active_channels.remove(&key);
+                if let Some(info) = self.active_channels.remove(&key) {
+                    if let Some(channel) = info.channel {
+                        self.system.halt_channel(channel);
+                    }
+                }
             }
             return;
         }
         for (key, info) in self.active_channels.iter_mut() {
+            if info
+                .target
+                .is_some_and(|target| snapshot.object(target).is_none())
+            {
+                if info.looped {
+                    finished.push(key.clone());
+                    continue;
+                }
+                info.target = None;
+            }
             let channel = match info.channel {
                 Some(channel) if self.system.channel_is_playing(channel) => channel,
                 Some(_) => {
@@ -6273,6 +6381,11 @@ struct ChannelInfo {
     volume: u8,
     custom_falloff: Option<i32>,
     started_at: Instant,
+    /// C4SoundSystem::Instance::DetachObj replaces the scripted volume/pan
+    /// with GetVolumeByPos at the object's final position. While attached,
+    /// cache that raw positional pair as a fallback for legacy/missed detach
+    /// events; once target is None it is the immutable detached mix.
+    detached_mix: Option<(f32, f32)>,
 }
 
 impl ChannelInfo {
@@ -40925,25 +41038,35 @@ fn find_music_group(paths: &AppPaths) -> Result<PathBuf> {
 }
 
 fn compute_mix_values(
-    info: &ChannelInfo,
+    info: &mut ChannelInfo,
     snapshot: &SimulationSnapshot,
     focus: Option<&ObjectSnapshot>,
     viewport_center: Vector2,
 ) -> (f32, f32) {
-    compute_mix_values_for(
-        info.volume,
-        info.target,
-        info.custom_falloff,
-        snapshot,
-        focus,
-        viewport_center,
-    )
+    const AUDIBILITY_RADIUS: f32 = 700.0;
+
+    let base_volume = (info.volume as f32 / 100.0).clamp(0.0, 1.0);
+    let Some(target_id) = info.target else {
+        return info.detached_mix.unwrap_or((base_volume, 0.0));
+    };
+    let Some(target) = snapshot.object(target_id) else {
+        return info.detached_mix.unwrap_or((base_volume, 0.0));
+    };
+    let (mut audibility, pan) =
+        compute_positional_mix(target.position, snapshot, focus, viewport_center);
+    info.detached_mix = Some((audibility, pan));
+    if let Some(falloff_distance) = info.custom_falloff {
+        if falloff_distance != 0 {
+            let scale = AUDIBILITY_RADIUS / falloff_distance as f32;
+            audibility = (1.0 + (audibility - 1.0) * scale).clamp(0.0, 1.0);
+        }
+    }
+
+    (base_volume * audibility, pan)
 }
 
-fn compute_mix_values_for(
-    volume: u8,
-    target_id: Option<ObjectId>,
-    custom_falloff: Option<i32>,
+fn compute_positional_mix(
+    source: Vector2,
     snapshot: &SimulationSnapshot,
     focus: Option<&ObjectSnapshot>,
     viewport_center: Vector2,
@@ -40951,16 +41074,6 @@ fn compute_mix_values_for(
     const AUDIBILITY_RADIUS: f32 = 700.0;
     const PAN_DIVISOR: f32 = 5.0;
     const PAN_LIMIT: f32 = 100.0;
-
-    let base_volume = (volume as f32 / 100.0).clamp(0.0, 1.0);
-    let Some(target_id) = target_id else {
-        return (base_volume, 0.0);
-    };
-    let Some(target) = snapshot.object(target_id) else {
-        return (base_volume, 0.0);
-    };
-    let source = target.position;
-
     let mut listeners: Vec<Vector2> = Vec::new();
     if let Some(focus_object) = focus {
         listeners.push(focus_object.position);
@@ -40981,13 +41094,7 @@ fn compute_mix_values_for(
         let dx = (source.x - listener.x) as f32;
         let dy = (source.y - listener.y) as f32;
         let distance = (dx * dx + dy * dy).sqrt();
-        let mut audibility = (1.0 - distance / AUDIBILITY_RADIUS).clamp(0.0, 1.0);
-        if let Some(falloff_distance) = custom_falloff {
-            if falloff_distance != 0 {
-                let scale = AUDIBILITY_RADIUS / falloff_distance as f32;
-                audibility = (1.0 + (audibility - 1.0) * scale).clamp(0.0, 1.0);
-            }
-        }
+        let audibility = (1.0 - distance / AUDIBILITY_RADIUS).clamp(0.0, 1.0);
         best_audibility = best_audibility.max(audibility);
     }
 
@@ -41012,7 +41119,36 @@ fn compute_mix_values_for(
     }
     let pan = (pan_accumulator.clamp(-PAN_LIMIT, PAN_LIMIT)) / PAN_LIMIT;
 
-    (base_volume * best_audibility, pan.clamp(-1.0, 1.0))
+    (best_audibility, pan.clamp(-1.0, 1.0))
+}
+
+fn compute_mix_values_for(
+    volume: u8,
+    target_id: Option<ObjectId>,
+    custom_falloff: Option<i32>,
+    snapshot: &SimulationSnapshot,
+    focus: Option<&ObjectSnapshot>,
+    viewport_center: Vector2,
+) -> (f32, f32) {
+    const AUDIBILITY_RADIUS: f32 = 700.0;
+
+    let base_volume = (f32::from(volume) / 100.0).clamp(0.0, 1.0);
+    let Some(target_id) = target_id else {
+        return (base_volume, 0.0);
+    };
+    let Some(target) = snapshot.object(target_id) else {
+        return (base_volume, 0.0);
+    };
+    let (mut audibility, pan) =
+        compute_positional_mix(target.position, snapshot, focus, viewport_center);
+    if let Some(falloff_distance) = custom_falloff {
+        if falloff_distance != 0 {
+            let scale = AUDIBILITY_RADIUS / falloff_distance as f32;
+            audibility = (1.0 + (audibility - 1.0) * scale).clamp(0.0, 1.0);
+        }
+    }
+
+    (base_volume * audibility, pan)
 }
 
 fn walker_script() -> &'static str {
@@ -46772,6 +46908,173 @@ func Award()
         );
         assert!((volume - 0.8).abs() < 1e-6);
         assert_eq!(pan, 0.0);
+    }
+
+    #[test]
+    fn object_removal_detach_stops_the_attached_loop_within_one_frame() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("SoundDetach.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Fire.wav"), silent_pcm_wav(10_000))
+            .expect("write loop sound");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let listener = make_object(1, "LIST", Vector2::new(1000, 1000));
+        let source = make_object(2, "FIRE", Vector2::new(1350, 1000));
+        let initial = make_snapshot(
+            vec![listener.clone(), source.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+        audio
+            .start_sound(
+                "Fire",
+                Some(source.id),
+                100,
+                true,
+                false,
+                None,
+                &initial,
+                Some(&listener),
+                listener.position,
+            )
+            .expect("loop starts");
+        let key = SoundInstanceKey::new("Fire", Some(source.id));
+        let channel = audio.active_channels[&key]
+            .channel
+            .expect("enabled loop has a mixer channel");
+
+        let mut removed = make_snapshot(
+            vec![listener.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+        removed.audio = vec![AudioCommand::DetachObjectSounds {
+            target: source.id,
+            position: source.position,
+        }];
+        let mut runtime_music_enabled = false;
+        audio.process_audio(
+            &removed,
+            Some(&listener),
+            listener.position,
+            &mut runtime_music_enabled,
+        );
+
+        assert!(!audio.active_channels.contains_key(&key));
+        assert!(!audio.system.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn object_removal_detach_freezes_one_shot_at_last_positional_mix() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("SoundDetach.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Impact.wav"), silent_pcm_wav(10_000))
+            .expect("write one-shot sound");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let listener = make_object(1, "LIST", Vector2::new(1000, 1000));
+        let source = make_object(2, "IMPT", Vector2::new(1350, 1000));
+        let initial = make_snapshot(
+            vec![listener.clone(), source.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+        audio
+            .start_sound(
+                "Impact",
+                Some(source.id),
+                40,
+                false,
+                false,
+                Some(1400),
+                &initial,
+                Some(&listener),
+                listener.position,
+            )
+            .expect("one-shot starts");
+        let key = SoundInstanceKey::new("Impact", Some(source.id));
+        let channel = audio.active_channels[&key]
+            .channel
+            .expect("enabled one-shot has a mixer channel");
+
+        let mut removed = make_snapshot(
+            vec![listener.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+        removed.audio = vec![AudioCommand::DetachObjectSounds {
+            target: source.id,
+            position: source.position,
+        }];
+        let mut runtime_music_enabled = false;
+        audio.process_audio(
+            &removed,
+            Some(&listener),
+            listener.position,
+            &mut runtime_music_enabled,
+        );
+
+        let info = &audio.active_channels[&key];
+        assert_eq!(info.target, None);
+        let (volume, pan) = info.detached_mix.expect("detached mix is frozen");
+        let frozen_mix = (volume, pan);
+        assert!((volume - 0.5).abs() < 1e-6, "volume={volume}");
+        assert!((pan - 0.7).abs() < 1e-6, "pan={pan}");
+        assert!(audio.system.channel_is_playing(channel));
+
+        let moved_listener = make_object(1, "LIST", Vector2::new(2000, 1000));
+        let moved = make_snapshot(vec![moved_listener.clone()], Vec::new());
+        audio.update_channels(
+            &moved,
+            Some(&moved_listener),
+            moved_listener.position,
+        );
+        assert_eq!(audio.active_channels[&key].detached_mix, Some(frozen_mix));
+        assert!(!audio
+            .try_start_sound(
+                "Impact",
+                None,
+                100,
+                false,
+                true,
+                None,
+                &moved,
+                Some(&moved_listener),
+                moved_listener.position,
+            )
+            .expect("global near-dedup check succeeds"));
+
+        audio.stop_sound("Impact", None);
+        assert!(!audio.active_channels.contains_key(&key));
+        assert!(!audio.system.channel_is_playing(channel));
     }
 
     #[test]
@@ -84856,6 +85159,7 @@ protected func InputCallback(string answer, int player)
                 volume: 100,
                 custom_falloff: None,
                 started_at: Instant::now(),
+                detached_mix: None,
             },
         );
         existing_sound

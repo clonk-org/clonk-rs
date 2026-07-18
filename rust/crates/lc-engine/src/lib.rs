@@ -16012,6 +16012,10 @@ pub enum AudioCommand {
         #[serde(default)]
         custom_falloff: Option<i32>,
     },
+    DetachObjectSounds {
+        target: ObjectId,
+        position: Vector2,
+    },
     StopSound {
         name: String,
         target: Option<ObjectId>,
@@ -29874,6 +29878,19 @@ impl Engine {
         let mut snapshot = self.snapshot();
         snapshot.hud.scoreboard_presentations = self.take_scoreboard_presentations();
         snapshot.menu_requests = self.pending_menu_requests.drain(..).collect();
+        for command in &self.pending_audio {
+            match command {
+                AudioCommand::PlaySound {
+                    target: Some(target),
+                    looped: false,
+                    ..
+                } => self.audio_registry.note_attached_sound(*target),
+                AudioCommand::DetachObjectSounds { target, .. } => {
+                    self.audio_registry.note_detached_sounds(*target);
+                }
+                _ => {}
+            }
+        }
         snapshot.audio = self.pending_audio.drain(..).collect();
         Ok(snapshot)
     }
@@ -32262,6 +32279,19 @@ impl Engine {
         // Game.Input is not part of EngineState. A pre-load direct-removal
         // request must not fire against players from the restored game.
         self.pending_remove_player_controls.clear();
+        // Sound instances are presentation state and are not serialized by
+        // C4SoundSystem. Loading a game starts without channels or object
+        // bindings from the discarded world.
+        self.audio_registry.clear_sound_instances();
+        self.pending_audio.retain(|command| {
+            matches!(
+                command,
+                AudioCommand::PlayMusic { .. }
+                    | AudioCommand::StopMusic
+                    | AudioCommand::SetMusicLevel { .. }
+                    | AudioCommand::SetMusicPlaylist { .. }
+            )
+        });
 
         self.frame = state.frame;
         self.game_time = state.game_time;
@@ -50025,17 +50055,60 @@ impl Engine {
         }
     }
 
+    fn detach_audio_for_object(&mut self, target: ObjectId, position: Vector2) {
+        if self.pending_audio.iter().any(|command| {
+            matches!(
+                command,
+                AudioCommand::PlaySound {
+                    target: Some(event_target),
+                    looped: false,
+                    ..
+                } if *event_target == target
+            )
+        }) {
+            self.audio_registry.note_attached_sound(target);
+        }
+        self.audio_registry.detach_object_sounds(target, position);
+        for event in self.audio_registry.take_events() {
+            let duplicate_detach = matches!(
+                &event,
+                AudioCommand::DetachObjectSounds {
+                    target: event_target,
+                    ..
+                } if *event_target == target
+            ) && self.pending_audio.iter().any(|pending| {
+                matches!(
+                    pending,
+                    AudioCommand::DetachObjectSounds {
+                        target: pending_target,
+                        ..
+                    } if *pending_target == target
+                )
+            });
+            if !duplicate_detach {
+                self.pending_audio.push(event);
+            }
+        }
+    }
+
     fn detach_destroyed_objects(&mut self) -> Result<(), EngineError> {
         self.clear_destroyed_object_layers();
         let mut updates = Vec::new();
-        let destroyed: Vec<ObjectId> = self
+        let destroyed_objects: Vec<(ObjectId, Vector2)> = self
             .objects
             .iter()
             .filter(|object| {
                 object.destroyed || matches!(object.state.status, ObjectStatus::Deleted)
             })
-            .map(|object| object.id)
+            .map(|object| (object.id, object.state.position))
             .collect();
+        let destroyed: Vec<ObjectId> = destroyed_objects
+            .iter()
+            .map(|(object, _)| *object)
+            .collect();
+        for (object, position) in destroyed_objects {
+            self.detach_audio_for_object(object, position);
+        }
         for object_id in &destroyed {
             self.clear_effect_command_target(*object_id);
         }
@@ -50164,6 +50237,12 @@ impl Engine {
     /// Synchronous `FirstRef->Set0(); Game.ClearPointers(this)` tail of
     /// AssignRemoval (C4Object.cpp:302-304; C4Game.cpp:1018-1031).
     fn clear_object_references_for_removal(&mut self, target: ObjectId) -> Result<(), EngineError> {
+        if let Some(position) = self
+            .find_object_index(target)
+            .map(|index| self.objects[index].state.position)
+        {
+            self.detach_audio_for_object(target, position);
+        }
         let remaining_numbers = self
             .objects
             .iter()
@@ -50256,24 +50335,6 @@ impl Engine {
             self.active_message_board_input = None;
         }
         self.transfer_zones.clear(target);
-        self.pending_audio.retain(|command| match command {
-            AudioCommand::PlaySound {
-                target: audio_target,
-                ..
-            }
-            | AudioCommand::StopSound {
-                target: audio_target,
-                ..
-            }
-            | AudioCommand::SetSoundVolume {
-                target: audio_target,
-                ..
-            } => *audio_target != Some(target),
-            AudioCommand::PlayMusic { .. }
-            | AudioCommand::StopMusic
-            | AudioCommand::SetMusicLevel { .. }
-            | AudioCommand::SetMusicPlaylist { .. } => true,
-        });
         self.clear_effect_command_target(target);
 
         let active = self
@@ -63909,5 +63970,148 @@ mod landscape_push_pull_regression {
             cpp_surface8
         );
         assert_eq!(enabled.rng, LcgRng::seed_from_u64(0x4c_30_32_33));
+    }
+}
+
+#[cfg(test)]
+mod audio_detach_regression {
+    use super::*;
+
+    fn sound_source_engine() -> (Engine, ObjectId, Vector2) {
+        let mut engine = Engine::with_seed(0x4c_30_30_31);
+        engine
+            .register_definition(
+                Definition::from_script("SND1", "Sound source", "")
+                    .expect("sound definition compiles"),
+            )
+            .expect("sound definition registers");
+        let position = Vector2::new(321, 654);
+        let object = engine
+            .spawn_object(SpawnConfig::new("SND1").with_position(position))
+            .expect("sound source spawns");
+        (engine, object, position)
+    }
+
+    fn impact_command(object: ObjectId) -> AudioCommand {
+        AudioCommand::PlaySound {
+            name: "Impact".into(),
+            target: Some(object),
+            volume: 100,
+            looped: false,
+            multiple: false,
+            custom_falloff: None,
+        }
+    }
+
+    #[test]
+    fn native_destroy_detaches_loop_at_the_objects_final_position() {
+        let (mut engine, object, position) = sound_source_engine();
+        engine
+            .audio_registry
+            .play_sound("Fire", Some(object), 100, true, false, None);
+        engine.audio_registry.take_events();
+        engine.pending_audio.clear();
+
+        let index = engine.find_object_index(object).expect("source remains");
+        engine.objects[index].mark_destroyed();
+        let snapshot = engine.tick().expect("native removal frame succeeds");
+
+        assert!(snapshot.object(object).is_none());
+        assert!(!engine
+            .audio_registry
+            .is_looping("Fire", Some(object)));
+        assert!(!engine
+            .audio_registry
+            .is_playing("Fire", Some(object)));
+        assert_eq!(
+            snapshot.audio,
+            vec![AudioCommand::DetachObjectSounds {
+                target: object,
+                position,
+            }]
+        );
+    }
+
+    #[test]
+    fn native_destroy_without_object_audio_emits_no_detach_command() {
+        let (mut engine, object, _) = sound_source_engine();
+        let index = engine.find_object_index(object).expect("source remains");
+        engine.objects[index].mark_destroyed();
+
+        let snapshot = engine.tick().expect("native removal frame succeeds");
+
+        assert!(snapshot.audio.is_empty());
+    }
+
+    #[test]
+    fn same_frame_direct_one_shot_detaches_once_in_command_order() {
+        let (mut engine, object, position) = sound_source_engine();
+        let play = impact_command(object);
+        engine.pending_audio.push(play.clone());
+        let index = engine.find_object_index(object).expect("source remains");
+        engine.objects[index].mark_destroyed();
+
+        let snapshot = engine.tick().expect("native removal frame succeeds");
+
+        assert_eq!(
+            snapshot.audio,
+            vec![
+                play,
+                AudioCommand::DetachObjectSounds {
+                    target: object,
+                    position,
+                },
+            ]
+        );
+        engine.audio_registry.detach_object_sounds(object, position);
+        assert!(engine.audio_registry.take_events().is_empty());
+    }
+
+    #[test]
+    fn delivered_one_shot_target_is_remembered_until_later_removal() {
+        let (mut engine, object, position) = sound_source_engine();
+        let play = impact_command(object);
+        engine.pending_audio.push(play.clone());
+        assert_eq!(
+            engine.tick().expect("delivery frame succeeds").audio,
+            vec![play]
+        );
+
+        let index = engine.find_object_index(object).expect("source remains");
+        engine.objects[index].mark_destroyed();
+        assert_eq!(
+            engine.tick().expect("removal frame succeeds").audio,
+            vec![AudioCommand::DetachObjectSounds {
+                target: object,
+                position,
+            }]
+        );
+    }
+
+    #[test]
+    fn restore_discards_sound_bindings_from_the_replaced_world() {
+        let (mut engine, object, _) = sound_source_engine();
+        let state = engine.capture_state();
+        engine
+            .audio_registry
+            .play_sound("Impact", Some(object), 100, false, false, None);
+        engine
+            .pending_audio
+            .extend(engine.audio_registry.take_events());
+
+        engine.restore_state(&state).expect("state restores");
+        let index = engine
+            .find_object_index(object)
+            .expect("restored source remains");
+        engine.objects[index].mark_destroyed();
+        let snapshot = engine.tick().expect("restored removal succeeds");
+
+        assert_eq!(
+            snapshot.audio,
+            vec![AudioCommand::SetMusicPlaylist {
+                playlist: None,
+                restart: false,
+            }]
+        );
     }
 }
