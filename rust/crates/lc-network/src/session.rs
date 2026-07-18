@@ -16,13 +16,13 @@ use crate::legacy::{
 };
 use crate::{
     aggregate_ready_batch, reconcile_join_client_registry, run_client_connection_handshake,
-    run_host_connection_handshake, AdmissionDecision, BarrierEffect, ClientId, ConnectionAction,
-    ConnectionLivenessState, ControlBacklog, ControlCoordinator, ControlDelivery, ControlMessage,
-    ControlOutcome, ControlPacket, HostAdmission, HostAdmissionRequest, JoinClientRegistrySnapshot,
-    JoinDataEnvelope, LobbyCountdownPacket, MissingRange, NetworkStatus, ParticipantKind,
-    ReadyBatch, ReadyCheckPacket, RemoteBarrierState, ResourcePacket, ResyncScheduler,
-    StatusBarrier, Tick, TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY,
-    NETWORK_STATE_PAUSE,
+    run_host_connection_handshake, AdmissionDecision, BarrierEffect, BarrierPhase, ClientId,
+    ConnectionAction, ConnectionLivenessState, ControlBacklog, ControlCoordinator, ControlDelivery,
+    ControlMessage, ControlOutcome, ControlPacket, HostAdmission, HostAdmissionRequest,
+    JoinClientRegistrySnapshot, JoinDataEnvelope, LobbyCountdownPacket, MissingRange, NetworkStatus,
+    ParticipantKind, ReadyBatch, ReadyCheckPacket, RemoteBarrierState, ResourcePacket,
+    ResyncScheduler, StatusBarrier, Tick, TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO,
+    NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1845,6 +1845,7 @@ struct HostState {
     closed_routes: crate::post_mortem::ClosedConnectionRouter,
     pending_sync: Vec<lc_engine::ControlPacket>,
     status_barrier: StatusBarrier,
+    game_started: bool,
     control_mode: i32,
     admission: HostAdmission,
     client_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
@@ -2009,6 +2010,10 @@ async fn run_host(
         closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
         pending_sync: Vec::new(),
         status_barrier: StatusBarrier::stable(config.initial_status),
+        game_started: matches!(
+            config.initial_status.state,
+            NETWORK_STATE_GO | NETWORK_STATE_PAUSE
+        ),
         control_mode: config.initial_status.control_mode,
         admission,
         client_cores,
@@ -3251,10 +3256,13 @@ async fn handle_client_disconnected(
         return;
     }
     let disconnected = state.clients.remove(&client_id);
+    let removed_logical_client = disconnected.is_some();
     if let Some(client) = &disconnected {
         state.pending_kinds.remove(&client.core.client_id);
+        if let Some(remote) = state.status_barrier.remotes.get_mut(&client_id) {
+            *remote = RemoteBarrierState::Removing;
+        }
     }
-    let barrier_effects = state.status_barrier.remove_remote(client_id);
 
     let _ = state
         .event_tx
@@ -3271,7 +3279,16 @@ async fn handle_client_disconnected(
         // src/C4GameControlNetwork.cpp:181-220,260-297,329-345).
         queue_disconnected_client_remove(&client.core, state).await;
     }
+    let barrier_effects = state.status_barrier.remove_remote(client_id);
     apply_barrier_effects(barrier_effects, state).await;
+    if removed_logical_client {
+        let retry_effects = retry_unreached_status_after_disconnect(
+            &mut state.status_barrier,
+            state.coordinator.current_tick(),
+            state.game_started,
+        );
+        apply_barrier_effects(retry_effects, state).await;
+    }
 
     if let Some(reason) = reason {
         let _ = state
@@ -3290,6 +3307,12 @@ async fn handle_admission_failed(connection_id: u32, error: String, state: &mut 
         provisional_client_id.and_then(|client_id| state.client_cores.get(&client_id).cloned())
     {
         queue_disconnected_client_remove(&core, state).await;
+        let retry_effects = retry_unreached_status_after_disconnect(
+            &mut state.status_barrier,
+            state.coordinator.current_tick(),
+            state.game_started,
+        );
+        apply_barrier_effects(retry_effects, state).await;
     }
     let _ = state
         .event_tx
@@ -3298,6 +3321,35 @@ async fn handle_admission_failed(connection_id: u32, error: String, state: &mut 
             error,
         })
         .await;
+}
+
+fn retry_unreached_status_after_disconnect(
+    barrier: &mut StatusBarrier,
+    current_tick: Tick,
+    game_started: bool,
+) -> Vec<BarrierEffect> {
+    if !matches!(
+        barrier.phase,
+        BarrierPhase::Waiting {
+            local_reached: false
+        }
+    ) || !matches!(barrier.status.state, NETWORK_STATE_GO | NETWORK_STATE_PAUSE)
+    {
+        return Vec::new();
+    }
+
+    let status = NetworkStatus {
+        target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
+        ..barrier.status
+    };
+    let mut effects = barrier.change_status(status);
+    // ChangeGameStatus immediately calls CheckStatusReached. The disconnect
+    // retry deliberately targets ControlTick. A running game has reached that
+    // tick already; initial Go must still wait for FinalInit.
+    if game_started {
+        effects.extend(barrier.local_reached());
+    }
+    effects
 }
 
 async fn queue_disconnected_client_remove(
@@ -4006,6 +4058,9 @@ async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostStat
             }
             BarrierEffect::BroadcastStatusAck(status) => {
                 broadcast_status(status, true, state).await;
+                if status.state == NETWORK_STATE_GO {
+                    state.game_started = true;
+                }
                 committed = true;
             }
             BarrierEffect::SendStatusAck { client_id, status } => {
@@ -11533,14 +11588,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn running_disconnect_keeps_client_in_control_membership_until_sync_executes() {
-        // OnClientDisconnect removes the peer from the status wait set, but
-        // CtrlRemove changes C4GameControlNetwork's active-client copy only
-        // when the host-authored CDT_Sync ClientRemove executes. Until then,
-        // PackCompleteCtrl still includes that client's already-received
-        // contribution (src/C4Network2.cpp:1786-1807;
-        // src/C4Client.cpp:293-303;
-        // src/C4GameControlNetwork.cpp:181-220,260-297,329-345,741-783).
+    async fn running_disconnect_executes_remove_at_the_retargeted_boundary() {
+        // CtrlRemove is synchronized, but OnClientDisconnect immediately
+        // retargets the unreached Go barrier to ControlTick. The removal then
+        // executes before control packing resumes, so the disconnected
+        // client's buffered contribution is no longer part of the batch
+        // (src/C4Network2.cpp:1786-1807;
+        // src/C4GameControlNetwork.cpp:260-297,329-345,741-783).
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
@@ -11588,57 +11642,28 @@ mod tests {
             }
         }
 
-        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
-            .await
-            .unwrap();
-        let boundary = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
-        assert_eq!(boundary.tick(), 0);
-        assert_eq!(control_commands(&boundary), vec![0xA0, 0xB0]);
-
-        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
-            .await
-            .unwrap();
-        let premature = timeout(Duration::from_millis(50), async {
-            loop {
-                match host_events.recv().await {
-                    Some(HostEvent::Ready { packet }) => break packet,
-                    Some(_) => continue,
-                    None => panic!("host event stream ended before sync execution"),
-                }
-            }
-        })
-        .await;
-        assert!(
-            premature.is_err(),
-            "disconnect released a host-only tick before ClientRemove executed"
-        );
-
-        host.status_reached().await.unwrap();
-        let mut released = None;
         let mut synchronized_remove = None;
         let mut committed = false;
-        while released.is_none() || synchronized_remove.is_none() || !committed {
+        while synchronized_remove.is_none() || !committed {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
-                Some(HostEvent::Ready { packet }) => {
-                    assert!(released.replace(packet).is_none(), "tick released twice");
-                }
-                Some(HostEvent::SyncScheduled { controls, .. }) => {
+                Some(HostEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) if control_tick == 0 => {
                     assert!(
                         synchronized_remove.replace(controls).is_none(),
                         "ClientRemove synchronized twice"
                     );
                 }
-                Some(HostEvent::StatusCommitted(status)) if status.state == NETWORK_STATE_GO => {
+                Some(HostEvent::StatusCommitted(status))
+                    if status.state == NETWORK_STATE_GO && status.target_tick == 0 =>
+                {
                     committed = true;
                 }
                 Some(_) => continue,
-                None => panic!("host event stream ended during sync execution"),
+                None => panic!("host event stream ended during disconnect recovery"),
             }
         }
-
-        let released = released.unwrap();
-        assert_eq!(released.tick(), 1);
-        assert_eq!(control_commands(&released), vec![0xA1]);
         let controls = synchronized_remove.unwrap();
         let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
             panic!("expected one synchronized ClientRemove, got {controls:?}");
@@ -11646,6 +11671,286 @@ mod tests {
         assert_eq!(remove.client_id, i32::try_from(client_id).unwrap());
         assert_eq!(remove.by_client, i32::try_from(HOST_CLIENT_ID).unwrap());
 
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
+            .await
+            .unwrap();
+        let boundary = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(boundary.tick(), 0);
+        assert_eq!(control_commands(&boundary), vec![0xA0]);
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
+            .await
+            .unwrap();
+        let released = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(released.tick(), 1);
+        assert_eq!(control_commands(&released), vec![0xA1]);
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn unreached_pause_disconnect_retry_targets_current_tick_and_reaches_locally() {
+        let pause = NetworkStatus {
+            state: NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 12,
+        };
+        let mut barrier = StatusBarrier::stable(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 3,
+        });
+        barrier.set_remote_state(7, RemoteBarrierState::Ready);
+        barrier.change_status(pause);
+
+        let retargeted = NetworkStatus {
+            target_tick: 4,
+            ..pause
+        };
+        assert_eq!(
+            retry_unreached_status_after_disconnect(&mut barrier, 4, true),
+            vec![
+                BarrierEffect::InvalidateReference,
+                BarrierEffect::BroadcastStatus(retargeted),
+                BarrierEffect::DriveControlTo(4),
+                BarrierEffect::StopControl,
+            ]
+        );
+        assert_eq!(barrier.status, retargeted);
+        assert_eq!(
+            barrier.phase,
+            BarrierPhase::Waiting {
+                local_reached: true
+            }
+        );
+        assert_eq!(
+            barrier.remotes.get(&7),
+            Some(&RemoteBarrierState::NotReady)
+        );
+        assert_eq!(
+            barrier.remote_ack(7, retargeted),
+            vec![
+                BarrierEffect::ExecutePendingSyncControls,
+                BarrierEffect::BroadcastStatusAck(retargeted),
+            ]
+        );
+        assert_eq!(barrier.phase, BarrierPhase::Stable);
+    }
+
+    #[test]
+    fn initial_go_disconnect_retargets_but_does_not_reach_before_game_initialization() {
+        let initial_go = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 12,
+        };
+        let mut barrier = StatusBarrier::stable(NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        });
+        barrier.change_status(initial_go);
+
+        let retargeted = NetworkStatus {
+            target_tick: 4,
+            ..initial_go
+        };
+        assert_eq!(
+            retry_unreached_status_after_disconnect(&mut barrier, 4, false),
+            vec![
+                BarrierEffect::InvalidateReference,
+                BarrierEffect::BroadcastStatus(retargeted),
+                BarrierEffect::DriveControlTo(4),
+            ]
+        );
+        assert_eq!(barrier.status, retargeted);
+        assert_eq!(
+            barrier.phase,
+            BarrierPhase::Waiting {
+                local_reached: false
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreached_go_disconnect_retargets_and_releases_client_remove() {
+        // OnClientDisconnect retries an unreached Go/Pause transition at the
+        // host's current control tick. This lets the synchronized ClientRemove
+        // execute even when the departed client was the only participant that
+        // had not supplied the original target's preceding control
+        // (src/C4Network2.cpp:1786-1807).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+
+        let mut alpha = connect_client(
+            addr,
+            ClientConfig::new("Alpha", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let alpha_id = alpha.client_id();
+        let mut alpha_events = alpha.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, alpha_id).await;
+
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let beta_id = beta.client_id();
+        let mut beta_events = beta.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, beta_id).await;
+
+        let running = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        host.change_status(running).await.unwrap();
+        for events in [&mut alpha_events, &mut beta_events] {
+            loop {
+                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                    Some(ClientEvent::Status(status)) if status == running => break,
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("client disconnected before initial Go: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("client event stream ended before initial Go"),
+                }
+            }
+        }
+        alpha.submit_status_ack(running).await.unwrap();
+        beta.submit_status_ack(running).await.unwrap();
+        host.status_reached().await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusCommitted(status)) if status == running => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before initial Go committed"),
+            }
+        }
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
+            .await
+            .unwrap();
+        alpha
+            .submit_control(legacy_packet(alpha_id, 0, 0xB0))
+            .await
+            .unwrap();
+        beta.submit_control(legacy_packet(beta_id, 0, 0xC0))
+            .await
+            .unwrap();
+        let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(ready.tick(), 0);
+        assert_eq!(control_commands(&ready), vec![0xA0, 0xB0, 0xC0]);
+
+        let unreachable = NetworkStatus {
+            target_tick: 2,
+            ..running
+        };
+        host.change_status(unreachable).await.unwrap();
+        for events in [&mut alpha_events, &mut beta_events] {
+            loop {
+                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                    Some(ClientEvent::Status(status)) if status == unreachable => break,
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("client disconnected before unreached Go: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("client event stream ended before unreached Go"),
+                }
+            }
+        }
+
+        beta.submit_status_ack(unreachable).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusAck {
+                    client_id,
+                    status,
+                }) if client_id == beta_id && status == unreachable => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before Beta acknowledged unreached Go"),
+            }
+        }
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
+            .await
+            .unwrap();
+        beta.submit_control(legacy_packet(beta_id, 1, 0xC1))
+            .await
+            .unwrap();
+
+        alpha.shutdown().await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ClientLeft { client_id }) if client_id == alpha_id => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before Alpha departed"),
+            }
+        }
+
+        let retargeted = NetworkStatus {
+            target_tick: 1,
+            ..unreachable
+        };
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::Status(status)) if status == retargeted => break,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("Beta disconnected before the retry: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("Beta event stream ended before the retry"),
+            }
+        }
+
+        beta.submit_status_ack(retargeted).await.unwrap();
+
+        let mut released = None;
+        let mut synchronized_remove = None;
+        let mut committed = false;
+        while released.is_none() || synchronized_remove.is_none() || !committed {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Ready { packet }) if packet.tick() == 1 => {
+                    assert!(released.replace(packet).is_none(), "tick released twice");
+                }
+                Some(HostEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) if control_tick == 1 => {
+                    assert!(
+                        synchronized_remove.replace(controls).is_none(),
+                        "ClientRemove synchronized twice"
+                    );
+                }
+                Some(HostEvent::StatusCommitted(status)) if status == retargeted => {
+                    committed = true;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended during disconnect recovery"),
+            }
+        }
+
+        let released = released.unwrap();
+        assert_eq!(control_commands(&released), vec![0xA1, 0xC1]);
+        let controls = synchronized_remove.unwrap();
+        let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
+            panic!("expected one synchronized ClientRemove, got {controls:?}");
+        };
+        assert_eq!(remove.client_id, i32::try_from(alpha_id).unwrap());
+        assert_eq!(remove.by_client, i32::try_from(HOST_CLIENT_ID).unwrap());
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 2, 0xA2))
+            .await
+            .unwrap();
+        beta.submit_control(legacy_packet(beta_id, 2, 0xC2))
+            .await
+            .unwrap();
+        let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(ready.tick(), 2);
+        assert_eq!(control_commands(&ready), vec![0xA2, 0xC2]);
+
+        beta.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
     }
 
@@ -11774,6 +12079,203 @@ mod tests {
                 None => panic!("witness event stream ended unexpectedly"),
             }
         }
+
+        witness.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_admission_failure_retargets_unreached_go_and_executes_remove() {
+        // A failed half-accepted runtime join has already broadcast ClientJoin
+        // before its socket disappears. OnConnectFail queues the matching
+        // ClientRemove and performs the same unreached Go/Pause retry as an
+        // established-client disconnect (src/C4Network2.cpp:1745-1755,
+        // 1786-1807; src/C4Client.cpp:293-303).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut witness = connect_client(
+            addr,
+            ClientConfig::new("Witness", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let witness_id = witness.client_id();
+        let mut witness_events = witness.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, witness_id).await;
+
+        let running = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        host.change_status(running).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+                Some(ClientEvent::Status(status)) if status == running => break,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("witness disconnected before initial Go: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("witness event stream ended before initial Go"),
+            }
+        }
+        witness.submit_status_ack(running).await.unwrap();
+        host.status_reached().await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusCommitted(status)) if status == running => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before initial Go committed"),
+            }
+        }
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
+            .await
+            .unwrap();
+        witness
+            .submit_control(legacy_packet(witness_id, 0, 0xB0))
+            .await
+            .unwrap();
+        let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(ready.tick(), 0);
+        assert_eq!(control_commands(&ready), vec![0xA0, 0xB0]);
+
+        let unreachable = NetworkStatus {
+            target_tick: 2,
+            ..running
+        };
+        host.change_status(unreachable).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+                Some(ClientEvent::Status(status)) if status == unreachable => break,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("witness disconnected before unreached Go: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("witness event stream ended before unreached Go"),
+            }
+        }
+        witness.submit_status_ack(unreachable).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusAck {
+                    client_id,
+                    status,
+                }) if client_id == witness_id && status == unreachable => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before unreached Go acknowledgement"),
+            }
+        }
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut failed = crate::ControlTransport::new(stream);
+        assert!(matches!(
+            failed.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        let name = lc_engine::LegacyCString::from_bytes(b"HalfJoin".to_vec()).unwrap();
+        failed
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: -1,
+                        name: name.clone(),
+                        nick: name,
+                        ..Default::default()
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: 77,
+                },
+            ))
+            .await
+            .unwrap();
+        loop {
+            match failed.read_message().await.unwrap() {
+                ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                ControlMessage::Ping(ping) => {
+                    failed
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                _ => continue,
+            }
+        }
+
+        let provisional_id = loop {
+            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct { data, .. }) => {
+                    if let Ok(EngineControlPacket::ClientJoin(join)) =
+                        decode_control_entry_payload(&data)
+                    {
+                        break join.core.client_id;
+                    }
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("witness disconnected before provisional ClientJoin: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("witness event stream ended before provisional ClientJoin"),
+            }
+        };
+        drop(failed);
+
+        let retargeted = NetworkStatus {
+            target_tick: 1,
+            ..unreachable
+        };
+        loop {
+            match timeout(EVENT_WAIT, witness_events.recv()).await.unwrap() {
+                Some(ClientEvent::Status(status)) if status == retargeted => break,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("witness disconnected before admission retry: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("witness event stream ended before admission retry"),
+            }
+        }
+        witness.submit_status_ack(retargeted).await.unwrap();
+
+        let mut synchronized_remove = None;
+        let mut committed = false;
+        while synchronized_remove.is_none() || !committed {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) if control_tick == 1 => {
+                    assert!(
+                        synchronized_remove.replace(controls).is_none(),
+                        "provisional ClientRemove synchronized twice"
+                    );
+                }
+                Some(HostEvent::StatusCommitted(status)) if status == retargeted => {
+                    committed = true;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended during admission recovery"),
+            }
+        }
+        let controls = synchronized_remove.unwrap();
+        let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
+            panic!("expected one synchronized provisional ClientRemove, got {controls:?}");
+        };
+        assert_eq!(remove.client_id, provisional_id);
+        assert_eq!(remove.by_client, i32::try_from(HOST_CLIENT_ID).unwrap());
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
+            .await
+            .unwrap();
+        witness
+            .submit_control(legacy_packet(witness_id, 1, 0xB1))
+            .await
+            .unwrap();
+        let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(ready.tick(), 1);
+        assert_eq!(control_commands(&ready), vec![0xA1, 0xB1]);
 
         witness.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
