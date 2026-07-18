@@ -4,6 +4,8 @@
 //! provide timestamps and the result of the C++ `SafeRandom` draw so identical
 //! inputs produce identical state transitions.
 
+use std::collections::BTreeSet;
+
 use crate::resource_packet::{
     ResourceChunkAvailability, ResourceChunkRange, ResourceDataPacket, ResourceDiscoverPacket,
     ResourcePacket, ResourceStatusPacket,
@@ -153,7 +155,7 @@ struct ResourceState {
     local_chunks: ChunkSet,
     peer_chunks: Vec<PeerChunks>,
     discovery_started_at: Option<u64>,
-    outstanding_loads: Vec<OutstandingLoad>,
+    outstanding_loads: Vec<ScheduledLoad>,
     dirty: bool,
 }
 
@@ -168,6 +170,12 @@ pub struct OutstandingLoad {
     pub chunk: i32,
     pub peer_id: i32,
     pub started_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScheduledLoad {
+    load: OutstandingLoad,
+    refill_on_send_failure: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,7 +599,7 @@ impl ResourceCatalog {
             if !resource.outstanding_loads.is_empty() {
                 let previous_count = resource.outstanding_loads.len();
                 resource.outstanding_loads.retain(|load| {
-                    now_seconds.saturating_sub(load.started_at) < RESOURCE_LOAD_TIMEOUT_SECONDS
+                    now_seconds.saturating_sub(load.load.started_at) < RESOURCE_LOAD_TIMEOUT_SECONDS
                 });
                 if resource.outstanding_loads.len() < previous_count {
                     actions.push(ResourceCatalogAction::RefillRequests {
@@ -731,6 +739,23 @@ impl ResourceCatalog {
         random_choice: usize,
         now_seconds: u64,
     ) -> Option<ResourceCatalogAction> {
+        self.schedule_request_with_failure_policy(
+            resource_id,
+            peer_id,
+            random_choice,
+            now_seconds,
+            false,
+        )
+    }
+
+    fn schedule_request_with_failure_policy(
+        &mut self,
+        resource_id: i32,
+        peer_id: i32,
+        random_choice: usize,
+        now_seconds: u64,
+        refill_on_send_failure: bool,
+    ) -> Option<ResourceCatalogAction> {
         let resource = self.resource_mut(resource_id)?;
         if !resource.registration.loading
             || resource.outstanding_loads.len() + 1 >= RESOURCE_MAX_LOADS
@@ -740,7 +765,7 @@ impl ResourceCatalog {
         let peer_load_count = resource
             .outstanding_loads
             .iter()
-            .filter(|load| load.peer_id == peer_id)
+            .filter(|load| load.load.peer_id == peer_id)
             .count();
         if peer_load_count >= RESOURCE_MAX_LOAD_PER_PEER_PER_FILE {
             return None;
@@ -757,16 +782,19 @@ impl ResourceCatalog {
                     && !resource
                         .outstanding_loads
                         .iter()
-                        .any(|load| load.chunk == *chunk)
+                        .any(|load| load.load.chunk == *chunk)
             })
             .nth(random_choice)?;
 
         resource.outstanding_loads.insert(
             0,
-            OutstandingLoad {
-                chunk,
-                peer_id,
-                started_at: now_seconds,
+            ScheduledLoad {
+                load: OutstandingLoad {
+                    chunk,
+                    peer_id,
+                    started_at: now_seconds,
+                },
+                refill_on_send_failure,
             },
         );
         Some(ResourceCatalogAction::SendToPeer {
@@ -784,6 +812,19 @@ impl ResourceCatalog {
         &mut self,
         resource_id: i32,
         now_seconds: u64,
+        safe_random: impl FnMut(usize) -> usize,
+    ) -> Vec<ResourceCatalogAction> {
+        self.refill_requests_excluding(resource_id, now_seconds, &BTreeSet::new(), safe_random)
+    }
+
+    /// Continues `StartNewLoads` after transport failures. C++ nulls failed
+    /// peers in its local shuffled array for the remainder of that pass while
+    /// retaining their advertised chunks for a future pass.
+    pub fn refill_requests_excluding(
+        &mut self,
+        resource_id: i32,
+        now_seconds: u64,
+        unavailable_peers: &BTreeSet<i32>,
         mut safe_random: impl FnMut(usize) -> usize,
     ) -> Vec<ResourceCatalogAction> {
         let peer_ids = self
@@ -792,6 +833,7 @@ impl ResourceCatalog {
                 resource
                     .peer_chunks
                     .iter()
+                    .filter(|peer| !unavailable_peers.contains(&peer.peer_id))
                     .map(|peer| peer.peer_id)
                     .collect::<Vec<_>>()
             })
@@ -822,9 +864,13 @@ impl ResourceCatalog {
                 let eligible_count = self.eligible_chunk_count(resource_id, peer_id);
                 if eligible_count != 0 {
                     let choice = safe_random(eligible_count) % eligible_count;
-                    if let Some(action) =
-                        self.schedule_request(resource_id, peer_id, choice, now_seconds)
-                    {
+                    if let Some(action) = self.schedule_request_with_failure_policy(
+                        resource_id,
+                        peer_id,
+                        choice,
+                        now_seconds,
+                        true,
+                    ) {
                         actions.push(action);
                     }
                 }
@@ -837,6 +883,44 @@ impl ResourceCatalog {
             }
         }
         actions
+    }
+
+    /// Rolls back the exact request reservation when its transport send
+    /// failed. Requests created by `StartNewLoads` immediately continue that
+    /// pass using the remaining peers; the one-shot `OnStatus` request does
+    /// not start a refill pass in native code.
+    pub fn on_request_send_failed(
+        &mut self,
+        peer_id: i32,
+        request: &crate::resource_packet::ResourceRequestPacket,
+        now_seconds: u64,
+        unavailable_peers: &BTreeSet<i32>,
+        safe_random: impl FnMut(usize) -> usize,
+    ) -> Vec<ResourceCatalogAction> {
+        let refill =
+            {
+                let Some(resource) = self.resource_mut(request.resource_id) else {
+                    return Vec::new();
+                };
+                let Some(position) = resource.outstanding_loads.iter().position(|load| {
+                    load.load.peer_id == peer_id && load.load.chunk == request.chunk
+                }) else {
+                    return Vec::new();
+                };
+                resource
+                    .outstanding_loads
+                    .remove(position)
+                    .refill_on_send_failure
+            };
+        if !refill {
+            return Vec::new();
+        }
+        self.refill_requests_excluding(
+            request.resource_id,
+            now_seconds,
+            unavailable_peers,
+            safe_random,
+        )
     }
 
     pub fn outstanding_load_count(&self, resource_id: i32) -> usize {
@@ -854,7 +938,7 @@ impl ResourceCatalog {
             || resource
                 .outstanding_loads
                 .iter()
-                .filter(|load| load.peer_id == peer_id)
+                .filter(|load| load.load.peer_id == peer_id)
                 .count()
                 >= RESOURCE_MAX_LOAD_PER_PEER_PER_FILE
         {
@@ -875,7 +959,7 @@ impl ResourceCatalog {
                     && !resource
                         .outstanding_loads
                         .iter()
-                        .any(|load| load.chunk == *chunk)
+                        .any(|load| load.load.chunk == *chunk)
             })
             .count()
     }
@@ -893,7 +977,7 @@ impl ResourceCatalog {
         if !resource.outstanding_loads.is_empty() {
             let previous_count = resource.outstanding_loads.len();
             resource.outstanding_loads.retain(|load| {
-                now_seconds.saturating_sub(load.started_at) < RESOURCE_LOAD_TIMEOUT_SECONDS
+                now_seconds.saturating_sub(load.load.started_at) < RESOURCE_LOAD_TIMEOUT_SECONDS
             });
             return ResourceLoadPoll::Active {
                 expired: previous_count - resource.outstanding_loads.len(),
@@ -922,7 +1006,7 @@ impl ResourceCatalog {
         resource.dirty = true;
         resource
             .outstanding_loads
-            .retain(|load| load.chunk != chunk);
+            .retain(|load| load.load.chunk != chunk);
         if !resource.local_chunks.is_complete() {
             return ChunkStoreOutcome::Stored;
         }

@@ -848,3 +848,52 @@ fn cpp_refill_shuffles_peers_then_fills_each_to_its_effective_limit() {
         vec![(2, 0), (2, 1), (2, 2), (3, 3), (3, 4), (3, 5)]
     );
 }
+
+#[test]
+fn cpp_failed_one_shot_request_rolls_back_without_starting_a_refill_pass() {
+    // OnStatus calls StartLoad once and ignores a failed send. Only callers
+    // already inside StartNewLoads continue to another peer
+    // (src/C4Network2Res.cpp:886-909,1048-1054,1090-1110).
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register(ResourceRegistration {
+        resource_id: 131,
+        chunk_count: 4,
+        binary_compatible: false,
+        loading: true,
+    }));
+    assert_eq!(
+        catalog.record_peer_status(
+            7,
+            &ResourceStatusPacket {
+                resource_id: 131,
+                chunks: ResourceChunkAvailability {
+                    chunk_count: 4,
+                    ranges: vec![ResourceChunkRange {
+                        start: 0,
+                        length: 4,
+                    }],
+                },
+            },
+        ),
+        PeerStatusOutcome::Recorded
+    );
+    let Some(ResourceCatalogAction::SendToPeer {
+        peer_id,
+        packet: ResourcePacket::Request(request),
+    }) = catalog.schedule_request(131, 7, 0, 10)
+    else {
+        panic!("peer status should schedule one request");
+    };
+    assert_eq!(catalog.outstanding_load_count(131), 1);
+    assert!(catalog
+        .on_request_send_failed(
+            peer_id,
+            &request,
+            10,
+            &std::collections::BTreeSet::from([peer_id]),
+            |_| 0,
+        )
+        .is_empty());
+    assert_eq!(catalog.outstanding_load_count(131), 0);
+    assert_eq!(catalog.peer_ids(131), vec![7]);
+}

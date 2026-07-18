@@ -2363,7 +2363,10 @@ fn maybe_initiate_tcp_simultaneous_open(
     let _ = routes.try_send_to(peer_id_wire, ControlMessage::TcpSimOpen(packet));
 }
 
-fn add_connected_mesh_route(route: ConnectedMeshRoute, routes: &mut ClientRouteManager) {
+fn add_connected_mesh_route(
+    route: ConnectedMeshRoute,
+    routes: &mut ClientRouteManager,
+) -> Option<ClientId> {
     match route {
         ConnectedMeshRoute::Tcp {
             peer_id,
@@ -2371,7 +2374,7 @@ fn add_connected_mesh_route(route: ConnectedMeshRoute, routes: &mut ClientRouteM
             peer_core: _,
             route,
         } => {
-            routes.add_peer_route(
+            let first_peer_route = routes.add_peer_route(
                 peer_id,
                 initiator_id,
                 route.local_connection_id,
@@ -2381,6 +2384,7 @@ fn add_connected_mesh_route(route: ConnectedMeshRoute, routes: &mut ClientRouteM
                 route.transport,
                 route.liveness,
             );
+            first_peer_route.then_some(peer_id)
         }
         ConnectedMeshRoute::Udp {
             peer_id,
@@ -2388,7 +2392,7 @@ fn add_connected_mesh_route(route: ConnectedMeshRoute, routes: &mut ClientRouteM
             peer_core: _,
             route,
         } => {
-            routes.add_peer_route(
+            let first_peer_route = routes.add_peer_route(
                 peer_id,
                 initiator_id,
                 route.local_connection_id,
@@ -2398,6 +2402,7 @@ fn add_connected_mesh_route(route: ConnectedMeshRoute, routes: &mut ClientRouteM
                 route.transport,
                 route.liveness,
             );
+            first_peer_route.then_some(peer_id)
         }
     }
 }
@@ -3442,6 +3447,33 @@ impl ClientResourceState {
             ),
             control,
         })
+    }
+
+    fn on_request_send_failed(
+        &mut self,
+        peer_id: i32,
+        request: &crate::ResourceRequestPacket,
+        unavailable_peers: &BTreeSet<i32>,
+    ) -> Vec<crate::ResourceCatalogAction> {
+        let now_seconds = self.resource_epoch.elapsed().as_secs();
+        let mut random = resource_safe_random;
+        if let Some(backend) = self.backend.as_mut() {
+            backend.on_request_send_failed(
+                peer_id,
+                request,
+                now_seconds,
+                unavailable_peers,
+                &mut random,
+            )
+        } else {
+            self.catalog.on_request_send_failed(
+                peer_id,
+                request,
+                now_seconds,
+                unavailable_peers,
+                &mut random,
+            )
+        }
     }
 
     fn retain_resource_resolver(
@@ -7127,9 +7159,14 @@ impl ClientRouteManager {
         peer_addr: Option<SocketAddr>,
         transport: crate::ControlTransport<S>,
         liveness: ConnectionLivenessState,
-    ) where
+    ) -> bool
+    where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let peer_was_connected = self
+            .routes
+            .values()
+            .any(|route| route.peer_id == peer_id && !route.outbound.is_closed());
         let route_rank = |initiator_id: ClientId, local_id: u32, remote_id: u32| {
             (
                 initiator_id,
@@ -7190,6 +7227,7 @@ impl ClientRouteManager {
                 .outbound
                 .retire();
         }
+        !peer_was_connected && new_route_wins
     }
 
     fn preferred_route_id(
@@ -8050,9 +8088,9 @@ async fn run_client_loop_with_routes(
             ) {
                 Ok(events) => dispatch_client_resource_events(
                     events,
+                    &mut resource_state,
                     &mut transport,
                     &event_tx,
-                    resource_state.host_peer_id,
                 )
                 .await
                 .map_err(|error| error.to_string()),
@@ -8064,9 +8102,9 @@ async fn run_client_loop_with_routes(
                 .on_packet(resource_state.host_peer_id, &packet);
             dispatch_client_resource_actions(
                 actions,
+                &mut resource_state,
                 &mut transport,
                 &event_tx,
-                resource_state.host_peer_id,
             )
             .await
             .map_err(|error| error.to_string())
@@ -8104,7 +8142,27 @@ async fn run_client_loop_with_routes(
                         }
                         if let Ok(route) = completion.result {
                             if connected_mesh_route_matches_registry(&route, &client_cores) {
-                                add_connected_mesh_route(route, &mut transport);
+                                if let Some(peer_id) =
+                                    add_connected_mesh_route(route, &mut transport)
+                                {
+                                    if let Err(error) = dispatch_client_resource_peer_connected(
+                                        peer_id,
+                                        &mut resource_state,
+                                        &mut transport,
+                                        &event_tx,
+                                    )
+                                    .await
+                                    {
+                                        let _ = event_tx
+                                            .send(ClientEvent::Disconnected {
+                                                reason: Some(format!(
+                                                    "peer resource discovery failed: {error}"
+                                                )),
+                                            })
+                                            .await;
+                                        break 'outer;
+                                    }
+                                }
                             }
                         }
                     }
@@ -8614,9 +8672,9 @@ async fn run_client_loop_with_routes(
                         Ok(events) => {
                             if let Err(error) = dispatch_client_resource_events(
                                 events,
+                                &mut resource_state,
                                 &mut transport,
                                 &event_tx,
-                                resource_state.host_peer_id,
                             )
                             .await
                             {
@@ -8641,9 +8699,9 @@ async fn run_client_loop_with_routes(
                     let actions = resource_state.catalog.on_timer(now_seconds);
                     if let Err(error) = dispatch_client_resource_actions(
                         actions,
+                        &mut resource_state,
                         &mut transport,
                         &event_tx,
-                        resource_state.host_peer_id,
                     )
                     .await
                     {
@@ -9040,76 +9098,34 @@ async fn run_client_loop_with_routes(
                             }
                         });
                     }
-                    Ok(ControlMessage::Resource(_)) if ingress_peer_id != HOST_CLIENT_ID => {
-                        // Peer resource serving/fanout is a separate protocol
-                        // path. Do not attribute a peer packet to the host's
-                        // resource catalog.
-                    }
                     Ok(ControlMessage::Resource(packet)) => {
-                        let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
-                        if let Some(backend) = resource_state.backend.as_mut() {
-                            let mut random = resource_safe_random;
-                            match backend.on_packet(
-                                resource_state.host_peer_id,
-                                &packet,
-                                now_seconds,
-                                &mut random,
-                            ) {
-                                Ok(events) => {
-                                    if matches!(&packet, ResourcePacket::Derive(_)) {
-                                        let _ = resource_state.catalog.on_packet(
-                                            resource_state.host_peer_id,
-                                            &packet,
-                                        );
-                                    }
-                                    update_derived_resource_sources(
-                                        &mut resource_state.local_resource_sources,
-                                        &events,
-                                    );
-                                    if let Err(error) = dispatch_client_resource_events(
-                                        events,
-                                        &mut transport,
-                                        &event_tx,
-                                        resource_state.host_peer_id,
-                                    )
-                                    .await
-                                    {
-                                        let _ = event_tx
-                                            .send(ClientEvent::Disconnected {
-                                                reason: Some(format!("resource response failed: {error}")),
-                                            })
-                                            .await;
-                                        break;
-                                    }
-                                }
-                                Err(error) => {
-                                    let _ = event_tx
-                                        .send(ClientEvent::Disconnected {
-                                            reason: Some(format!("resource response failed: {error}")),
-                                        })
-                                        .await;
-                                    break;
-                                }
+                        let Ok(resource_peer_id) = i32::try_from(ingress_peer_id) else {
+                            if ingress_peer_id != HOST_CLIENT_ID {
+                                transport.retire_peer(ingress_peer_id);
                             }
-                        } else {
-                            let actions = resource_state
-                                .catalog
-                                .on_packet(resource_state.host_peer_id, &packet);
-                            if let Err(error) = dispatch_client_resource_actions(
-                                actions,
-                                &mut transport,
-                                &event_tx,
-                                resource_state.host_peer_id,
-                            )
-                            .await
-                            {
-                                let _ = event_tx
-                                    .send(ClientEvent::Disconnected {
-                                        reason: Some(format!("resource response failed: {error}")),
-                                    })
-                                    .await;
-                                break;
+                            continue;
+                        };
+                        if let Err(error) = dispatch_client_resource_packet(
+                            resource_peer_id,
+                            &packet,
+                            &mut resource_state,
+                            &mut transport,
+                            &event_tx,
+                        )
+                        .await
+                        {
+                            if ingress_peer_id != HOST_CLIENT_ID {
+                                // Native resource handlers reject malformed or
+                                // unusable peer work locally; one mesh source
+                                // cannot tear down the independent host link.
+                                continue;
                             }
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("resource response failed: {error}")),
+                                })
+                                .await;
+                            break;
                         }
                     }
                     Ok(ControlMessage::Status(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
@@ -9483,28 +9499,177 @@ async fn run_client_loop_with_routes(
     }
 }
 
-async fn dispatch_client_resource_actions(
-    actions: Vec<crate::ResourceCatalogAction>,
+async fn dispatch_client_resource_peer_connected(
+    peer_id: ClientId,
+    resource_state: &mut ClientResourceState,
     transport: &mut ClientRouteManager,
     event_tx: &mpsc::Sender<ClientEvent>,
+) -> Result<(), String> {
+    let peer_id = i32::try_from(peer_id)
+        .map_err(|_| "connected resource peer ID exceeds the C++ signed range".to_string())?;
+    let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
+    if let Some(backend) = resource_state.backend.as_mut() {
+        let mut random = resource_safe_random;
+        let events = backend
+            .on_peer_connected(peer_id, now_seconds, &mut random)
+            .map_err(|error| error.to_string())?;
+        dispatch_client_resource_events(
+            events,
+            resource_state,
+            transport,
+            event_tx,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    } else {
+        let actions = resource_state.catalog.on_peer_connected(peer_id);
+        dispatch_client_resource_actions(
+            actions,
+            resource_state,
+            transport,
+            event_tx,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+}
+
+async fn dispatch_client_resource_packet(
+    peer_id: i32,
+    packet: &ResourcePacket,
+    resource_state: &mut ClientResourceState,
+    transport: &mut ClientRouteManager,
+    event_tx: &mpsc::Sender<ClientEvent>,
+) -> Result<(), String> {
+    let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
+    if let Some(backend) = resource_state.backend.as_mut() {
+        let mut random = resource_safe_random;
+        let events = backend
+            .on_packet(peer_id, packet, now_seconds, &mut random)
+            .map_err(|error| error.to_string())?;
+        if matches!(packet, ResourcePacket::Derive(_)) {
+            let _ = resource_state.catalog.on_packet(peer_id, packet);
+        }
+        update_derived_resource_sources(
+            &mut resource_state.local_resource_sources,
+            &events,
+        );
+        dispatch_client_resource_events(
+            events,
+            resource_state,
+            transport,
+            event_tx,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    } else {
+        let actions = resource_state.catalog.on_packet(peer_id, packet);
+        dispatch_client_resource_actions(
+            actions,
+            resource_state,
+            transport,
+            event_tx,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientResourceSendOutcome {
+    Sent,
+    PeerUnavailable,
+}
+
+fn try_dispatch_client_resource_to_peer(
+    transport: &mut ClientRouteManager,
     host_peer_id: i32,
+    peer_id: i32,
+    packet: ResourcePacket,
+) -> Result<ClientResourceSendOutcome, TransportError> {
+    let Ok(peer_id_wire) = ClientId::try_from(peer_id) else {
+        return Ok(ClientResourceSendOutcome::PeerUnavailable);
+    };
+    match transport.try_send_to(peer_id_wire, ControlMessage::Resource(packet)) {
+        Ok(()) => Ok(ClientResourceSendOutcome::Sent),
+        Err(error) if peer_id == host_peer_id => Err(error),
+        Err(_) => {
+            // C++ fails a peer-specific resource send without tearing down the
+            // independent host session. Request accounting is reconciled by
+            // the action dispatcher before it continues the native refill.
+            transport.retire_peer_gracefully(peer_id_wire);
+            Ok(ClientResourceSendOutcome::PeerUnavailable)
+        }
+    }
+}
+
+async fn dispatch_client_resource_actions(
+    actions: Vec<crate::ResourceCatalogAction>,
+    resource_state: &mut ClientResourceState,
+    transport: &mut ClientRouteManager,
+    event_tx: &mpsc::Sender<ClientEvent>,
 ) -> Result<(), TransportError> {
-    for action in actions {
+    let mut unavailable_peers = BTreeSet::new();
+    dispatch_client_resource_actions_with_unavailable(
+        actions,
+        resource_state,
+        transport,
+        event_tx,
+        &mut unavailable_peers,
+    )
+    .await
+}
+
+async fn dispatch_client_resource_actions_with_unavailable(
+    actions: Vec<crate::ResourceCatalogAction>,
+    resource_state: &mut ClientResourceState,
+    transport: &mut ClientRouteManager,
+    event_tx: &mpsc::Sender<ClientEvent>,
+    unavailable_peers: &mut BTreeSet<i32>,
+) -> Result<(), TransportError> {
+    let host_peer_id = resource_state.host_peer_id;
+    let mut pending = VecDeque::from(actions);
+    while let Some(action) = pending.pop_front() {
         match action {
-            crate::ResourceCatalogAction::SendToPeer { peer_id, packet }
-                if peer_id == host_peer_id =>
-            {
-                transport
-                    .send_message(ControlMessage::Resource(packet))
-                    .await?;
+            crate::ResourceCatalogAction::SendToPeer { peer_id, packet } => {
+                let request = match &packet {
+                    ResourcePacket::Request(request) => Some(request.clone()),
+                    _ => None,
+                };
+                let outcome = try_dispatch_client_resource_to_peer(
+                    transport,
+                    host_peer_id,
+                    peer_id,
+                    packet,
+                )?;
+                if outcome == ClientResourceSendOutcome::PeerUnavailable {
+                    unavailable_peers.insert(peer_id);
+                    if let Some(request) = request {
+                        pending.extend(resource_state.on_request_send_failed(
+                            peer_id,
+                            &request,
+                            unavailable_peers,
+                        ));
+                    }
+                }
             }
             crate::ResourceCatalogAction::Broadcast { packet } => {
-                // The current Rust session has its host message link here. As
-                // P2P links are established, the same action must fan out over
-                // every connected peer just like C++ BroadcastMsg.
-                transport
-                    .send_message(ControlMessage::Resource(packet))
-                    .await?;
+                // BroadcastMsg selects one message route per connected
+                // logical client, preferring UDP and falling back to TCP.
+                for peer_id in transport.connected_peer_ids() {
+                    let Ok(peer_id) = i32::try_from(peer_id) else {
+                        continue;
+                    };
+                    let outcome = try_dispatch_client_resource_to_peer(
+                        transport,
+                        host_peer_id,
+                        peer_id,
+                        packet.clone(),
+                    )?;
+                    if outcome == ClientResourceSendOutcome::PeerUnavailable {
+                        unavailable_peers.insert(peer_id);
+                    }
+                }
             }
             external => {
                 let _ = event_tx.send(ClientEvent::ResourceAction(external)).await;
@@ -9516,15 +9681,22 @@ async fn dispatch_client_resource_actions(
 
 async fn dispatch_client_resource_events(
     events: Vec<crate::ResourceTransferEvent>,
+    resource_state: &mut ClientResourceState,
     transport: &mut ClientRouteManager,
     event_tx: &mpsc::Sender<ClientEvent>,
-    host_peer_id: i32,
 ) -> Result<(), TransportError> {
+    let mut unavailable_peers = BTreeSet::new();
     for event in events {
         match event {
             crate::ResourceTransferEvent::Transport(action) => {
-                dispatch_client_resource_actions(vec![action], transport, event_tx, host_peer_id)
-                    .await?;
+                dispatch_client_resource_actions_with_unavailable(
+                    vec![action],
+                    resource_state,
+                    transport,
+                    event_tx,
+                    &mut unavailable_peers,
+                )
+                .await?;
             }
             crate::ResourceTransferEvent::Completed {
                 resource_id,
@@ -9736,6 +9908,46 @@ mod tests {
 
         host.shutdown().await.unwrap();
         puncher.shutdown().await.unwrap();
+    }
+
+    fn add_test_route_queue(
+        routes: &mut ClientRouteManager,
+        route_id: u32,
+        peer_id: ClientId,
+        protocol: crate::NetworkProtocol,
+    ) -> mpsc::Receiver<ClientRouteCommand> {
+        let (sender, receiver) = mpsc::channel(64);
+        let (retire, _retire_rx) = watch::channel(false);
+        assert!(routes
+            .routes
+            .insert(
+                route_id,
+                ClientRouteEntry {
+                    peer_id,
+                    initiator_id: peer_id,
+                    remote_connection_id: route_id.wrapping_add(1_000),
+                    protocol,
+                    peer_addr: None,
+                    outbound: ClientRouteSender { sender, retire },
+                },
+            )
+            .is_none());
+        receiver
+    }
+
+    fn take_queued_resource(
+        receiver: &mut mpsc::Receiver<ClientRouteCommand>,
+    ) -> ResourcePacket {
+        match receiver
+            .try_recv()
+            .expect("resource command is queued on the selected route")
+        {
+            ClientRouteCommand::Message(ControlMessage::Resource(packet)) => packet,
+            ClientRouteCommand::Message(other) => {
+                panic!("unexpected queued resource message: {other:?}")
+            }
+            ClientRouteCommand::Flush(_) => panic!("unexpected queued resource flush"),
+        }
     }
 
     #[tokio::test]
@@ -11064,6 +11276,438 @@ mod tests {
         drop(rebound);
         host.shutdown().await.unwrap();
         puncher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_client_mesh_route_sends_one_resource_discover_per_logical_peer() {
+        let mut resource_state = ClientResourceState::empty();
+        assert!(resource_state.catalog.register(crate::ResourceRegistration {
+            resource_id: 41,
+            chunk_count: 2,
+            binary_compatible: true,
+            loading: false,
+        }));
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut routes = ClientRouteManager::new();
+        let (tcp_client, tcp_peer) = duplex(4_096);
+        let mut tcp_peer = crate::ControlTransport::new(tcp_peer);
+
+        let first_route = routes.add_peer_route(
+            7,
+            7,
+            70,
+            700,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(tcp_client),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        assert!(first_route);
+        if first_route {
+            dispatch_client_resource_peer_connected(
+                7,
+                &mut resource_state,
+                &mut routes,
+                &event_tx,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            timeout(EVENT_WAIT, tcp_peer.read_message())
+                .await
+                .unwrap()
+                .unwrap(),
+            ControlMessage::Resource(ResourcePacket::Discover(
+                crate::ResourceDiscoverPacket {
+                    resource_ids: vec![41],
+                },
+            ))
+        );
+
+        let (udp_client, udp_peer) = duplex(4_096);
+        let mut udp_peer = crate::ControlTransport::new(udp_peer);
+        let second_route = routes.add_peer_route(
+            7,
+            7,
+            71,
+            701,
+            crate::NetworkProtocol::Udp,
+            None,
+            crate::ControlTransport::new(udp_client),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        assert!(!second_route);
+        if second_route {
+            dispatch_client_resource_peer_connected(
+                7,
+                &mut resource_state,
+                &mut routes,
+                &event_tx,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(timeout(Duration::from_millis(50), udp_peer.read_message())
+            .await
+            .is_err());
+
+        routes.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_resource_dispatch_fans_out_and_selects_cpp_message_and_data_routes() {
+        let mut resource_state = ClientResourceState::empty();
+        let mut routes = ClientRouteManager::new();
+        let mut host = add_test_route_queue(
+            &mut routes,
+            1,
+            HOST_CLIENT_ID,
+            crate::NetworkProtocol::Tcp,
+        );
+        let mut peer_tcp =
+            add_test_route_queue(&mut routes, 70, 7, crate::NetworkProtocol::Tcp);
+        let mut peer_udp =
+            add_test_route_queue(&mut routes, 71, 7, crate::NetworkProtocol::Udp);
+        let mut second_peer =
+            add_test_route_queue(&mut routes, 90, 9, crate::NetworkProtocol::Tcp);
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let status = ResourcePacket::Status(crate::ResourceStatusPacket {
+            resource_id: 12,
+            chunks: crate::ResourceChunkAvailability {
+                chunk_count: 1,
+                ranges: vec![crate::ResourceChunkRange {
+                    start: 0,
+                    length: 1,
+                }],
+            },
+        });
+
+        dispatch_client_resource_actions(
+            vec![crate::ResourceCatalogAction::Broadcast {
+                packet: status.clone(),
+            }],
+            &mut resource_state,
+            &mut routes,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(take_queued_resource(&mut host), status);
+        assert_eq!(take_queued_resource(&mut peer_udp), status);
+        assert_eq!(take_queued_resource(&mut second_peer), status);
+        assert!(peer_tcp.try_recv().is_err());
+
+        let request = ResourcePacket::Request(crate::ResourceRequestPacket {
+            resource_id: 12,
+            chunk: 0,
+        });
+        dispatch_client_resource_actions(
+            vec![crate::ResourceCatalogAction::SendToPeer {
+                peer_id: 7,
+                packet: request.clone(),
+            }],
+            &mut resource_state,
+            &mut routes,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(take_queued_resource(&mut peer_udp), request);
+        assert!(host.try_recv().is_err());
+        assert!(second_peer.try_recv().is_err());
+
+        let data = ResourcePacket::Data(crate::ResourceDataPacket {
+            resource_id: 12,
+            chunk: 0,
+            data: vec![0x55],
+        });
+        dispatch_client_resource_actions(
+            vec![crate::ResourceCatalogAction::SendToPeer {
+                peer_id: 7,
+                packet: data.clone(),
+            }],
+            &mut resource_state,
+            &mut routes,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(take_queued_resource(&mut peer_tcp), data);
+        assert!(host.try_recv().is_err());
+        assert!(peer_udp.try_recv().is_err());
+        assert!(second_peer.try_recv().is_err());
+
+        routes.retire_peer_gracefully(7);
+        dispatch_client_resource_actions(
+            vec![crate::ResourceCatalogAction::SendToPeer {
+                peer_id: 7,
+                packet: request,
+            }],
+            &mut resource_state,
+            &mut routes,
+            &event_tx,
+        )
+        .await
+        .expect("lost mesh resource source does not tear down the host route");
+        assert!(routes.connected_peer_ids().contains(&HOST_CLIENT_ID));
+        assert!(host.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_client_peer_requests_rollback_and_refill_from_live_peers() {
+        let mut resource_state = ClientResourceState::empty();
+        assert!(resource_state.catalog.register(crate::ResourceRegistration {
+            resource_id: 91,
+            chunk_count: 64,
+            binary_compatible: true,
+            loading: true,
+        }));
+        let availability = crate::ResourceChunkAvailability {
+            chunk_count: 64,
+            ranges: vec![crate::ResourceChunkRange {
+                start: 0,
+                length: 64,
+            }],
+        };
+        for peer_id in 1_i32..=9 {
+            assert_eq!(
+                resource_state.catalog.record_peer_status(
+                    peer_id,
+                    &crate::ResourceStatusPacket {
+                        resource_id: 91,
+                        chunks: availability.clone(),
+                    },
+                ),
+                crate::PeerStatusOutcome::Recorded
+            );
+        }
+        let actions = resource_state.catalog.refill_requests(91, 0, |_| 0);
+        assert_eq!(actions.len(), 19);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(
+                    action,
+                    crate::ResourceCatalogAction::SendToPeer { peer_id: 9, .. }
+                ))
+                .count(),
+            3
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| matches!(
+                    action,
+                    crate::ResourceCatalogAction::SendToPeer { peer_id: 8, .. }
+                ))
+                .count(),
+            3
+        );
+
+        let mut routes = ClientRouteManager::new();
+        let mut host = add_test_route_queue(
+            &mut routes,
+            1,
+            HOST_CLIENT_ID,
+            crate::NetworkProtocol::Tcp,
+        );
+        let mut receivers = BTreeMap::new();
+        for peer_id in 1_u32..=7 {
+            receivers.insert(
+                peer_id,
+                add_test_route_queue(
+                    &mut routes,
+                    200 + peer_id,
+                    peer_id,
+                    crate::NetworkProtocol::Udp,
+                ),
+            );
+        }
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        dispatch_client_resource_actions(
+            actions,
+            &mut resource_state,
+            &mut routes,
+            &event_tx,
+        )
+        .await
+        .expect("an unavailable mesh source does not tear down the host route");
+
+        let mut sent = Vec::new();
+        for (peer_id, receiver) in &mut receivers {
+            while let Ok(command) = receiver.try_recv() {
+                let ClientRouteCommand::Message(ControlMessage::Resource(
+                    ResourcePacket::Request(request),
+                )) = command
+                else {
+                    panic!("refill queued a non-request resource command");
+                };
+                sent.push((*peer_id, request.chunk));
+            }
+        }
+        assert_eq!(resource_state.catalog.outstanding_load_count(91), 19);
+        assert_eq!(sent.len(), 19);
+        assert_eq!(
+            sent.iter().map(|(_, chunk)| *chunk).collect::<BTreeSet<_>>().len(),
+            19
+        );
+        assert!(sent.iter().all(|(peer_id, _)| *peer_id < 8));
+        assert!(routes.connected_peer_ids().contains(&HOST_CLIENT_ID));
+        assert!(host.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn client_peer_resource_statuses_fill_cpp_swarm_limits_and_serve_chunks() {
+        let directories = SessionResourceDirectories::new();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.backend = Some(
+            crate::ResourceTransferBackend::new(9, directories.client.clone()).unwrap(),
+        );
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 77,
+            loadable: true,
+            file_size: 64,
+            chunk_size: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Swarm.bin".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        resource_state
+            .backend
+            .as_mut()
+            .unwrap()
+            .register_remote_loadable(core.clone())
+            .unwrap();
+        let mut routes = ClientRouteManager::new();
+        let mut receivers = BTreeMap::new();
+        for peer_id in 0_i32..=6 {
+            receivers.insert(
+                peer_id,
+                add_test_route_queue(
+                    &mut routes,
+                    100 + peer_id as u32,
+                    peer_id as ClientId,
+                    crate::NetworkProtocol::Udp,
+                ),
+            );
+        }
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let status = ResourcePacket::Status(crate::ResourceStatusPacket {
+            resource_id: core.id,
+            chunks: crate::ResourceChunkAvailability {
+                chunk_count: 64,
+                ranges: vec![crate::ResourceChunkRange {
+                    start: 0,
+                    length: 64,
+                }],
+            },
+        });
+
+        for peer_id in 0_i32..=6 {
+            dispatch_client_resource_packet(
+                peer_id,
+                &status,
+                &mut resource_state,
+                &mut routes,
+                &event_tx,
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut outstanding = Vec::new();
+        let mut fulfilled = None;
+        for peer_id in 0_i32..=6 {
+            let ResourcePacket::Request(request) =
+                take_queued_resource(receivers.get_mut(&peer_id).unwrap())
+            else {
+                panic!("peer status did not schedule a resource request");
+            };
+            if peer_id == 1 {
+                fulfilled = Some(request);
+            } else {
+                outstanding.push((peer_id, request.chunk));
+            }
+        }
+        let fulfilled = fulfilled.unwrap();
+        let fulfilled_data = vec![
+            0x5a;
+            usize::try_from(core.file_size).unwrap()
+                - usize::try_from(fulfilled.chunk).unwrap()
+        ];
+        dispatch_client_resource_packet(
+            1,
+            &ResourcePacket::Data(crate::ResourceDataPacket {
+                resource_id: core.id,
+                chunk: u32::try_from(fulfilled.chunk).unwrap(),
+                data: fulfilled_data.clone(),
+            }),
+            &mut resource_state,
+            &mut routes,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+
+        for (peer_id, receiver) in &mut receivers {
+            while let Ok(command) = receiver.try_recv() {
+                let ClientRouteCommand::Message(ControlMessage::Resource(
+                    ResourcePacket::Request(request),
+                )) = command
+                else {
+                    panic!("swarm refill queued a non-request resource command");
+                };
+                outstanding.push((*peer_id, request.chunk));
+            }
+        }
+        let backend = resource_state.backend.as_ref().unwrap();
+        assert_eq!(backend.catalog().outstanding_load_count(core.id), 19);
+        assert_eq!(outstanding.len(), 19);
+        assert_eq!(
+            outstanding
+                .iter()
+                .map(|(_, chunk)| *chunk)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            19
+        );
+        let mut per_peer = BTreeMap::<i32, usize>::new();
+        for (peer_id, _) in &outstanding {
+            *per_peer.entry(*peer_id).or_default() += 1;
+        }
+        let mut counts = per_peer.values().copied().collect::<Vec<_>>();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![1, 3, 3, 3, 3, 3, 3]);
+        assert_eq!(
+            backend
+                .catalog()
+                .peer_ids(core.id)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            (0_i32..=6).collect()
+        );
+
+        dispatch_client_resource_packet(
+            2,
+            &ResourcePacket::Request(crate::ResourceRequestPacket {
+                resource_id: core.id,
+                chunk: fulfilled.chunk,
+            }),
+            &mut resource_state,
+            &mut routes,
+            &event_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            take_queued_resource(receivers.get_mut(&2).unwrap()),
+            ResourcePacket::Data(crate::ResourceDataPacket {
+                resource_id: core.id,
+                chunk: u32::try_from(fulfilled.chunk).unwrap(),
+                data: fulfilled_data,
+            })
+        );
     }
 
     #[tokio::test]

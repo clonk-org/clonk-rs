@@ -4,7 +4,7 @@
 //! This type executes the filesystem effects, feeds successful writes back into
 //! the catalog, and leaves socket delivery as typed events for its caller.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -252,6 +252,29 @@ impl ResourceTransferBackend {
 
     pub fn catalog(&self) -> &ResourceCatalog {
         &self.catalog
+    }
+
+    /// Reconciles a request that could not be placed on the selected peer's
+    /// transport. The catalog owns the pre-send reservation and native refill
+    /// policy; filesystem state is unaffected.
+    pub fn on_request_send_failed<F>(
+        &mut self,
+        peer_id: i32,
+        request: &crate::ResourceRequestPacket,
+        now_seconds: u64,
+        unavailable_peers: &BTreeSet<i32>,
+        safe_random: F,
+    ) -> Vec<ResourceCatalogAction>
+    where
+        F: FnMut(usize) -> usize,
+    {
+        self.catalog.on_request_send_failed(
+            peer_id,
+            request,
+            now_seconds,
+            unavailable_peers,
+            safe_random,
+        )
     }
 
     pub fn core(&self, resource_id: i32) -> Option<&NetworkResourceCore> {
