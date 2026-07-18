@@ -765,6 +765,23 @@ impl ScenarioLoaderHead {
         Self::load_from_group_with_languages(group, &["US"])
     }
 
+    /// Parses the Scenario.txt fields that control resource-group
+    /// registration without resolving or validating the presentation title.
+    /// The returned head deliberately has an empty `scenario_title`; callers
+    /// must use this only for Origin/Definitions/Extra resource setup.
+    pub fn load_from_group_for_resource_registration(
+        group: &Group,
+    ) -> Result<Self, ScenarioError> {
+        let manifest = parse_legacy_scenario_manifest(group)?;
+        let savegame_definition_override =
+            load_savegame_definition_override(group, manifest.core.head.save_game != 0)?;
+        Ok(Self::from_manifest(
+            manifest,
+            savegame_definition_override,
+            String::new(),
+        ))
+    }
+
     pub fn load_from_group_with_languages<S: AsRef<str>>(
         group: &Group,
         languages: &[S],
@@ -789,7 +806,19 @@ impl ScenarioLoaderHead {
             Some(title) => title,
             None => validate_name_ex_no_empty(manifest.core.head.title.clone())?,
         };
-        Ok(Self {
+        Ok(Self::from_manifest(
+            manifest,
+            savegame_definition_override,
+            scenario_title,
+        ))
+    }
+
+    fn from_manifest(
+        manifest: LegacyScenarioManifest,
+        savegame_definition_override: ScenarioSavegameDefinitionOverride,
+        scenario_title: String,
+    ) -> Self {
+        Self {
             loader: ScenarioLoaderMetadata {
                 configured_specification: manifest.core.head.loader.clone(),
             },
@@ -803,7 +832,7 @@ impl ScenarioLoaderHead {
             replay: manifest.core.head.replay != 0,
             savegame_definition_override,
             scenario_title,
-        })
+        }
     }
 
     pub fn loader(&self) -> &ScenarioLoaderMetadata {
@@ -14908,6 +14937,28 @@ RandomTeamCount=2
             ScenarioLoaderHead::load_from_group(&group),
             Err(ScenarioError::LoaderTitleTruncationBoundary { limit: 120 })
         ));
+    }
+
+    #[test]
+    fn resource_registration_head_never_resolves_unrelated_title_data() {
+        let directory = tempdir().expect("scenario directory");
+        let title = format!("{}é", "A".repeat(119));
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            format!(
+                "[Head]\nTitle={title}\nOrigin=Parent.c4s\n\
+                 \n[Definitions]\nLocalOnly=1\nDefinition1=Objects.c4d\n"
+            ),
+        )
+        .expect("scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group_for_resource_registration(&group)
+            .expect("resource registration head");
+        assert_eq!(head.scenario_title(), "");
+        assert_eq!(head.origin(), Some("Parent.c4s"));
+        assert_eq!(head.configured_definition_modules(), ["Objects.c4d"]);
+        assert!(head.local_only());
     }
 
     /// Builds the raw on-disk image of a tiny C4Group. This is intentionally

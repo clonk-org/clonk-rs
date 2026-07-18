@@ -124,7 +124,7 @@ use lc_frontend::loader_screen::{
 use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
 use lc_frontend::{
     ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
-    GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
+    GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
     InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction, MainMenuItem,
     MaterialRenderInfo, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
     StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
@@ -576,6 +576,14 @@ struct ResolvedGraphicsImage {
 struct SelectedGraphicsImageSource {
     source: SelectedLoaderSource,
     from_registration: bool,
+}
+
+#[derive(Clone)]
+struct GameGraphicsResources {
+    cursor_atlas: Arc<CursorAtlas>,
+    hud_graphics: Arc<HudGraphics>,
+    options: Option<Arc<ImageData>>,
+    palette: Arc<GamePalette>,
 }
 
 // C4LoaderScreen uses SafeRandom, which is the platform C library's global
@@ -1635,7 +1643,7 @@ fn select_named_graphics_image_source(
         registration: &base,
         from_registration: false,
     });
-    let mut selected: Option<(i32, Group, PathBuf, bool)> = None;
+    let mut selected: Option<(Group, PathBuf, bool)> = None;
     for extension in ["bmp", "jpeg", "jpg", "png"] {
         let filename = format!("{name}.{extension}");
         candidates.sort_by(|left, right| {
@@ -1665,19 +1673,188 @@ fn select_named_graphics_image_source(
             }
         }
         if let Some(candidate) = candidate {
-            if selected
-                .as_ref()
-                .is_none_or(|(priority, _, _, _)| candidate.0 >= *priority)
-            {
-                selected = Some(candidate);
-            }
+            // FindSuitableFile never assigns its local `iPrio` after a hit.
+            // Consequently every later extension replaces an earlier one,
+            // even when it comes from a lower-priority group.
+            selected = Some((candidate.1, candidate.2, candidate.3));
         }
     }
-    let (_, group, filename, from_registration) =
+    let (group, filename, from_registration) =
         selected.with_context(|| format!("classic graphics resource `{name}` is unavailable"))?;
     Ok(SelectedGraphicsImageSource {
         source: SelectedLoaderSource { group, filename },
         from_registration,
+    })
+}
+
+fn select_exact_graphics_source(
+    filename: &str,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> Result<SelectedLoaderSource> {
+    let base = LoaderGroupRegistration {
+        priority: 0,
+        registration_order: 0,
+        group: graphics.clone(),
+    };
+    let mut candidates = registrations.iter().collect::<Vec<_>>();
+    candidates.push(&base);
+    candidates.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.registration_order.cmp(&right.registration_order))
+    });
+    for candidate in candidates {
+        if let Some(path) = find_classic_named_entry(&candidate.group, filename)? {
+            return Ok(SelectedLoaderSource {
+                group: candidate.group.clone(),
+                filename: path,
+            });
+        }
+    }
+    anyhow::bail!("classic graphics resource `{filename}` is unavailable")
+}
+
+fn decode_game_graphics_image(
+    source: &SelectedLoaderSource,
+    palette: &GamePalette,
+) -> Result<ImageData> {
+    let is_bmp = source
+        .filename
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("bmp"));
+    if is_bmp {
+        let bytes = source.group.read_file(&source.filename).with_context(|| {
+            format!(
+                "failed to read game graphic `{}` from {}",
+                source.filename.display(),
+                source.group.root().display()
+            )
+        })?;
+        let bit_depth = bytes
+            .get(28..30)
+            .map(|value| u16::from_le_bytes([value[0], value[1]]));
+        if bit_depth == Some(8) {
+            let bitmap = lc_resources::bitmap::IndexedBitmap::decode(&bytes).with_context(|| {
+                format!(
+                    "failed to decode indexed game graphic `{}` from {}",
+                    source.filename.display(),
+                    source.group.root().display()
+                )
+            })?;
+            let mut pixels = Vec::with_capacity(bitmap.indices.len() * 4);
+            for index in bitmap.indices {
+                let color = palette.color(index);
+                pixels.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+            return Ok(ImageData::new(bitmap.width, bitmap.height, pixels));
+        }
+    }
+    decode_selected_loader(source)
+}
+
+fn load_game_graphics_image(
+    stem: &str,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+    palette: &GamePalette,
+) -> Result<ImageData> {
+    let selected = select_named_graphics_image_source(stem, registrations, graphics)?;
+    decode_game_graphics_image(&selected.source, palette)
+}
+
+fn resolve_game_graphics_resources(
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+    cached_cursor_atlas: Option<Arc<CursorAtlas>>,
+) -> Result<GameGraphicsResources> {
+    let palette_source = select_exact_graphics_source("C4.pal", registrations, graphics)?;
+    let palette_bytes = palette_source
+        .group
+        .read_file(&palette_source.filename)
+        .with_context(|| {
+            format!(
+                "failed to read game palette `{}` from {}",
+                palette_source.filename.display(),
+                palette_source.group.root().display()
+            )
+        })?;
+    let palette = GamePalette::from_c4_pal(&palette_bytes).with_context(|| {
+        format!(
+            "game palette `{}` in {} is shorter than {} bytes",
+            palette_source.filename.display(),
+            palette_source.group.root().display(),
+            GamePalette::BYTE_LEN
+        )
+    })?;
+    let load = |stem: &str| {
+        load_game_graphics_image(stem, registrations, graphics, &palette)
+            .with_context(|| format!("failed to load game graphics resource `{stem}`"))
+    };
+    let hud_graphics = HudGraphics {
+        player: Some(load("Player")?),
+        flag: Some(load("Flag")?),
+        crew: Some(load("Crew")?),
+        score: Some(load("Score")?),
+        wealth: Some(load("Wealth")?),
+        rank: Some(load("Rank")?),
+        captain: Some(load("Captain")?),
+        fire: Some(load("Fire")?),
+        menu: Some(load("Menu")?),
+        upper_board: Some(load("UpperBoard")?),
+        logo: Some(load("Logo")?),
+        construction: Some(load("Construction")?),
+        energy: Some(load("Energy")?),
+        magic: Some(load("Magic")?),
+        arrow: Some(load("Arrow")?),
+        exit: Some(load("Exit")?),
+        hand: Some(load("Hand")?),
+        build: Some(load("Build")?),
+        energy_bars: Some(load("EnergyBars")?),
+        select_mark: Some(load("SelectMark")?),
+        control: Some(load("Control")?),
+        background: Some(load("Background")?),
+    };
+    let options = Some(Arc::new(load("Options")?));
+
+    // PreInit fills fctCursors[0..7] from the sized files. Clear deliberately
+    // keeps those cached facets. A valid game-local Cursor.* suppresses the
+    // sized reload, then ReloadResolutionDependentFiles replaces that legacy
+    // sheet with the already-cached selected size before any frame can use it.
+    let cursor_atlas = match load_game_graphics_image("Cursor", registrations, graphics, &palette) {
+        Ok(_) => cached_cursor_atlas
+            .as_deref()
+            .cloned()
+            .context(
+                "legacy Cursor.* suppressed sized cursor initialization before a cache existed",
+            )?,
+        Err(_) => {
+            let cursor_stems = [
+                "CursorXXXXXLarge",
+                "CursorXXXXLarge",
+                "CursorXXXLarge",
+                "CursorXXLarge",
+                "CursorXLarge",
+                "CursorLarge",
+                "CursorMedium",
+                "CursorSmall",
+            ];
+            CursorAtlas::new(
+                cursor_stems
+                    .into_iter()
+                    .map(|stem| load(stem).map(Some))
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        }
+    };
+
+    Ok(GameGraphicsResources {
+        cursor_atlas: Arc::new(cursor_atlas),
+        hud_graphics: Arc::new(hud_graphics),
+        options,
+        palette: Arc::new(palette),
     })
 }
 
@@ -3060,6 +3237,7 @@ struct FrontendAssets {
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
+    game_palette: Arc<GamePalette>,
 }
 
 impl FrontendAssets {
@@ -3086,6 +3264,7 @@ impl FrontendAssets {
         let mut sprites = HashMap::new();
         let mut cursor_atlas = CursorAtlas::empty();
         let mut hud_graphics = HudGraphics::default();
+        let mut game_palette = GamePalette::default();
 
         if let Some(paths) = paths {
             let graphics_path = paths.planet_dir().join("Graphics.c4g");
@@ -3197,6 +3376,29 @@ impl FrontendAssets {
                             }
                         }
                     }
+                    match resolve_game_graphics_resources(
+                        &graphics_registrations,
+                        &graphics,
+                        None,
+                    ) {
+                        Ok(resources) => {
+                            cursor_atlas = resources.cursor_atlas.as_ref().clone();
+                            hud_graphics = resources.hud_graphics.as_ref().clone();
+                            game_palette = resources.palette.as_ref().clone();
+                            if let Some(options) = resources.options {
+                                startup_dialog_images.insert(
+                                    "Options.png".to_string(),
+                                    options.as_ref().clone(),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "failed to resolve startup game graphics bundle"
+                            );
+                        }
+                    }
                 }
                 Err(error) => {
                     let detail = error.to_string();
@@ -3241,6 +3443,7 @@ impl FrontendAssets {
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
+            game_palette: Arc::new(game_palette),
         }
     }
 
@@ -3447,7 +3650,10 @@ impl FrontendAssets {
         )
     }
 
-    fn game_over_classic_resources(&self) -> Option<GameOverClassicResources<'_>> {
+    fn game_over_classic_resources<'a>(
+        &'a self,
+        hud: &'a HudGraphics,
+    ) -> Option<GameOverClassicResources<'a>> {
         let caption = self.startup_dialog_images.get("GUICaption.png")?;
         let button = self.startup_dialog_images.get("GUIButton.png")?;
         let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
@@ -3463,8 +3669,10 @@ impl FrontendAssets {
             fonts,
             Some(button_highlight),
             self.startup_dialog_images.get("GUIIcons.png"),
-            self.startup_dialog_images.get("Player.png"),
-            self.hud_graphics.score.as_ref(),
+            hud.player
+                .as_ref()
+                .or_else(|| self.startup_dialog_images.get("Player.png")),
+            hud.score.as_ref(),
         ))
     }
 
@@ -3999,6 +4207,13 @@ impl FrontendAssets {
     fn require_classic_game_over_resources(
         &self,
     ) -> std::result::Result<(), ClassicParityBoundary> {
+        self.require_classic_game_over_resources_with_hud(self.hud_graphics.as_ref())
+    }
+
+    fn require_classic_game_over_resources_with_hud(
+        &self,
+        hud: &HudGraphics,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
         let mut missing = Vec::new();
         if self.clonk_fonts.is_none() {
             missing.push("CStdFont/Endeavour.ttf");
@@ -4011,12 +4226,15 @@ impl FrontendAssets {
         if self.game_over_button_highlight.is_none() {
             missing.push("GUIButtonHighlight.png");
         }
-        for name in ["GUIIcons.png", "Player.png"] {
+        for name in ["GUIIcons.png"] {
             if !self.startup_dialog_images.contains_key(name) {
                 missing.push(name);
             }
         }
-        if self.hud_graphics.score.is_none() {
+        if hud.player.is_none() && !self.startup_dialog_images.contains_key("Player.png") {
+            missing.push("Player.png");
+        }
+        if hud.score.is_none() {
             missing.push("Score.png");
         }
         if missing.is_empty() {
@@ -4032,6 +4250,10 @@ impl FrontendAssets {
 
     fn hud_graphics(&self) -> Arc<HudGraphics> {
         Arc::clone(&self.hud_graphics)
+    }
+
+    fn game_palette(&self) -> Arc<GamePalette> {
+        Arc::clone(&self.game_palette)
     }
 
     fn base_sprite_map(&self) -> &HashMap<String, DefinitionSprite> {
@@ -7659,6 +7881,9 @@ struct GameApp {
     /// Effective definition vector from the active game. C++ backs this up
     /// across Restart/Next Mission and restores it as FixedDefinitions.
     active_definition_load: Option<ScenarioDefinitionLoad>,
+    /// C4GraphicsResource's game-local HUD, cursor and palette selection.
+    /// `None` means the process-startup Graphics.c4g bundle is active.
+    active_game_graphics: Option<GameGraphicsResources>,
     audio: Option<AudioContext>,
     /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
     /// from persisted RXMusic while a game is running.
@@ -14920,6 +15145,7 @@ impl GameApp {
             assets.hud_graphics(),
         );
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
+        graphics.set_game_palette(assets.game_palette());
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         let control_messages = ControlMessageState::new(
             load_sound_command_cooldown(paths),
@@ -15032,6 +15258,7 @@ impl GameApp {
             scenario_catalog,
             active_scenario: None,
             active_definition_load: None,
+            active_game_graphics: None,
             audio,
             runtime_music_enabled: false,
             assets: assets.clone(),
@@ -15377,6 +15604,62 @@ impl GameApp {
         }
     }
 
+    fn current_cursor_atlas(&self) -> Arc<CursorAtlas> {
+        self.active_game_graphics
+            .as_ref()
+            .map(|resources| Arc::clone(&resources.cursor_atlas))
+            .unwrap_or_else(|| self.assets.cursor_atlas())
+    }
+
+    fn current_hud_graphics(&self) -> Arc<HudGraphics> {
+        self.active_game_graphics
+            .as_ref()
+            .map(|resources| Arc::clone(&resources.hud_graphics))
+            .unwrap_or_else(|| self.assets.hud_graphics())
+    }
+
+    fn current_hud_graphics_ref(&self) -> &HudGraphics {
+        self.active_game_graphics
+            .as_ref()
+            .map(|resources| resources.hud_graphics.as_ref())
+            .unwrap_or(self.assets.hud_graphics.as_ref())
+    }
+
+    fn current_game_palette(&self) -> Arc<GamePalette> {
+        self.active_game_graphics
+            .as_ref()
+            .map(|resources| Arc::clone(&resources.palette))
+            .unwrap_or_else(|| self.assets.game_palette())
+    }
+
+    fn current_options_graphic(&self) -> Option<ImageData> {
+        self.active_game_graphics
+            .as_ref()
+            .and_then(|resources| resources.options.as_deref().cloned())
+            .or_else(|| self.assets.dialog_image("Options.png"))
+    }
+
+    fn startup_game_graphics_resources(&self) -> GameGraphicsResources {
+        GameGraphicsResources {
+            cursor_atlas: self.assets.cursor_atlas(),
+            hud_graphics: self.assets.hud_graphics(),
+            options: self
+                .assets
+                .startup_dialog_images
+                .get("Options.png")
+                .cloned()
+                .map(Arc::new),
+            palette: self.assets.game_palette(),
+        }
+    }
+
+    fn script_text_spec_resources(&self) -> ScriptTextSpecResources<'_> {
+        ScriptTextSpecResources::from_assets_and_hud(
+            self.assets.as_ref(),
+            self.current_hud_graphics_ref(),
+        )
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         self.close_context_menu_silently();
@@ -15394,6 +15677,9 @@ impl GameApp {
         self.running_pointer_position = None;
         self.scoreboard_close_pointer_capture = false;
         self.mark_menu_dirty();
+        let cursor_atlas = self.current_cursor_atlas();
+        let hud_graphics = self.current_hud_graphics();
+        let game_palette = self.current_game_palette();
         let mut graphics = GraphicsSystem::new(
             width,
             height,
@@ -15401,10 +15687,11 @@ impl GameApp {
             &self.scenario_label,
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
-            self.assets.cursor_atlas(),
-            self.assets.hud_graphics(),
+            cursor_atlas,
+            hud_graphics,
         );
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
+        graphics.set_game_palette(game_palette);
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
         self.sync_scenario_game_option_bounds();
@@ -17168,7 +17455,7 @@ impl GameApp {
         let font_images = resolve_scoreboard_font_images(
             &self.engine,
             &self.snapshot.hud.scoreboard,
-            ScriptTextSpecResources::from_assets(&self.assets),
+            self.script_text_spec_resources(),
         )
         .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
         let resources = self
@@ -17205,7 +17492,7 @@ impl GameApp {
         let font_images = resolve_scoreboard_font_images(
             &self.engine,
             &self.snapshot.hud.scoreboard,
-            ScriptTextSpecResources::from_assets(&self.assets),
+            self.script_text_spec_resources(),
         )
         .map_err(fail)?;
         let resources = self
@@ -19831,6 +20118,7 @@ impl GameApp {
 
     fn ensure_ingame_menu_gfx(&mut self) -> &mut IngameMenuGraphics {
         if self.ingame_menu_gfx.is_none() {
+            let hud = self.current_hud_graphics();
             let throw_key = self
                 .bindings
                 .key_for(ControlBindingId::Throw)
@@ -19847,13 +20135,22 @@ impl GameApp {
                 .map(format_key_label)
                 .unwrap_or_default();
             self.ingame_menu_gfx = Some(IngameMenuGraphics {
-                hud: self.assets.hud_graphics().as_ref().clone(),
+                hud: hud.as_ref().clone(),
                 owner_colors: HashMap::new(),
-                menu: self.assets.dialog_image("Menu.png"),
-                options: self.assets.dialog_image("Options.png"),
-                control: self.assets.dialog_image("Control.png"),
+                menu: hud
+                    .menu
+                    .clone()
+                    .or_else(|| self.assets.dialog_image("Menu.png")),
+                options: self.current_options_graphic(),
+                control: hud
+                    .control
+                    .clone()
+                    .or_else(|| self.assets.dialog_image("Control.png")),
                 gui_icons: self.assets.dialog_image("GUIIcons.png"),
-                player: self.assets.dialog_image("Player.png"),
+                player: hud
+                    .player
+                    .clone()
+                    .or_else(|| self.assets.dialog_image("Player.png")),
                 caption_bar: self.assets.dialog_image("GUICaption.png"),
                 definition_icons: HashMap::new(),
                 font_images: HashMap::new(),
@@ -23468,7 +23765,7 @@ impl GameApp {
                 let surface = self.graphics.surface();
                 Rect::new(0, 0, surface.width(), surface.height())
             });
-        let resources = ScriptTextSpecResources::from_assets(&self.assets);
+        let resources = self.script_text_spec_resources();
         let font_images =
             resolve_script_menu_font_images(&self.engine, menu, resources).map_err(|error| {
                 classic_parity_engine_error(report_classic_parity_boundary(
@@ -30116,7 +30413,7 @@ impl GameApp {
     fn handle_game_over(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.assets
-            .require_classic_game_over_resources()
+            .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
             .map_err(report_classic_parity_boundary)
             .map_err(classic_parity_engine_error)?;
         // DoGameOver calls C4Player::EvaluateLeague for every survivor,
@@ -32127,7 +32424,7 @@ impl GameApp {
                 let font_images = resolve_message_font_images(
                     &self.engine,
                     message,
-                    ScriptTextSpecResources::from_assets(&self.assets),
+                    self.script_text_spec_resources(),
                 );
                 game_message::draw_global_message_native(
                     &mut surface,
@@ -32162,7 +32459,7 @@ impl GameApp {
         self.preflight_visible_gui_overlay_resources()?;
         if self.game_over_dialog.is_some() {
             self.assets
-                .require_classic_game_over_resources()
+                .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
                 .map_err(report_classic_parity_boundary)?;
         }
         if let Some(browser) = self.save_browser.as_ref() {
@@ -32372,7 +32669,7 @@ impl GameApp {
             } else {
                 0
             };
-            let text_spec_resources = ScriptTextSpecResources::from_assets(&self.assets);
+            let text_spec_resources = self.script_text_spec_resources();
             let font_images = resolve_script_menu_font_images(
                 &self.engine,
                 menu,
@@ -32382,7 +32679,7 @@ impl GameApp {
                 tracing::error!(%error, "classic menu text-image resource preflight failed");
                 error
             })?;
-            let hud_graphics = self.assets.hud_graphics();
+            let hud_graphics = self.current_hud_graphics();
             let item_icons = menu
                 .items
                 .iter()
@@ -32647,9 +32944,10 @@ impl GameApp {
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
+            let hud = self.current_hud_graphics();
             let classic = self
                 .assets
-                .game_over_classic_resources()
+                .game_over_classic_resources(hud.as_ref())
                 .expect("game-over resources were preflighted before rendering");
             dialog.render_with_gamma(
                 self.graphics.surface_mut(),
@@ -32864,7 +33162,7 @@ impl GameApp {
                 let font_images = resolve_message_font_images(
                     &self.engine,
                     message,
-                    ScriptTextSpecResources::from_assets(&self.assets),
+                    self.script_text_spec_resources(),
                 );
                 game_message::draw_global_message(
                     self.graphics.surface_mut(),
@@ -33472,6 +33770,8 @@ impl GameApp {
     }
 
     fn return_to_menu(&mut self) {
+        self.active_game_graphics = None;
+        self.ingame_menu_gfx = None;
         self.active_global_gui_overrides.clear();
         self.close_context_menu_silently();
         self.host_lobby_countdown = None;
@@ -33578,6 +33878,8 @@ impl GameApp {
         );
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
+        self.graphics
+            .set_game_palette(self.assets.game_palette());
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
@@ -34084,6 +34386,14 @@ impl GameApp {
             // selected during this load. C++ backs up that effective vector.
             definition_root: None,
         };
+        let active_game_graphics = self
+            .loaded_game_graphics_resources(&scenario, Some(&effective_definition_load))
+            .map_err(|error| {
+                ScenarioActivationError::Recoverable(format!(
+                    "Failed to load {} graphics: {error:#}",
+                    scenario.title
+                ))
+            })?;
 
         tracing::info!(
             scenario = %scenario.title,
@@ -34506,6 +34816,8 @@ impl GameApp {
         let offline_player_infos = offline_startup_players
             .is_some()
             .then(|| std::mem::take(&mut self.control_player_infos));
+        self.active_game_graphics = Some(active_game_graphics);
+        self.ingame_menu_gfx = None;
         self.configure_running_state(label, ground);
         if !network_game {
             // C++ creates fullscreen viewports only after Script.Initialize
@@ -34577,6 +34889,8 @@ impl GameApp {
             "starting sandbox fallback scenario"
         );
 
+        self.active_game_graphics = None;
+        self.ingame_menu_gfx = None;
         self.active_global_gui_overrides.clear();
         self.finish_recording();
         self.loading_state = None;
@@ -34813,14 +35127,77 @@ impl GameApp {
         )
     }
 
+    fn loaded_game_graphics_resources(
+        &self,
+        frontend: &FrontendScenario,
+        definition_load: Option<&ScenarioDefinitionLoad>,
+    ) -> Result<GameGraphicsResources> {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return Ok(self.startup_game_graphics_resources());
+        };
+        let path = frontend
+            .path
+            .as_deref()
+            .context("loaded scenario has no path for game graphics resolution")?;
+        let scenario_group = open_group_path_for_folder_map(path)
+            .with_context(|| format!("failed to open loaded scenario at {}", path.display()))?;
+        // Graphics registration only consumes Origin, Definitions and Extra;
+        // it must not resolve or validate unrelated presentation title data.
+        let head = ScenarioLoaderHead::load_from_group_for_resource_registration(
+            &scenario_group,
+        )
+        .map_err(anyhow::Error::from)?;
+        let fallback_definition_load;
+        let definition_load = match definition_load {
+            Some(definition_load) => definition_load,
+            None => {
+                fallback_definition_load = ScenarioDefinitionLoad::Seed {
+                    modules: Vec::new(),
+                    definition_root: None,
+                };
+                &fallback_definition_load
+            }
+        };
+        let mut registrations = classic_loader_registrations(
+            frontend,
+            &scenario_group,
+            &head,
+            definition_load,
+            paths,
+        )?;
+        let first_definition_order = registrations
+            .iter()
+            .map(|registration| registration.registration_order)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        registrations.extend(definition_graphics_source_registrations(
+            &head,
+            &scenario_group,
+            definition_load,
+            paths,
+            first_definition_order,
+        )?);
+        let graphics_registrations = loader_graphics_registrations(&registrations)?;
+        if graphics_registrations.is_empty() {
+            return Ok(self.startup_game_graphics_resources());
+        }
+        let graphics = main_graphics_group(paths)?;
+        resolve_game_graphics_resources(
+            &graphics_registrations,
+            &graphics,
+            Some(self.assets.cursor_atlas()),
+        )
+    }
+
     fn apply_loaded_game(&mut self, save: SavedGameFile) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         let scenario_info = save.scenario.clone();
         let frontend = scenario_info.to_frontend();
         let saved_definition_load = save.definition_load.clone();
 
-        let (loaded_overrides, loaded_fonts) = if scenario_info.sandbox {
-            (HashMap::new(), None)
+        let (loaded_overrides, loaded_fonts, loaded_game_graphics) = if scenario_info.sandbox {
+            (HashMap::new(), None, None)
         } else {
             (
                 self.loaded_game_global_gui_overrides(&frontend, saved_definition_load.as_ref())?,
@@ -34830,6 +35207,10 @@ impl GameApp {
                         saved_definition_load.as_ref(),
                     )?,
                 ),
+                Some(self.loaded_game_graphics_resources(
+                    &frontend,
+                    saved_definition_load.as_ref(),
+                )?),
             )
         };
         self.assets
@@ -35052,29 +35433,6 @@ impl GameApp {
         }
 
         self.rebuild_definition_sprites();
-
-        let offline_player_infos = self
-            .network
-            .is_none()
-            .then(|| std::mem::take(&mut self.control_player_infos));
-        self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
-        if let Some(player_infos) = offline_player_infos {
-            self.control_player_infos = player_infos;
-        }
-        if let Some(enabled) = save.runtime_music_enabled {
-            self.runtime_music_enabled = enabled;
-        }
-        self.active_scenario = Some(frontend.clone());
-
-        if let Some(audio) = self.audio.as_mut() {
-            audio.set_music_playlist(save.engine_state.play_list.clone());
-        }
-
-        if scenario_info.sandbox {
-            self.play_sandbox_audio();
-        } else if let Some(path) = frontend.path.as_ref() {
-            self.play_scenario_audio(path);
-        }
 
         self.engine
             .restore_state(&save.engine_state)
@@ -35325,6 +35683,33 @@ impl GameApp {
         self.engine
             .finalize_restored_players()
             .context("failed to run restored player FinalInit")?;
+
+        // Commit presentation resources only after every fallible restore
+        // step. A rejected save must not leak its HUD/cursor/palette into the
+        // still-visible previous game.
+        let offline_player_infos = self
+            .network
+            .is_none()
+            .then(|| std::mem::take(&mut self.control_player_infos));
+        self.active_game_graphics = loaded_game_graphics;
+        self.ingame_menu_gfx = None;
+        self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
+        if let Some(player_infos) = offline_player_infos {
+            self.control_player_infos = player_infos;
+        }
+        if let Some(enabled) = save.runtime_music_enabled {
+            self.runtime_music_enabled = enabled;
+        }
+        self.active_scenario = Some(frontend.clone());
+        if let Some(audio) = self.audio.as_mut() {
+            audio.set_music_playlist(save.engine_state.play_list.clone());
+        }
+        if scenario_info.sandbox {
+            self.play_sandbox_audio();
+        } else if let Some(path) = frontend.path.as_ref() {
+            self.play_scenario_audio(path);
+        }
+
         self.engine.set_film_viewport_available(true);
         self.mouse_control = self.local_controls.mouse_owner().is_some();
         if let Some(max_players) = self.engine.max_players() {
@@ -35418,6 +35803,9 @@ impl GameApp {
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
+        let cursor_atlas = self.current_cursor_atlas();
+        let hud_graphics = self.current_hud_graphics();
+        let game_palette = self.current_game_palette();
         self.graphics = GraphicsSystem::new(
             width,
             height,
@@ -35425,11 +35813,12 @@ impl GameApp {
             &self.scenario_label,
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
-            self.assets.cursor_atlas(),
-            self.assets.hud_graphics(),
+            cursor_atlas,
+            hud_graphics,
         );
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
+        self.graphics.set_game_palette(game_palette);
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.graphics.set_sky(self.sky.clone());
         self.graphics
@@ -36480,10 +36869,14 @@ struct ScriptTextSpecResources<'a> {
 
 impl<'a> ScriptTextSpecResources<'a> {
     fn from_assets(assets: &'a FrontendAssets) -> Self {
+        Self::from_assets_and_hud(assets, assets.hud_graphics.as_ref())
+    }
+
+    fn from_assets_and_hud(assets: &'a FrontendAssets, hud: &'a HudGraphics) -> Self {
         Self {
             gui_icons: assets.startup_dialog_images.get("GUIIcons.png"),
             gui_icons_extended: assets.startup_dialog_images.get("GUIIcons2.png"),
-            score: assets.hud_graphics.score.as_ref(),
+            score: hud.score.as_ref(),
         }
     }
 }
@@ -56827,7 +57220,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn global_gui_stem_resolver_honors_group_priority_and_extension_ties() {
+    fn graphics_stem_resolver_matches_find_suitable_file_extension_bug() {
         let directory = tempdir().expect("global GUI resolver");
         let base = directory.path().join("base.c4g");
         let override_group = directory.path().join("override.c4g");
@@ -56847,14 +57240,15 @@ public func Grant(password) { return GainMissionAccess(password); }
         let base_group = Group::open(&base).expect("base group");
         let selected =
             select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
-                .expect("select high-priority bmp");
-        assert!(selected.from_registration);
-        assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.bmp"));
+                .expect("select globally later png");
+        assert!(!selected.from_registration);
+        assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.png"));
         assert_eq!(
             decode_selected_loader(&selected.source)
-                .expect("decode selected bmp")
+                .expect("decode selected base png")
                 .pixels(),
-            [0, 0, 255, 255]
+            [255, 0, 0, 255],
+            "FindSuitableFile never updates iPrio, so a base png replaces a scenario-priority bmp"
         );
 
         write_preview_png(&override_group.join("GUIBigArrows.png"), [0, 255, 0, 255]);
@@ -56876,6 +57270,220 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn game_graphics_refreshes_hud_cursor_and_palette_then_reverts_at_preinit() {
+        let directory = tempdir().expect("game graphics refresh fixture");
+        let base_path = directory.path().join("base.c4g");
+        let scenario_path = directory.path().join("scenario.c4g");
+        let sized_path = directory.path().join("sized.c4g");
+        for path in [&base_path, &scenario_path, &sized_path] {
+            fs::create_dir(path).expect("graphics group");
+        }
+        let write_solid = |path: &Path, width: u32, height: u32, pixel: [u8; 4]| {
+            image::RgbaImage::from_pixel(width, height, image::Rgba(pixel))
+                .save(path)
+                .expect("write solid graphics image");
+        };
+        for stem in [
+            "Player",
+            "Flag",
+            "Crew",
+            "Score",
+            "Wealth",
+            "Captain",
+            "Fire",
+            "Menu",
+            "UpperBoard",
+            "Logo",
+            "Construction",
+            "Energy",
+            "Magic",
+            "Arrow",
+            "Exit",
+            "Hand",
+            "Build",
+            "EnergyBars",
+            "SelectMark",
+            "Control",
+            "Background",
+            "Options",
+        ] {
+            write_preview_png(&base_path.join(format!("{stem}.png")), [9, 8, 7, 255]);
+        }
+        write_preview_image(
+            &base_path.join("Rank.bmp"),
+            [20, 30, 40, 255],
+            image::ImageFormat::Bmp,
+        );
+        for stem in [
+            "CursorXXXXXLarge",
+            "CursorXXXXLarge",
+            "CursorXXXLarge",
+            "CursorXXLarge",
+            "CursorXLarge",
+            "CursorLarge",
+            "CursorMedium",
+            "CursorSmall",
+        ] {
+            let pixel = if stem == "CursorLarge" {
+                [10, 20, 30, 255]
+            } else {
+                [1, 1, 1, 255]
+            };
+            write_solid(&base_path.join(format!("{stem}.png")), 78, 2, pixel);
+        }
+        let mut base_palette = vec![0_u8; GamePalette::BYTE_LEN];
+        base_palette[6 * 3..6 * 3 + 3].copy_from_slice(&[63, 63, 63]);
+        base_palette[10 * 3..10 * 3 + 3].copy_from_slice(&[10, 0, 0]);
+        fs::write(base_path.join("C4.pal"), base_palette).expect("base C4.pal");
+        let base = Group::open(&base_path).expect("base graphics");
+        let startup = resolve_game_graphics_resources(&[], &base, None)
+            .expect("startup graphics bundle");
+
+        let mut scenario_palette = vec![0_u8; GamePalette::BYTE_LEN];
+        scenario_palette[6 * 3..6 * 3 + 3].copy_from_slice(&[3, 4, 5]);
+        scenario_palette[10 * 3..10 * 3 + 3].copy_from_slice(&[1, 2, 3]);
+        fs::write(scenario_path.join("C4.pal"), scenario_palette)
+            .expect("scenario C4.pal");
+        write_preview_png(&scenario_path.join("Control.png"), [80, 90, 100, 255]);
+        write_preview_png(&scenario_path.join("Options.png"), [110, 120, 130, 255]);
+        let mut embedded_palette = [[0_u8; 3]; 256];
+        embedded_palette[10] = [0, 255, 0];
+        let indexed_rank = lc_resources::bitmap::IndexedBitmap {
+            width: 1,
+            height: 1,
+            indices: vec![10],
+        }
+        .encode_with_palette(&embedded_palette)
+        .expect("indexed scenario Rank.bmp");
+        fs::write(scenario_path.join("Rank.bmp"), indexed_rank).expect("scenario Rank.bmp");
+        write_solid(
+            &scenario_path.join("Cursor.png"),
+            39 * 13,
+            13,
+            [200, 0, 0, 255],
+        );
+        write_solid(
+            &scenario_path.join("CursorLarge.png"),
+            39 * 13,
+            13,
+            [0, 200, 0, 255],
+        );
+        let scenario_registrations = [LoaderGroupRegistration {
+            priority: 200,
+            registration_order: 0,
+            group: Group::open(&scenario_path).expect("scenario graphics"),
+        }];
+        let active = resolve_game_graphics_resources(
+            &scenario_registrations,
+            &base,
+            Some(Arc::clone(&startup.cursor_atlas)),
+        )
+        .expect("active scenario graphics bundle");
+        assert_eq!(
+            active
+                .hud_graphics
+                .rank
+                .as_ref()
+                .expect("scenario rank")
+                .pixels(),
+            [4, 8, 12, 255],
+            "indexed BMP pixels use the selected game palette, not the embedded BMP palette"
+        );
+        assert_eq!(
+            active
+                .hud_graphics
+                .control
+                .as_ref()
+                .expect("scenario control")
+                .pixels(),
+            [80, 90, 100, 255]
+        );
+        assert_eq!(active.palette.color(6), Color::opaque(12, 16, 20));
+        assert_eq!(
+            active.options.as_deref().expect("scenario options").pixels(),
+            [110, 120, 130, 255]
+        );
+        assert_eq!(
+            active
+                .cursor_atlas
+                .image_for_resolution(1280)
+                .expect("cached large cursor")
+                .pixels()[..4],
+            [10, 20, 30, 255],
+            "a valid legacy Cursor suppresses sized overrides, then the cached pre-game size wins"
+        );
+
+        write_solid(
+            &sized_path.join("CursorLarge.png"),
+            39 * 13,
+            13,
+            [0, 200, 0, 255],
+        );
+        let sized = resolve_game_graphics_resources(
+            &[LoaderGroupRegistration {
+                priority: 200,
+                registration_order: 0,
+                group: Group::open(&sized_path).expect("sized cursor graphics"),
+            }],
+            &base,
+            Some(Arc::clone(&startup.cursor_atlas)),
+        )
+        .expect("sized cursor override bundle");
+        let sized_large = sized
+            .cursor_atlas
+            .image_for_resolution(1280)
+            .expect("overridden large cursor");
+        assert_eq!(sized_large.height(), 13);
+        assert_eq!(&sized_large.pixels()[..4], &[0, 200, 0, 255]);
+        assert_eq!(
+            (
+                35 * sized_large.height(),
+                36 * sized_large.height(),
+                38 * sized_large.height()
+            ),
+            (455, 468, 494)
+        );
+
+        let mut app = new_menu_app(64, 64);
+        let startup_hud = app.assets.hud_graphics();
+        let startup_palette = app.assets.game_palette();
+        app.active_game_graphics = Some(active.clone());
+        app.configure_running_state("Overridden".to_string(), 64);
+        assert_eq!(
+            app.graphics
+                .hud_graphics()
+                .rank
+                .as_ref()
+                .expect("active rank")
+                .pixels(),
+            [4, 8, 12, 255]
+        );
+        assert_eq!(app.graphics.game_palette().color(6), Color::opaque(12, 16, 20));
+        assert_eq!(
+            app.ensure_ingame_menu_gfx()
+                .options
+                .as_ref()
+                .expect("active options sheet")
+                .pixels(),
+            [110, 120, 130, 255]
+        );
+        app.resize(80, 80).expect("active graphics survive resize");
+        assert_eq!(
+            app.graphics
+                .hud_graphics()
+                .control
+                .as_ref()
+                .expect("active control after resize")
+                .pixels(),
+            [80, 90, 100, 255]
+        );
+        app.return_to_menu();
+        assert!(app.active_game_graphics.is_none());
+        assert_eq!(app.graphics.hud_graphics().as_ref(), startup_hud.as_ref());
+        assert_eq!(app.graphics.game_palette().as_ref(), startup_palette.as_ref());
+    }
+
+    #[test]
     fn initial_extra_override_rebinds_canonical_and_malformed_winner_never_falls_back() {
         let _lock = env_lock().lock();
 
@@ -56883,10 +57491,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         install_global_gui_test_root(valid.path(), None);
         let extra_graphics = valid.path().join("planet/Extra.c4g/Graphics.c4g");
         fs::create_dir_all(&extra_graphics).expect("valid Extra Graphics.c4g");
-        write_preview_image(
-            &extra_graphics.join("GUIBigArrows.bmp"),
+        write_preview_png(
+            &extra_graphics.join("GUIBigArrows.png"),
             [0x12, 0x34, 0x56, 0xff],
-            image::ImageFormat::Bmp,
         );
         {
             let user = valid.path().join("user");
@@ -56914,9 +57521,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         install_global_gui_test_root(malformed.path(), None);
         let extra_graphics = malformed.path().join("planet/Extra.c4g/Graphics.c4g");
         fs::create_dir_all(&extra_graphics).expect("malformed Extra Graphics.c4g");
-        write_preview_png(
-            &extra_graphics.join("GUIBigArrows.bmp"),
+        write_preview_image(
+            &extra_graphics.join("GUIBigArrows.png"),
             [0xaa, 0xbb, 0xcc, 0xff],
+            image::ImageFormat::Bmp,
         );
         {
             let user = malformed.path().join("user");
@@ -56929,7 +57537,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             let assets = FrontendAssets::load(Some(&paths));
             let error = assets
                 .require_classic_global_gui_bootstrap_resources(&HashMap::new())
-                .expect_err("malformed winning bmp must not fall back to base PNG");
+                .expect_err("malformed winning png must not fall back to base PNG");
             assert!(matches!(
                 error,
                 ClassicParityBoundary::GlobalGuiBootstrapResources { ref issues }
@@ -79416,7 +80024,9 @@ protected func InputCallback(string answer, int player)
             .startup_dialog_images
             .remove("Player.png")
             .expect("fixture player icon");
-        Arc::make_mut(&mut assets.hud_graphics).score = None;
+        let hud = Arc::make_mut(&mut assets.hud_graphics);
+        hud.player = None;
+        hud.score = None;
         app.scoreboard_initial_reconcile_pending = true;
         let before = runtime_global_ui_snapshot(&app);
         let mut frame = vec![0x5a; 320 * 200 * 4];
@@ -79457,11 +80067,19 @@ protected func InputCallback(string answer, int player)
 
         {
             let name = "Player.png";
-            let image = Arc::get_mut(&mut app.assets)
-                .expect("frontend assets are app-owned")
-                .startup_dialog_images
-                .remove(name)
-                .expect("fixture image");
+            let (image, hud_player) = {
+                let assets = Arc::get_mut(&mut app.assets)
+                    .expect("frontend assets are app-owned");
+                let image = assets
+                    .startup_dialog_images
+                    .remove(name)
+                    .expect("fixture image");
+                let hud_player = Arc::make_mut(&mut assets.hud_graphics)
+                    .player
+                    .take()
+                    .expect("fixture HUD player image");
+                (image, hud_player)
+            };
             let mut frame = vec![0xa5; 320 * 200 * 4];
             let sentinel = frame.clone();
 
@@ -79471,10 +80089,11 @@ protected func InputCallback(string answer, int player)
             assert_game_over_resource_boundary(&error, vec![name]);
             assert_eq!(frame, sentinel, "{name} guard must run before pixels");
 
-            Arc::get_mut(&mut app.assets)
-                .expect("frontend assets are app-owned")
+            let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+            assets
                 .startup_dialog_images
                 .insert(name.to_string(), image);
+            Arc::make_mut(&mut assets.hud_graphics).player = Some(hud_player);
         }
 
         let score = {

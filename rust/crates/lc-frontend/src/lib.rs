@@ -111,6 +111,46 @@ const C4GFXBLIT_PARENT: u32 = 256;
 /// retain palette indices all the way to `C4FacetEx::DrawLine`.
 const C4_GAME_PALETTE: &[u8; 256 * 3] = include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
 
+/// The per-game palette installed by `C4GraphicsResource::Init`. Source
+/// bytes use C4.PAL's six-bit RGB channels; indices 0 and 191 receive the
+/// engine's fixed transparency/force-field overrides after expansion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GamePalette {
+    colors: [Color; 256],
+}
+
+impl GamePalette {
+    pub const BYTE_LEN: usize = 256 * 3;
+
+    pub fn from_c4_pal(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < Self::BYTE_LEN {
+            return None;
+        }
+        let mut colors = [Color::opaque(0, 0, 0); 256];
+        for (index, color) in colors.iter_mut().enumerate() {
+            let offset = index * 3;
+            *color = Color::opaque(
+                bytes[offset] << 2,
+                bytes[offset + 1] << 2,
+                bytes[offset + 2] << 2,
+            );
+        }
+        colors[0] = Color::transparent();
+        colors[191] = Color::new(0, 0, 255, 128);
+        Some(Self { colors })
+    }
+
+    pub fn color(&self, index: u8) -> Color {
+        self.colors[usize::from(index)]
+    }
+}
+
+impl Default for GamePalette {
+    fn default() -> Self {
+        Self::from_c4_pal(C4_GAME_PALETTE).expect("embedded C4.PAL has 256 RGB entries")
+    }
+}
+
 /// Presentation fields from one C4MaterialCore. Colors and alpha retain the
 /// C++ arrays verbatim: three RGB triplets and two sets of three transparency
 /// values (`0` opaque, `255` transparent).
@@ -2173,6 +2213,7 @@ pub struct GraphicsSystem {
     rotateable_definitions: HashSet<DefinitionId>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
+    game_palette: Arc<GamePalette>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
     /// Gamma currently installed in CStdDDraw. A runtime SetGamma mutates the
@@ -2246,6 +2287,7 @@ impl GraphicsSystem {
             rotateable_definitions: HashSet::new(),
             cursor_atlas,
             hud_graphics,
+            game_palette: Arc::new(GamePalette::default()),
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
             active_gamma_control_points: None,
@@ -2306,6 +2348,14 @@ impl GraphicsSystem {
 
     pub fn hud_graphics(&self) -> Arc<HudGraphics> {
         Arc::clone(&self.hud_graphics)
+    }
+
+    pub fn set_game_palette(&mut self, palette: Arc<GamePalette>) {
+        self.game_palette = palette;
+    }
+
+    pub fn game_palette(&self) -> Arc<GamePalette> {
+        Arc::clone(&self.game_palette)
     }
 
     pub fn surface(&self) -> &Surface {
@@ -2540,6 +2590,7 @@ impl GraphicsSystem {
             viewport.rect,
             current,
             down,
+            self.game_palette.color(10),
             gamma,
         );
         true
@@ -5276,9 +5327,12 @@ impl GraphicsSystem {
         // function. Texture-only MOD2 modes never alter line RGB. Preserve
         // the modulation activation (MOD2 + zero ColorMod intentionally
         // modulates the line to black), while masking those mode bits out.
-        let primary =
-            modulate_line_palette_color(c4_palette_color(primary), object_blit.modulation);
-        let marker = modulate_line_palette_color(c4_palette_color(marker), object_blit.modulation);
+        let primary = modulate_line_palette_color(
+            self.game_palette.color(primary),
+            object_blit.modulation,
+        );
+        let marker =
+            modulate_line_palette_color(self.game_palette.color(marker), object_blit.modulation);
         let blit = SpriteBlitState {
             mode: object_blit.mode & C4GFXBLIT_ADDITIVE,
             modulation: None,
@@ -7372,26 +7426,7 @@ fn object_color(object: &ObjectSnapshot) -> Color {
 }
 
 fn c4_palette_color(index: u8) -> Color {
-    let offset = usize::from(index) * 3;
-    let rgb = if index == 191 {
-        // Runtime force-field override, after the file's channel expansion.
-        [0, 0, 255]
-    } else {
-        [
-            C4_GAME_PALETTE[offset] << 2,
-            C4_GAME_PALETTE[offset + 1] << 2,
-            C4_GAME_PALETTE[offset + 2] << 2,
-        ]
-    };
-    let alpha = match index {
-        // C4GraphicsResource's AlphaPalette stores Clonk transparency;
-        // StdGL inverts it before blending (src/C4GraphicsResource.cpp:
-        // 183-193; src/StdGL.cpp:913-933).
-        0 => 0,
-        191 => 128,
-        _ => 255,
-    };
-    Color::new(rgb[0], rgb[1], rgb[2], alpha)
+    GamePalette::default().color(index)
 }
 
 fn modulate_line_palette_color(color: Color, modulation: Option<u32>) -> Color {
@@ -7787,6 +7822,7 @@ fn draw_mouse_selection_frame_raster(
     viewport_clip: SurfaceRect,
     current: (i32, i32),
     down: (i32, i32),
+    color: Color,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     let previous_clip = surface.clip();
@@ -7811,7 +7847,7 @@ fn draw_mouse_selection_frame_raster(
         surface,
         (x1 as f32, y1 as f32),
         (x2 as f32, y1 as f32),
-        MOUSE_SELECTION_FRAME_COLOR,
+        color,
         gamma,
         None,
     );
@@ -7819,7 +7855,7 @@ fn draw_mouse_selection_frame_raster(
         surface,
         (x1 as f32, y2 as f32),
         (x2 as f32, y2 as f32),
-        MOUSE_SELECTION_FRAME_COLOR,
+        color,
         gamma,
         None,
     );
@@ -7827,7 +7863,7 @@ fn draw_mouse_selection_frame_raster(
         surface,
         (x1 as f32, y1 as f32),
         (x1 as f32, y2 as f32),
-        MOUSE_SELECTION_FRAME_COLOR,
+        color,
         gamma,
         None,
     );
@@ -7835,7 +7871,7 @@ fn draw_mouse_selection_frame_raster(
         surface,
         (x2 as f32, y1 as f32),
         (x2 as f32, y2 as f32),
-        MOUSE_SELECTION_FRAME_COLOR,
+        color,
         gamma,
         None,
     );
@@ -11805,7 +11841,7 @@ mod tests {
         let black = Color::opaque(0, 0, 0);
         graphics.surface_mut().fill(black);
         graphics.draw_objects(
-            &[power, lightning],
+            &[power.clone(), lightning.clone()],
             &[],
             &lines,
             &[],
@@ -11840,6 +11876,43 @@ mod tests {
             graphics.surface().get_pixel(20, 8),
             Some(Color::opaque(255, 0, 255)),
             "the line path suppresses the object's magenta sprite face"
+        );
+
+        let mut palette_bytes = vec![0_u8; GamePalette::BYTE_LEN];
+        palette_bytes[6 * 3..6 * 3 + 3].copy_from_slice(&[1, 2, 3]);
+        palette_bytes[26 * 3..26 * 3 + 3].copy_from_slice(&[7, 8, 9]);
+        palette_bytes[68 * 3..68 * 3 + 3].copy_from_slice(&[4, 5, 6]);
+        let palette = GamePalette::from_c4_pal(&palette_bytes).expect("complete custom C4.pal");
+        assert_eq!(palette.color(0), Color::transparent());
+        assert_eq!(palette.color(191), Color::new(0, 0, 255, 128));
+        graphics.set_game_palette(Arc::new(palette));
+        graphics.presentation_rng = SafeRng::default();
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[power, lightning],
+            &[],
+            &lines,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(2, 3),
+            Some(Color::opaque(28, 32, 36)),
+            "the active C4.pal supplies the typed-line marker"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(3, 3),
+            Some(Color::opaque(16, 20, 24)),
+            "the active C4.pal supplies the typed-line primary color"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(21, 7),
+            Some(Color::opaque(4, 8, 12)),
+            "the active C4.pal supplies DrawBolt's white index"
         );
     }
 
@@ -14654,6 +14727,7 @@ mod tests {
             SurfaceRect::new(2, 2, 5, 5),
             (1, 3),
             (5, 6),
+            MOUSE_SELECTION_FRAME_COLOR,
             None,
         );
 
@@ -14686,6 +14760,22 @@ mod tests {
             Some(background),
             "the shared second endpoint stays omitted by all four GL lines"
         );
+
+        let active_palette_red = Color::opaque(4, 8, 12);
+        surface.fill(background);
+        draw_mouse_selection_frame_raster(
+            &mut surface,
+            SurfaceRect::new(2, 2, 5, 5),
+            (1, 3),
+            (5, 6),
+            active_palette_red,
+            None,
+        );
+        assert_eq!(
+            surface.get_pixel(3, 3),
+            Some(active_palette_red),
+            "the selection frame uses color index 10 from the active game palette"
+        );
     }
 
     #[test]
@@ -14703,6 +14793,7 @@ mod tests {
             SurfaceRect::new(0, 0, 4, 4),
             (0, 1),
             (3, 3),
+            MOUSE_SELECTION_FRAME_COLOR,
             Some(&gamma),
         );
 
