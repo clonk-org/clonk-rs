@@ -191,6 +191,7 @@ const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
 const MAX_REFRESH_INTERVAL: Duration = Duration::from_millis(30);
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
+const GAME_MUSIC_FADE_OUT_MS: u32 = 2_000;
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const DEFAULT_SCENARIO_MAX_PLAYERS: usize = 12;
@@ -5730,6 +5731,28 @@ impl AudioContext {
         lock_unpoisoned(&self.pending_music).take();
     }
 
+    fn fade_out_music(&mut self, duration_ms: u32) -> bool {
+        // C4MusicSystem::Stop(fadeoutMS) retains its current song state and is
+        // a strict no-op when SDL_mixer has no active music. A Rust-only
+        // pending decode represents the song that C++ would already have
+        // started synchronously, though, so invalidate that generation before
+        // it can begin stale frontend playback during scenario loading.
+        let pending = self.music_load_pending.load(AtomicOrdering::Acquire) != 0;
+        let mut playing = self.system.music_is_playing();
+        if !pending && !playing {
+            return false;
+        }
+        if pending {
+            self.music_load_pending.store(0, AtomicOrdering::Release);
+            lock_unpoisoned(&self.music_control).advance_generation();
+            playing = self.system.music_is_playing();
+            if !playing {
+                lock_unpoisoned(&self.pending_music).take();
+            }
+        }
+        self.system.music_fade_out(duration_ms)
+    }
+
     fn set_scenario_music_level(&mut self, level: Option<u8>) {
         let mut control = lock_unpoisoned(&self.music_control);
         control.set_scenario_level(level);
@@ -8321,6 +8344,9 @@ struct GameApp {
     /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
     /// from persisted RXMusic while a game is running.
     runtime_music_enabled: bool,
+    /// A game-transition fade is still owning the mixer. Startup music is
+    /// requested once after that fade completes instead of hard-replacing it.
+    resume_frontend_music_after_fade: bool,
     assets: Arc<FrontendAssets>,
     /// Winning scenario/folder/definition C4GUI sources that cannot yet be
     /// rebound. Empty means the accepted initial base/Extra bundle is active.
@@ -15967,6 +15993,7 @@ impl GameApp {
             active_game_graphics: None,
             audio,
             runtime_music_enabled: false,
+            resume_frontend_music_after_fade: false,
             assets: assets.clone(),
             active_global_gui_overrides: HashMap::new(),
             native_startup_fonts: None,
@@ -20859,6 +20886,7 @@ impl GameApp {
     }
 
     fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
+        self.resume_frontend_music_after_fade = false;
         let audio = self.audio.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
@@ -21545,6 +21573,7 @@ impl GameApp {
             .map(classic_language_packs)
             .unwrap_or_default();
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
+        self.fade_out_game_music();
         let scenario_data = Scenario::load_network_from_path_with_languages_and_seed_and_packs(
             &combined_path,
             &definition_groups,
@@ -27925,9 +27954,7 @@ impl GameApp {
                 return Ok(());
             }
             self.play_ui_sound("Click");
-            if let Some(audio) = self.audio.as_mut() {
-                audio.stop_music();
-            }
+            self.fade_out_game_music();
             self.status_text.clear();
             self.loading_state = Some(ScenarioLoadingState::from_loaded(
                 scenario,
@@ -31095,6 +31122,15 @@ impl GameApp {
                 let search_blink_changed = self.menu_state.search_edit.tick_blink();
                 if definition_scroll_changed || scrollbar_changed || search_blink_changed {
                     self.mark_menu_dirty();
+                }
+                let fade_finished = self.resume_frontend_music_after_fade
+                    && self
+                        .audio
+                        .as_ref()
+                        .is_none_or(|audio| !audio.music_is_playing());
+                if fade_finished {
+                    self.resume_frontend_music_after_fade = false;
+                    self.ensure_menu_music();
                 }
             }
         }
@@ -34985,7 +35021,18 @@ impl GameApp {
         self.mark_menu_dirty();
     }
 
+    fn fade_out_game_music(&mut self) -> bool {
+        let fading = self
+            .audio
+            .as_mut()
+            .is_some_and(|audio| audio.fade_out_music(GAME_MUSIC_FADE_OUT_MS));
+        self.resume_frontend_music_after_fade = fading;
+        fading
+    }
+
     fn return_to_menu(&mut self) {
+        // C4Game::Clear starts the fade before tearing down game state.
+        let music_fading = self.fade_out_game_music();
         self.active_game_graphics = None;
         self.ingame_menu_gfx = None;
         self.active_global_gui_overrides.clear();
@@ -35070,7 +35117,6 @@ impl GameApp {
         self.loading_state = None;
         self.runtime_music_enabled = false;
         if let Some(audio) = self.audio.as_mut() {
-            audio.stop_music();
             audio.reset_sfx();
             audio.configure_scenario(None);
         }
@@ -35116,7 +35162,9 @@ impl GameApp {
 
         self.mode = AppMode::Menu;
         self.show_main_menu();
-        self.ensure_menu_music();
+        if !music_fading {
+            self.ensure_menu_music();
+        }
     }
 
     fn ensure_menu_music(&mut self) {
@@ -35126,12 +35174,14 @@ impl GameApp {
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
             if !audio.menu_music_enabled() {
+                self.resume_frontend_music_after_fade = false;
                 audio.stop_music();
                 return;
             }
             if audio.music_is_playing() {
                 return;
             }
+            self.resume_frontend_music_after_fade = false;
             if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
                 tracing::warn!(error = %err, "failed to start menu music");
                 audio.stop_music();
@@ -35579,9 +35629,7 @@ impl GameApp {
             }
         });
 
-        if let Some(audio) = self.audio.as_mut() {
-            audio.stop_music();
-        }
+        self.fade_out_game_music();
         self.status_text.clear();
         let mut loading_state = ScenarioLoadingState::new(
             scenario,
@@ -36979,6 +37027,7 @@ impl GameApp {
     }
 
     fn play_scenario_audio(&mut self, path: &Path) {
+        self.resume_frontend_music_after_fade = false;
         let runtime_music_enabled = self.runtime_music_enabled;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(path));
@@ -37003,6 +37052,7 @@ impl GameApp {
     }
 
     fn play_sandbox_audio(&mut self) {
+        self.resume_frontend_music_after_fade = false;
         let runtime_music_enabled = self.runtime_music_enabled;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
@@ -56095,6 +56145,57 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn idle_music_fade_is_a_noop_and_does_not_suppress_a_later_play() {
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        let initial_generation = lock_unpoisoned(&audio.music_control).generation;
+
+        assert!(!audio.fade_out_music(GAME_MUSIC_FADE_OUT_MS));
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).generation,
+            initial_generation,
+            "an idle fade must not invalidate the next Play"
+        );
+
+        audio
+            .play_music(&silent_pcm_wav(1_000), true)
+            .expect("schedule music after idle fade");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !audio.system.music_is_playing() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            audio.system.music_is_playing(),
+            "a Play following an idle fade must still reach the mixer"
+        );
+    }
+
+    #[test]
+    fn script_stop_music_remains_an_immediate_halt() {
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        let music = audio
+            .system
+            .load_music(&silent_pcm_wav(5_000))
+            .expect("load test music");
+        audio
+            .system
+            .play_music(&music, true)
+            .expect("start test music");
+        let mut runtime_music_enabled = true;
+
+        audio.handle_events(
+            &[AudioCommand::StopMusic],
+            &make_snapshot(Vec::new(), Vec::new()),
+            None,
+            Vector2::ZERO,
+            &[],
+            &mut runtime_music_enabled,
+        );
+
+        assert!(!runtime_music_enabled);
+        assert!(!audio.system.music_is_playing());
+    }
+
+    #[test]
     fn music_control_rejects_stale_decode_and_uses_latest_level() {
         // A replacement/stop invalidates an in-flight decode. A MusicLevel
         // call made while the replacement decodes must supply the volume used
@@ -56454,6 +56555,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn menu_music_runs_in_menu_cycle() {
         lc_core::logging::init();
+        assert_eq!(GAME_MUSIC_FADE_OUT_MS, 2_000);
 
         // Music discovery reads process env; hold the env lock so the
         // EnvGuard-based tests cannot redirect paths mid-load.
@@ -56486,7 +56588,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 let playing = app
                     .audio
                     .as_ref()
-                    .map(|audio| audio.music_is_playing())
+                    .map(|audio| audio.system.music_is_playing())
                     .unwrap_or(false);
                 if playing || started.elapsed() > std::time::Duration::from_secs(20) {
                     break playing;
@@ -56504,6 +56606,26 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
 
         app.return_to_menu();
+        assert!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .system
+                .music_is_playing(),
+            "game teardown must leave the current song active while it fades"
+        );
+        assert!(app.resume_frontend_music_after_fade);
+
+        // Complete the asynchronous fade without making this regression wait
+        // two wall-clock seconds. The menu cycle must then request frontend
+        // music once instead of replacing the fading game song immediately.
+        app.audio
+            .as_ref()
+            .expect("test audio")
+            .system
+            .halt_music();
+        app.update().expect("poll completed teardown fade");
+        assert!(!app.resume_frontend_music_after_fade);
         assert!(
             wait_for_music(&app),
             "menu music should resume after returning to the menu"
@@ -91225,7 +91347,30 @@ protected func InputCallback(string answer, int player)
             .expect("scenario discovered");
         assert_eq!(scenario.title, "Alpha Mission");
 
+        let frontend_music = app
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .system
+            .load_music(&silent_pcm_wav(5_000))
+            .expect("load frontend music fixture");
+        app.audio
+            .as_ref()
+            .expect("test audio")
+            .system
+            .play_music(&frontend_music, true)
+            .expect("start frontend music fixture");
+
         app.start_scenario(scenario).expect("start disk scenario");
+        assert!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .system
+                .music_is_playing(),
+            "scenario initialization must fade rather than halt frontend music"
+        );
+        assert!(app.resume_frontend_music_after_fade);
         wait_for_running(&mut app);
 
         assert!(
