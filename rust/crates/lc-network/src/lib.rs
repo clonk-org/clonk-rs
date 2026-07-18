@@ -17,6 +17,7 @@ mod join_client_registry;
 mod join_player_registry;
 mod join_team_registry;
 mod league;
+mod league_round_results_packet;
 mod legacy;
 mod lobby;
 mod local_resource_resolution;
@@ -111,6 +112,11 @@ pub use league::{
     LeagueAuthResponse, LeagueChecksumError, LeagueFbidRegistry, LeagueHttpPostTransport,
     LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead, LeagueJoinResponse,
     LeaguePlayerInfoEncodeError, LEAGUE_HTTP_TIMEOUT, LEAGUE_HTTP_USER_AGENT, MAX_LEAGUES,
+};
+pub use league_round_results_packet::{
+    decode_league_round_results_payload, encode_league_round_results_payload,
+    LeagueRoundPlayerStatus, LeagueRoundResultsDecodeError, LeagueRoundResultsEncodeError,
+    LeagueRoundResultsPacket, LeagueRoundResultsPlayer, PID_LEAGUE_ROUND_RESULTS,
 };
 pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,

@@ -2644,6 +2644,13 @@ async fn handle_client_event(
         ClientEvent::ResourceDeriveUnsupported { core } => {
             let _ = event_tx.send(NetworkEvent::ResourceDeriveUnsupported { core });
         }
+        ClientEvent::LeagueRoundResults { packet } => {
+            tracing::debug!(
+                success = packet.success,
+                players = packet.players.len(),
+                "received league round results from host"
+            );
+        }
         ClientEvent::UnhandledPacket { packet_type } => {
             let status = format!("{packet_type:02x}");
             tracing::error!(client_id = HOST_CLIENT_ID, %status, "Unhandled packet");

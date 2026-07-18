@@ -10,6 +10,11 @@ use crate::legacy::{
     decode_join_data_envelope, decode_player_info_update_payload, encode_join_data_envelope,
     encode_player_info_update_payload, JoinDataEnvelope, LegacyControlError, LegacyEncodeError,
 };
+use crate::league_round_results_packet::{
+    decode_league_round_results_payload, encode_league_round_results_payload,
+    LeagueRoundResultsDecodeError, LeagueRoundResultsEncodeError, LeagueRoundResultsPacket,
+    PID_LEAGUE_ROUND_RESULTS,
+};
 use crate::name_validation::validate_name_no_empty;
 use crate::resource_packet::{
     decode_resource_packet, encode_resource_packet, ResourcePacket, ResourcePacketCodecError,
@@ -37,7 +42,6 @@ const PID_CLIENT_ACT_REQ: u8 = 0x13;
 const PID_TCP_SIM_OPEN: u8 = 0x14;
 const PID_JOIN_DATA: u8 = 0x15;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
-const PID_LEAGUE_ROUND_RESULTS: u8 = 0x17;
 const PID_LOBBY_COUNTDOWN: u8 = 0x20;
 const PID_READY_CHECK: u8 = 0x21;
 const PID_CONTROL: u8 = 0x40;
@@ -193,6 +197,10 @@ pub enum TransportError {
     JoinDataDecode(#[source] LegacyControlError),
     #[error("failed to encode join-data packet: {0}")]
     JoinDataEncode(#[source] LegacyEncodeError),
+    #[error("invalid league round-results packet: {0}")]
+    LeagueRoundResultsDecode(#[source] LeagueRoundResultsDecodeError),
+    #[error("failed to encode league round-results packet: {0}")]
+    LeagueRoundResultsEncode(#[source] LeagueRoundResultsEncodeError),
     #[error("invalid client-address packet: {0}")]
     AddressDecode(#[source] AddressPacketDecodeError),
     #[error("invalid resource packet: {0}")]
@@ -247,6 +255,7 @@ pub enum ControlMessage {
     Forward(ForwardPacket),
     PostMortem(crate::PostMortemPacket),
     JoinData(Box<JoinDataEnvelope>),
+    LeagueRoundResults(LeagueRoundResultsPacket),
     Address(AddressPacket),
     Resource(ResourcePacket),
     Status(NetworkStatus),
@@ -454,6 +463,13 @@ where
                     encode_join_data_envelope(&envelope).map_err(TransportError::JoinDataEncode)?,
                 );
             }
+            ControlMessage::LeagueRoundResults(packet) => {
+                frame.push(PID_LEAGUE_ROUND_RESULTS);
+                frame.extend(
+                    encode_league_round_results_payload(&packet)
+                        .map_err(TransportError::LeagueRoundResultsEncode)?,
+                );
+            }
             ControlMessage::Address(packet) => {
                 frame.push(PID_ADDR);
                 frame.extend(encode_address_packet_payload(&packet));
@@ -545,9 +561,9 @@ pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage
     if body.is_empty() {
         return Err(TransportError::Malformed("missing packet payload"));
     }
-    // Both IDs are present in C++'s typed packet table, but their main-thread
-    // handlers are not ported yet. C++ still unpacks them before discovering
-    // that no handler is enabled, so malformed bodies remain fatal.
+    // Both IDs are present in C++'s typed packet table. C++ unpacks them
+    // before checking whether a handler is enabled, so malformed bodies
+    // remain fatal even when a valid packet would be ignored.
     match body[0] {
         PID_TCP_SIM_OPEN => {
             decode_address_packet_payload(&body[1..]).map_err(|_| {
@@ -556,34 +572,14 @@ pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage
             return Ok(None);
         }
         PID_LEAGUE_ROUND_RESULTS => {
-            validate_league_round_results_payload(&body[1..])?;
-            return Ok(None);
+            return decode_league_round_results_payload(&body[1..])
+                .map(ControlMessage::LeagueRoundResults)
+                .map(Some)
+                .map_err(TransportError::LeagueRoundResultsDecode);
         }
         _ => {}
     }
     parse_control_message(body).map(Some)
-}
-
-fn validate_league_round_results_payload(payload: &[u8]) -> Result<(), TransportError> {
-    let mut reader = ConnectionPayloadReader::new(payload);
-    let _success = reader.read_bool()?;
-    let _result_string = reader.read_c_string()?;
-    let player_count = reader.read_packed_i32()?;
-    if !(0..=5_000).contains(&player_count) {
-        return Err(TransportError::Malformed(
-            "league round-results player count is out of range",
-        ));
-    }
-    for _ in 0..player_count {
-        // ID, total playing time, old/new settlement score, league score,
-        // score gain, rank and rank symbol are native-endian dwords.
-        for _ in 0..8 {
-            let _field = reader.read_raw_i32()?;
-        }
-        let _progress_data = reader.read_c_string()?;
-        let _league_status = reader.read_u8()?;
-    }
-    Ok(())
 }
 
 fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -1110,7 +1106,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn known_cpp_packets_skip_without_losing_following_tcp_frame() {
+    async fn known_cpp_packets_decode_or_skip_without_losing_following_tcp_frame() {
         // Real C++ bodies: packed client 7 + TCP IPv6 address for
         // PID_TCPSimOpen, then a successful zero-player league result.
         let tcp_sim_open = [
@@ -1153,12 +1149,26 @@ mod tests {
         server.write_all(&frames).await.unwrap();
         let mut transport = ControlTransport::new(client);
 
-        let message =
-            tokio::time::timeout(std::time::Duration::from_secs(1), transport.read_message())
-                .await
-                .expect("known opaque packets blocked the following frame")
-                .expect("known opaque packet disconnected the transport");
-        assert_eq!(message, ControlMessage::Ping(ping));
+        assert!(matches!(
+            transport.read_packet().await.unwrap(),
+            InboundPacket::Ignored(PID_TCP_SIM_OPEN)
+        ));
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            transport.read_message(),
+        )
+        .await
+        .expect("league results blocked the following frame")
+        .expect("valid league results disconnected the transport");
+        assert_eq!(
+            results,
+            ControlMessage::LeagueRoundResults(LeagueRoundResultsPacket {
+                success: true,
+                result_string: LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+                players: Vec::new(),
+            })
+        );
+        assert_eq!(transport.read_message().await.unwrap(), ControlMessage::Ping(ping));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1254,7 +1264,9 @@ mod tests {
         ));
         assert!(matches!(
             parse_complete_packet(&[PID_LEAGUE_ROUND_RESULTS, 1, b'O', b'K']),
-            Err(TransportError::UnexpectedEof)
+            Err(TransportError::LeagueRoundResultsDecode(
+                LeagueRoundResultsDecodeError::Legacy(LegacyControlError::UnexpectedEof)
+            ))
         ));
     }
 

@@ -459,6 +459,7 @@ where
             ControlMessage::Address(_)
             | ControlMessage::Status(_)
             | ControlMessage::StatusAck(_)
+            | ControlMessage::LeagueRoundResults(_)
             | ControlMessage::ActivationRequest { .. }
             | ControlMessage::PlayerInfoUpdate(_)
             | ControlMessage::Request { .. }
@@ -624,6 +625,7 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::ActivationRequest { .. } => 0x13,
         ControlMessage::JoinData(_) => 0x15,
         ControlMessage::PlayerInfoUpdate(_) => 0x16,
+        ControlMessage::LeagueRoundResults(_) => 0x17,
         ControlMessage::LobbyCountdown(_) => 0x20,
         ControlMessage::ReadyCheck(_) => 0x21,
         ControlMessage::Resource(packet) => match packet {
@@ -901,6 +903,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::Forward(_) => "PID_Fwd",
         ControlMessage::PostMortem(_) => "PID_PostMortem",
         ControlMessage::JoinData(_) => "PID_JoinData",
+        ControlMessage::LeagueRoundResults(_) => "PID_LeagueRoundResults",
         ControlMessage::Address(_) => "PID_Addr",
         ControlMessage::Resource(packet) => match packet {
             ResourcePacket::Discover(_) => "PID_NetResDis",

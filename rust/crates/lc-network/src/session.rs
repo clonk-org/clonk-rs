@@ -985,6 +985,9 @@ pub enum ClientEvent {
     ResourceDeriveUnsupported {
         core: lc_engine::NetworkResourceCore,
     },
+    LeagueRoundResults {
+        packet: crate::LeagueRoundResultsPacket,
+    },
     UnhandledPacket {
         packet_type: u8,
     },
@@ -2752,6 +2755,10 @@ async fn handle_client_message(
         // PID_JoinData is host-to-client only; C++ silently ignores it on a
         // host (src/C4Network2.cpp:938-946).
         ControlMessage::JoinData(_) => {}
+        // League results are host-authored. C++ recognizes the packet on a
+        // host but accepts it only when it arrived from the host client
+        // (src/C4Network2Players.cpp:392-419).
+        ControlMessage::LeagueRoundResults(_) => {}
         ControlMessage::Address(packet) => {
             handle_received_host_address(client_id, packet, state).await;
         }
@@ -4709,6 +4716,11 @@ async fn run_client_loop_with_addresses<S>(
                     // C++ merely logs/ignores later packets rather than
                     // disconnecting (src/C4Network2.cpp:1574-1580).
                     Ok(ControlMessage::JoinData(_)) => {}
+                    Ok(ControlMessage::LeagueRoundResults(packet)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::LeagueRoundResults { packet })
+                            .await;
+                    }
                     Ok(ControlMessage::Address(packet)) => {
                         if !client_addresses.contains_key(&packet.client_id) {
                             continue;
@@ -5261,11 +5273,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn client_reports_a_selected_forwarded_unhandled_packet() {
-        // PID_Fwd recursively enters HandlePacket. A structurally valid packet
-        // without an enabled handler is logged just like a direct packet and
-        // does not close the connection (src/C4Network2IO.cpp:1037-1045,
-        // 856-899).
+    async fn client_surfaces_selected_forwarded_league_results() {
+        // PID_Fwd recursively enters HandlePacket. League results selected for
+        // this client retain their typed host-only route and do not close the
+        // connection (src/C4Network2IO.cpp:1037-1045;
+        // src/C4Network2Players.cpp:392-419).
         let (client_stream, host_stream) = duplex(512);
         let mut host_transport = crate::ControlTransport::new(host_stream);
         let (command_tx, command_rx) = mpsc::channel(1);
@@ -5292,10 +5304,21 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(matches!(
-            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
-            Some(ClientEvent::UnhandledPacket { packet_type: 0x17 })
-        ));
+        let event = timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .unwrap()
+            .expect("client event channel remains open");
+        let ClientEvent::LeagueRoundResults { packet } = event else {
+            panic!("expected typed forwarded league results, got {event:?}");
+        };
+        assert_eq!(
+            packet,
+            crate::LeagueRoundResultsPacket {
+                success: true,
+                result_string: lc_engine::LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+                players: Vec::new(),
+            }
+        );
 
         let ping = crate::PingPacket {
             sent_at: 29,
@@ -5677,6 +5700,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn host_ignores_client_originated_league_results_and_keeps_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut client, _) = raw_client_transport(address, b"Source").await;
+        drain_raw_client(&mut client).await;
+
+        client
+            .send_message(ControlMessage::LeagueRoundResults(
+                crate::LeagueRoundResultsPacket {
+                    success: true,
+                    result_string: lc_engine::LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+                    players: Vec::new(),
+                },
+            ))
+            .await
+            .unwrap();
+        let ping = crate::PingPacket {
+            sent_at: 31,
+            packet_counter: 0,
+        };
+        client
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            timeout(EVENT_WAIT, client.read_message())
+                .await
+                .expect("host kept the accepted connection responsive")
+                .unwrap(),
+            ControlMessage::Pong(ping)
+        );
+
+        drop(client);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn host_does_not_rebroadcast_a_raw_client_control() {
         // PID_Control dispatches only to HandleControl, which stores the
         // contribution; only HandleFwdReq performs fallback fanout (pristine
@@ -5965,10 +6027,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_reports_a_self_forwarded_unhandled_packet() {
+    async fn host_ignores_self_forwarded_client_league_results() {
         // HandleFwdReq relays first and then recursively handles the self leg.
-        // A valid packet with no enabled handler is reported without closing
-        // its source connection (src/C4Network2IO.cpp:856-899,1077-1129).
+        // A host recognizes league results but silently rejects them when they
+        // originated from an ordinary client, without closing that client's
+        // connection (src/C4Network2IO.cpp:1077-1129;
+        // src/C4Network2Players.cpp:392-419).
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
@@ -5985,21 +6049,28 @@ mod tests {
             }))
             .await
             .unwrap();
-        loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
-                Some(HostEvent::UnhandledPacket {
-                    client_id: Some(client_id),
-                    packet_type: 0x17,
-                }) if client_id == source_id => break,
-                Some(HostEvent::TransportError {
-                    client_id: Some(client_id),
-                    error,
-                }) if client_id == source_id => {
-                    panic!("forwarded unhandled packet failed: {error}")
-                }
-                Some(_) => continue,
-                None => panic!("host event stream ended before unhandled packet"),
-            }
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = timeout_at(quiet_deadline, host_events.recv()).await {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::UnhandledPacket {
+                        client_id: Some(client_id),
+                        packet_type: 0x17,
+                    } if client_id == source_id
+                ),
+                "typed league results were reported as unhandled"
+            );
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        ..
+                    } if client_id == source_id
+                ),
+                "host rejected league results by failing the connection"
+            );
         }
 
         let ping = crate::PingPacket {
@@ -6014,7 +6085,7 @@ mod tests {
             match timeout(EVENT_WAIT, source.read_message()).await.unwrap() {
                 Ok(ControlMessage::Pong(received)) if received == ping => break,
                 Ok(_) => continue,
-                Err(error) => panic!("connection closed after unhandled forwarding: {error}"),
+                Err(error) => panic!("connection closed after league-results forwarding: {error}"),
             }
         }
 
@@ -10169,12 +10240,21 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            timeout(Duration::from_millis(100), event_rx.recv())
-                .await
-                .unwrap(),
-            Some(ClientEvent::UnhandledPacket { packet_type: 0x17 })
-        ));
+        let event = timeout(Duration::from_millis(100), event_rx.recv())
+            .await
+            .unwrap()
+            .expect("client event channel remains open");
+        let ClientEvent::LeagueRoundResults { packet } = event else {
+            panic!("expected typed league round-results event, got {event:?}");
+        };
+        assert_eq!(
+            packet,
+            crate::LeagueRoundResultsPacket {
+                success: true,
+                result_string: lc_engine::LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+                players: Vec::new(),
+            }
+        );
 
         let mut host = crate::ControlTransport::new(host_stream);
         let ping = crate::PingPacket {
@@ -10185,7 +10265,7 @@ mod tests {
         assert_eq!(
             host.read_message().await.unwrap(),
             ControlMessage::Pong(ping),
-            "the ignored packet must not terminate the accepted connection"
+            "the typed packet must not terminate the accepted connection"
         );
 
         tokio::time::advance(Duration::from_millis(1_500)).await;
@@ -10195,7 +10275,7 @@ mod tests {
         };
         assert_eq!(
             liveness_ping.packet_counter, 1,
-            "the unhandled PID must advance the recoverable inbound counter"
+            "the typed PID must advance the recoverable inbound counter"
         );
         host.send_message(ControlMessage::Pong(liveness_ping))
             .await
@@ -11914,6 +11994,7 @@ mod tests {
                 | ClientEvent::ResourceComplete { .. }
                 | ClientEvent::ResourceLoadFailed { .. }
                 | ClientEvent::ResourceDeriveUnsupported { .. }
+                | ClientEvent::LeagueRoundResults { .. }
                 | ClientEvent::UnhandledPacket { .. }
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
@@ -13462,6 +13543,7 @@ mod tests {
                 Ok(Some(ClientEvent::ResourceComplete { .. }))
                 | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(ClientEvent::ResourceDeriveUnsupported { .. })) => continue,
+                Ok(Some(ClientEvent::LeagueRoundResults { .. })) => continue,
                 Ok(Some(ClientEvent::UnhandledPacket { .. })) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
