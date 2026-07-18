@@ -387,11 +387,18 @@ where
     /// `C4NetIOTCP::UnpackPacket` (src/C4NetIO.cpp:1304). Returns `Ok(None)`
     /// while the frame is still incomplete.
     fn extract_frame(&mut self) -> Result<Option<InboundPacket>, TransportError> {
-        if self.read_buf.len() < FRAME_HEADER_LEN {
+        if self
+            .read_buf
+            .first()
+            .is_some_and(|&prefix| prefix != TCP_FRAME_PREFIX)
+        {
+            // C++ consumes the whole Peer::IBuf on a bad prefix and leaves
+            // the connection open (src/C4NetIO.cpp:1308-1310,1447-1454).
+            self.read_buf.clear();
             return Ok(None);
         }
-        if self.read_buf[0] != TCP_FRAME_PREFIX {
-            return Err(TransportError::Malformed("invalid TCP frame prefix"));
+        if self.read_buf.len() < FRAME_HEADER_LEN {
+            return Ok(None);
         }
         let size = u32::from_ne_bytes([
             self.read_buf[1],
@@ -2684,16 +2691,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rejects_invalid_prefix() {
-        let mut frame = expect_frame(&[PID_CONTROL, 0x00]);
-        frame[0] = 0xAA;
-        let (client, mut server) = duplex(16);
-        server.write_all(&frame).await.unwrap();
+    async fn discards_invalid_prefix_chunk_and_reads_the_next_frame() {
+        let frame = expect_frame(&[PID_CONTROL_REQ, 0x40, 0x00]);
+        let mut discarded_chunk = vec![0xAA];
+        discarded_chunk.extend(expect_frame(&[PID_CONTROL_REQ, 0x20, 0x00]));
+        let (client, mut server) = duplex(discarded_chunk.len());
+        let writer = tokio::spawn(async move {
+            server.write_all(&discarded_chunk).await.unwrap();
+            server.write_all(&frame).await.unwrap();
+        });
         let mut transport = ControlTransport::new(client);
-        let err = transport.read_message().await.unwrap_err();
-        match err {
-            TransportError::Malformed(_) => {}
-            other => panic!("unexpected error: {:?}", other),
-        }
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Request { from_tick: 64 }
+        );
+        writer.await.unwrap();
     }
 }
