@@ -5741,7 +5741,9 @@ impl AudioContext {
 
     fn reset_sfx(&mut self) {
         for info in self.active_channels.values() {
-            self.system.halt_channel(info.channel);
+            if let Some(channel) = info.channel {
+                self.system.halt_channel(channel);
+            }
         }
         self.active_channels.clear();
     }
@@ -5886,9 +5888,6 @@ impl AudioContext {
                     multiple,
                     custom_falloff,
                 } => {
-                    if !self.options.sound_enabled {
-                        continue;
-                    }
                     if let Err(err) = self.start_sound(
                         name,
                         *target,
@@ -6018,22 +6017,12 @@ impl AudioContext {
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
     ) -> Result<bool, AudioError> {
-        if !self.options.sound_enabled {
-            return Ok(false);
-        }
         let key = SoundInstanceKey::new(name, target);
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
         // caller explicitly requests multiple instances (C4Script.cpp:
         // 2317-2319). Do this before asking the fixed-size mixer for a slot.
-        if !multiple {
-            let already_playing = self
-                .active_channels
-                .get(&key)
-                .is_some_and(|info| self.system.channel_is_playing(info.channel));
-            if already_playing {
-                return Ok(false);
-            }
-            self.active_channels.remove(&key);
+        if !multiple && self.active_channels.contains_key(&key) {
+            return Ok(false);
         }
         let Some((handle, sample_key)) = self.ensure_sound_with_key(name)? else {
             return Ok(false);
@@ -6045,9 +6034,7 @@ impl AudioContext {
             && self
                 .active_channels
                 .values()
-                .filter(|info| {
-                    info.sample_key == sample_key && self.system.channel_is_playing(info.channel)
-                })
+                .filter(|info| info.sample_key == sample_key)
                 .count()
                 >= MAX_SOUND_INSTANCES
         {
@@ -6059,25 +6046,34 @@ impl AudioContext {
         // (C4SoundSystem.cpp:341-350).
         let already_playing_near = self.active_channels.values().any(|info| {
             info.sample_key == sample_key
-                && self.system.channel_is_playing(info.channel)
                 && sound_targets_are_near(info.target, target, snapshot)
         });
         if already_playing_near {
             return Ok(false);
         }
-        let channel = self.system.play_sound(&handle, looped)?;
+        let duration_ms = handle.duration_ms().unwrap_or(0);
+        let channel = if self.options.sound_enabled {
+            Some(self.system.play_sound(&handle, looped)?)
+        } else {
+            None
+        };
         let info = ChannelInfo {
             channel,
+            handle,
+            duration_ms,
             sample_key,
             looped,
             target,
             volume,
             custom_falloff,
+            started_at: Instant::now(),
         };
         let (mut mix_volume, pan) = compute_mix_values(&info, snapshot, focus, viewport_center);
         mix_volume *= self.options.sound_volume;
-        self.system
-            .channel_set_volume_and_pan(channel, mix_volume, pan);
+        if let Some(channel) = channel {
+            self.system
+                .channel_set_volume_and_pan(channel, mix_volume, pan);
+        }
         self.active_channels.insert(key, info);
         Ok(true)
     }
@@ -6085,7 +6081,9 @@ impl AudioContext {
     fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
         let key = SoundInstanceKey::new(name, target);
         if let Some(info) = self.active_channels.remove(&key) {
-            self.system.halt_channel(info.channel);
+            if let Some(channel) = info.channel {
+                self.system.halt_channel(channel);
+            }
         }
     }
 
@@ -6101,10 +6099,9 @@ impl AudioContext {
         let key = SoundInstanceKey::new(name, target);
         if let Some(info) = self.active_channels.get_mut(&key) {
             info.volume = volume;
-            if !self.options.sound_enabled {
+            let Some(channel) = info.channel else {
                 return;
-            }
-            let channel = info.channel;
+            };
             let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
             mix_volume *= self.options.sound_volume;
             self.system
@@ -6118,29 +6115,62 @@ impl AudioContext {
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
     ) {
+        let now = Instant::now();
         let mut finished = Vec::new();
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
         if !self.options.sound_enabled {
-            if !self.active_channels.is_empty() {
-                self.reset_sfx();
+            for (key, info) in self.active_channels.iter_mut() {
+                if let Some(channel) = info.channel {
+                    if !self.system.channel_is_playing(channel) {
+                        finished.push(key.clone());
+                        continue;
+                    }
+                    self.system.halt_channel(channel);
+                    info.channel = None;
+                } else if info.non_looping_past_half_duration(now) {
+                    finished.push(key.clone());
+                }
+            }
+            for key in finished {
+                self.active_channels.remove(&key);
             }
             return;
         }
         for (key, info) in self.active_channels.iter_mut() {
-            if !info.looped && !self.system.channel_is_playing(info.channel) {
-                finished.push(key.clone());
-                continue;
-            }
+            let channel = match info.channel {
+                Some(channel) if self.system.channel_is_playing(channel) => channel,
+                Some(_) => {
+                    finished.push(key.clone());
+                    continue;
+                }
+                None if info.non_looping_past_half_duration(now) => {
+                    finished.push(key.clone());
+                    continue;
+                }
+                None => match self.system.play_sound(&info.handle, info.looped) {
+                    Ok(channel) => {
+                        info.channel = Some(channel);
+                        channel
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, sound = %info.sample_key, "failed to restore sound channel");
+                        finished.push(key.clone());
+                        continue;
+                    }
+                },
+            };
             let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
             mix_volume *= self.options.sound_volume;
-            updates.push((info.channel, mix_volume, pan));
+            updates.push((channel, mix_volume, pan));
         }
         for (channel, volume, pan) in updates {
             self.system.channel_set_volume_and_pan(channel, volume, pan);
         }
         for key in finished {
             if let Some(info) = self.active_channels.remove(&key) {
-                self.system.halt_channel(info.channel);
+                if let Some(channel) = info.channel {
+                    self.system.halt_channel(channel);
+                }
             }
         }
     }
@@ -6234,12 +6264,32 @@ impl SoundInstanceKey {
 
 #[derive(Clone)]
 struct ChannelInfo {
-    channel: ChannelId,
+    channel: Option<ChannelId>,
+    handle: SoundHandle,
+    duration_ms: u32,
     sample_key: String,
     looped: bool,
     target: Option<ObjectId>,
     volume: u8,
     custom_falloff: Option<i32>,
+    started_at: Instant,
+}
+
+impl ChannelInfo {
+    fn playback_position_ms(&self, now: Instant) -> u32 {
+        if self.duration_ms == 0 {
+            return 0;
+        }
+        let elapsed_ms = now.saturating_duration_since(self.started_at).as_millis();
+        u32::try_from(elapsed_ms % u128::from(self.duration_ms))
+            .expect("position is below duration")
+    }
+
+    fn non_looping_past_half_duration(&self, now: Instant) -> bool {
+        !self.looped
+            && self.channel.is_none()
+            && self.playback_position_ms(now) > self.duration_ms / 2
+    }
 }
 
 fn sound_targets_are_near(
@@ -20565,8 +20615,9 @@ impl GameApp {
                 },
             ))
         })?;
-        // C4SoundSystem::ToggleOnOff changes only RXSound. Existing instances
-        // keep playing; the flag gates future sound-effect starts.
+        // C4SoundSystem::ToggleOnOff changes only RXSound. The next sound
+        // update releases mixer channels while retaining logical instances;
+        // starts made while muted are retained channel-less as well.
         audio.options.sound_enabled = !audio.options.sound_enabled;
         Ok(())
     }
@@ -40878,12 +40929,30 @@ fn compute_mix_values(
     focus: Option<&ObjectSnapshot>,
     viewport_center: Vector2,
 ) -> (f32, f32) {
+    compute_mix_values_for(
+        info.volume,
+        info.target,
+        info.custom_falloff,
+        snapshot,
+        focus,
+        viewport_center,
+    )
+}
+
+fn compute_mix_values_for(
+    volume: u8,
+    target_id: Option<ObjectId>,
+    custom_falloff: Option<i32>,
+    snapshot: &SimulationSnapshot,
+    focus: Option<&ObjectSnapshot>,
+    viewport_center: Vector2,
+) -> (f32, f32) {
     const AUDIBILITY_RADIUS: f32 = 700.0;
     const PAN_DIVISOR: f32 = 5.0;
     const PAN_LIMIT: f32 = 100.0;
 
-    let base_volume = (info.volume as f32 / 100.0).clamp(0.0, 1.0);
-    let Some(target_id) = info.target else {
+    let base_volume = (volume as f32 / 100.0).clamp(0.0, 1.0);
+    let Some(target_id) = target_id else {
         return (base_volume, 0.0);
     };
     let Some(target) = snapshot.object(target_id) else {
@@ -40912,7 +40981,7 @@ fn compute_mix_values(
         let dy = (source.y - listener.y) as f32;
         let distance = (dx * dx + dy * dy).sqrt();
         let mut audibility = (1.0 - distance / AUDIBILITY_RADIUS).clamp(0.0, 1.0);
-        if let Some(falloff_distance) = info.custom_falloff {
+        if let Some(falloff_distance) = custom_falloff {
             if falloff_distance != 0 {
                 let scale = AUDIBILITY_RADIUS / falloff_distance as f32;
                 audibility = (1.0 + (audibility - 1.0) * scale).clamp(0.0, 1.0);
@@ -46298,6 +46367,35 @@ func Award()
         bytes
     }
 
+    fn test_audio_context_with_sound(
+        duration_ms: u32,
+    ) -> (tempfile::TempDir, AudioContext, SimulationSnapshot) {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Audio.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Loop.wav"), silent_pcm_wav(duration_ms))
+            .expect("write test sound");
+
+        let mut audio = AudioContext::try_new(AudioOptions {
+            max_channels: 1,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        (dir, audio, make_snapshot(Vec::new(), Vec::new()))
+    }
+
+    fn test_sound_command(looped: bool) -> AudioCommand {
+        AudioCommand::PlaySound {
+            name: "Loop".to_string(),
+            target: None,
+            volume: 100,
+            looped,
+            multiple: false,
+            custom_falloff: None,
+        }
+    }
+
     struct EnvGuard {
         _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
         saved: Vec<(String, Option<OsString>)>,
@@ -46353,6 +46451,190 @@ func Award()
         let terms = SoundSearchTerms::new("Sound*");
         assert_eq!(terms.wildcard_pattern.as_deref(), Some("sound*.wav"));
         assert!(terms.search_names.is_empty());
+    }
+
+    #[test]
+    fn muted_loop_releases_channel_but_survives_and_restarts_on_unmute() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(1_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        snapshot.audio.push(test_sound_command(true));
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        snapshot.audio.clear();
+
+        let original_channel = audio.active_channels[&key]
+            .channel
+            .expect("enabled loop has a mixer channel");
+        assert!(audio.system.channel_is_playing(original_channel));
+
+        audio.options.sound_enabled = false;
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(audio.active_channels.contains_key(&key));
+        assert!(audio.active_channels[&key].channel.is_none());
+        assert!(!audio.system.channel_is_playing(original_channel));
+
+        audio.options.sound_enabled = true;
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        let restored_channel = audio.active_channels[&key]
+            .channel
+            .expect("unmuted loop reacquires a mixer channel");
+        assert!(audio.system.channel_is_playing(restored_channel));
+    }
+
+    #[test]
+    fn loop_started_while_muted_gets_a_channel_after_unmute() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(1_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        audio.options.sound_enabled = false;
+        snapshot.audio.push(test_sound_command(true));
+
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        snapshot.audio.clear();
+        assert!(audio.active_channels.contains_key(&key));
+        assert!(audio.active_channels[&key].channel.is_none());
+        let original_started_at = audio.active_channels[&key].started_at;
+
+        snapshot.audio.push(test_sound_command(true));
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        snapshot.audio.clear();
+        assert_eq!(audio.active_channels.len(), 1);
+        assert_eq!(audio.active_channels[&key].started_at, original_started_at);
+
+        audio.options.sound_enabled = true;
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        let channel = audio.active_channels[&key]
+            .channel
+            .expect("muted loop starts after unmute");
+        assert!(audio.system.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn channel_less_muted_loop_still_obeys_volume_and_stop_commands() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(1_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        audio.options.sound_enabled = false;
+        snapshot.audio.push(test_sound_command(true));
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+
+        snapshot.audio = vec![AudioCommand::SetSoundVolume {
+            name: "Loop".to_string(),
+            target: None,
+            volume: 37,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert_eq!(audio.active_channels[&key].volume, 37);
+        assert!(audio.active_channels[&key].channel.is_none());
+
+        snapshot.audio = vec![AudioCommand::StopSound {
+            name: "Loop".to_string(),
+            target: None,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(!audio.active_channels.contains_key(&key));
+
+        snapshot.audio.clear();
+        audio.options.sound_enabled = true;
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(!audio.active_channels.contains_key(&key));
+    }
+
+    #[test]
+    fn muted_one_shot_past_half_duration_is_culled_before_it_can_resume() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(10_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        snapshot.audio.push(test_sound_command(false));
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        snapshot.audio.clear();
+        audio
+            .active_channels
+            .get_mut(&key)
+            .expect("one-shot instance")
+            .started_at = Instant::now() - Duration::from_millis(6_000);
+
+        audio.options.sound_enabled = false;
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(audio.active_channels.contains_key(&key));
+        assert!(audio.active_channels[&key].channel.is_none());
+
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(!audio.active_channels.contains_key(&key));
+
+        audio.options.sound_enabled = true;
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(!audio.active_channels.contains_key(&key));
     }
 
     #[test]
@@ -46426,16 +46708,14 @@ func Award()
                 score: 0,
             }],
         );
-        let info = ChannelInfo {
-            channel: ChannelId(0),
-            sample_key: String::new(),
-            looped: false,
-            target: Some(source.id),
-            volume: 100,
-            custom_falloff: None,
-        };
-        let (volume, pan) =
-            compute_mix_values(&info, &snapshot, Some(&listener), Vector2::new(1000, 1000));
+        let (volume, pan) = compute_mix_values_for(
+            100,
+            Some(source.id),
+            None,
+            &snapshot,
+            Some(&listener),
+            Vector2::new(1000, 1000),
+        );
         assert!((volume - 0.5).abs() < 1e-6, "volume={volume}");
         assert!((pan - 0.7).abs() < 1e-6, "pan={pan}");
     }
@@ -46455,16 +46735,14 @@ func Award()
                 score: 0,
             }],
         );
-        let info = ChannelInfo {
-            channel: ChannelId(0),
-            sample_key: String::new(),
-            looped: false,
-            target: Some(source.id),
-            volume: 100,
-            custom_falloff: Some(1400),
-        };
-        let (volume, pan) =
-            compute_mix_values(&info, &snapshot, Some(&listener), Vector2::new(1000, 1000));
+        let (volume, pan) = compute_mix_values_for(
+            100,
+            Some(source.id),
+            Some(1400),
+            &snapshot,
+            Some(&listener),
+            Vector2::new(1000, 1000),
+        );
         assert!((volume - 0.5).abs() < 1e-6, "volume={volume}");
         assert!((pan - 1.0).abs() < 1e-6, "pan={pan}");
     }
@@ -46483,16 +46761,14 @@ func Award()
                 score: 0,
             }],
         );
-        let info = ChannelInfo {
-            channel: ChannelId(0),
-            sample_key: String::new(),
-            looped: false,
-            target: None,
-            volume: 80,
-            custom_falloff: None,
-        };
-        let (volume, pan) =
-            compute_mix_values(&info, &snapshot, Some(&listener), Vector2::new(0, 0));
+        let (volume, pan) = compute_mix_values_for(
+            80,
+            None,
+            None,
+            &snapshot,
+            Some(&listener),
+            Vector2::new(0, 0),
+        );
         assert!((volume - 0.8).abs() < 1e-6);
         assert_eq!(pan, 0.0);
     }
@@ -84560,22 +84836,26 @@ protected func InputCallback(string answer, int player)
         }
 
         let mut existing_sound = new_running_sandbox_app();
-        existing_sound
-            .audio
-            .as_mut()
-            .expect("test audio")
-            .active_channels
-            .insert(
-                SoundInstanceKey::new("Loop", None),
-                ChannelInfo {
-                    channel: ChannelId(999),
-                    sample_key: "loop".to_string(),
-                    looped: true,
-                    target: None,
-                    volume: 100,
-                    custom_falloff: None,
-                },
-            );
+        let audio = existing_sound.audio.as_mut().expect("test audio");
+        let handle = audio
+            .system
+            .load_sound(&silent_pcm_wav(1_000))
+            .expect("test sound handle");
+        let duration_ms = handle.duration_ms().expect("test sound duration");
+        audio.active_channels.insert(
+            SoundInstanceKey::new("Loop", None),
+            ChannelInfo {
+                channel: Some(ChannelId(999)),
+                handle,
+                duration_ms,
+                sample_key: "loop".to_string(),
+                looped: true,
+                target: None,
+                volume: 100,
+                custom_falloff: None,
+                started_at: Instant::now(),
+            },
+        );
         existing_sound
             .handle_modifiers_changed(ModifiersState::CTRL)
             .expect("set Ctrl+F3");
