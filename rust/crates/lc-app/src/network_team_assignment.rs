@@ -1,7 +1,7 @@
 use lc_engine::{
-    ControlPlayerInfoEntry, ControlPlayerInfoRegistry, InitialHostTeamAssignmentOracle,
-    InitialNetworkTeam, InitialNetworkTeamDistribution, InitialNetworkTeamMetadata, LegacyCString,
-    PlayerInfoAdmission, PlayerInfoControlData, PlayerInfoUpdateRequest, TeamColorUpdateError,
+    ControlPlayerInfoEntry, ControlPlayerInfoRegistry, InitialNetworkTeamDistribution,
+    InitialNetworkTeamMetadata, LegacyCString, PlayerInfoAdmission, PlayerInfoControlData,
+    PlayerInfoUpdateRequest, TeamColorUpdateError,
 };
 use thiserror::Error;
 
@@ -14,51 +14,34 @@ use crate::prepared_host_bootstrap::ProcessInitialHostTeamAssignmentOracle;
 #[derive(Debug, Clone)]
 pub(crate) struct NetworkTeamAssignmentState {
     teams: InitialNetworkTeamMetadata,
+    generated_team_name_template: LegacyCString,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum NetworkTeamControlError {
     #[error("team distribution {0} is outside C4TeamList's 0..=4 range")]
     InvalidDistribution(i32),
-    #[error(
-        "this team distribution would generate teams whose localized names and process-random colors are unavailable"
-    )]
-    GeneratedTeamsUnavailable,
     #[error(transparent)]
     TeamColors(#[from] TeamColorUpdateError),
 }
 
-#[derive(Default)]
-struct GeneratedTeamDetectingOracle {
-    generated: bool,
-}
-
-impl InitialHostTeamAssignmentOracle for GeneratedTeamDetectingOracle {
-    fn safe_random(&mut self, _range: i32) -> i32 {
-        0
-    }
-
-    fn generate_team(
-        &mut self,
-        id: i32,
-        _existing_teams: &[InitialNetworkTeam],
-    ) -> InitialNetworkTeam {
-        self.generated = true;
-        InitialNetworkTeam {
-            id,
-            name: LegacyCString::default(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        }
-    }
-}
-
 impl NetworkTeamAssignmentState {
     pub(crate) fn from_prepared_host(teams: InitialNetworkTeamMetadata) -> Self {
-        Self { teams }
+        Self::from_prepared_host_with_team_name_template(
+            teams,
+            LegacyCString::from_bytes(b"Team %d".to_vec())
+                .expect("the shipped team-name resource contains no NUL"),
+        )
+    }
+
+    pub(crate) fn from_prepared_host_with_team_name_template(
+        teams: InitialNetworkTeamMetadata,
+        generated_team_name_template: LegacyCString,
+    ) -> Self {
+        Self {
+            teams,
+            generated_team_name_template,
+        }
     }
 
     pub(crate) fn teams_mut(&mut self) -> &mut InitialNetworkTeamMetadata {
@@ -69,10 +52,24 @@ impl NetworkTeamAssignmentState {
         &self.teams
     }
 
-    /// Execute the host half of `C4TeamList::SetTeamDistribution`. A preview
-    /// with a side-effect-free oracle proves that the exact operation will not
-    /// request an unmodelled generated team before the process RNG or live
-    /// registries are touched.
+    pub(crate) fn set_generated_team_name_template(&mut self, template: LegacyCString) {
+        self.generated_team_name_template = template;
+    }
+
+    /// Run the control host's post-PlayerInfo random-team reconciliation on
+    /// the retained team state. Tie breaking shares C++'s process-global
+    /// `SafeRandom` stream with initial and runtime team assignment.
+    pub(crate) fn recheck_random_teams(
+        &mut self,
+        player_infos: &mut ControlPlayerInfoRegistry,
+    ) -> Vec<PlayerInfoControlData> {
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+            self.generated_team_name_template.clone(),
+        );
+        player_infos.recheck_random_teams(&mut self.teams, &mut oracle)
+    }
+
+    /// Execute the host half of `C4TeamList::SetTeamDistribution`.
     pub(crate) fn set_distribution(
         &mut self,
         player_infos: &mut ControlPlayerInfoRegistry,
@@ -98,23 +95,13 @@ impl NetworkTeamAssignmentState {
             return Ok(Vec::new());
         }
 
-        let mut preview_teams = self.teams.clone();
-        preview_teams.team_distribution = distribution;
-        let mut preview_infos = player_infos.clone();
-        let mut detector = GeneratedTeamDetectingOracle::default();
-        let _ = preview_infos.reassign_all_teams(
-            &mut preview_teams,
-            &mut detector,
-            has_or_will_have_lobby,
-        );
-        if detector.generated {
-            return Err(NetworkTeamControlError::GeneratedTeamsUnavailable);
-        }
-
         self.teams.team_distribution = distribution;
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+            self.generated_team_name_template.clone(),
+        );
         Ok(player_infos.reassign_all_teams(
             &mut self.teams,
-            &mut ProcessInitialHostTeamAssignmentOracle,
+            &mut oracle,
             has_or_will_have_lobby,
         ))
     }
@@ -143,12 +130,67 @@ impl NetworkTeamAssignmentState {
         max_players: usize,
         restore_players: &[ControlPlayerInfoEntry],
     ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+            self.generated_team_name_template.clone(),
+        );
         player_infos.admit_remote_request_with_runtime_teams_and_attributes(
             request,
             max_players,
             &mut self.teams,
             restore_players,
-            &mut ProcessInitialHostTeamAssignmentOracle,
+            &mut oracle,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_recheck_regenerates_cpp_default_team_metadata() {
+        let mut assignment =
+            NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+                InitialNetworkTeamMetadata {
+                    active: true,
+                    custom: true,
+                    allow_hostility_change: false,
+                    allow_team_switch: false,
+                    auto_generate_teams: true,
+                    last_team_id: 7,
+                    team_distribution: InitialNetworkTeamDistribution::Random,
+                    team_colors: true,
+                    max_script_players: 0,
+                    script_player_names: LegacyCString::default(),
+                    random_team_count: 2,
+                    teams: vec![lc_engine::InitialNetworkTeam {
+                        id: 7,
+                        name: LegacyCString::from_bytes(b"Old".to_vec()).unwrap(),
+                        player_start_index: 0,
+                        player_ids: Vec::new(),
+                        color: 0,
+                        icon_spec: LegacyCString::default(),
+                        max_players: 0,
+                    }],
+                },
+                LegacyCString::from_bytes(b"Mannschaft %d".to_vec()).unwrap(),
+            );
+        let mut player_infos = ControlPlayerInfoRegistry::default();
+
+        assert!(assignment
+            .recheck_random_teams(&mut player_infos)
+            .is_empty());
+        assert_eq!(
+            assignment
+                .teams()
+                .teams
+                .iter()
+                .map(|team| (team.id, team.name.as_bytes(), team.color))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, b"Mannschaft 1".as_slice(), 0x00f4_0000),
+                (2, b"Mannschaft 2".as_slice(), 0x0000_c800),
+            ],
+        );
     }
 }

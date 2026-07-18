@@ -452,17 +452,72 @@ extern "C" {
     fn c_rand() -> c_int;
 }
 
+/// Serializes every main-thread-style transaction over C's process-global
+/// `rand()` stream. Loader, audio, and team assignment all share this owner.
+pub(crate) static CLASSIC_SAFE_RANDOM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn format_generated_team_name(template: &LegacyCString, id: i32) -> LegacyCString {
+    let id = id.to_string();
+    let mut formatted = Vec::with_capacity(template.as_bytes().len().saturating_add(id.len()));
+    let mut source = template.as_bytes().iter().copied();
+    while let Some(byte) = source.next() {
+        if byte != b'%' {
+            formatted.push(byte);
+            continue;
+        }
+        match source.next() {
+            Some(b'd') => formatted.extend_from_slice(id.as_bytes()),
+            Some(b'%') => formatted.push(b'%'),
+            Some(other) => formatted.extend_from_slice(&[b'%', other]),
+            None => formatted.push(b'%'),
+        }
+    }
+    formatted.truncate(30);
+    LegacyCString::from_bytes(formatted)
+        .expect("a validated resource string and decimal team ID contain no NUL")
+}
+
 /// The same process-global C runtime stream used by C++ `SafeRandom`.
 ///
 /// This deliberately does not derive from `Parameters.RandomSeed`: C++ seeds
 /// that separate deterministic simulation stream only after the lobby.
-pub(crate) struct ProcessInitialHostTeamAssignmentOracle;
+pub(crate) struct ProcessInitialHostTeamAssignmentOracle {
+    team_name_template: LegacyCString,
+    _guard: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+impl ProcessInitialHostTeamAssignmentOracle {
+    pub(crate) fn new(team_name_template: LegacyCString) -> Self {
+        Self {
+            team_name_template,
+            _guard: None,
+        }
+    }
+
+    fn ensure_random_locked(&mut self) {
+        if self._guard.is_none() {
+            self._guard = Some(
+                CLASSIC_SAFE_RANDOM_LOCK
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+        }
+    }
+
+    fn with_shipped_team_name() -> Self {
+        Self::new(
+            LegacyCString::from_bytes(b"Team %d".to_vec())
+                .expect("the shipped team-name resource contains no NUL"),
+        )
+    }
+}
 
 impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle {
     fn safe_random(&mut self, range: i32) -> i32 {
         if range == 0 {
             return 0;
         }
+        self.ensure_random_locked();
         // SAFETY: `rand` has no pointer preconditions and C++ calls this exact
         // process-global function from `SafeRandom` (src/C4Random.h:71-75).
         unsafe { c_rand() % range }
@@ -471,17 +526,10 @@ impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle 
     fn generate_team(
         &mut self,
         id: i32,
-        _existing_teams: &[InitialNetworkTeam],
+        existing_teams: &[InitialNetworkTeam],
     ) -> InitialNetworkTeam {
-        InitialNetworkTeam {
-            id,
-            name: LegacyCString::default(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        }
+        let name = format_generated_team_name(&self.team_name_template, id);
+        lc_engine::generate_default_initial_team(id, name, existing_teams, self)
     }
 }
 
@@ -509,10 +557,20 @@ impl<O: InitialHostTeamAssignmentOracle> InitialHostTeamAssignmentOracle
     fn generate_team(
         &mut self,
         id: i32,
-        existing_teams: &[InitialNetworkTeam],
+        _existing_teams: &[InitialNetworkTeam],
     ) -> InitialNetworkTeam {
         self.generated_team_requested = true;
-        self.inner.generate_team(id, existing_teams)
+        // The caller rejects this preview. Avoid consuming process RNG merely
+        // to construct data that cannot commit.
+        InitialNetworkTeam {
+            id,
+            name: LegacyCString::default(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color: 0,
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        }
     }
 }
 
@@ -521,10 +579,8 @@ impl<O: InitialHostTeamAssignmentOracle> InitialHostTeamAssignmentOracle
 pub fn prepare_host_bootstrap(
     spec: PreparedHostBootstrapSpec<'_>,
 ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
-    prepare_host_bootstrap_with_team_assignment_oracle(
-        spec,
-        &mut ProcessInitialHostTeamAssignmentOracle,
-    )
+    let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
+    prepare_host_bootstrap_with_team_assignment_oracle(spec, &mut oracle)
 }
 
 /// Injection seam for the process-local services used by C++ team assignment.
@@ -883,6 +939,17 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
 mod definition_root_graphics_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn generated_team_name_formats_resource_percent_and_c4_name_limit() {
+        let template = LegacyCString::from_bytes(
+            b"Very long %% localized team %d suffix".to_vec(),
+        )
+        .unwrap();
+        let formatted = format_generated_team_name(&template, 12);
+        assert_eq!(formatted.as_bytes().len(), 30);
+        assert_eq!(formatted.as_bytes(), b"Very long % localized team 12 ");
+    }
 
     #[test]
     fn definition_pack_graphics_precede_prepared_host_base_graphics() {

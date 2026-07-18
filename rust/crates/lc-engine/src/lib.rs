@@ -97,10 +97,11 @@ pub use control::{
 };
 pub use control_execution::{
     assign_initial_host_player_teams, assign_initial_offline_player_teams,
-    prepare_join_player_config, resolve_remote_embedded_player_data, ControlClientRegistry,
-    ControlClientState, ControlPlayerInfoRegistry, InitialHostTeamAssignmentOracle,
-    JoinPlayerPreparation, PlayerInfoAdmission, PrepareJoinPlayerError, RemoteEmbeddedPlayerData,
-    ResolveRemoteEmbeddedPlayerDataError, TeamColorUpdateError,
+    generate_default_initial_team, prepare_join_player_config, resolve_remote_embedded_player_data,
+    ControlClientRegistry, ControlClientState, ControlPlayerInfoRegistry,
+    InitialHostTeamAssignmentOracle, JoinPlayerPreparation, PlayerInfoAdmission,
+    PrepareJoinPlayerError, RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError,
+    TeamColorUpdateError,
 };
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;

@@ -86,7 +86,8 @@ use lc_engine::{
     EngineState, EnvironmentSettings, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT,
     FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
-    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MissionAccessStore,
+    LegacyCString, MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind,
+    MissionAccessStore,
     MouseDragSource,
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, Recorder, Recording, RgbColor, Scenario, ScenarioError,
@@ -164,7 +165,9 @@ use object_menu::{
 use offline_startup::{
     OfflineStartupPlayers, offline_player_paths_identical, offline_player_real_path,
 };
-use prepared_host_bootstrap::ProcessInitialHostTeamAssignmentOracle;
+use prepared_host_bootstrap::{
+    CLASSIC_SAFE_RANDOM_LOCK, ProcessInitialHostTeamAssignmentOracle,
+};
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
@@ -598,12 +601,6 @@ struct GameGraphicsResources {
     palette: Arc<GamePalette>,
     liquid_animation: Option<Arc<ImageData>>,
 }
-
-// C4LoaderScreen and wildcard sound selection use SafeRandom, which is the
-// platform C library's global rand() stream. Keep each C++ main-thread draw
-// sequence atomic so Rust worker/tests cannot interleave it. Future ports of
-// SafeRandom/FixRandom consumers must share this owner.
-static CLASSIC_SAFE_RANDOM_LOCK: Mutex<()> = Mutex::new(());
 
 extern "C" {
     fn rand() -> std::os::raw::c_int;
@@ -2327,6 +2324,27 @@ enum RuntimeHelpCharset {
 struct RuntimeLanguageTable {
     charset: RuntimeHelpCharset,
     entries: HashMap<String, String>,
+}
+
+fn generated_team_name_template(table: &RuntimeLanguageTable) -> LegacyCString {
+    table
+        .entries
+        .get("IDS_MSG_TEAM")
+        .and_then(|value| {
+            let bytes = match table.charset {
+                RuntimeHelpCharset::Windows1252 => value
+                    .chars()
+                    .map(runtime_cp1252_byte)
+                    .collect::<Result<Vec<_>>>()
+                    .expect("a decoded Windows-1252 resource value re-encodes losslessly"),
+                RuntimeHelpCharset::Utf8 => value.as_bytes().to_vec(),
+            };
+            LegacyCString::from_bytes(bytes)
+        })
+        .unwrap_or_else(|| {
+            LegacyCString::from_bytes(b"Team %d".to_vec())
+                .expect("the shipped team-name resource contains no NUL")
+        })
 }
 
 fn runtime_help_raw_table_value<'a>(bytes: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
@@ -8494,14 +8512,18 @@ fn initial_network_league_name(network_mode: Option<&NetworkMode>) -> Vec<u8> {
 
 fn initial_network_team_assignment(
     network_mode: Option<&NetworkMode>,
+    generated_team_name_template: &LegacyCString,
 ) -> Option<NetworkTeamAssignmentState> {
     network_mode.and_then(|mode| match mode {
         NetworkMode::Host(HostSettings {
             prepared: Some(prepared),
             ..
-        }) => Some(NetworkTeamAssignmentState::from_prepared_host(
-            prepared.runtime_team_metadata().clone(),
-        )),
+        }) => Some(
+            NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+                prepared.runtime_team_metadata().clone(),
+                generated_team_name_template.clone(),
+            ),
+        ),
         NetworkMode::Host(_) | NetworkMode::Client(_) => None,
     })
 }
@@ -8765,6 +8787,8 @@ struct GameApp {
     control_clients: ControlClientRegistry,
     network_client_activity: NetworkClientActivity,
     control_player_infos: ControlPlayerInfoRegistry,
+    /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
+    generated_team_name_template: LegacyCString,
     network_team_assignment: Option<NetworkTeamAssignmentState>,
     admission_resources: AdmissionResourceStore,
     /// Mutable host-owned JoinData used for lobby Set changes, GO
@@ -16193,7 +16217,6 @@ impl GameApp {
         let network_max_players = initial_network_max_players(network_mode.as_ref());
         let network_is_league = initial_network_is_league(network_mode.as_ref());
         let network_league_name = initial_network_league_name(network_mode.as_ref());
-        let network_team_assignment = initial_network_team_assignment(network_mode.as_ref());
         let control_player_infos = ControlPlayerInfoRegistry::default();
         // Scenario discovery only walks directories and reads scenario
         // groups; start it only after the process-global resource gate.
@@ -16332,6 +16355,17 @@ impl GameApp {
             }
         };
         let runtime_language_table = load_runtime_language_table(paths);
+        let generated_team_name_template = runtime_language_table
+            .as_ref()
+            .map(|table| generated_team_name_template(table))
+            .unwrap_or_else(|_| {
+                LegacyCString::from_bytes(b"Team %d".to_vec())
+                    .expect("the shipped team-name resource contains no NUL")
+            });
+        let network_team_assignment = initial_network_team_assignment(
+            network_mode.as_ref(),
+            &generated_team_name_template,
+        );
         let (needed_material_need, needed_material_none) = runtime_language_table
             .as_ref()
             .map(|table| needed_material_resource_strings(table))
@@ -16477,6 +16511,7 @@ impl GameApp {
             control_clients,
             network_client_activity: NetworkClientActivity::default(),
             control_player_infos,
+            generated_team_name_template,
             network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
             host_join_snapshot,
@@ -22366,6 +22401,7 @@ impl GameApp {
         }
 
         let restore_players = host_restore_player_info_entries(self.host_join_snapshot.as_ref());
+        let generated_team_name_template = self.generated_team_name_template.clone();
         let admission = match self.network_team_assignment.as_mut() {
             Some(team_assignment) => team_assignment.admit_request(
                 &mut self.control_player_infos,
@@ -22373,13 +22409,18 @@ impl GameApp {
                 self.network_max_players,
                 &restore_players,
             ),
-            None => self.control_player_infos.admit_request_with_attributes(
-                request,
-                self.network_max_players,
-                None,
-                &restore_players,
-                &mut ProcessInitialHostTeamAssignmentOracle,
-            ),
+            None => {
+                let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+                    generated_team_name_template,
+                );
+                self.control_player_infos.admit_request_with_attributes(
+                    request,
+                    self.network_max_players,
+                    None,
+                    &restore_players,
+                    &mut oracle,
+                )
+            }
         }
         .map_err(|error| format!("host rejected the runtime player attributes: {error}"))?
         .ok_or_else(|| "host rejected the runtime player request".to_string())?;
@@ -23234,6 +23275,8 @@ impl GameApp {
                         tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
                         let restore_players =
                             host_restore_player_info_entries(self.host_join_snapshot.as_ref());
+                        let generated_team_name_template =
+                            self.generated_team_name_template.clone();
                         let admission = if !by_host {
                             match self.network_team_assignment.as_mut() {
                                 Some(team_assignment) => team_assignment.admit_request(
@@ -23242,25 +23285,33 @@ impl GameApp {
                                     self.network_max_players,
                                     &restore_players,
                                 ),
-                                None => self.control_player_infos.admit_request_with_attributes(
-                                    request,
-                                    self.network_max_players,
-                                    None,
-                                    &restore_players,
-                                    &mut ProcessInitialHostTeamAssignmentOracle,
-                                ),
+                                None => {
+                                    let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+                                        generated_team_name_template,
+                                    );
+                                    self.control_player_infos.admit_request_with_attributes(
+                                        request,
+                                        self.network_max_players,
+                                        None,
+                                        &restore_players,
+                                        &mut oracle,
+                                    )
+                                }
                             }
                         } else {
                             let teams = self
                                 .network_team_assignment
                                 .as_ref()
                                 .map(|assignment| assignment.teams().clone());
+                            let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+                                generated_team_name_template,
+                            );
                             self.control_player_infos.admit_request_with_attributes(
                                 request,
                                 self.network_max_players,
                                 teams.as_ref(),
                                 &restore_players,
-                                &mut ProcessInitialHostTeamAssignmentOracle,
+                                &mut oracle,
                             )
                         };
                         match admission {
@@ -23304,6 +23355,12 @@ impl GameApp {
                         }
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
+                            let local_origin = self
+                                .network
+                                .as_ref()
+                                .and_then(|network| {
+                                    i32::try_from(network.local_client_id()).ok()
+                                }) == Some(info.by_client);
                             let had_client_packet = self
                                 .control_player_infos
                                 .client_packet(client_id)
@@ -23318,14 +23375,24 @@ impl GameApp {
                             self.admission_resources
                                 .register_player_info_resources(&info.players);
                             self.control_player_infos.apply(info);
-                            self.recheck_team_memberships_from_player_infos();
-                            if send_clean_follow_up {
-                                if let Some(Err(error)) = self.network.as_ref().and_then(|network| {
-                                    self.control_player_infos
-                                        .client_packet(client_id)
-                                        .map(|clean| network.broadcast_player_info(clean))
-                                }) {
-                                    tracing::error!(%error, "failed to broadcast clean PlayerInfo follow-up");
+                            let rebalance_updates =
+                                self.recheck_team_memberships_from_player_infos();
+                            if local_origin {
+                                let mut updated_clients = rebalance_updates
+                                    .iter()
+                                    .map(|update| update.client_id)
+                                    .collect::<HashSet<_>>();
+                                if send_clean_follow_up {
+                                    updated_clients.insert(client_id);
+                                }
+                                let updates =
+                                    self.control_player_infos.client_packets(&updated_clients);
+                                if let Some(network) = self.network.as_ref() {
+                                    for update in updates {
+                                        if let Err(error) = network.broadcast_player_info(update) {
+                                            tracing::error!(%error, "failed to broadcast updated PlayerInfo");
+                                        }
+                                    }
                                 }
                             }
                             seed_engine_player_info_parameters(
@@ -27490,7 +27557,10 @@ impl GameApp {
                                 &self.control_player_infos,
                             );
                             self.network_team_assignment =
-                                initial_network_team_assignment(Some(&mode));
+                                initial_network_team_assignment(
+                                    Some(&mode),
+                                    &self.generated_team_name_template,
+                                );
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -27534,7 +27604,10 @@ impl GameApp {
                                 &self.control_player_infos,
                             );
                             self.network_team_assignment =
-                                initial_network_team_assignment(Some(&mode));
+                                initial_network_team_assignment(
+                                    Some(&mode),
+                                    &self.generated_team_name_template,
+                                );
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -30252,6 +30325,11 @@ impl GameApp {
 
     fn reload_application_language_resources(&mut self) -> Result<String> {
         let table = load_runtime_language_table(self.app_paths.as_ref())?;
+        let generated_team_name_template = generated_team_name_template(&table);
+        self.generated_team_name_template = generated_team_name_template.clone();
+        if let Some(assignment) = self.network_team_assignment.as_mut() {
+            assignment.set_generated_team_name_template(generated_team_name_template);
+        }
         let charset = table
             .entries
             .get("IDS_LANG_CHARSET")
@@ -30664,15 +30742,26 @@ impl GameApp {
     /// `C4Network2Players::HandlePlayerInfo` immediately rechecks the live
     /// C4TeamList. Keep both the pre-activation registry and any retained
     /// JoinData projection at that same direct-control boundary.
-    fn recheck_team_memberships_from_player_infos(&mut self) {
+    fn recheck_team_memberships_from_player_infos(
+        &mut self,
+    ) -> Vec<lc_engine::PlayerInfoControlData> {
+        let recheck_random_teams = matches!(
+            self.runtime_network_role(),
+            RuntimeNetworkRole::Host
+        ) && self.engine.is_control_host();
         let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
         let exact_metadata = self.network_team_assignment.as_mut().map(|assignment| {
             self.control_player_infos
                 .recheck_team_players(assignment.teams_mut());
-            assignment.teams().clone()
+            let updates = if recheck_random_teams {
+                assignment.recheck_random_teams(&mut self.control_player_infos)
+            } else {
+                Vec::new()
+            };
+            (assignment.teams().clone(), updates)
         });
 
-        if let Some(metadata) = exact_metadata {
+        if let Some((metadata, updates)) = exact_metadata {
             let runtime_teams = runtime_teams_from_initial_metadata(&metadata);
             let snapshot = lc_network::join_team_list_snapshot(metadata);
             self.engine.set_teams(runtime_teams.clone());
@@ -30689,7 +30778,7 @@ impl GameApp {
             if let Some(host_snapshot) = self.host_join_snapshot.as_mut() {
                 host_snapshot.parameters.teams = snapshot;
             }
-            return;
+            return updates;
         }
 
         if let Some(prepared) = self
@@ -30710,6 +30799,7 @@ impl GameApp {
             recheck_runtime_team_memberships_from_infos(&mut runtime_teams, &memberships);
             self.engine.set_teams(runtime_teams);
         }
+        Vec::new()
     }
 
     fn refresh_current_player_info_teams(&mut self) -> bool {
@@ -31044,10 +31134,43 @@ impl GameApp {
         for control in controls {
             result = match control {
                 NetworkControl::PlayerInfo(info) => {
+                    let client_id = info.client_id;
+                    let local_origin = self
+                        .network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                        == Some(info.by_client);
+                    let had_client_packet = self
+                        .control_player_infos
+                        .client_packet(client_id)
+                        .is_some();
+                    let send_clean_follow_up = matches!(
+                        self.runtime_network_role(),
+                        RuntimeNetworkRole::Host
+                    ) && info.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
+                        && (info.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS == 0
+                            || !had_client_packet);
                     self.admission_resources
                         .register_player_info_resources(&info.players);
                     self.control_player_infos.apply(info);
-                    self.recheck_team_memberships_from_player_infos();
+                    let rebalance_updates = self.recheck_team_memberships_from_player_infos();
+                    if local_origin {
+                        let mut updated_clients = rebalance_updates
+                            .iter()
+                            .map(|update| update.client_id)
+                            .collect::<HashSet<_>>();
+                        if send_clean_follow_up {
+                            updated_clients.insert(client_id);
+                        }
+                        let updates = self.control_player_infos.client_packets(&updated_clients);
+                        if let Some(network) = self.network.as_ref() {
+                            for update in updates {
+                                if let Err(error) = network.broadcast_player_info(update) {
+                                    tracing::error!(%error, "failed to broadcast updated PlayerInfo");
+                                }
+                            }
+                        }
+                    }
                     seed_engine_player_info_parameters(
                         &mut self.engine,
                         &self.network_league_name,
@@ -31238,7 +31361,23 @@ impl GameApp {
                         if self.control_clients.apply_remove(&remove) {
                             self.network_client_activity.remove_client(remove.client_id);
                             self.control_messages.remove_client(remove.client_id);
+                            let had_player_info = self
+                                .control_player_infos
+                                .client_packet(remove.client_id)
+                                .is_some();
                             self.control_player_infos.on_client_part(remove.client_id);
+                            let updates = if had_player_info {
+                                self.recheck_team_memberships_from_player_infos()
+                            } else {
+                                Vec::new()
+                            };
+                            if let Some(network) = self.network.as_ref() {
+                                for update in updates {
+                                    if let Err(error) = network.broadcast_player_info(update) {
+                                        tracing::error!(%error, "failed to broadcast client-part PlayerInfo update");
+                                    }
+                                }
+                            }
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
                                 &self.network_league_name,
@@ -37038,7 +37177,10 @@ impl GameApp {
                     &mut metadata,
                     self.engine.teams(),
                 );
-                NetworkTeamAssignmentState::from_prepared_host(metadata)
+                NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+                    metadata,
+                    self.generated_team_name_template.clone(),
+                )
             });
         } else if replay {
             self.network_team_assignment = None;
@@ -37155,7 +37297,12 @@ impl GameApp {
                 self.engine.team_configuration(),
                 self.engine.teams(),
             )
-            .map(NetworkTeamAssignmentState::from_prepared_host);
+            .map(|metadata| {
+                NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+                    metadata,
+                    self.generated_team_name_template.clone(),
+                )
+            });
         }
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
@@ -72512,6 +72659,155 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn host_direct_player_info_rebalances_random_teams_and_broadcasts_changed_packet() {
+        // HandlePlayerInfo runs RecheckPlayers followed by the control-host
+        // RecheckTeams. The third unjoined player makes a 3/0 split, so the
+        // first member moves once. The incoming Updated flag and the move
+        // both mark the same owner, but SendUpdatedPlayers emits that
+        // client's complete, clean packet only once
+        // (src/C4Network2Players.cpp:245-275; src/C4Teams.cpp:688-730).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+
+        let mut metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![10, 20], 0),
+                set_control_test_team(2, Vec::new(), 0),
+            ],
+        );
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::Random;
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&metadata));
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata,
+        ));
+        app.control_player_infos.replace_snapshot(
+            30,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    set_control_test_player(10, 1, 0),
+                    set_control_test_player(20, 1, 0),
+                ],
+                ..Default::default()
+            }],
+        );
+
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED,
+                    players: vec![
+                        set_control_test_player(10, 1, 0),
+                        set_control_test_player(20, 1, 0),
+                        set_control_test_player(30, 1, 0),
+                    ],
+                    by_client: 0,
+                },
+            )))
+            .expect("queue host-authored PlayerInfo addition");
+        app.process_network_events()
+            .expect("apply host-authored PlayerInfo addition");
+
+        let teams = app
+            .network_team_assignment
+            .as_ref()
+            .expect("host team assignment remains installed")
+            .teams();
+        assert_eq!(teams.teams[0].player_ids, vec![20, 30]);
+        assert_eq!(teams.teams[1].player_ids, vec![10]);
+        assert_eq!(app.control_player_infos.get(10).unwrap().team, 2);
+        assert_eq!(app.control_player_infos.get(20).unwrap().team, 1);
+        assert_eq!(app.control_player_infos.get(30).unwrap().team, 1);
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [updated] = broadcasts.as_slice() else {
+            panic!("expected one rebalanced PlayerInfo packet, got {broadcasts:?}");
+        };
+        assert_eq!((updated.client_id, updated.by_client), (3, 0));
+        assert_eq!(
+            updated.flags
+                & (lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+                    | lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED),
+            0,
+        );
+        assert_eq!(
+            updated
+                .players
+                .iter()
+                .map(|player| (player.id, player.team))
+                .collect::<Vec<_>>(),
+            vec![(10, 2), (20, 1), (30, 1)],
+        );
+    }
+
+    #[test]
+    fn client_direct_player_info_does_not_rebalance_random_teams_or_echo_updates() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        let mut metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![10, 20], 0),
+                set_control_test_team(2, Vec::new(), 0),
+            ],
+        );
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::Random;
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata,
+        ));
+        app.control_player_infos.replace_snapshot(
+            30,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    set_control_test_player(10, 1, 0),
+                    set_control_test_player(20, 1, 0),
+                ],
+                ..Default::default()
+            }],
+        );
+
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![
+                        set_control_test_player(10, 1, 0),
+                        set_control_test_player(20, 1, 0),
+                        set_control_test_player(30, 1, 0),
+                    ],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue host-authored PlayerInfo replacement");
+        app.process_network_events()
+            .expect("apply host-authored PlayerInfo replacement");
+
+        let teams = app
+            .network_team_assignment
+            .as_ref()
+            .expect("client team assignment remains installed")
+            .teams();
+        assert_eq!(teams.teams[0].player_ids, vec![10, 20, 30]);
+        assert!(teams.teams[1].player_ids.is_empty());
+        assert_eq!(app.control_player_infos.get(10).unwrap().team, 1);
+        assert!(commands.take_broadcast_player_infos().is_empty());
+    }
+
+    #[test]
     fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
         // HandlePlayerInfoUpdRequest allocates the ID before AssignTeams, and
         // the host broadcasts that already-adjusted PlayerInfo. AddPlayer also
@@ -73942,7 +74238,7 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn unavailable_generated_distribution_rolls_back_without_network_publication() {
+    fn generated_distribution_rebuilds_default_teams_and_publishes() {
         let mut app = new_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
@@ -73961,37 +74257,54 @@ protected func InputCallback(string answer, int player)
                 ..Default::default()
             }],
         );
-        let before_teams = app
-            .network_team_assignment
-            .as_ref()
-            .unwrap()
-            .teams()
-            .clone();
-        let before_infos = app.control_player_infos.retained_rows_snapshot();
-        let before_snapshot = app.host_join_snapshot.clone();
-        let before_distribution = app.engine.team_distribution();
-
         app.execute_control_set(lc_network::LegacyControlSet {
             value_type: 3,
             data: 3,
             by_client: 0,
         });
 
+        let assignment = app.network_team_assignment.as_ref().unwrap().teams();
+        assert_eq!(assignment.team_distribution, lc_engine::InitialNetworkTeamDistribution::Random);
+        assert_eq!(assignment.last_team_id, 2);
         assert_eq!(
-            app.network_team_assignment.as_ref().unwrap().teams(),
-            &before_teams
+            assignment
+                .teams
+                .iter()
+                .map(|team| (team.id, team.name.as_bytes(), team.color))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, b"Team 1".as_slice(), 0x00f4_0000),
+                (2, b"Team 2".as_slice(), 0x0000_c800),
+            ]
         );
+        let assigned_team = app.control_player_infos.get(20).unwrap().team;
+        assert!((1..=2).contains(&assigned_team));
         assert_eq!(
-            app.control_player_infos.retained_rows_snapshot(),
-            before_infos
+            assignment
+                .teams
+                .iter()
+                .find(|team| team.id == assigned_team)
+                .unwrap()
+                .player_ids,
+            vec![20]
         );
-        assert_eq!(app.host_join_snapshot, before_snapshot);
-        assert_eq!(app.engine.team_distribution(), before_distribution);
-        assert!(app.status_text.contains("unavailable"));
+        assert_eq!(app.engine.team_distribution(), 3);
+        let snapshot = app.host_join_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.parameters.teams.team_distribution, 3);
+        assert_eq!(snapshot.parameters.teams.teams.len(), 2);
+        let (player_infos, snapshots) = commands.take_team_control_updates();
+        let [player_info] = player_infos.as_slice() else {
+            panic!("expected one regenerated PlayerInfo packet");
+        };
+        assert_eq!(player_info.client_id, 3);
         assert_eq!(
-            commands.take_team_control_updates(),
-            (Vec::new(), Vec::new())
+            player_info.flags
+                & (lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+                    | lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED),
+            0
         );
+        assert_eq!(player_info.players[0].team, assigned_team);
+        assert_eq!(snapshots, vec![snapshot.clone()]);
     }
 
     #[test]
@@ -75310,6 +75623,96 @@ protected func InputCallback(string answer, int player)
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
         assert!(app.control_player_infos.get(8).is_none());
+    }
+
+    #[test]
+    fn synchronized_client_remove_rebalances_random_teams_and_broadcasts_changed_packet() {
+        // OnClientPart first drops the departing client's unjoined infos and
+        // rechecks memberships. The host then redistributes the first
+        // relocatable member from the resulting 3/0 split and sends its
+        // owner's updated packet (src/C4Network2Players.cpp:425-459;
+        // src/C4Teams.cpp:688-730).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.control_clients.register(4, true, false);
+
+        let mut metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![10, 20, 30], 0),
+                set_control_test_team(2, vec![40], 0),
+            ],
+        );
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::Random;
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&metadata));
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata,
+        ));
+        app.control_player_infos.replace_snapshot(
+            40,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![
+                        set_control_test_player(10, 1, 0),
+                        set_control_test_player(20, 1, 0),
+                        set_control_test_player(30, 1, 0),
+                    ],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 4,
+                    players: vec![set_control_test_player(40, 2, 0)],
+                    ..Default::default()
+                },
+            ],
+        );
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 4,
+                    reason: lc_engine::LegacyCString::default(),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute synchronized client removal");
+
+        assert!(!app.control_clients.contains(4));
+        assert!(app.control_player_infos.get(40).is_none());
+        let teams = app
+            .network_team_assignment
+            .as_ref()
+            .expect("host team assignment remains installed")
+            .teams();
+        assert_eq!(teams.teams[0].player_ids, vec![20, 30]);
+        assert_eq!(teams.teams[1].player_ids, vec![10]);
+        assert_eq!(app.control_player_infos.get(10).unwrap().team, 2);
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [updated] = broadcasts.as_slice() else {
+            panic!("expected one rebalanced PlayerInfo packet, got {broadcasts:?}");
+        };
+        assert_eq!((updated.client_id, updated.by_client), (3, 0));
+        assert_eq!(
+            updated.flags
+                & (lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+                    | lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED),
+            0,
+        );
+        assert_eq!(
+            updated
+                .players
+                .iter()
+                .map(|player| (player.id, player.team))
+                .collect::<Vec<_>>(),
+            vec![(10, 2), (20, 1), (30, 1)],
+        );
     }
 
     #[test]
@@ -90904,6 +91307,30 @@ protected func InputCallback(string answer, int player)
         assert_eq!(
             duplicate.get("IDS_CON_HELP").map(String::as_str),
             Some("First")
+        );
+    }
+
+    #[test]
+    fn generated_team_name_template_preserves_the_runtime_table_charset() {
+        let cp1252 = RuntimeLanguageTable {
+            charset: RuntimeHelpCharset::Windows1252,
+            entries: HashMap::from([(
+                "IDS_MSG_TEAM".to_string(),
+                "Équipe %d".to_string(),
+            )]),
+        };
+        assert_eq!(
+            generated_team_name_template(&cp1252).as_bytes(),
+            b"\xc9quipe %d"
+        );
+
+        let utf8 = RuntimeLanguageTable {
+            charset: RuntimeHelpCharset::Utf8,
+            entries: cp1252.entries,
+        };
+        assert_eq!(
+            generated_team_name_template(&utf8).as_bytes(),
+            "Équipe %d".as_bytes()
         );
     }
 
