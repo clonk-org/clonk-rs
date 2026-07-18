@@ -54180,6 +54180,13 @@ func Announce()
 
     #[test]
     fn message_speech_catalog_matches_cpp_prepared_filenames() {
+        let invalid_star_matches =
+            HashSet::from(["foo.wav".to_string(), "foo12.wav".to_string()]);
+        assert!(!sound_sample_available(&invalid_star_matches, "Foo*"));
+        let mut valid_star_matches = invalid_star_matches;
+        valid_star_matches.insert("foo1.wav".to_string());
+        assert!(sound_sample_available(&valid_star_matches, "Foo*"));
+
         let samples = HashSet::from([
             "voice.wav".to_string(),
             "encoded.ogg".to_string(),
