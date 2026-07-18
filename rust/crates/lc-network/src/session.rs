@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::{poll_fn, Future};
 use std::io;
 use std::net::SocketAddr;
@@ -838,10 +838,12 @@ impl ClientDialRace {
         tcp_available: bool,
         udp_handle: Option<crate::ReliableUdpSessionHandle>,
     ) -> Self {
+        let mut seen_addresses = HashSet::new();
         Self {
             attempts: addresses
                 .into_iter()
                 .enumerate()
+                .filter(|(_, address)| seen_addresses.insert(*address))
                 .filter_map(|(index, address)| {
                     if address.is_ip_null() {
                         return None;
@@ -15716,6 +15718,87 @@ mod tests {
             }
             other => panic!("expected bounded connection timeout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn client_dial_race_coalesces_a_duplicate_connect_address() {
+        // ConnectWithSocket returns success without creating another
+        // connection when GetConnectionByConnAddr finds the same protocol and
+        // connect endpoint (src/C4Network2IO.cpp:228-240).
+        let address = crate::NetworkAddress::new(
+            crate::NetworkProtocol::Tcp,
+            SocketAddr::from(([127, 0, 0, 1], 31_114)),
+        );
+        let race = ClientDialRace::new([address, address], true, None);
+
+        assert_eq!(race.attempts.len(), 1);
+        assert_eq!(race.attempts[0].index, 0, "the first attempt wins dedup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exclusive_join_defers_welcome_until_the_active_route_fails() {
+        // InitClient opens every prepared route together, but exclusive mode
+        // permits only one outstanding PID_Conn. OnDisconn promotes the next
+        // already-open socket (src/C4Network2IO.cpp:523-563,1223-1255).
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_address = first_listener.local_addr().unwrap();
+        let second_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_address = second_listener.local_addr().unwrap();
+        let client = tokio::spawn(connect_client_addresses(
+            [
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, first_address),
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, second_address),
+            ],
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+        let (first, second) = timeout(EVENT_WAIT, async {
+            let (first, second) = tokio::join!(first_listener.accept(), second_listener.accept());
+            (first.unwrap().0, second.unwrap().0)
+        })
+        .await
+        .expect("both transport sockets open together");
+
+        let mut first_probe = [0_u8; 1];
+        let mut second_probe = [0_u8; 1];
+        let first_is_active = tokio::select! {
+            ready = first.peek(&mut first_probe) => {
+                assert_eq!(ready.unwrap(), 1);
+                true
+            }
+            ready = second.peek(&mut second_probe) => {
+                assert_eq!(ready.unwrap(), 1);
+                false
+            }
+            _ = tokio::time::sleep(EVENT_WAIT) => panic!("neither route sent PID_Conn"),
+        };
+        let (mut active, mut deferred) = if first_is_active {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let mut header_and_pid = [0_u8; 6];
+        active.read_exact(&mut header_and_pid).await.unwrap();
+        assert_eq!(header_and_pid[0], 0xff);
+        assert_eq!(header_and_pid[5], 0x02, "active route sends PID_Conn");
+
+        let mut deferred_probe = [0_u8; 1];
+        assert!(
+            timeout(Duration::from_millis(150), deferred.peek(&mut deferred_probe))
+                .await
+                .is_err(),
+            "the second open route must keep its welcome deferred"
+        );
+
+        drop(active);
+        timeout(EVENT_WAIT, deferred.read_exact(&mut header_and_pid))
+            .await
+            .expect("active failure promotes the deferred route")
+            .unwrap();
+        assert_eq!(header_and_pid[0], 0xff);
+        assert_eq!(header_and_pid[5], 0x02, "promoted route sends PID_Conn");
+
+        client.abort();
+        let _ = client.await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
