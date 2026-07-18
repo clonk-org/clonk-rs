@@ -16,6 +16,7 @@ use freetype::Library;
 use lc_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
 use lc_graphics::{Color, GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
+use lc_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
 
 /// Pixel-exact C4StartupPlrSelDlg geometry, all in C++ integer math and
 /// screen coordinates (dialog-client coordinates shifted by the client
@@ -49,6 +50,10 @@ pub struct PlrSelLayout {
     /// The six bottom buttons (UpdateBottomButtons,
     /// C4StartupPlrSelDlg.cpp:651-656).
     pub buttons: [IntRect; 6],
+    /// Crew mode's four visible bottom buttons. C++ retains the width that
+    /// was calculated for the six-button player row, then centers those
+    /// planks in a four-column grid (C4StartupPlrSelDlg.cpp:668-671).
+    pub crew_buttons: [IntRect; 4],
     /// Centered anchor of the fullscreen title label
     /// (FullscreenDialog::SetTitle non-woodbar path, C4GuiDialogs.cpp:843-847).
     pub title_anchor: (i32, i32),
@@ -150,6 +155,18 @@ pub fn plrsel_layout(w: i32, h: i32) -> PlrSelLayout {
             h: button_height,
         };
     }
+    // Crew mode reuses `bottom_button_w`; only the number of grid sectors
+    // changes from six to four (UpdateBottomButtons, cpp:668-671).
+    let crew_cell_w = client.w / 4;
+    let mut crew_buttons = [IntRect::default(); 4];
+    for (i, rect) in crew_buttons.iter_mut().enumerate() {
+        *rect = IntRect {
+            x: client.x + crew_cell_w * i as i32 + (crew_cell_w - bottom_button_w) / 2,
+            y: client.y + bottom_buttons_y,
+            w: bottom_button_w,
+            h: button_height,
+        };
+    }
 
     PlrSelLayout {
         client,
@@ -162,6 +179,7 @@ pub fn plrsel_layout(w: i32, h: i32) -> PlrSelLayout {
         info_client,
         picture_area: at_screen(picture_rel),
         buttons,
+        crew_buttons,
         // Title label: x0 = clientWdt/2 (ACenter), y = C4UpperBoardHeight/2 -
         // TitleFont.lh/2 - GetMarginTop() (C4GuiDialogs.cpp:843-847).
         title_anchor: (
@@ -206,8 +224,8 @@ fn build_book_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
     let mut font = ClonkFont::new(line_height);
     font.cell_height = line_height; // no vertical shadow (StdFont.cpp:352)
     font.h_space = 0; // iHSpace = 0 without shadow (StdFont.cpp:327)
-    // The same CP1252 range the shadowed GUI fonts rasterize
-    // (clonk_fonts::build_font; StdFont.cpp:361-380).
+                      // The same CP1252 range the shadowed GUI fonts rasterize
+                      // (clonk_fonts::build_font; StdFont.cpp:361-380).
     for byte in 0x20u16..=0xFF {
         let Some(ch) = cp1252_to_char(byte as u8) else {
             continue;
@@ -368,6 +386,45 @@ pub struct PlrSelPlayer {
     pub comment: String,
 }
 
+/// Promotion text shown in a crew member's detail pane. The app resolves
+/// this from `C4ObjectInfoCore::GetNextRankInfo`, because the fallback rank
+/// system is owned outside the startup renderer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlrSelCrewPromotion {
+    pub rank_name: String,
+    pub experience: i32,
+}
+
+/// Presentation data for one direct `*.c4i` child of the selected player.
+/// Source filenames and writable group handles intentionally stay in the
+/// app/data layer; this model contains only what the dialog draws.
+#[derive(Clone)]
+pub struct PlrSelCrew {
+    pub name: String,
+    /// `Core.Participation != 0`, mirrored by the controller for immediate
+    /// checkbox feedback while the owning app persists `ObjectInfo.txt`.
+    pub participating: bool,
+    /// Fully resolved rank symbol. This may come from the crew group's own
+    /// Rank image or a phase cut from the global rank sheet.
+    pub rank_icon: Option<ImageData>,
+    /// Custom/resolved crew portrait. Unlike players, C++ leaves the picture
+    /// blank when no crew portrait can be resolved.
+    pub portrait: Option<ImageData>,
+    /// Parent player's `PrefColorDw`, applied to the crew portrait overlay.
+    pub color_dw: u32,
+    pub rank: i32,
+    pub rank_name: String,
+    pub type_name: String,
+    pub experience: i32,
+    pub rounds: i32,
+    pub death_count: i32,
+    pub total_playing_time: i32,
+    /// Already localized/formatted equivalent of C++ `DateString(Birthday)`.
+    pub birthday: String,
+    pub next_rank: Option<PlrSelCrewPromotion>,
+    pub physical: PhysicalInfo,
+}
+
 // ---------------------------------------------------------------------------
 // CStdDDraw-faithful private draw helpers
 // ---------------------------------------------------------------------------
@@ -387,13 +444,24 @@ const CLR_LIST_BOX_INACTIVE_SEL: u32 = 0xaf7f7f7f;
 /// (0x00 = opaque); rgb goes through the DummyShader gamma lookup
 /// (StdGL.cpp:1188-1199), then `glBlendFunc(GL_ONE_MINUS_SRC_ALPHA,
 /// GL_SRC_ALPHA)` blends with opacity `(255-A)/255`. `x2`/`y2` are INCLUSIVE.
-fn draw_box_dw(surface: &mut Surface, x1: i32, y1: i32, x2: i32, y2: i32, clr: u32, gamma: Option<&GammaRamp>) {
+fn draw_box_dw(
+    surface: &mut Surface,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    clr: u32,
+    gamma: Option<&GammaRamp>,
+) {
     let a_inv = ((clr >> 24) & 0xff) as f32 / 255.0;
     let opacity = 1.0 - a_inv;
-    let enc = |c: u8| -> f32 {
-        gamma.map_or(f32::from(c), |g| f32::from(g.encode_float(f32::from(c))))
-    };
-    let rgb = [enc((clr >> 16) as u8), enc((clr >> 8) as u8), enc(clr as u8)];
+    let enc =
+        |c: u8| -> f32 { gamma.map_or(f32::from(c), |g| f32::from(g.encode_float(f32::from(c)))) };
+    let rgb = [
+        enc((clr >> 16) as u8),
+        enc((clr >> 8) as u8),
+        enc(clr as u8),
+    ];
     for y in y1.max(0)..=y2.min(surface.height() as i32 - 1) {
         for x in x1.max(0)..=x2.min(surface.width() as i32 - 1) {
             let Some(dst) = surface.get_pixel(x as u32, y as u32) else {
@@ -456,7 +524,13 @@ fn clr_by_owner_gray(r: u8, g: u8, b: u8) -> Option<u8> {
     } else {
         2 * 255 / 3 + delta(gv) - delta(rv)
     };
-    let h = if h < 0 { h + 255 } else if h > 255 { h - 255 } else { h };
+    let h = if h < 0 {
+        h + 255
+    } else if h > 255 {
+        h - 255
+    } else {
+        h
+    };
     ((145..=175).contains(&h) && s > 100).then_some(b)
 }
 
@@ -532,7 +606,9 @@ fn draw_image_strip_modulated(
                     || modulated.round().clamp(0.0, 255.0),
                     |g| f32::from(g.encode_float(modulated)),
                 );
-                (enc * af + f32::from(dst) * (1.0 - af)).round().clamp(0.0, 255.0) as u8
+                (enc * af + f32::from(dst) * (1.0 - af))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             };
             let _ = surface.set_pixel(
                 tx as u32,
@@ -605,7 +681,10 @@ fn draw_image_bilinear_modulated(
     mod_clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
-    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
+    if rect.size.width <= 0.0
+        || rect.size.height <= 0.0
+        || image.width() == 0
+        || image.height() == 0
     {
         return;
     }
@@ -661,7 +740,9 @@ fn draw_image_bilinear_modulated(
                             || modulated.round(),
                             |g| f32::from(g.encode_float(modulated)),
                         );
-                        (enc * af + f32::from(dst) * (1.0 - af)).round().clamp(0.0, 255.0) as u8
+                        (enc * af + f32::from(dst) * (1.0 - af))
+                            .round()
+                            .clamp(0.0, 255.0) as u8
                     };
                     let _ = surface.set_pixel(
                         px as u32,
@@ -730,11 +811,47 @@ pub fn player_delete_warning(player: &PlrSelPlayer) -> String {
     warning
 }
 
+/// Builds `CrewListItem::GetDelWarning`'s confirmation text
+/// (C4StartupPlrSelDlg.cpp:509-516).
+pub fn crew_delete_warning(crew: &PlrSelCrew) -> String {
+    let mut warning = format!(
+        "Do you really want to delete {} {}?",
+        crew.rank_name, crew.name
+    );
+    if crew.total_playing_time > 10 * 60 * 60 {
+        warning.push_str(&format!(
+            " - this Clonk has a total playing time of {}!",
+            time_string(crew.total_playing_time)
+        ));
+    }
+    warning
+}
+
 fn gui_rect(r: IntRect) -> GuiRect {
     GuiRect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32)
 }
 
-/// Focusable controls in the player-selection dialog's player mode.
+/// Active list projection of the shared player-selection dialog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlrSelMode {
+    Player,
+    Crew {
+        player_index: usize,
+        player_name: String,
+    },
+}
+
+impl PlrSelMode {
+    pub fn title(&self) -> String {
+        match self {
+            Self::Player => "Player Selection".to_string(),
+            // LanguageUS IDS_CTL_CREW is exactly "Crew:".
+            Self::Crew { player_name, .. } => format!("Crew: {player_name}"),
+        }
+    }
+}
+
+/// Focusable controls in the mode-aware player-selection dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlrSelControl {
     PlayerList,
@@ -744,6 +861,7 @@ pub enum PlrSelControl {
     Delete,
     Properties,
     Crew,
+    Rename,
 }
 
 /// Requests produced by [`PlrSelController`]. File creation, deletion and
@@ -759,6 +877,11 @@ pub enum PlrSelAction {
     DeletePlayer(usize),
     PlayerProperties(usize),
     ShowCrew(usize),
+    LeaveCrew,
+    CrewParticipationChanged { index: usize, participating: bool },
+    DeleteCrew(usize),
+    RenameCrew(usize),
+    SetCrewDeathMessage(usize),
 }
 
 /// Commands contributed by one player row to the startup context menu.
@@ -834,11 +957,88 @@ impl PlrSelPlayerContextMenu {
     }
 }
 
-/// Live input/selection state for `C4StartupPlrSelDlg` player mode.
+/// Commands contributed by a crew row to the startup context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlrSelCrewContextCommand {
+    RenameCrew(usize),
+    DeleteCrew(usize),
+    SetCrewDeathMessage(usize),
+}
+
+impl From<PlrSelCrewContextCommand> for PlrSelAction {
+    fn from(command: PlrSelCrewContextCommand) -> Self {
+        match command {
+            PlrSelCrewContextCommand::RenameCrew(index) => Self::RenameCrew(index),
+            PlrSelCrewContextCommand::DeleteCrew(index) => Self::DeleteCrew(index),
+            PlrSelCrewContextCommand::SetCrewDeathMessage(index) => {
+                Self::SetCrewDeathMessage(index)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlrSelCrewContextIcon {
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlrSelCrewContextEntry {
+    pub label: &'static str,
+    pub tooltip: Option<&'static str>,
+    pub icon: PlrSelCrewContextIcon,
+    pub hotkey: Option<char>,
+    pub command: PlrSelCrewContextCommand,
+}
+
+/// The exact three-entry context menu built by `CrewListItem::ContextMenu`
+/// (C4StartupPlrSelDlg.cpp:375-385).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlrSelCrewContextMenu {
+    pub entries: [PlrSelCrewContextEntry; 3],
+    pub initial_selection: Option<usize>,
+}
+
+impl PlrSelCrewContextMenu {
+    pub const fn for_crew(crew_index: usize) -> Self {
+        Self {
+            entries: [
+                PlrSelCrewContextEntry {
+                    label: "Rename",
+                    tooltip: Some("Rename the selected crew member."),
+                    icon: PlrSelCrewContextIcon::None,
+                    hotkey: None,
+                    command: PlrSelCrewContextCommand::RenameCrew(crew_index),
+                },
+                PlrSelCrewContextEntry {
+                    label: "Delete",
+                    tooltip: Some("Delete the selected crew member."),
+                    icon: PlrSelCrewContextIcon::None,
+                    hotkey: None,
+                    command: PlrSelCrewContextCommand::DeleteCrew(crew_index),
+                },
+                PlrSelCrewContextEntry {
+                    label: "Set death message",
+                    tooltip: Some("Set the message that appear when this clonk dies."),
+                    icon: PlrSelCrewContextIcon::None,
+                    hotkey: None,
+                    command: PlrSelCrewContextCommand::SetCrewDeathMessage(crew_index),
+                },
+            ],
+            initial_selection: None,
+        }
+    }
+}
+
+/// Live input/selection state for both projections of
+/// `C4StartupPlrSelDlg`.
 pub struct PlrSelController {
     width: i32,
     height: i32,
-    activations: Vec<bool>,
+    mode: PlrSelMode,
+    player_activations: Vec<bool>,
+    crew_participations: Vec<bool>,
+    saved_player_selection: Option<usize>,
     selected: Option<usize>,
     focus: PlrSelControl,
     pointer_position: Option<GuiPoint>,
@@ -852,7 +1052,10 @@ impl PlrSelController {
         Self {
             width: 1,
             height: 1,
-            activations: vec![false; player_count],
+            mode: PlrSelMode::Player,
+            player_activations: vec![false; player_count],
+            crew_participations: Vec::new(),
+            saved_player_selection: None,
             // UpdatePlayerList selects the first available entry
             // (C4StartupPlrSelDlg.cpp:724-729).
             selected: (player_count > 0).then_some(0),
@@ -864,35 +1067,129 @@ impl PlrSelController {
         }
     }
 
+    pub const fn mode(&self) -> &PlrSelMode {
+        &self.mode
+    }
+
+    pub fn dialog_title(&self) -> String {
+        self.mode.title()
+    }
+
+    pub const fn is_crew_mode(&self) -> bool {
+        matches!(&self.mode, PlrSelMode::Crew { .. })
+    }
+
+    /// Switches the existing dialog into crew mode after the app has
+    /// successfully opened a selected player and found at least one direct
+    /// crew entry. The selected player index is retained for the return trip.
+    pub fn enter_crew_mode(
+        &mut self,
+        player_index: usize,
+        player_name: impl Into<String>,
+        participations: Vec<bool>,
+    ) -> bool {
+        if self.is_crew_mode()
+            || player_index >= self.player_activations.len()
+            || participations.is_empty()
+        {
+            return false;
+        }
+        self.saved_player_selection = Some(player_index);
+        self.mode = PlrSelMode::Crew {
+            player_index,
+            player_name: player_name.into(),
+        };
+        self.crew_participations = participations;
+        self.selected = (!self.crew_participations.is_empty()).then_some(0);
+        self.focus = PlrSelControl::PlayerList;
+        self.pointer_pressed = None;
+        self.key_pressed = None;
+        self.hovered = self
+            .pointer_position
+            .and_then(|point| self.hit_button(point));
+        true
+    }
+
+    /// Restores player mode and the player that owned the displayed crew.
+    /// Returns that still-valid player index for app-side stable-path restore.
+    pub fn leave_crew_mode(&mut self) -> Option<usize> {
+        if !self.is_crew_mode() {
+            return None;
+        }
+        let restored = self
+            .saved_player_selection
+            .take()
+            .filter(|index| *index < self.player_activations.len());
+        self.mode = PlrSelMode::Player;
+        self.crew_participations.clear();
+        self.selected = restored.or_else(|| (!self.player_activations.is_empty()).then_some(0));
+        self.focus = PlrSelControl::PlayerList;
+        self.pointer_pressed = None;
+        self.key_pressed = None;
+        self.hovered = self
+            .pointer_position
+            .and_then(|point| self.hit_button(point));
+        restored
+    }
+
     pub fn resize(&mut self, width: i32, height: i32) {
         self.width = width.max(1);
         self.height = height.max(1);
-        self.hovered = self.pointer_position.and_then(|point| self.hit_button(point));
+        self.hovered = self
+            .pointer_position
+            .and_then(|point| self.hit_button(point));
     }
 
     pub fn set_player_count(&mut self, player_count: usize) {
-        self.activations.resize(player_count, false);
-        self.normalize_selection();
+        self.player_activations.resize(player_count, false);
+        self.saved_player_selection = self
+            .saved_player_selection
+            .filter(|index| *index < player_count);
+        if !self.is_crew_mode() {
+            self.normalize_selection();
+        }
     }
 
     /// Replaces the activation flags after player-file discovery. Like C++,
     /// the first activated player is selected, falling back to the first
     /// deactivated player (C4StartupPlrSelDlg.cpp:695-729).
     pub fn set_player_activations(&mut self, activations: Vec<bool>) {
-        self.activations = activations;
-        self.selected = self
-            .activations
-            .iter()
-            .position(|activated| *activated)
-            .or_else(|| (!self.activations.is_empty()).then_some(0));
+        self.player_activations = activations;
+        self.saved_player_selection = self
+            .saved_player_selection
+            .filter(|index| *index < self.player_activations.len());
+        if !self.is_crew_mode() {
+            self.selected = self
+                .player_activations
+                .iter()
+                .position(|activated| *activated)
+                .or_else(|| (!self.player_activations.is_empty()).then_some(0));
+        }
     }
 
     pub fn player_activations(&self) -> &[bool] {
-        &self.activations
+        &self.player_activations
     }
 
     pub fn is_player_activated(&self, index: usize) -> Option<bool> {
-        self.activations.get(index).copied()
+        self.player_activations.get(index).copied()
+    }
+
+    pub fn set_crew_participations(&mut self, participations: Vec<bool>) -> bool {
+        if !self.is_crew_mode() {
+            return false;
+        }
+        self.crew_participations = participations;
+        self.normalize_selection();
+        true
+    }
+
+    pub fn crew_participations(&self) -> &[bool] {
+        &self.crew_participations
+    }
+
+    pub fn is_crew_participating(&self, index: usize) -> Option<bool> {
+        self.crew_participations.get(index).copied()
     }
 
     pub const fn selected_index(&self) -> Option<usize> {
@@ -900,13 +1197,16 @@ impl PlrSelController {
     }
 
     pub fn set_selected_index(&mut self, selected: Option<usize>) {
-        self.selected = selected.filter(|index| *index < self.activations.len());
+        self.selected = selected.filter(|index| *index < self.row_count());
     }
 
     /// Returns the player row under a context-menu press. The whole item
     /// rectangle is a target because C++ child controls inherit the row's
     /// context handler; the one-pixel spacing and scrollbar are not.
     pub fn player_context_index_at(&self, position: GuiPoint) -> Option<usize> {
+        if self.is_crew_mode() {
+            return None;
+        }
         let layout = self.layout();
         if !contains_plrsel(layout.list_client, position) {
             return None;
@@ -917,11 +1217,48 @@ impl PlrSelController {
     /// Selects the context target without transferring keyboard focus or
     /// emitting normal list-selection actions. Popup opening owns any sound.
     pub fn select_player_for_context(&mut self, index: usize) -> bool {
-        if index >= self.activations.len() {
+        if self.is_crew_mode() || index >= self.player_activations.len() {
             return false;
         }
         self.selected = Some(index);
         true
+    }
+
+    pub fn crew_context_index_at(&self, position: GuiPoint) -> Option<usize> {
+        if !self.is_crew_mode() {
+            return None;
+        }
+        let layout = self.layout();
+        if !contains_plrsel(layout.list_client, position) {
+            return None;
+        }
+        self.list_item_at(position)
+    }
+
+    pub fn select_crew_for_context(&mut self, index: usize) -> bool {
+        if !self.is_crew_mode() || index >= self.crew_participations.len() {
+            return false;
+        }
+        self.selected = Some(index);
+        true
+    }
+
+    /// Mode-aware row target used by the app's shared context-menu router.
+    pub fn context_index_at(&self, position: GuiPoint) -> Option<usize> {
+        if self.is_crew_mode() {
+            self.crew_context_index_at(position)
+        } else {
+            self.player_context_index_at(position)
+        }
+    }
+
+    /// Selects a mode-appropriate popup target without changing focus.
+    pub fn select_for_context(&mut self, index: usize) -> bool {
+        if self.is_crew_mode() {
+            self.select_crew_for_context(index)
+        } else {
+            self.select_player_for_context(index)
+        }
     }
 
     pub const fn focused_control(&self) -> PlrSelControl {
@@ -1003,7 +1340,7 @@ impl PlrSelController {
         let selected = self.list_item_at(position);
         let mut actions = self.change_focus(PlrSelControl::PlayerList);
         actions.extend(self.change_selection(selected));
-        actions.extend(selected.map(PlrSelAction::PlayerProperties));
+        actions.extend(self.selected_edit_action());
         actions
     }
 
@@ -1011,11 +1348,17 @@ impl PlrSelController {
         match key {
             // StartupPlrSelBack binds Back, Left and Escape at override
             // priority (C4StartupPlrSelDlg.cpp:596-605).
-            KeyCode::Escape | KeyCode::Left => vec![PlrSelAction::Back],
+            KeyCode::Escape | KeyCode::Left => {
+                if self.is_crew_mode() {
+                    vec![PlrSelAction::LeaveCrew]
+                } else {
+                    vec![PlrSelAction::Back]
+                }
+            }
             KeyCode::Tab => self.advance_focus(),
             KeyCode::Up if self.focus == PlrSelControl::PlayerList => self.move_selection(-1),
             KeyCode::Down if self.focus == PlrSelControl::PlayerList => self.move_selection(1),
-            KeyCode::Right => self
+            KeyCode::Right if !self.is_crew_mode() => self
                 .selected
                 .map(PlrSelAction::ShowCrew)
                 .into_iter()
@@ -1023,11 +1366,9 @@ impl PlrSelController {
             KeyCode::Space if self.focus == PlrSelControl::PlayerList => {
                 self.toggle_selected_activation()
             }
-            KeyCode::Enter if self.focus == PlrSelControl::PlayerList => self
-                .selected
-                .map(PlrSelAction::PlayerProperties)
-                .into_iter()
-                .collect(),
+            KeyCode::Enter if self.focus == PlrSelControl::PlayerList => {
+                self.selected_edit_action()
+            }
             KeyCode::Enter | KeyCode::Space => {
                 self.key_pressed = Some((self.focus, key));
                 Vec::new()
@@ -1046,12 +1387,26 @@ impl PlrSelController {
         self.activate(pressed)
     }
 
+    /// Mode-aware equivalent of the dialog's F2/edit shortcut: player mode
+    /// opens properties, crew mode begins renaming the selected member.
+    pub fn handle_edit_shortcut(&self) -> Vec<PlrSelAction> {
+        self.selected_edit_action()
+    }
+
     fn layout(&self) -> PlrSelLayout {
         plrsel_layout(self.width, self.height)
     }
 
+    pub fn row_count(&self) -> usize {
+        if self.is_crew_mode() {
+            self.crew_participations.len()
+        } else {
+            self.player_activations.len()
+        }
+    }
+
     fn hit_button(&self, point: GuiPoint) -> Option<PlrSelControl> {
-        const CONTROLS: [PlrSelControl; 6] = [
+        const PLAYER_CONTROLS: [PlrSelControl; 6] = [
             PlrSelControl::Back,
             PlrSelControl::NewPlayer,
             PlrSelControl::Activate,
@@ -1059,11 +1414,26 @@ impl PlrSelController {
             PlrSelControl::Properties,
             PlrSelControl::Crew,
         ];
-        self.layout()
-            .buttons
-            .iter()
-            .zip(CONTROLS)
-            .find_map(|(rect, control)| contains_plrsel(*rect, point).then_some(control))
+        const CREW_CONTROLS: [PlrSelControl; 4] = [
+            PlrSelControl::Back,
+            PlrSelControl::Activate,
+            PlrSelControl::Delete,
+            PlrSelControl::Rename,
+        ];
+        let layout = self.layout();
+        if self.is_crew_mode() {
+            layout
+                .crew_buttons
+                .iter()
+                .zip(CREW_CONTROLS)
+                .find_map(|(rect, control)| contains_plrsel(*rect, point).then_some(control))
+        } else {
+            layout
+                .buttons
+                .iter()
+                .zip(PLAYER_CONTROLS)
+                .find_map(|(rect, control)| contains_plrsel(*rect, point).then_some(control))
+        }
     }
 
     fn list_item_at(&self, point: GuiPoint) -> Option<usize> {
@@ -1076,7 +1446,7 @@ impl PlrSelController {
             return None;
         }
         let index = (offset / layout.item_pitch) as usize;
-        (index < self.activations.len()).then_some(index)
+        (index < self.row_count()).then_some(index)
     }
 
     fn checkbox_at(&self, point: GuiPoint) -> Option<usize> {
@@ -1094,7 +1464,7 @@ impl PlrSelController {
     }
 
     fn move_focus(&mut self, backwards: bool) -> Vec<PlrSelAction> {
-        const ORDER: [PlrSelControl; 7] = [
+        const PLAYER_ORDER: [PlrSelControl; 7] = [
             PlrSelControl::PlayerList,
             PlrSelControl::Back,
             PlrSelControl::NewPlayer,
@@ -1103,13 +1473,28 @@ impl PlrSelController {
             PlrSelControl::Properties,
             PlrSelControl::Crew,
         ];
-        let index = ORDER.iter().position(|control| *control == self.focus).unwrap_or(0);
-        let next = if backwards {
-            (index + ORDER.len() - 1) % ORDER.len()
+        const CREW_ORDER: [PlrSelControl; 5] = [
+            PlrSelControl::PlayerList,
+            PlrSelControl::Back,
+            PlrSelControl::Activate,
+            PlrSelControl::Delete,
+            PlrSelControl::Rename,
+        ];
+        let order: &[PlrSelControl] = if self.is_crew_mode() {
+            &CREW_ORDER
         } else {
-            (index + 1) % ORDER.len()
+            &PLAYER_ORDER
         };
-        self.change_focus(ORDER[next])
+        let index = order
+            .iter()
+            .position(|control| *control == self.focus)
+            .unwrap_or(0);
+        let next = if backwards {
+            (index + order.len() - 1) % order.len()
+        } else {
+            (index + 1) % order.len()
+        };
+        self.change_focus(order[next])
     }
 
     fn change_focus(&mut self, focus: PlrSelControl) -> Vec<PlrSelAction> {
@@ -1130,14 +1515,15 @@ impl PlrSelController {
     }
 
     fn move_selection(&mut self, delta: i32) -> Vec<PlrSelAction> {
-        if self.activations.is_empty() {
+        let row_count = self.row_count();
+        if row_count == 0 {
             return Vec::new();
         }
         let selected = match (self.selected, delta) {
-            (None, value) if value < 0 => Some(self.activations.len() - 1),
+            (None, value) if value < 0 => Some(row_count - 1),
             (None, _) => Some(0),
             (Some(index), value) if value < 0 => Some(index.saturating_sub(1)),
-            (Some(index), _) => Some((index + 1).min(self.activations.len() - 1)),
+            (Some(index), _) => Some((index + 1).min(row_count - 1)),
         };
         self.change_selection(selected)
     }
@@ -1150,45 +1536,85 @@ impl PlrSelController {
     }
 
     fn toggle_activation(&mut self, index: usize) -> Vec<PlrSelAction> {
-        let Some(activated) = self.activations.get_mut(index) else {
-            return Vec::new();
-        };
-        *activated = !*activated;
-        vec![PlrSelAction::ActivationChanged {
-            index,
-            activated: *activated,
-        }]
+        if self.is_crew_mode() {
+            let Some(participating) = self.crew_participations.get_mut(index) else {
+                return Vec::new();
+            };
+            *participating = !*participating;
+            vec![PlrSelAction::CrewParticipationChanged {
+                index,
+                participating: *participating,
+            }]
+        } else {
+            let Some(activated) = self.player_activations.get_mut(index) else {
+                return Vec::new();
+            };
+            *activated = !*activated;
+            vec![PlrSelAction::ActivationChanged {
+                index,
+                activated: *activated,
+            }]
+        }
     }
 
     fn activate(&mut self, control: PlrSelControl) -> Vec<PlrSelAction> {
         match control {
             PlrSelControl::PlayerList => Vec::new(),
+            PlrSelControl::Back if self.is_crew_mode() => vec![PlrSelAction::LeaveCrew],
             PlrSelControl::Back => vec![PlrSelAction::Back],
-            PlrSelControl::NewPlayer => vec![PlrSelAction::NewPlayer],
+            PlrSelControl::NewPlayer if !self.is_crew_mode() => vec![PlrSelAction::NewPlayer],
+            PlrSelControl::NewPlayer => Vec::new(),
             PlrSelControl::Activate => self.toggle_selected_activation(),
+            PlrSelControl::Delete if self.is_crew_mode() => self
+                .selected
+                .map(PlrSelAction::DeleteCrew)
+                .into_iter()
+                .collect(),
             PlrSelControl::Delete => self
                 .selected
                 .map(PlrSelAction::DeletePlayer)
                 .into_iter()
                 .collect(),
-            PlrSelControl::Properties => self
+            PlrSelControl::Properties if !self.is_crew_mode() => self
                 .selected
                 .map(PlrSelAction::PlayerProperties)
                 .into_iter()
                 .collect(),
-            PlrSelControl::Crew => self
+            PlrSelControl::Properties => Vec::new(),
+            PlrSelControl::Crew if !self.is_crew_mode() => self
                 .selected
                 .map(PlrSelAction::ShowCrew)
                 .into_iter()
                 .collect(),
+            PlrSelControl::Crew => Vec::new(),
+            PlrSelControl::Rename if self.is_crew_mode() => self
+                .selected
+                .map(PlrSelAction::RenameCrew)
+                .into_iter()
+                .collect(),
+            PlrSelControl::Rename => Vec::new(),
         }
     }
 
+    fn selected_edit_action(&self) -> Vec<PlrSelAction> {
+        self.selected
+            .map(|index| {
+                if self.is_crew_mode() {
+                    PlrSelAction::RenameCrew(index)
+                } else {
+                    PlrSelAction::PlayerProperties(index)
+                }
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn normalize_selection(&mut self) {
+        let row_count = self.row_count();
         self.selected = self
             .selected
-            .filter(|index| *index < self.activations.len())
-            .or_else(|| (!self.activations.is_empty()).then_some(0));
+            .filter(|index| *index < row_count)
+            .or_else(|| (row_count > 0).then_some(0));
     }
 
     fn is_highlighted(&self, control: PlrSelControl, draw_focus: bool) -> bool {
@@ -1197,7 +1623,9 @@ impl PlrSelController {
 
     fn is_pressed(&self, control: PlrSelControl) -> bool {
         self.pointer_pressed == Some(control)
-            || self.key_pressed.is_some_and(|(pressed, _)| pressed == control)
+            || self
+                .key_pressed
+                .is_some_and(|(pressed, _)| pressed == control)
     }
 }
 
@@ -1231,7 +1659,18 @@ impl PlrSelScreen {
         selected: Option<usize>,
         gamma: Option<&GammaRamp>,
     ) {
-        Self::render_impl(surface, assets, fonts, book, players, selected, None, true, gamma);
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            book,
+            players,
+            &[],
+            selected,
+            None,
+            true,
+            gamma,
+        );
     }
 
     /// Draws the live controller state, including activation flags and all
@@ -1251,6 +1690,7 @@ impl PlrSelScreen {
             fonts,
             book,
             players,
+            &[],
             controller.selected,
             Some(controller),
             true,
@@ -1278,6 +1718,63 @@ impl PlrSelScreen {
             fonts,
             book,
             players,
+            &[],
+            controller.selected,
+            Some(controller),
+            draw_focus,
+            gamma,
+        );
+    }
+
+    /// Mode-aware live renderer. The controller selects which slice is
+    /// visible; keeping both available lets the app retain player rows while
+    /// a crew session is open and restore them without reconstructing UI.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_controller_with_crew(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        fonts: &ClonkFontSet,
+        book: &BookFontSet,
+        players: &[PlrSelPlayer],
+        crew: &[PlrSelCrew],
+        controller: &PlrSelController,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            book,
+            players,
+            crew,
+            controller.selected,
+            Some(controller),
+            true,
+            gamma,
+        );
+    }
+
+    /// Mode-aware renderer variant used while an owning popup suppresses the
+    /// retained control's keyboard-focus highlight.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_controller_with_crew_and_draw_focus(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        fonts: &ClonkFontSet,
+        book: &BookFontSet,
+        players: &[PlrSelPlayer],
+        crew: &[PlrSelCrew],
+        controller: &PlrSelController,
+        draw_focus: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            book,
+            players,
+            crew,
             controller.selected,
             Some(controller),
             draw_focus,
@@ -1292,6 +1789,7 @@ impl PlrSelScreen {
         fonts: &ClonkFontSet,
         book: &BookFontSet,
         players: &[PlrSelPlayer],
+        crew: &[PlrSelCrew],
         selected: Option<usize>,
         controller: Option<&PlrSelController>,
         draw_focus: bool,
@@ -1319,9 +1817,12 @@ impl PlrSelScreen {
             gamma,
         );
 
+        let crew_mode = controller.is_some_and(PlrSelController::is_crew_mode);
+        let row_count = if crew_mode { crew.len() } else { players.len() };
+
         // 2. List box: selection bar behind the items (ListBox::DrawElement,
         //    C4GuiListBox.cpp:100-124), then the items in add-order.
-        if let Some(sel) = selected.filter(|&sel| sel < players.len()) {
+        if let Some(sel) = selected.filter(|&sel| sel < row_count) {
             let y = layout.list_client.y + layout.item_pitch * sel as i32;
             let color = if controller
                 .is_none_or(|state| draw_focus && state.focus == PlrSelControl::PlayerList)
@@ -1340,39 +1841,60 @@ impl PlrSelScreen {
                 gamma,
             );
         }
-        for (i, player) in players.iter().enumerate() {
-            let activated = controller
-                .and_then(|state| state.activations.get(i).copied())
-                .unwrap_or(player.activated);
-            Self::render_list_item(
-                surface,
-                assets,
-                book,
-                &layout,
-                player,
-                activated,
-                i as i32,
-                gamma,
-            );
-        }
+        if crew_mode {
+            for (i, member) in crew.iter().enumerate() {
+                let participating = controller
+                    .and_then(|state| state.crew_participations.get(i).copied())
+                    .unwrap_or(member.participating);
+                Self::render_crew_list_item(
+                    surface,
+                    assets,
+                    book,
+                    &layout,
+                    member,
+                    participating,
+                    i as i32,
+                    gamma,
+                );
+            }
+            if let Some(member) = selected.and_then(|sel| crew.get(sel)) {
+                Self::render_crew_selection_info(surface, book, &layout, member, gamma);
+                Self::render_crew_portrait(surface, &layout, member, gamma);
+            }
+        } else {
+            for (i, player) in players.iter().enumerate() {
+                let activated = controller
+                    .and_then(|state| state.player_activations.get(i).copied())
+                    .unwrap_or(player.activated);
+                Self::render_list_item(
+                    surface, assets, book, &layout, player, activated, i as i32, gamma,
+                );
+            }
 
-        // 3. Info panel text for the selected player
-        //    (PlayerListItem::SetSelectionInfo, cpp:293-302).
-        if let Some(player) = selected.and_then(|sel| players.get(sel)) {
-            Self::render_selection_info(surface, book, &layout, player, gamma);
-        }
+            // 3. Info panel text for the selected player
+            //    (PlayerListItem::SetSelectionInfo, cpp:293-302).
+            if let Some(player) = selected.and_then(|sel| players.get(sel)) {
+                Self::render_selection_info(surface, book, &layout, player, gamma);
+            }
 
-        // 4. Portrait picture, ColorByOwner-tinted (cpp:798-801).
-        if let Some(player) = selected.and_then(|sel| players.get(sel)) {
-            Self::render_portrait(surface, assets, &layout, player, gamma);
+            // 4. Portrait picture, ColorByOwner-tinted (cpp:798-801).
+            if let Some(player) = selected.and_then(|sel| players.get(sel)) {
+                Self::render_portrait(surface, assets, &layout, player, gamma);
+            }
         }
 
         // 5.-10. Bottom buttons (Button::DrawElement, C4GuiButton.cpp:80-111).
         let activate_label = selected
             .and_then(|sel| {
-                controller
-                    .and_then(|state| state.activations.get(sel).copied())
-                    .or_else(|| players.get(sel).map(|player| player.activated))
+                if crew_mode {
+                    controller
+                        .and_then(|state| state.crew_participations.get(sel).copied())
+                        .or_else(|| crew.get(sel).map(|member| member.participating))
+                } else {
+                    controller
+                        .and_then(|state| state.player_activations.get(sel).copied())
+                        .or_else(|| players.get(sel).map(|player| player.activated))
+                }
             })
             .map_or("Activate", |activated| {
                 if activated {
@@ -1381,35 +1903,59 @@ impl PlrSelScreen {
                     "Activate"
                 }
             });
-        let buttons = [
-            (PlrSelControl::Back, "Back"),
-            (PlrSelControl::NewPlayer, "New"),
-            (PlrSelControl::Activate, activate_label),
-            (PlrSelControl::Delete, "Delete"),
-            (PlrSelControl::Properties, "Properties"),
-            (PlrSelControl::Crew, "Crew"),
-        ];
-        for (index, (control, label)) in buttons.into_iter().enumerate() {
-            Self::render_button(
-                surface,
-                assets,
-                fonts,
-                layout.buttons[index],
-                label,
-                controller
-                    .is_some_and(|state| state.is_highlighted(control, draw_focus)),
-                controller.is_some_and(|state| state.is_pressed(control)),
-                gamma,
-            );
+        if crew_mode {
+            let buttons = [
+                (PlrSelControl::Back, "Back"),
+                (PlrSelControl::Activate, activate_label),
+                (PlrSelControl::Delete, "Delete"),
+                (PlrSelControl::Rename, "Rename"),
+            ];
+            for (rect, (control, label)) in layout.crew_buttons.into_iter().zip(buttons) {
+                Self::render_button(
+                    surface,
+                    assets,
+                    fonts,
+                    rect,
+                    label,
+                    controller.is_some_and(|state| state.is_highlighted(control, draw_focus)),
+                    controller.is_some_and(|state| state.is_pressed(control)),
+                    gamma,
+                );
+            }
+        } else {
+            let buttons = [
+                (PlrSelControl::Back, "Back"),
+                (PlrSelControl::NewPlayer, "New"),
+                (PlrSelControl::Activate, activate_label),
+                (PlrSelControl::Delete, "Delete"),
+                (PlrSelControl::Properties, "Properties"),
+                (PlrSelControl::Crew, "Crew"),
+            ];
+            for (rect, (control, label)) in layout.buttons.into_iter().zip(buttons) {
+                Self::render_button(
+                    surface,
+                    assets,
+                    fonts,
+                    rect,
+                    label,
+                    controller.is_some_and(|state| state.is_highlighted(control, draw_focus)),
+                    controller.is_some_and(|state| state.is_pressed(control)),
+                    gamma,
+                );
+            }
         }
 
         // 11. Fullscreen title, drawn last (SetTitle re-adds the label at the
         //     list end, C4GuiDialogs.cpp:835-847; cpp:693).
+        let title = controller.map_or_else(
+            || "Player Selection".to_string(),
+            |state| state.dialog_title(),
+        );
         fonts.title.draw_with_gamma(
             surface,
             layout.title_anchor.0,
             layout.title_anchor.1,
-            "Player Selection",
+            &title,
             CLR_BUTTON_FONT,
             TextAlign::Center,
             true,
@@ -1489,13 +2035,23 @@ impl PlrSelScreen {
         let cb = extract_region(&assets.checkbox, phase * 32, 0, 32, 32);
         crate::draw_image_bilinear(
             surface,
-            &gui_rect(IntRect { x: item.x, y: item.y, w: item.h, h: item.h }),
+            &gui_rect(IntRect {
+                x: item.x,
+                y: item.y,
+                w: item.h,
+                h: item.h,
+            }),
             &cb,
             gamma,
         );
         // Icon at x = iHeight + IconLabelSpacing (cpp:88), aspect-centered
         // (Picture::DrawElement, C4GuiLabels.cpp:348-378).
-        let icon_box = IntRect { x: item.x + item.h + 2, y: item.y, w: item.h, h: item.h };
+        let icon_box = IntRect {
+            x: item.x + item.h + 2,
+            y: item.y,
+            w: item.h,
+            h: item.h,
+        };
         match &player.big_icon {
             Some(icon) => {
                 let icon = engine_png_texture(icon); // C4Surface.cpp:972
@@ -1528,6 +2084,151 @@ impl PlrSelScreen {
             false,
             gamma,
         );
+    }
+
+    /// One CrewListItem: participation checkbox, resolved rank icon and name
+    /// (C4StartupPlrSelDlg.cpp:341-373).
+    #[allow(clippy::too_many_arguments)]
+    fn render_crew_list_item(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        book: &BookFontSet,
+        layout: &PlrSelLayout,
+        crew: &PlrSelCrew,
+        participating: bool,
+        index: i32,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let item = IntRect {
+            x: layout.list_client.x,
+            y: layout.list_client.y + layout.item_pitch * index,
+            w: layout.item_width,
+            h: layout.item_height,
+        };
+        let phase = u32::from(participating);
+        let checkbox = extract_region(&assets.checkbox, phase * 32, 0, 32, 32);
+        crate::draw_image_bilinear(
+            surface,
+            &gui_rect(IntRect {
+                x: item.x,
+                y: item.y,
+                w: item.h,
+                h: item.h,
+            }),
+            &checkbox,
+            gamma,
+        );
+
+        let icon_box = IntRect {
+            x: item.x + item.h + 2,
+            y: item.y,
+            w: item.h,
+            h: item.h,
+        };
+        if let Some(icon) = &crew.rank_icon {
+            let icon = engine_png_texture(icon);
+            let dest = aspect_fit(icon.width() as i32, icon.height() as i32, icon_box);
+            crate::draw_image_bilinear(surface, &gui_rect(dest), &icon, gamma);
+        }
+        book.text.draw_with_gamma(
+            surface,
+            item.x + (item.h + 2) * 2,
+            item.y + 2,
+            &crew.name,
+            CLR_PLAYER_ITEM,
+            TextAlign::Left,
+            false,
+            gamma,
+        );
+    }
+
+    /// Crew detail text from `CrewListItem::SetSelectionInfo`
+    /// (C4StartupPlrSelDlg.cpp:467-507).
+    fn render_crew_selection_info(
+        surface: &mut Surface,
+        book: &BookFontSet,
+        layout: &PlrSelLayout,
+        crew: &PlrSelCrew,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let caption = format!("{} {}", crew.rank_name, crew.name);
+        let mut lines = vec![
+            format!("Type: {}", crew.type_name),
+            format!("Experience: {}", crew.experience),
+            format!("Rounds: {}", crew.rounds),
+            format!("Died: {} x", crew.death_count),
+        ];
+        if let Some(next_rank) = &crew.next_rank {
+            lines.push(format!("Promotion to {}", next_rank.rank_name));
+            lines.push(format!("at: {}", next_rank.experience));
+        } else {
+            lines.push("No further promotions.".to_string());
+        }
+        lines.push(format!(
+            "Playing time: {}",
+            time_string(crew.total_playing_time)
+        ));
+        lines.push(format!("Birthday: {}", crew.birthday));
+
+        let physical = crew.physical;
+        lines.extend([
+            Self::physical_text_line("Energy:", physical.energy),
+            Self::physical_text_line("Breath:", physical.breath),
+            Self::physical_text_line("Walk:", physical.walk),
+            Self::physical_text_line("Jump:", physical.jump),
+        ]);
+        if physical.can_scale != 0 {
+            lines.push(Self::physical_text_line("Scale:", physical.scale));
+        }
+        if physical.can_hangle != 0 {
+            lines.push(Self::physical_text_line("Hangle:", physical.hangle));
+        }
+        lines.extend([
+            Self::physical_text_line("Dig:", physical.dig),
+            Self::physical_text_line("Swim:", physical.swim),
+            Self::physical_text_line("Throw:", physical.throw),
+            Self::physical_text_line("Push:", physical.push),
+            Self::physical_text_line("Fight:", physical.fight),
+        ]);
+        if physical.magic != 0 {
+            lines.push(Self::physical_text_line("Magic:", physical.magic));
+        }
+
+        let mut y = layout.info_client.y;
+        book.caption.draw_with_gamma(
+            surface,
+            layout.info_client.x,
+            y,
+            &caption,
+            CLR_PLAYER_ITEM,
+            TextAlign::Left,
+            false,
+            gamma,
+        );
+        y += book.caption.line_height;
+        let bottom = layout.info_client.y + layout.info_client.h;
+        for line in lines {
+            y += book.text.line_height / 3;
+            if y + book.text.line_height > bottom {
+                break;
+            }
+            book.text.draw_with_gamma(
+                surface,
+                layout.info_client.x,
+                y,
+                &line,
+                CLR_PLAYER_ITEM,
+                TextAlign::Left,
+                false,
+                gamma,
+            );
+            y += book.text.line_height;
+        }
+    }
+
+    fn physical_text_line(label: &str, value: i32) -> String {
+        let bars = (10_i64 * i64::from(value) / i64::from(C4_MAX_PHYSICAL)).max(0) as usize;
+        format!("{label} {}", "\u{b7}".repeat(bars))
     }
 
     /// Info panel lines (SetSelectionInfo, cpp:293-302): name in
@@ -1586,8 +2287,32 @@ impl PlrSelScreen {
         // C4Surface.cpp:972: ReadPNG squashes transparent texels to black
         // before CreateColorByOwner splits the surface.
         let source = engine_png_texture(player.portrait.as_ref().unwrap_or(&assets.player));
-        let dest = aspect_fit(source.width() as i32, source.height() as i32, layout.picture_area);
+        let dest = aspect_fit(
+            source.width() as i32,
+            source.height() as i32,
+            layout.picture_area,
+        );
         Self::draw_color_by_owner(surface, &source, dest, player.color_dw, gamma);
+    }
+
+    /// Crew portraits do not use the player's default icon as fallback;
+    /// `LoadPortrait(..., false)` leaves the picture blank when unresolved.
+    fn render_crew_portrait(
+        surface: &mut Surface,
+        layout: &PlrSelLayout,
+        crew: &PlrSelCrew,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let Some(portrait) = &crew.portrait else {
+            return;
+        };
+        let source = engine_png_texture(portrait);
+        let dest = aspect_fit(
+            source.width() as i32,
+            source.height() as i32,
+            layout.picture_area,
+        );
+        Self::draw_color_by_owner(surface, &source, dest, crew.color_dw, gamma);
     }
 
     /// `C4Facet::DrawClr` (C4Facet.cpp:142-150): base surface blit followed
@@ -1635,7 +2360,10 @@ mod tests {
         let l = plrsel_layout(1280, 720);
 
         // Client: margins x=1280/50=25, y=720*2/75=19, top=720/7=102.
-        assert_eq!((l.client.x, l.client.y, l.client.w, l.client.h), (25, 102, 1230, 599));
+        assert_eq!(
+            (l.client.x, l.client.y, l.client.w, l.client.h),
+            (25, 102, 1230, 599)
+        );
 
         // Player list box (123,155,379,373) client-rel → screen.
         assert_eq!(
@@ -1644,7 +2372,12 @@ mod tests {
         );
         // List client: +3px margins.
         assert_eq!(
-            (l.list_client.x, l.list_client.y, l.list_client.w, l.list_client.h),
+            (
+                l.list_client.x,
+                l.list_client.y,
+                l.list_client.w,
+                l.list_client.h
+            ),
             (151, 260, 373, 367)
         );
         // Items: 357 wide (373-16 scrollbar), 26 high, 27px pitch.
@@ -1653,23 +2386,51 @@ mod tests {
         // Info window (594,244,387,300) client-rel → screen; text client
         // shrunk by margins 10/8/5/8 and the 16px scrollbar.
         assert_eq!(
-            (l.info_window.x, l.info_window.y, l.info_window.w, l.info_window.h),
+            (
+                l.info_window.x,
+                l.info_window.y,
+                l.info_window.w,
+                l.info_window.h
+            ),
             (619, 346, 387, 300)
         );
         assert_eq!(
-            (l.info_client.x, l.info_client.y, l.info_client.w, l.info_client.h),
+            (
+                l.info_client.x,
+                l.info_client.y,
+                l.info_client.w,
+                l.info_client.h
+            ),
             (629, 354, 356, 284)
         );
 
         // Portrait picture area (781,94,200,150) client-rel → screen.
         assert_eq!(
-            (l.picture_area.x, l.picture_area.y, l.picture_area.w, l.picture_area.h),
+            (
+                l.picture_area.x,
+                l.picture_area.y,
+                l.picture_area.w,
+                l.picture_area.h
+            ),
             (806, 196, 200, 150)
         );
 
         // Bottom buttons: 187x32 at x=34+205*i, y=665.
         for (i, b) in l.buttons.iter().enumerate() {
-            assert_eq!((b.x, b.y, b.w, b.h), (34 + 205 * i as i32, 665, 187, 32), "button {i}");
+            assert_eq!(
+                (b.x, b.y, b.w, b.h),
+                (34 + 205 * i as i32, 665, 187, 32),
+                "button {i}"
+            );
+        }
+        // Crew uses four 307px grid sectors while retaining the 187px plank
+        // width calculated for the six-button player row.
+        for (i, b) in l.crew_buttons.iter().enumerate() {
+            assert_eq!(
+                (b.x, b.y, b.w, b.h),
+                (85 + 307 * i as i32, 665, 187, 32),
+                "crew button {i}"
+            );
         }
 
         // Title label anchor: centered at x=640, y=8.
@@ -1717,6 +2478,135 @@ mod tests {
             PlrSelAction::from(menu.entries[1].command),
             PlrSelAction::DeletePlayer(3)
         );
+    }
+
+    #[test]
+    fn crew_context_menu_matches_cpp_entries_and_commands() {
+        let menu = PlrSelCrewContextMenu::for_crew(4);
+        assert_eq!(menu.initial_selection, None);
+        assert_eq!(
+            menu.entries
+                .iter()
+                .map(|entry| entry.label)
+                .collect::<Vec<_>>(),
+            ["Rename", "Delete", "Set death message"]
+        );
+        assert_eq!(
+            menu.entries.map(|entry| PlrSelAction::from(entry.command)),
+            [
+                PlrSelAction::RenameCrew(4),
+                PlrSelAction::DeleteCrew(4),
+                PlrSelAction::SetCrewDeathMessage(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn controller_enters_and_leaves_crew_with_exact_title_and_player_restore() {
+        let mut controller = PlrSelController::new(3);
+        controller.set_selected_index(Some(2));
+
+        assert!(!controller.enter_crew_mode(2, "Ada", Vec::new()));
+        assert_eq!(controller.mode(), &PlrSelMode::Player);
+        assert_eq!(controller.dialog_title(), "Player Selection");
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Right),
+            vec![PlrSelAction::ShowCrew(2)]
+        );
+
+        assert!(controller.enter_crew_mode(2, "Ada", vec![true, false]));
+        assert_eq!(
+            controller.mode(),
+            &PlrSelMode::Crew {
+                player_index: 2,
+                player_name: "Ada".to_string(),
+            }
+        );
+        assert_eq!(controller.dialog_title(), "Crew: Ada");
+        assert_eq!(controller.row_count(), 2);
+        assert_eq!(controller.selected_index(), Some(0));
+        assert!(controller.handle_key_down(crate::KeyCode::Right).is_empty());
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Left),
+            vec![PlrSelAction::LeaveCrew]
+        );
+
+        assert_eq!(controller.leave_crew_mode(), Some(2));
+        assert_eq!(controller.mode(), &PlrSelMode::Player);
+        assert_eq!(controller.selected_index(), Some(2));
+        assert_eq!(controller.row_count(), 3);
+    }
+
+    #[test]
+    fn crew_controls_route_participation_delete_and_rename() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(2);
+        controller.resize(1280, 720);
+        controller.set_selected_index(Some(1));
+        assert!(controller.enter_crew_mode(1, "Ada", vec![true, false]));
+
+        assert_eq!(
+            click(&mut controller, layout.crew_buttons[0]),
+            vec![PlrSelAction::LeaveCrew]
+        );
+        assert_eq!(
+            click(&mut controller, layout.crew_buttons[1]),
+            vec![PlrSelAction::CrewParticipationChanged {
+                index: 0,
+                participating: false,
+            }]
+        );
+        assert_eq!(controller.is_crew_participating(0), Some(false));
+        assert_eq!(
+            click(&mut controller, layout.crew_buttons[2]),
+            vec![PlrSelAction::DeleteCrew(0)]
+        );
+        assert_eq!(
+            click(&mut controller, layout.crew_buttons[3]),
+            vec![PlrSelAction::RenameCrew(0)]
+        );
+
+        let second_row_name = crate::GuiPoint::new(
+            (layout.list_client.x + layout.item_height * 3) as f32,
+            (layout.list_client.y + layout.item_pitch + layout.item_height / 2) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_double_click(second_row_name),
+            vec![
+                PlrSelAction::SelectionChanged(Some(1)),
+                PlrSelAction::RenameCrew(1),
+            ]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![PlrSelAction::RenameCrew(1)]
+        );
+        assert_eq!(
+            controller.handle_edit_shortcut(),
+            vec![PlrSelAction::RenameCrew(1)]
+        );
+    }
+
+    #[test]
+    fn mode_aware_context_target_uses_current_row_set_without_changing_focus() {
+        let layout = plrsel_layout(1280, 720);
+        let point = crate::GuiPoint::new(
+            (layout.list_client.x + layout.item_height * 3) as f32,
+            (layout.list_client.y + layout.item_pitch + 2) as f32,
+        );
+        let mut controller = PlrSelController::new(3);
+        controller.resize(1280, 720);
+        assert_eq!(controller.context_index_at(point), Some(1));
+        assert!(controller.select_for_context(1));
+        assert_eq!(controller.selected_index(), Some(1));
+
+        assert!(controller.enter_crew_mode(1, "Ada", vec![true, true]));
+        assert_eq!(controller.player_context_index_at(point), None);
+        assert_eq!(controller.crew_context_index_at(point), Some(1));
+        assert_eq!(controller.context_index_at(point), Some(1));
+        assert!(controller.select_for_context(1));
+        assert!(!controller.select_for_context(2));
+        assert_eq!(controller.focused_control(), PlrSelControl::PlayerList);
     }
 
     #[test]
@@ -1791,8 +2681,14 @@ mod tests {
         );
         assert!(controller.handle_pointer_up(second_row).is_empty());
 
-        assert_eq!(click(&mut controller, layout.buttons[0]), vec![PlrSelAction::Back]);
-        assert_eq!(click(&mut controller, layout.buttons[1]), vec![PlrSelAction::NewPlayer]);
+        assert_eq!(
+            click(&mut controller, layout.buttons[0]),
+            vec![PlrSelAction::Back]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[1]),
+            vec![PlrSelAction::NewPlayer]
+        );
         assert_eq!(
             click(&mut controller, layout.buttons[2]),
             vec![PlrSelAction::ActivationChanged {
@@ -2123,11 +3019,7 @@ mod tests {
     // GL_LINEAR edge interpolation (proven on the checkbox top/left edge).
     #[test]
     fn engine_png_texture_squashes_fully_transparent_texels_to_black() {
-        let image = ImageData::new(
-            2,
-            1,
-            vec![255, 255, 255, 0, 200, 100, 50, 1],
-        );
+        let image = ImageData::new(2, 1, vec![255, 255, 255, 0, 200, 100, 50, 1]);
         let out = engine_png_texture(&image);
         assert_eq!(out.pixels(), &[0, 0, 0, 0, 200, 100, 50, 1]);
     }
@@ -2177,10 +3069,28 @@ mod tests {
     #[test]
     fn aspect_fit_centers_square_source_in_wide_box() {
         // 150x150 source in (806,196,200,150) → (831,196,150,150) (spec §6).
-        let out = aspect_fit(150, 150, IntRect { x: 806, y: 196, w: 200, h: 150 });
+        let out = aspect_fit(
+            150,
+            150,
+            IntRect {
+                x: 806,
+                y: 196,
+                w: 200,
+                h: 150,
+            },
+        );
         assert_eq!((out.x, out.y, out.w, out.h), (831, 196, 150, 150));
         // 64x64 into 26x26: ratios equal → unchanged.
-        let out = aspect_fit(64, 64, IntRect { x: 179, y: 260, w: 26, h: 26 });
+        let out = aspect_fit(
+            64,
+            64,
+            IntRect {
+                x: 179,
+                y: 260,
+                w: 26,
+                h: 26,
+            },
+        );
         assert_eq!((out.x, out.y, out.w, out.h), (179, 260, 26, 26));
     }
 
@@ -2241,7 +3151,15 @@ mod tests {
         let players = [tyler()];
 
         let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
-        PlrSelScreen::render(&mut surface, &assets, &fonts, &book, &players, Some(0), Some(gamma));
+        PlrSelScreen::render(
+            &mut surface,
+            &assets,
+            &fonts,
+            &book,
+            &players,
+            Some(0),
+            Some(gamma),
+        );
         // The app's final whole-surface gamma pass (identity except 0 → 1).
         gamma.apply_to_surface(&mut surface);
 

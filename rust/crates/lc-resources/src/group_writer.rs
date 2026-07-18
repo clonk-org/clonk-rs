@@ -465,6 +465,39 @@ impl MutableGroup {
         self.entries.len() != previous
     }
 
+    /// Renames one entry with C4Group's ASCII-case-insensitive lookup rules.
+    /// A missing source or a distinct entry already occupying `new` leaves
+    /// the group unchanged and returns `false`. Entry payload and metadata are
+    /// retained in place, including for opaque packed child groups.
+    pub fn rename_entry(&mut self, old: &str, new: &str) -> bool {
+        let old = old.as_bytes();
+        let new = new.as_bytes();
+        if old.is_empty() || new.is_empty() || old.contains(&0) || new.contains(&0) {
+            return false;
+        }
+        let Some(source_index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.name_bytes.eq_ignore_ascii_case(old))
+        else {
+            return false;
+        };
+        if self.entries.iter().enumerate().any(|(index, entry)| {
+            index != source_index && entry.name_bytes.eq_ignore_ascii_case(new)
+        }) {
+            return false;
+        }
+
+        let name_bytes = new[..new.len().min(MAX_ENTRY_NAME_BYTES)].to_vec();
+        let entry = &mut self.entries[source_index];
+        if let MutableGroupEntryData::Child(child) = &mut entry.data {
+            child.filename = name_bytes.clone();
+        }
+        entry.name = String::from_utf8_lossy(&name_bytes).into_owned();
+        entry.name_bytes = name_bytes;
+        true
+    }
+
     pub fn sort(&mut self, sort_list: &str) -> bool {
         if sort_list.is_empty() {
             return false;

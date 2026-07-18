@@ -122,7 +122,7 @@ use lc_frontend::loader_screen::{
     LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection, LoaderState, LoaderUpdate,
     STARTUP_LOADER_SPECIFICATION,
 };
-use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
+use lc_frontend::startup_plrsel::{PlrSelCrewContextCommand, PlrSelPlayerContextCommand};
 use lc_frontend::{
     ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
     GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
@@ -181,8 +181,10 @@ use serde::{
 use sha1::{Digest, Sha1};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
-    PlayerImageWrite, SavedStartupPlayer, StartupPlayerFile, delete_player_file,
-    discover_player_files, persist_activations, save_player_properties,
+    PlayerImageWrite, SavedStartupPlayer, StartupCrewFile, StartupCrewMutationError,
+    StartupPlayerFile, delete_crew_file, delete_player_file, discover_crew_files,
+    discover_player_files, persist_activations, rename_crew, save_player_properties,
+    set_crew_death_message, set_crew_participation,
 };
 use time::{OffsetDateTime, macros::format_description};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -7917,6 +7919,7 @@ struct ScriptMenuPresentationState {
 enum MessageDialogContinuation {
     None,
     DeleteStartupPlayer { path: PathBuf },
+    DeleteStartupCrew { player_path: PathBuf, file_name: String },
     LobbyReadyCheck { remaining_seconds: u32 },
     LeagueVote { subject: LeagueVoteSubject },
     LeagueSurrender,
@@ -7960,7 +7963,14 @@ impl ScenarioSelectorMode {
 struct PendingGameOptionInputDialog {
     kind: GameOptionInputKind,
     network_join_password: bool,
+    crew_action: Option<PendingCrewInputAction>,
     controller: InputDialogController,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingCrewInputAction {
+    Rename { index: usize },
+    SetDeathMessage { index: usize },
 }
 
 struct StagedNetworkHostScenario {
@@ -8061,6 +8071,7 @@ enum ScenselSearchContextCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AppContextMenuCommand {
     StartupPlayer(PlrSelPlayerContextCommand),
+    StartupCrew(PlrSelCrewContextCommand),
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
     OptionsLanguage(String),
@@ -8844,6 +8855,9 @@ struct GameApp {
     startup_player_properties_dialog: Option<PendingStartupPlayerProperties>,
     startup_player_files: Vec<StartupPlayerFile>,
     startup_player_models: Vec<lc_frontend::startup_plrsel::PlrSelPlayer>,
+    startup_crew_files: Vec<StartupCrewFile>,
+    startup_crew_models: Vec<lc_frontend::startup_plrsel::PlrSelCrew>,
+    startup_crew_player_index: Option<usize>,
     startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
@@ -14344,6 +14358,39 @@ fn format_saved_timestamp(seconds: u64) -> String {
     }
 }
 
+fn format_startup_crew_birthday(seconds: i32) -> String {
+    if seconds == 0 {
+        return String::new();
+    }
+    OffsetDateTime::from_unix_timestamp(i64::from(seconds))
+        .ok()
+        .and_then(|datetime| {
+            datetime
+                .format(&format_description!(
+                    "[day].[month].[year] [hour]:[minute]"
+                ))
+                .ok()
+        })
+        .unwrap_or_default()
+}
+
+fn startup_rank_icon(sheet: &ImageData, rank: i32) -> Option<ImageData> {
+    let size = sheet.height();
+    if size == 0 {
+        return None;
+    }
+    let phases = (sheet.width() / size).max(1);
+    let phase = u32::try_from(rank.max(0)).unwrap_or_default() % phases;
+    let source_x = phase * size;
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        let start = ((y * sheet.width() + source_x) * 4) as usize;
+        let end = start + (size * 4) as usize;
+        pixels.extend_from_slice(sheet.pixels().get(start..end)?);
+    }
+    Some(ImageData::new(size, size, pixels))
+}
+
 fn sanitize_save_label(label: &str) -> String {
     let mut result = String::new();
     let mut last_was_separator = false;
@@ -16859,6 +16906,9 @@ impl GameApp {
             startup_player_properties_dialog: None,
             startup_player_files,
             startup_player_models,
+            startup_crew_files: Vec::new(),
+            startup_crew_models: Vec::new(),
+            startup_crew_player_index: None,
             startup_options_dialog: None,
             startup_about_dialog: None,
             startup_view: StartupView::MainMenu,
@@ -20307,22 +20357,34 @@ impl GameApp {
                         return Ok(());
                     }
                     if self.startup_view == StartupView::PlayerSelection && no_shortcut_modifiers {
-                        let selected = self
+                        let actions = self
                             .startup_player_dialog
                             .as_ref()
-                            .and_then(|dialog| dialog.selected_index());
-                        let action = match key {
-                            VirtualKeyCode::Insert => {
-                                Some(lc_frontend::startup_plrsel::PlrSelAction::NewPlayer)
-                            }
-                            VirtualKeyCode::Delete => selected
-                                .map(lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer),
-                            VirtualKeyCode::F2 => selected
-                                .map(lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties),
-                            _ => None,
-                        };
-                        if let Some(action) = action {
-                            self.process_player_dialog_actions(vec![action])?;
+                            .map(|dialog| match key {
+                                VirtualKeyCode::Insert if !dialog.is_crew_mode() => {
+                                    vec![lc_frontend::startup_plrsel::PlrSelAction::NewPlayer]
+                                }
+                                VirtualKeyCode::Delete => dialog
+                                    .selected_index()
+                                    .map(|index| {
+                                        if dialog.is_crew_mode() {
+                                            lc_frontend::startup_plrsel::PlrSelAction::DeleteCrew(
+                                                index,
+                                            )
+                                        } else {
+                                            lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer(
+                                                index,
+                                            )
+                                        }
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                                VirtualKeyCode::F2 => dialog.handle_edit_shortcut(),
+                                _ => Vec::new(),
+                            })
+                            .unwrap_or_default();
+                        if !actions.is_empty() {
+                            self.process_player_dialog_actions(actions)?;
                             return Ok(());
                         }
                     }
@@ -27288,7 +27350,11 @@ impl GameApp {
                                 && offset >= 0
                                 && offset % layout.item_pitch < layout.item_height)
                                 .then_some((offset / layout.item_pitch) as usize)
-                                .filter(|index| *index < self.startup_player_models.len())
+                                .filter(|index| {
+                                    self.startup_player_dialog
+                                        .as_ref()
+                                        .is_some_and(|dialog| *index < dialog.row_count())
+                                })
                         });
                         let is_double = if button_state == ElementState::Released {
                             let now = Instant::now();
@@ -28746,6 +28812,7 @@ impl GameApp {
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             kind: GameOptionInputKind::Password,
             network_join_password: true,
+            crew_action: None,
             controller,
         });
         self.game_option_input_consumed_keys.clear();
@@ -29718,11 +29785,11 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let Some((index, anchor)) = self.startup_player_dialog.as_ref().and_then(|dialog| {
+        let Some((index, anchor, crew_mode)) = self.startup_player_dialog.as_ref().and_then(|dialog| {
             let point = dialog.pointer_position()?;
             dialog
-                .player_context_index_at(point)
-                .map(|index| (index, point))
+                .context_index_at(point)
+                .map(|index| (index, point, dialog.is_crew_mode()))
         }) else {
             return Ok(false);
         };
@@ -29734,34 +29801,57 @@ impl GameApp {
         if !self
             .startup_player_dialog
             .as_mut()
-            .is_some_and(|dialog| dialog.select_player_for_context(index))
+            .is_some_and(|dialog| dialog.select_for_context(index))
         {
-            tracing::error!(index, "player context menu references a stale row");
+            tracing::error!(index, "startup player context menu references a stale row");
             return Ok(false);
         }
 
-        let model = lc_frontend::startup_plrsel::PlrSelPlayerContextMenu::for_player(index);
-        let entries = model
-            .entries
-            .into_iter()
-            .map(|entry| {
-                let icon = match entry.icon {
-                    lc_frontend::startup_plrsel::PlrSelPlayerContextIcon::None => {
-                        ContextMenuIcon::None
+        let entries = if crew_mode {
+            lc_frontend::startup_plrsel::PlrSelCrewContextMenu::for_crew(index)
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    let icon = match entry.icon {
+                        lc_frontend::startup_plrsel::PlrSelCrewContextIcon::None => {
+                            ContextMenuIcon::None
+                        }
+                    };
+                    let mut item = ContextMenuEntry::new(entry.label)
+                        .with_icon(icon)
+                        .with_action(AppContextMenuCommand::StartupCrew(entry.command));
+                    if let Some(tooltip) = entry.tooltip {
+                        item = item.with_tooltip(tooltip);
                     }
-                };
-                let mut item = ContextMenuEntry::new(entry.label)
-                    .with_icon(icon)
-                    .with_action(AppContextMenuCommand::StartupPlayer(entry.command));
-                if let Some(tooltip) = entry.tooltip {
-                    item = item.with_tooltip(tooltip);
-                }
-                if let Some(hotkey) = entry.hotkey {
-                    item = item.with_hotkey(hotkey);
-                }
-                item
-            })
-            .collect();
+                    if let Some(hotkey) = entry.hotkey {
+                        item = item.with_hotkey(hotkey);
+                    }
+                    item
+                })
+                .collect()
+        } else {
+            lc_frontend::startup_plrsel::PlrSelPlayerContextMenu::for_player(index)
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    let icon = match entry.icon {
+                        lc_frontend::startup_plrsel::PlrSelPlayerContextIcon::None => {
+                            ContextMenuIcon::None
+                        }
+                    };
+                    let mut item = ContextMenuEntry::new(entry.label)
+                        .with_icon(icon)
+                        .with_action(AppContextMenuCommand::StartupPlayer(entry.command));
+                    if let Some(tooltip) = entry.tooltip {
+                        item = item.with_tooltip(tooltip);
+                    }
+                    if let Some(hotkey) = entry.hotkey {
+                        item = item.with_hotkey(hotkey);
+                    }
+                    item
+                })
+                .collect()
+        };
         self.open_context_menu_at(entries, anchor)
     }
 
@@ -29879,6 +29969,21 @@ impl GameApp {
                     ) => {
                         // ContextMenu already emitted the activation Click.
                         self.open_startup_player_delete_dialog(index, false)?;
+                    }
+                    AppContextMenuCommand::StartupCrew(
+                        PlrSelCrewContextCommand::RenameCrew(index),
+                    ) => {
+                        self.open_startup_crew_rename_dialog(index, false)?;
+                    }
+                    AppContextMenuCommand::StartupCrew(
+                        PlrSelCrewContextCommand::DeleteCrew(index),
+                    ) => {
+                        self.open_startup_crew_delete_dialog(index, false)?;
+                    }
+                    AppContextMenuCommand::StartupCrew(
+                        PlrSelCrewContextCommand::SetCrewDeathMessage(index),
+                    ) => {
+                        self.open_startup_crew_death_message_dialog(index)?;
                     }
                     AppContextMenuCommand::AddStartupParticipant(reference) => {
                         self.set_startup_participant(&reference, true);
@@ -30617,9 +30722,25 @@ impl GameApp {
                     self.open_existing_startup_player_properties(index);
                 }
                 PlrSelAction::ShowCrew(index) => {
-                    return Err(classic_startup_action_error(
-                        ClassicStartupAction::PlayerCrew { index },
-                    ));
+                    self.enter_startup_crew_mode(index)?;
+                }
+                PlrSelAction::LeaveCrew => {
+                    self.leave_startup_crew_mode();
+                }
+                PlrSelAction::CrewParticipationChanged {
+                    index,
+                    participating,
+                } => {
+                    self.set_startup_crew_participation(index, participating)?;
+                }
+                PlrSelAction::DeleteCrew(index) => {
+                    self.open_startup_crew_delete_dialog(index, true)?;
+                }
+                PlrSelAction::RenameCrew(index) => {
+                    self.open_startup_crew_rename_dialog(index, true)?;
+                }
+                PlrSelAction::SetCrewDeathMessage(index) => {
+                    self.open_startup_crew_death_message_dialog(index)?;
                 }
             }
         }
@@ -30659,6 +30780,384 @@ impl GameApp {
             ),
             MessageDialogContinuation::DeleteStartupPlayer { path },
         )
+    }
+
+    fn enter_startup_crew_mode(&mut self, player_index: usize) -> Result<(), EngineError> {
+        let Some(player) = self.startup_player_files.get(player_index) else {
+            tracing::error!(player_index, "crew action references a stale player row");
+            return Ok(());
+        };
+        let player_name = player.render_model.name.clone();
+        let mut crew = match discover_crew_files(player) {
+            Ok(crew) => crew,
+            Err(error) => {
+                tracing::error!(%error, path = %player.path.display(), "failed to open startup crew");
+                return Ok(());
+            }
+        };
+        self.hydrate_startup_crew_models(&mut crew);
+        if crew.is_empty() {
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    format!("{player_name} does not have a crew yet!"),
+                    format!("Crew: {player_name}"),
+                    lc_frontend::message_dialog::MessageDialogIcon::PLAYER,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+            return Ok(());
+        }
+
+        let participations = crew
+            .iter()
+            .map(|entry| entry.render_model.participating)
+            .collect();
+        let entered = self
+            .startup_player_dialog
+            .as_mut()
+            .is_some_and(|dialog| {
+                dialog.enter_crew_mode(player_index, player_name, participations)
+            });
+        if !entered {
+            tracing::error!(player_index, "startup crew mode transition was rejected");
+            return Ok(());
+        }
+        self.startup_crew_models = crew
+            .iter()
+            .map(|entry| entry.render_model.clone())
+            .collect();
+        self.startup_crew_files = crew;
+        self.startup_crew_player_index = Some(player_index);
+        self.plrsel_last_click = None;
+        self.status_text.clear();
+        self.play_ui_sound("DoorOpen");
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn leave_startup_crew_mode(&mut self) {
+        self.close_context_menu_silently();
+        if self
+            .startup_player_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.leave_crew_mode())
+            .is_none()
+        {
+            return;
+        }
+        self.startup_crew_files.clear();
+        self.startup_crew_models.clear();
+        self.startup_crew_player_index = None;
+        self.plrsel_last_click = None;
+        self.play_ui_sound("DoorClose");
+        self.mark_menu_dirty();
+    }
+
+    fn reload_startup_crew_list(&mut self, select_file: Option<&str>) -> io::Result<()> {
+        let player_index = self.startup_crew_player_index.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "startup crew player is unavailable")
+        })?;
+        let player = self.startup_player_files.get(player_index).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "startup crew player row is stale")
+        })?;
+        let mut crew = discover_crew_files(player)?;
+        self.hydrate_startup_crew_models(&mut crew);
+        let selected = select_file.and_then(|file_name| {
+            crew.iter()
+                .position(|entry| entry.file_name.eq_ignore_ascii_case(file_name))
+        });
+        self.startup_crew_models = crew
+            .iter()
+            .map(|entry| entry.render_model.clone())
+            .collect();
+        self.startup_crew_files = crew;
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_crew_participations(
+                self.startup_crew_models
+                    .iter()
+                    .map(|entry| entry.participating)
+                    .collect(),
+            );
+            dialog.set_selected_index(
+                selected.or_else(|| (!self.startup_crew_models.is_empty()).then_some(0)),
+            );
+        }
+        self.plrsel_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn show_startup_crew_error(
+        &mut self,
+        message: impl Into<String>,
+        caption: impl Into<String>,
+    ) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn set_startup_crew_participation(
+        &mut self,
+        index: usize,
+        participating: bool,
+    ) -> Result<(), EngineError> {
+        let Some((player_path, file_name)) = self
+            .startup_crew_files
+            .get(index)
+            .map(|entry| (entry.player_path.clone(), entry.file_name.clone()))
+        else {
+            tracing::error!(index, "crew-participation action references a stale row");
+            return Ok(());
+        };
+        match set_crew_participation(&player_path, &file_name, participating) {
+            Ok(()) => {
+                if let Some(entry) = self.startup_crew_files.get_mut(index) {
+                    entry.crew_info.participation = i32::from(participating);
+                    entry.render_model.participating = participating;
+                }
+                if let Some(model) = self.startup_crew_models.get_mut(index) {
+                    model.participating = participating;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, path = %player_path.display(), %file_name, "failed to rewrite crew participation");
+                if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                    dialog.set_crew_participations(
+                        self.startup_crew_models
+                            .iter()
+                            .map(|entry| entry.participating)
+                            .collect(),
+                    );
+                    dialog.set_selected_index(Some(index));
+                }
+                self.show_startup_crew_error("File modification failure.", "")?;
+            }
+        }
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn open_startup_crew_delete_dialog(
+        &mut self,
+        index: usize,
+        play_source_click: bool,
+    ) -> Result<(), EngineError> {
+        let delete = self.startup_crew_files.get(index).map(|entry| {
+            (
+                entry.player_path.clone(),
+                entry.file_name.clone(),
+                lc_frontend::startup_plrsel::crew_delete_warning(&entry.render_model),
+            )
+        });
+        let Some((player_path, file_name, warning)) = delete else {
+            tracing::error!(index, "crew-delete action references a stale row");
+            return Ok(());
+        };
+        if play_source_click {
+            self.play_ui_sound("Click");
+        }
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                warning,
+                "Delete",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::DeleteStartupCrew {
+                player_path,
+                file_name,
+            },
+        )
+    }
+
+    fn open_startup_crew_rename_dialog(
+        &mut self,
+        index: usize,
+        play_source_click: bool,
+    ) -> Result<(), EngineError> {
+        let Some(initial_text) = self
+            .startup_crew_models
+            .get(index)
+            .map(|entry| entry.name.clone())
+        else {
+            tracing::error!(index, "crew-rename action references a stale row");
+            return Ok(());
+        };
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Crew rename input",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        self.close_context_menu_silently();
+        if play_source_click {
+            self.play_ui_sound("Click");
+        }
+        let controller = InputDialogController::new(
+            "Rename crew member:",
+            "Rename",
+            InputDialogIcon::None,
+        )
+        .with_input_text(&initial_text);
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            kind: GameOptionInputKind::Comment,
+            network_join_password: false,
+            crew_action: Some(PendingCrewInputAction::Rename { index }),
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn open_startup_crew_death_message_dialog(
+        &mut self,
+        index: usize,
+    ) -> Result<(), EngineError> {
+        let Some(initial_text) = self.startup_crew_files.get(index).map(|entry| {
+            lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(
+                &entry.crew_info.death_message,
+            ))
+        }) else {
+            tracing::error!(index, "crew death-message action references a stale row");
+            return Ok(());
+        };
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Crew death-message input",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        self.close_context_menu_silently();
+        let controller = InputDialogController::new(
+            "Enter new death message:",
+            "Set death message",
+            InputDialogIcon::COMMENT,
+        )
+        .with_max_text(75)
+        .with_input_text(&initial_text);
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            kind: GameOptionInputKind::Comment,
+            network_join_password: false,
+            crew_action: Some(PendingCrewInputAction::SetDeathMessage { index }),
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn complete_startup_crew_input(
+        &mut self,
+        action: PendingCrewInputAction,
+        text: String,
+    ) -> Result<(), EngineError> {
+        match action {
+            PendingCrewInputAction::Rename { index } => {
+                let Some((player_path, old_file_name)) = self
+                    .startup_crew_files
+                    .get(index)
+                    .map(|entry| (entry.player_path.clone(), entry.file_name.clone()))
+                else {
+                    tracing::error!(index, "accepted crew rename references a stale row");
+                    return Ok(());
+                };
+                match rename_crew(&player_path, &old_file_name, &text) {
+                    Ok(new_file_name) => {
+                        if let Err(error) =
+                            self.reload_startup_crew_list(Some(new_file_name.as_str()))
+                        {
+                            tracing::error!(%error, "failed to reload renamed startup crew");
+                            self.show_startup_crew_error(
+                                "File modification failure.",
+                                "Rename failure.",
+                            )?;
+                        }
+                    }
+                    Err(StartupCrewMutationError::NameCollision { file_name }) => {
+                        self.show_startup_crew_error(
+                            format!(
+                                "A Clonk with the file name \"{file_name}\" exists already."
+                            ),
+                            "Rename failure.",
+                        )?;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, path = %player_path.display(), %old_file_name, "failed to rename startup crew");
+                        let _ = self.reload_startup_crew_list(None);
+                        self.show_startup_crew_error(
+                            format!("Crew rename failed: {error}"),
+                            "Rename failure.",
+                        )?;
+                    }
+                }
+            }
+            PendingCrewInputAction::SetDeathMessage { index } => {
+                let Some((player_path, file_name)) = self
+                    .startup_crew_files
+                    .get(index)
+                    .map(|entry| (entry.player_path.clone(), entry.file_name.clone()))
+                else {
+                    tracing::error!(index, "accepted crew death message references a stale row");
+                    return Ok(());
+                };
+                let result = set_crew_death_message(&player_path, &file_name, &text);
+                if result.is_ok() {
+                    if let Err(error) = self.reload_startup_crew_list(Some(&file_name)) {
+                        tracing::error!(%error, "failed to reload startup crew death message");
+                    }
+                }
+                // Native feedback is unconditional after RewriteCore.
+                self.play_ui_sound("Connect");
+                if let Err(error) = result {
+                    tracing::error!(%error, path = %player_path.display(), %file_name, "failed to rewrite crew death message");
+                    self.show_startup_crew_error("File modification failure.", "")?;
+                }
+            }
+        }
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn hydrate_startup_crew_models(&self, crew: &mut [StartupCrewFile]) {
+        let rank_names = self.default_rank_names.as_deref().unwrap_or_default();
+        let rank_sheet = self.assets.hud_graphics.rank.as_ref();
+        for entry in crew {
+            let next_rank = entry.crew_info.core.next_rank_info(
+                entry.crew_info.rank,
+                rank_names,
+                1_000,
+            );
+            entry.render_model.next_rank = (next_rank.promotion_possible())
+                .then(|| {
+                    next_rank.name.map(|name| {
+                        lc_frontend::startup_plrsel::PlrSelCrewPromotion {
+                            rank_name: lc_resources::decode_legacy_script_text(
+                                &lc_script::c4_string_bytes(name),
+                            ),
+                            experience: next_rank.experience,
+                        }
+                    })
+                })
+                .flatten();
+            entry.render_model.birthday = format_startup_crew_birthday(entry.crew_info.birthday);
+            if entry.render_model.rank_icon.is_none() {
+                entry.render_model.rank_icon = rank_sheet
+                    .and_then(|sheet| startup_rank_icon(sheet, entry.crew_info.rank));
+            }
+        }
     }
 
     fn process_options_dialog_actions(
@@ -32377,6 +32876,9 @@ impl GameApp {
     fn open_player_selection_dialog(&mut self) {
         self.close_context_menu_silently();
         self.startup_player_properties_dialog = None;
+        self.startup_crew_files.clear();
+        self.startup_crew_models.clear();
+        self.startup_crew_player_index = None;
         let mut dialog =
             lc_frontend::startup_plrsel::PlrSelController::new(self.startup_player_models.len());
         dialog.set_player_activations(
@@ -35265,6 +35767,7 @@ impl GameApp {
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             kind: request.kind,
             network_join_password: false,
+            crew_action: None,
             controller,
         });
         self.game_option_input_consumed_keys.clear();
@@ -35363,6 +35866,10 @@ impl GameApp {
                         self.launch_pending_network_join();
                         break;
                     }
+                    if let Some(action) = pending.crew_action {
+                        self.complete_startup_crew_input(action, text)?;
+                        break;
+                    }
                     let actions = self.scenario_game_options.resolve_input_dialog(
                         pending.kind,
                         GameOptionInputDialogResult::Submitted(text),
@@ -35379,6 +35886,9 @@ impl GameApp {
                     if pending.network_join_password {
                         self.pending_network_join = None;
                         self.status_text.clear();
+                        break;
+                    }
+                    if pending.crew_action.is_some() {
                         break;
                     }
                     let actions = self
@@ -35599,6 +36109,13 @@ impl GameApp {
                 self.delete_startup_player_and_refresh(&path)?;
             }
             MessageDialogContinuation::DeleteStartupPlayer { .. } => {}
+            MessageDialogContinuation::DeleteStartupCrew {
+                player_path,
+                file_name,
+            } if result == lc_frontend::message_dialog::MessageDialogResult::Yes => {
+                self.delete_startup_crew_and_refresh(&player_path, &file_name)?;
+            }
+            MessageDialogContinuation::DeleteStartupCrew { .. } => {}
         }
         Ok(())
     }
@@ -35704,6 +36221,24 @@ impl GameApp {
                 ),
                 MessageDialogContinuation::None,
             )?;
+        }
+        Ok(())
+    }
+
+    fn delete_startup_crew_and_refresh(
+        &mut self,
+        player_path: &Path,
+        file_name: &str,
+    ) -> Result<(), EngineError> {
+        let deletion = delete_crew_file(player_path, file_name);
+        if let Err(error) = deletion.as_ref() {
+            tracing::error!(path = %player_path.display(), %file_name, %error, "failed to delete crew file");
+        }
+        if let Err(error) = self.reload_startup_crew_list(None) {
+            tracing::error!(%error, "failed to refresh startup crew after deletion");
+        }
+        if deletion.is_err() {
+            self.show_startup_crew_error("Delete failure.", "Clear")?;
         }
         Ok(())
     }
@@ -36355,6 +36890,7 @@ impl GameApp {
                         .as_ref()
                         .map(|pending| &pending.controller),
                     &self.startup_player_models,
+                    &self.startup_crew_models,
                     base_context_menu,
                     context_menu_open,
                     definition_selector_open,
@@ -41652,6 +42188,7 @@ fn render_startup_frame(
         &lc_frontend::startup_plrproperties::PlayerPropertiesController,
     >,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
+    crew_models: &[lc_frontend::startup_plrsel::PlrSelCrew],
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
     context_menu_open: bool,
     definition_selector_open: bool,
@@ -41810,12 +42347,13 @@ fn render_startup_frame(
                 player_dialog,
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book), Some(dialog)) => {
-                    lc_frontend::startup_plrsel::PlrSelScreen::render_controller_with_draw_focus(
+                    lc_frontend::startup_plrsel::PlrSelScreen::render_controller_with_crew_and_draw_focus(
                         surface,
                         &dlg_assets,
                         fonts,
                         book.as_ref(),
                         player_models,
+                        crew_models,
                         dialog,
                         !context_menu_open && player_properties.is_none(),
                         Some(startup_gamma()),
@@ -62848,18 +63386,163 @@ public func Grant(password) { return GainMissionAccess(password); }
         .expect("new-player properties are implemented");
         assert!(app.startup_player_properties_dialog.is_some());
         app.startup_player_properties_dialog = None;
+    }
 
-        let error = app
-            .process_player_dialog_actions(vec![
-                lc_frontend::startup_plrsel::PlrSelAction::ShowCrew(4),
-            ])
-            .expect_err("player crew is not ported");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerCrew { index: 4 }),
+    #[test]
+    fn startup_crew_mode_replaces_typed_boundary_and_crewless_stays_in_player_mode() {
+        let directory = tempdir().expect("crew fixture root");
+        let player_path = directory.path().join("Ada.c4p");
+        fs::create_dir(&player_path).expect("create player group");
+        fs::write(
+            player_path.join("Player.txt"),
+            "[Player]\nName=Ada\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write player core");
+        for (file_name, name, id, experience) in [
+            ("Low.c4i", "Low", "CLNK", 20),
+            ("High.c4i", "High", "WIPF", 200),
+        ] {
+            let crew = player_path.join(file_name);
+            fs::create_dir(&crew).expect("create crew child");
+            fs::write(
+                crew.join("ObjectInfo.txt"),
+                format!(
+                    "[ObjectInfo]\nid={id}\nName={name}\nRankName=Clonk\nExperience={experience}\nParticipation=1\n"
+                ),
+            )
+            .expect("write crew core");
+        }
+        let player_file = PlayerFile::load_from_path(&player_path).expect("load player fixture");
+        let player_model = lc_frontend::startup_plrsel::PlrSelPlayer {
+            name: "Ada".to_string(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 255,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: String::new(),
+        };
+        let mut app = new_classic_menu_app(640, 480);
+        app.startup_player_files.push(StartupPlayerFile {
+            path: player_path.clone(),
+            file_name: "Ada.c4p".to_string(),
+            player_file,
+            render_model: player_model.clone(),
+        });
+        app.startup_player_models.push(player_model);
+        app.open_player_selection_dialog();
+
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
+        ])
+        .expect("Crew enters without a PlayerCrew parity boundary");
+        let controller = app.startup_player_dialog.as_ref().expect("player dialog");
+        assert!(controller.is_crew_mode());
+        assert_eq!(controller.dialog_title(), "Crew: Ada");
+        assert_eq!(controller.selected_index(), Some(0));
+        assert_eq!(
+            app.startup_crew_models
+                .iter()
+                .map(|crew| crew.name.as_str())
+                .collect::<Vec<_>>(),
+            ["High", "Low"]
         );
-        assert!(app.status_text.is_empty());
         assert!(app.message_dialogs.is_empty());
+
+        let selected_crew_file = app.startup_crew_files[0].file_name.clone();
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::CrewParticipationChanged {
+                index: 0,
+                participating: false,
+            },
+        ])
+        .expect("persist crew participation");
+        let persisted = Group::open(player_path.join(&selected_crew_file))
+            .and_then(|group| {
+                lc_engine::player_file::CrewInfo::load(&group)
+                    .map_err(|error| GroupError::InvalidGroup(error.to_string()))
+            })
+            .expect("reload persisted crew participation");
+        assert_eq!(persisted.participation, 0);
+
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::SetCrewDeathMessage(0),
+        ])
+        .expect("open crew death-message input");
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("crew death-message input")
+                .controller
+                .max_text(),
+            75
+        );
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "Farewell".to_string(),
+        )])
+        .expect("persist crew death message");
+        let persisted = Group::open(player_path.join(&selected_crew_file))
+            .and_then(|group| {
+                lc_engine::player_file::CrewInfo::load(&group)
+                    .map_err(|error| GroupError::InvalidGroup(error.to_string()))
+            })
+            .expect("reload persisted crew death message");
+        assert_eq!(persisted.death_message, "Farewell");
+
+        let layout = lc_frontend::startup_plrsel::plrsel_layout(640, 480);
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_pointer_position(Some(GuiPoint::new(
+                (layout.list_client.x + layout.item_height * 2) as f32,
+                (layout.list_client.y + layout.item_height / 2) as f32,
+            )));
+        assert!(app
+            .open_startup_player_context_menu()
+            .expect("open crew context menu"));
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .expect("crew context menu")
+                .layout()
+                .panels[0]
+                .rows
+                .len(),
+            3
+        );
+        app.close_context_menu_silently();
+
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::LeaveCrew,
+        ])
+        .expect("return to player mode");
+        let controller = app.startup_player_dialog.as_ref().expect("player dialog");
+        assert!(!controller.is_crew_mode());
+        assert_eq!(controller.selected_index(), Some(0));
+
+        fs::remove_dir_all(player_path.join("Low.c4i")).expect("remove low crew");
+        fs::remove_dir_all(player_path.join("High.c4i")).expect("remove high crew");
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::ShowCrew(0),
+        ])
+        .expect("crewless player opens a message, not a typed boundary");
+        let controller = app.startup_player_dialog.as_ref().expect("player dialog");
+        assert!(!controller.is_crew_mode());
+        assert_eq!(controller.selected_index(), Some(0));
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Crew: Ada");
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Ada does not have a crew yet!"
+        );
+        assert_eq!(
+            app.message_dialogs[0].state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::PLAYER
+        );
     }
 
     #[test]

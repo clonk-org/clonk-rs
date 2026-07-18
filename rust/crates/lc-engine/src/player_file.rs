@@ -225,6 +225,17 @@ pub struct CrewInfo {
 }
 
 impl CrewInfo {
+    /// Loads one `*.c4i` crew group, including its embedded custom-portrait
+    /// state, with the same parser used by [`PlayerFile::load`].
+    pub fn load(group: &Group) -> Result<Self, ScenarioError> {
+        let bytes = group.read_file("ObjectInfo.txt")?;
+        let source = lc_script::c4_string_from_bytes(&bytes);
+        Ok(Self::from_object_info_source(
+            &source,
+            custom_portrait_loads(group),
+        ))
+    }
+
     fn from_object_info_source(source: &str, has_custom_portrait: bool) -> Self {
         let tree = ObjectInfoIniTree::parse(source);
         let object_info = tree.first_named_child(0, "ObjectInfo");
@@ -578,10 +589,7 @@ fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioE
             continue;
         };
         if is_info {
-            if let Ok(bytes) = child.read_file("ObjectInfo.txt") {
-                let text = lc_script::c4_string_from_bytes(&bytes);
-                let has_custom_portrait = custom_portrait_loads(&child);
-                let info = CrewInfo::from_object_info_source(&text, has_custom_portrait);
+            if let Ok(info) = CrewInfo::load(&child) {
                 crew.push(info);
             }
         }
@@ -824,6 +832,37 @@ mod tests {
         assert_eq!(zorro.death_count, 0, "DeathCount defaults to 0");
         assert_eq!((zorro.birthday, zorro.age), (0, 0));
         assert_eq!(zorro.participation, 1, "Participation defaults to 1");
+    }
+
+    #[test]
+    fn crew_info_loads_one_group_with_custom_portrait_state() {
+        let dir = tempdir().expect("tempdir");
+        let crew_path = dir.path().join("Veteran.c4i");
+        std::fs::create_dir(&crew_path).expect("crew dir");
+        std::fs::write(
+            crew_path.join("ObjectInfo.txt"),
+            "[ObjectInfo]\nid=CLNK\nName=Veteran\nPortraitFile=custom\nExperience=123\nParticipation=0\n",
+        )
+        .expect("write crew core");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(crew_path.join("Portrait.png"))
+            .expect("write crew portrait");
+        let group = Group::open(&crew_path).expect("open crew group");
+
+        let crew = CrewInfo::load(&group).expect("load crew info");
+
+        assert_eq!(crew.id, "CLNK");
+        assert_eq!(crew.name, "Veteran");
+        assert_eq!(crew.experience, 123);
+        assert_eq!(crew.participation, 0);
+        assert_eq!(crew.core.portrait_file, "custom");
+        let portrait = crew
+            .portraits
+            .current
+            .as_ref()
+            .expect("decoded custom portrait is current");
+        assert_eq!(portrait.source, None);
+        assert_eq!(portrait.name, "custom");
     }
 
     #[test]

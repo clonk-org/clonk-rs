@@ -1,12 +1,21 @@
-use std::fs;
-use std::io::{self, Cursor};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lc_core::std_config::Config;
-use lc_engine::player_file::PlayerFile;
-use lc_frontend::{startup_plrsel::PlrSelPlayer, ImageData};
+use lc_engine::{
+    player_file::{CrewInfo, PlayerFile},
+    scenario::ScenarioError,
+};
+use lc_frontend::{
+    startup_plrsel::{PlrSelCrew, PlrSelCrewPromotion, PlrSelPlayer},
+    ImageData,
+};
 use lc_platform::AppPaths;
-use lc_resources::{Group, MutableGroup};
+use lc_resources::{
+    Group, GroupEntry, GroupError, MutableGroup, MutableGroupChildMut, MutableGroupError,
+};
 use png::{BitDepth, ColorType, Transformations};
 
 /// One requested update to a player-group picture entry.
@@ -88,6 +97,623 @@ impl StartupPlayerFile {
     pub fn set_activated(&mut self, activated: bool) {
         self.render_model.activated = activated;
     }
+}
+
+/// One direct `*.c4i` child shown in startup crew mode.
+pub struct StartupCrewFile {
+    /// Physical player group containing this entry.
+    pub player_path: PathBuf,
+    /// Child basename, without the player path.
+    pub file_name: String,
+    /// Simulation-facing `C4ObjectInfoCore` data.
+    pub crew_info: CrewInfo,
+    /// Presentation-facing crew data.
+    pub render_model: PlrSelCrew,
+}
+
+/// Discovers the direct `*.c4i` children of one startup player and applies
+/// the visible C++ crew ordering: descending maximum experience for the
+/// definition type, then descending individual experience within that type.
+pub fn discover_crew_files(player: &StartupPlayerFile) -> io::Result<Vec<StartupCrewFile>> {
+    let group = Group::open(&player.path).map_err(group_error_to_io)?;
+    let mut crew = Vec::new();
+    for entry in group.entries().map_err(group_error_to_io)? {
+        if !has_crew_extension(&entry.name_bytes) {
+            continue;
+        }
+        let Ok(child) = open_direct_child(&group, &entry) else {
+            continue;
+        };
+        let Ok(source) = child.load_entry_string("ObjectInfo.txt") else {
+            continue;
+        };
+        if !has_object_info_section(&source) {
+            continue;
+        }
+        let Ok(crew_info) = CrewInfo::load(&child) else {
+            continue;
+        };
+        let rank_icon = load_group_png(&child, "Rank.png");
+        let portrait = load_group_png(&child, "Portrait.png");
+        let render_model = crew_render_model(
+            &crew_info,
+            player.player_file.normalized_preferred_color(),
+            rank_icon,
+            portrait,
+        );
+        crew.push(StartupCrewFile {
+            player_path: player.path.clone(),
+            file_name: lc_script::c4_string_from_bytes(&entry.name_bytes),
+            crew_info,
+            render_model,
+        });
+    }
+
+    let mut type_maximum = std::collections::HashMap::<String, i32>::new();
+    for entry in &crew {
+        type_maximum
+            .entry(entry.crew_info.id.clone())
+            .and_modify(|maximum| *maximum = (*maximum).max(entry.crew_info.experience))
+            .or_insert(entry.crew_info.experience);
+    }
+    crew.sort_by(|left, right| {
+        type_maximum[&right.crew_info.id]
+            .cmp(&type_maximum[&left.crew_info.id])
+            .then_with(|| right.crew_info.experience.cmp(&left.crew_info.experience))
+    });
+    Ok(crew)
+}
+
+fn crew_render_model(
+    crew: &CrewInfo,
+    color_dw: u32,
+    rank_icon: Option<ImageData>,
+    portrait: Option<ImageData>,
+) -> PlrSelCrew {
+    let display =
+        |value: &str| lc_resources::decode_legacy_script_text(&lc_script::c4_string_bytes(value));
+    let next_rank =
+        (crew.core.next_rank_exp > 0 && !crew.core.next_rank_name.is_empty()).then(|| {
+            PlrSelCrewPromotion {
+                rank_name: display(&crew.core.next_rank_name),
+                experience: crew.core.next_rank_exp,
+            }
+        });
+    PlrSelCrew {
+        name: display(&crew.name),
+        participating: crew.participation != 0,
+        rank_icon,
+        portrait,
+        color_dw,
+        rank: crew.rank,
+        rank_name: display(&crew.rank_name),
+        type_name: display(&crew.core.type_name),
+        experience: crew.experience,
+        rounds: crew.rounds,
+        death_count: crew.death_count,
+        total_playing_time: crew.total_playing_time,
+        birthday: String::new(),
+        next_rank,
+        physical: crew.physical.clone(),
+    }
+}
+
+fn open_direct_child(parent: &Group, entry: &GroupEntry) -> Result<Group, GroupError> {
+    if parent.is_directory() {
+        parent.open_child(&entry.relative_path)
+    } else {
+        let bytes = parent.read_entry_bytes_exact(entry)?;
+        Group::from_raw_memory(PathBuf::from(&entry.relative_path), bytes)
+    }
+}
+
+fn has_crew_extension(name: &[u8]) -> bool {
+    name.get(name.len().saturating_sub(4)..)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4i"))
+}
+
+fn has_object_info_section(source: &[u8]) -> bool {
+    source
+        .split(|byte| matches!(*byte, b'\r' | b'\n'))
+        .map(|line| trim_c4_whitespace(line))
+        .any(|line| line == b"[ObjectInfo]")
+}
+
+fn group_error_to_io(error: GroupError) -> io::Error {
+    match error {
+        GroupError::Io(error) => error,
+        error => io::Error::new(io::ErrorKind::InvalidData, error),
+    }
+}
+
+/// Failure while changing one startup crew child.
+#[derive(Debug, thiserror::Error)]
+pub enum StartupCrewMutationError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Group(#[from] GroupError),
+    #[error(transparent)]
+    MutableGroup(#[from] MutableGroupError),
+    #[error(transparent)]
+    CrewInfo(#[from] ScenarioError),
+    #[error("crew entry not found: {file_name}")]
+    EntryNotFound { file_name: String },
+    #[error("crew entry has no valid ObjectInfo core: {file_name}")]
+    InvalidCrewCore { file_name: String },
+    #[error("crew name must not be empty")]
+    EmptyName,
+    #[error("crew filename is too long: {file_name}")]
+    FilenameTooLong { file_name: String },
+    #[error("crew filename already exists: {file_name}")]
+    NameCollision { file_name: String },
+}
+
+/// Immediately rewrites `C4ObjectInfoCore::Participation` for one direct
+/// crew child. The default value (`true`) is omitted like the native compiler.
+pub fn set_crew_participation(
+    player_path: &Path,
+    child_name: &str,
+    participating: bool,
+) -> Result<(), StartupCrewMutationError> {
+    rewrite_crew_value(
+        player_path,
+        child_name,
+        b"Participation",
+        (!participating).then_some(b"0".as_slice()),
+    )
+}
+
+/// Rewrites the crew death message, capped to the native 75-byte C string.
+pub fn set_crew_death_message(
+    player_path: &Path,
+    child_name: &str,
+    message: &str,
+) -> Result<(), StartupCrewMutationError> {
+    let mut message = c4_input_bytes(message);
+    message.truncate(75);
+    rewrite_crew_value(
+        player_path,
+        child_name,
+        b"DeathMessage",
+        (!message.is_empty()).then_some(message.as_slice()),
+    )
+}
+
+/// Renames a crew child from its display name and rewrites `Core.Name`.
+/// Returns the new child basename (`*.c4i`).
+pub fn rename_crew(
+    player_path: &Path,
+    child_name: &str,
+    new_display_name: &str,
+) -> Result<String, StartupCrewMutationError> {
+    let mut requested_name = c4_input_bytes(new_display_name);
+    if requested_name.is_empty() {
+        return Err(StartupCrewMutationError::EmptyName);
+    }
+
+    let player_group = Group::open(player_path)?;
+    let entry = find_crew_entry(&player_group, child_name)?;
+    let actual_name = entry_name(&entry);
+    let child = open_direct_child(&player_group, &entry)?;
+    let crew_info = CrewInfo::load(&child)?;
+    if requested_name == lc_script::c4_string_bytes(&crew_info.name) {
+        return Ok(actual_name);
+    }
+
+    let new_name_bytes = crew_filename_from_title(&requested_name);
+    let new_file_name = lc_script::c4_string_from_bytes(&new_name_bytes);
+    let max_name = if cfg!(windows) { 256 } else { 255 };
+    if new_name_bytes.len() > max_name {
+        return Err(StartupCrewMutationError::FilenameTooLong {
+            file_name: new_file_name,
+        });
+    }
+    let rename_due = !item_identical(&entry.name_bytes, &new_name_bytes);
+    if rename_due
+        && player_group
+            .entries()?
+            .iter()
+            .any(|candidate| candidate.name_bytes.eq_ignore_ascii_case(&new_name_bytes))
+    {
+        return Err(StartupCrewMutationError::NameCollision {
+            file_name: new_file_name,
+        });
+    }
+
+    requested_name.truncate(30);
+    let source = child.load_entry_string("ObjectInfo.txt")?;
+    let rewritten =
+        rewrite_object_info_value(&source, b"Name", Some(&requested_name)).ok_or_else(|| {
+            StartupCrewMutationError::InvalidCrewCore {
+                file_name: actual_name.clone(),
+            }
+        })?;
+
+    if player_group.is_directory() {
+        let persisted_name = if rename_due {
+            let target = player_path.join(path_from_name_bytes(&new_name_bytes));
+            fs::rename(player_path.join(&entry.relative_path), &target)?;
+            new_file_name.clone()
+        } else {
+            actual_name
+        };
+        let reopened = Group::open(player_path)?;
+        let renamed_entry = find_crew_entry(&reopened, &persisted_name)?;
+        let renamed_child = open_direct_child(&reopened, &renamed_entry)?;
+        persist_object_info_to_standalone_child(&renamed_child, &rewritten)?;
+    } else {
+        let actual_utf8 = std::str::from_utf8(&entry.name_bytes).map_err(|_| {
+            StartupCrewMutationError::InvalidCrewCore {
+                file_name: actual_name.clone(),
+            }
+        })?;
+        let new_utf8 = std::str::from_utf8(&new_name_bytes).map_err(|_| {
+            StartupCrewMutationError::InvalidCrewCore {
+                file_name: new_file_name.clone(),
+            }
+        })?;
+        let mut mutable = MutableGroup::from_group(&player_group)?;
+        if rename_due && !mutable.rename_entry(actual_utf8, new_utf8) {
+            return Err(StartupCrewMutationError::EntryNotFound {
+                file_name: actual_name,
+            });
+        }
+        let lookup = if rename_due { new_utf8 } else { actual_utf8 };
+        replace_mutable_child_core(&mut mutable, lookup, rewritten)?;
+        persist_packed_group(player_path, &mutable)?;
+    }
+    Ok(new_file_name)
+}
+
+/// Permanently removes one direct crew child from a directory or packed
+/// player group.
+pub fn delete_crew_file(
+    player_path: &Path,
+    child_name: &str,
+) -> Result<(), StartupCrewMutationError> {
+    let player_group = Group::open(player_path)?;
+    let entry = find_crew_entry(&player_group, child_name)?;
+    if player_group.is_directory() {
+        let path = player_path.join(entry.relative_path);
+        let file_type = fs::symlink_metadata(&path)?.file_type();
+        if file_type.is_dir() {
+            fs::remove_dir_all(path)?;
+        } else {
+            fs::remove_file(path)?;
+        }
+        return Ok(());
+    }
+
+    let actual_name = std::str::from_utf8(&entry.name_bytes).map_err(|_| {
+        StartupCrewMutationError::InvalidCrewCore {
+            file_name: entry_name(&entry),
+        }
+    })?;
+    let mut mutable = MutableGroup::from_group(&player_group)?;
+    if !mutable.remove_entry(actual_name) {
+        return Err(StartupCrewMutationError::EntryNotFound {
+            file_name: child_name.to_string(),
+        });
+    }
+    persist_packed_group(player_path, &mutable)
+}
+
+fn rewrite_crew_value(
+    player_path: &Path,
+    child_name: &str,
+    key: &[u8],
+    value: Option<&[u8]>,
+) -> Result<(), StartupCrewMutationError> {
+    let player_group = Group::open(player_path)?;
+    let entry = find_crew_entry(&player_group, child_name)?;
+    let child = open_direct_child(&player_group, &entry)?;
+    let source = child.load_entry_string("ObjectInfo.txt")?;
+    let rewritten = rewrite_object_info_value(&source, key, value).ok_or_else(|| {
+        StartupCrewMutationError::InvalidCrewCore {
+            file_name: entry_name(&entry),
+        }
+    })?;
+    if player_group.is_directory() {
+        persist_object_info_to_standalone_child(&child, &rewritten)
+    } else {
+        let actual_name = std::str::from_utf8(&entry.name_bytes).map_err(|_| {
+            StartupCrewMutationError::InvalidCrewCore {
+                file_name: entry_name(&entry),
+            }
+        })?;
+        let mut mutable = MutableGroup::from_group(&player_group)?;
+        replace_mutable_child_core(&mut mutable, actual_name, rewritten)?;
+        persist_packed_group(player_path, &mutable)
+    }
+}
+
+fn replace_mutable_child_core(
+    parent: &mut MutableGroup,
+    child_name: &str,
+    source: Vec<u8>,
+) -> Result<(), StartupCrewMutationError> {
+    match parent.child_mut(child_name)? {
+        MutableGroupChildMut::Child(child) => child.add_file("ObjectInfo.txt", source)?,
+        MutableGroupChildMut::Missing | MutableGroupChildMut::File => {
+            return Err(StartupCrewMutationError::EntryNotFound {
+                file_name: child_name.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn persist_object_info_to_standalone_child(
+    child: &Group,
+    source: &[u8],
+) -> Result<(), StartupCrewMutationError> {
+    if child.is_directory() {
+        let entry = child
+            .entries()?
+            .into_iter()
+            .find(|entry| entry.name_bytes.eq_ignore_ascii_case(b"ObjectInfo.txt"))
+            .ok_or_else(|| StartupCrewMutationError::InvalidCrewCore {
+                file_name: child.root().display().to_string(),
+            })?;
+        return replace_existing_file(&child.root().join(entry.relative_path), source);
+    }
+    let mut mutable = MutableGroup::from_group(child)?;
+    mutable.add_file("ObjectInfo.txt", source.to_vec())?;
+    persist_packed_group(child.root(), &mutable)
+}
+
+fn persist_packed_group(path: &Path, group: &MutableGroup) -> Result<(), StartupCrewMutationError> {
+    let packed = group.pack()?;
+    replace_existing_file(path, &packed)
+}
+
+fn find_crew_entry(
+    player: &Group,
+    child_name: &str,
+) -> Result<GroupEntry, StartupCrewMutationError> {
+    let requested = c4_input_bytes(child_name);
+    player
+        .entries()?
+        .into_iter()
+        .find(|entry| {
+            has_crew_extension(&entry.name_bytes)
+                && entry.name_bytes.eq_ignore_ascii_case(&requested)
+        })
+        .ok_or_else(|| StartupCrewMutationError::EntryNotFound {
+            file_name: child_name.to_string(),
+        })
+}
+
+fn entry_name(entry: &GroupEntry) -> String {
+    lc_script::c4_string_from_bytes(&entry.name_bytes)
+}
+
+fn c4_input_bytes(value: &str) -> Vec<u8> {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(nul) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(nul);
+    }
+    bytes
+}
+
+fn crew_filename_from_title(title: &[u8]) -> Vec<u8> {
+    const MAX_PATH: usize = if cfg!(windows) { 260 } else { 1024 };
+    let mut title = title[..title.len().min(MAX_PATH)].to_vec();
+    let mut filename = Vec::with_capacity(title.len() + 4);
+    let mut index = 0;
+    while index < title.len() {
+        if title[index..].starts_with("§".as_bytes()) {
+            index += "§".len();
+            continue;
+        }
+        let byte = title[index];
+        index += 1;
+        let leading_whitespace = filename.is_empty() && is_c4_whitespace(byte);
+        let stripped = b"!\"\xa7%&/=?+*#:;<>\\.".contains(&byte);
+        if !leading_whitespace && !stripped {
+            filename.push(byte);
+        }
+    }
+    while filename.last().is_some_and(|byte| is_c4_whitespace(*byte)) {
+        filename.pop();
+    }
+    if filename.is_empty() {
+        filename.extend_from_slice(b"unnamed");
+    }
+    let remaining = MAX_PATH.saturating_sub(filename.len());
+    filename.extend_from_slice(&b".c4i"[..remaining.min(4)]);
+    title.clear();
+    filename
+}
+
+fn item_identical(old: &[u8], new: &[u8]) -> bool {
+    if cfg!(windows) {
+        old.eq_ignore_ascii_case(new)
+    } else {
+        old == new
+    }
+}
+
+fn rewrite_object_info_value(source: &[u8], key: &[u8], value: Option<&[u8]>) -> Option<Vec<u8>> {
+    let newline: &[u8] = if source.windows(2).any(|window| window == b"\r\n") {
+        b"\r\n"
+    } else {
+        b"\n"
+    };
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < source.len() {
+        let end = source[start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(source.len(), |offset| start + offset + 1);
+        lines.push((start, end));
+        start = end;
+    }
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut in_object_info = false;
+    let mut found_section = false;
+    let mut insertion = source.len();
+    let mut matching_line = None;
+    for (line_start, line_end) in &lines {
+        let content_end = (*line_end).saturating_sub(usize::from(
+            source.get(line_end.saturating_sub(1)) == Some(&b'\n'),
+        ));
+        let content_end = content_end.saturating_sub(usize::from(
+            source.get(content_end.saturating_sub(1)) == Some(&b'\r'),
+        ));
+        let content = &source[*line_start..content_end];
+        let trimmed = trim_c4_whitespace(content);
+        if trimmed.starts_with(b"[") && trimmed.ends_with(b"]") {
+            if in_object_info {
+                insertion = *line_start;
+                break;
+            }
+            in_object_info = trimmed == b"[ObjectInfo]";
+            found_section |= in_object_info;
+            continue;
+        }
+        if !in_object_info {
+            continue;
+        }
+        insertion = *line_end;
+        if let Some(equal) = content.iter().position(|byte| *byte == b'=') {
+            if trim_c4_whitespace(&content[..equal]) == key {
+                matching_line = Some((*line_start, *line_end));
+                break;
+            }
+        }
+    }
+    if !found_section {
+        return None;
+    }
+
+    let replacement = value.map(|value| {
+        let mut line = Vec::with_capacity(key.len() + value.len() + newline.len() + 1);
+        line.extend_from_slice(key);
+        line.push(b'=');
+        line.extend_from_slice(value);
+        line.extend_from_slice(newline);
+        line
+    });
+    let mut result = Vec::with_capacity(source.len() + replacement.as_ref().map_or(0, Vec::len));
+    if let Some((line_start, line_end)) = matching_line {
+        result.extend_from_slice(&source[..line_start]);
+        if let Some(replacement) = replacement {
+            result.extend_from_slice(&replacement);
+        }
+        result.extend_from_slice(&source[line_end..]);
+    } else if let Some(replacement) = replacement {
+        result.extend_from_slice(&source[..insertion]);
+        if insertion > 0 && !matches!(source[insertion - 1], b'\r' | b'\n') {
+            result.extend_from_slice(newline);
+        }
+        result.extend_from_slice(&replacement);
+        result.extend_from_slice(&source[insertion..]);
+    } else {
+        return Some(source.to_vec());
+    }
+    Some(result)
+}
+
+fn trim_c4_whitespace(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(|byte| is_c4_whitespace(*byte)) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(|byte| is_c4_whitespace(*byte)) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn is_c4_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+#[cfg(unix)]
+fn path_from_name_bytes(bytes: &[u8]) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes.to_vec())
+}
+
+#[cfg(not(unix))]
+fn path_from_name_bytes(bytes: &[u8]) -> std::ffi::OsString {
+    std::ffi::OsString::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+static NEXT_CREW_STAGED_PATH: AtomicU64 = AtomicU64::new(0);
+
+fn replace_existing_file(path: &Path, data: &[u8]) -> Result<(), StartupCrewMutationError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let staged = create_staged_file(parent, "new", data)?;
+    let backup = unused_staged_path(parent, "old")?;
+    if let Err(error) = fs::rename(path, &backup) {
+        let _ = fs::remove_file(&staged);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(&staged, path) {
+        let rollback = fs::rename(&backup, path);
+        let _ = fs::remove_file(&staged);
+        if let Err(rollback_error) = rollback {
+            return Err(io::Error::other(format!(
+                "crew rewrite failed ({error}); rollback failed ({rollback_error}); original remains at '{}'",
+                backup.display()
+            ))
+            .into());
+        }
+        return Err(error.into());
+    }
+    fs::remove_file(backup)?;
+    Ok(())
+}
+
+fn create_staged_file(parent: &Path, purpose: &str, data: &[u8]) -> io::Result<PathBuf> {
+    for _ in 0..1_000 {
+        let path = next_staged_path(parent, purpose);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(data).and_then(|()| file.sync_all()) {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a staged crew filename",
+    ))
+}
+
+fn unused_staged_path(parent: &Path, purpose: &str) -> io::Result<PathBuf> {
+    for _ in 0..1_000 {
+        let path = next_staged_path(parent, purpose);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(path),
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a crew backup filename",
+    ))
+}
+
+fn next_staged_path(parent: &Path, purpose: &str) -> PathBuf {
+    let unique = NEXT_CREW_STAGED_PATH.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+        ".legacyclonk-crew-{purpose}-{}-{unique}",
+        std::process::id()
+    ))
 }
 
 /// Permanently deletes a physical player group, matching
@@ -816,6 +1442,18 @@ mod tests {
         .expect("write player core");
     }
 
+    fn write_crew(player: &Path, file_name: &str, core: &str) {
+        let crew = player.join(file_name);
+        fs::create_dir_all(&crew).expect("create crew group");
+        fs::write(crew.join("ObjectInfo.txt"), core).expect("write crew core");
+    }
+
+    fn load_crew(player: &Path, file_name: &str) -> CrewInfo {
+        let player = Group::open(player).expect("open player group");
+        let child = player.open_child(file_name).expect("open crew child");
+        CrewInfo::load(&child).expect("load crew info")
+    }
+
     #[test]
     fn discovery_uses_cpp_player_path_references_and_marks_participants() {
         // C4StartupPlrSelDlg::UpdatePlayerList (C4StartupPlrSelDlg.cpp:678-733)
@@ -1194,5 +1832,139 @@ mod tests {
             lc_script::c4_string_from_bytes(&edited.read_file("Player.txt").expect("core"))
                 .contains("RankName=Captain")
         );
+    }
+
+    #[test]
+    fn crew_discovery_is_direct_and_uses_visible_descending_type_order() {
+        let root = tempdir().expect("player root");
+        let player_path = root.path().join("CrewSort.c4p");
+        write_player(&player_path, "CrewSort", 0x123456);
+        write_crew(
+            &player_path,
+            "Novice.c4i",
+            "[ObjectInfo]\nid=CLNK\nName=Novice\nRankName=Private\nTypeName=Clonk\nExperience=10\n",
+        );
+        write_crew(
+            &player_path,
+            "Veteran.c4i",
+            "[ObjectInfo]\nid=CLNK\nName=Veteran\nRankName=Captain\nTypeName=Clonk\nExperience=100\nParticipation=0\n",
+        );
+        write_crew(
+            &player_path,
+            "Wipf.c4i",
+            "[ObjectInfo]\nid=WIPF\nName=Wipf\nTypeName=Animal\nExperience=50\n",
+        );
+        write_crew(
+            &player_path.join("Roster.c4f"),
+            "Nested.c4i",
+            "[ObjectInfo]\nid=CLNK\nName=Nested\nExperience=1000\n",
+        );
+        fs::create_dir(player_path.join("Broken.c4i")).expect("broken crew group");
+
+        let player = discover_player_files_in(root.path(), &Config::new())
+            .expect("discover player")
+            .remove(0);
+        let crew = discover_crew_files(&player).expect("discover direct crew");
+
+        assert_eq!(
+            crew.iter()
+                .map(|entry| entry.file_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Veteran.c4i", "Novice.c4i", "Wipf.c4i"]
+        );
+        assert_eq!(crew[0].crew_info.experience, 100);
+        assert!(!crew[0].render_model.participating);
+        assert_eq!(crew[0].render_model.name, "Veteran");
+        assert_eq!(crew[0].render_model.rank_name, "Captain");
+        assert_eq!(crew[0].render_model.type_name, "Clonk");
+        assert_eq!(crew[0].render_model.color_dw, 0x123456);
+    }
+
+    #[test]
+    fn directory_crew_mutations_rewrite_rename_collide_and_delete() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Directory.c4p");
+        write_player(&player, "Directory", 1);
+        write_crew(
+            &player,
+            "Scout.c4i",
+            "[ObjectInfo]\nid=CLNK\nName=Scout\nExperience=7\nParticipation=1\n\n[Physical]\nWalk=80000\n",
+        );
+        write_crew(
+            &player,
+            "Target.c4i",
+            "[ObjectInfo]\nid=CLNK\nName=Target\n",
+        );
+
+        set_crew_participation(&player, "SCOUT.C4I", false).expect("disable crew");
+        assert_eq!(load_crew(&player, "Scout.c4i").participation, 0);
+        set_crew_participation(&player, "Scout.c4i", true).expect("enable crew");
+        assert_eq!(load_crew(&player, "Scout.c4i").participation, 1);
+
+        set_crew_death_message(&player, "Scout.c4i", &"x".repeat(90)).expect("set death message");
+        assert_eq!(load_crew(&player, "Scout.c4i").death_message.len(), 75);
+
+        let renamed =
+            rename_crew(&player, "Scout.c4i", "A!li.ce§").expect("rename sanitized crew filename");
+        assert_eq!(renamed, "Alice.c4i");
+        assert!(!player.join("Scout.c4i").exists());
+        assert_eq!(load_crew(&player, "Alice.c4i").name, "A!li.ce§");
+        assert!(matches!(
+            rename_crew(&player, "Alice.c4i", "Target"),
+            Err(StartupCrewMutationError::NameCollision { file_name })
+                if file_name == "Target.c4i"
+        ));
+
+        delete_crew_file(&player, "Alice.c4i").expect("delete crew");
+        assert!(!player.join("Alice.c4i").exists());
+        assert!(player.join("Target.c4i").exists());
+    }
+
+    #[test]
+    fn packed_player_crew_mutations_keep_the_parent_group_valid() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Packed.c4p");
+        let mut crew = MutableGroup::new("Crew.c4i");
+        crew.add_file(
+            "ObjectInfo.txt",
+            b"[ObjectInfo]\nid=CLNK\nName=Crew\nExperience=5\n".to_vec(),
+        )
+        .expect("crew core");
+        let mut packed = MutableGroup::new("Packed.c4p");
+        packed
+            .add_file("Player.txt", b"[Player]\nName=Packed\n".to_vec())
+            .expect("player core");
+        packed
+            .add_file("Keep.txt", b"untouched".to_vec())
+            .expect("opaque sibling");
+        packed.add_child("Crew.c4i", crew).expect("crew child");
+        fs::write(&player, packed.pack().expect("pack player")).expect("write player");
+
+        set_crew_participation(&player, "Crew.c4i", false).expect("disable packed crew");
+        set_crew_death_message(&player, "Crew.c4i", "Farewell").expect("packed death message");
+        let renamed = rename_crew(&player, "Crew.c4i", "Pack?ed").expect("rename packed crew");
+        assert_eq!(renamed, "Packed.c4i");
+
+        let reopened = Group::open(&player).expect("rewritten player remains valid");
+        assert_eq!(reopened.read_file("Keep.txt").unwrap(), b"untouched");
+        let crew = load_crew(&player, "Packed.c4i");
+        assert_eq!(crew.name, "Pack?ed");
+        assert_eq!(crew.participation, 0);
+        assert_eq!(crew.death_message, "Farewell");
+
+        delete_crew_file(&player, "Packed.c4i").expect("delete packed crew");
+        let reopened = Group::open(&player).expect("player remains valid after delete");
+        assert!(!reopened.exists("Packed.c4i"));
+        assert_eq!(reopened.read_file("Keep.txt").unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn crew_filename_sanitizer_matches_make_filename_from_title() {
+        assert_eq!(crew_filename_from_title(b"  !Bad.Name?  "), b"BadName.c4i");
+        assert_eq!(
+            crew_filename_from_title(b"!\"\xa7%&/=?+*#:;<>\\."),
+            b"unnamed.c4i"
+        );
+        assert_eq!(crew_filename_from_title(b"A  B"), b"A  B.c4i");
     }
 }

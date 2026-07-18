@@ -174,6 +174,7 @@ pub enum MessageDialogIcon {
 
 impl MessageDialogIcon {
     pub const NOTIFY: Self = Self::Standard(1);
+    pub const PLAYER: Self = Self::Standard(9);
     pub const ERROR: Self = Self::Standard(11);
     pub const CONFIRM: Self = Self::Standard(18);
 }

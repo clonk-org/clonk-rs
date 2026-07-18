@@ -157,6 +157,84 @@ fn cpp_case_insensitive_replacement_appends_the_new_entry() {
 }
 
 #[test]
+fn mutable_group_rename_is_case_insensitive_and_preserves_packed_child_metadata() {
+    let mut crew = MutableGroup::new("Veteran.c4i");
+    crew.add_file("ObjectInfo.txt", b"crew core".to_vec())
+        .unwrap();
+    let crew_crc = crew.contents_crc();
+    let crew_image = crew.pack_raw().unwrap();
+
+    let mut player = MutableGroup::new("Player.c4p");
+    player
+        .add_packed_child_with_metadata(
+            "Veteran.c4i",
+            crew_image.clone(),
+            crew_crc,
+            0x1234_5678,
+            true,
+        )
+        .unwrap();
+    let source = Group::from_memory(PathBuf::from("Player.c4p"), player.pack_raw().unwrap())
+        .expect("open source player");
+    let source_entry = source.entries().unwrap().remove(0);
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+
+    assert!(rewritten.rename_entry("vEtErAn.C4I", "Captain.c4i"));
+
+    let reopened = Group::from_memory(PathBuf::from("Player.c4p"), rewritten.pack_raw().unwrap())
+        .expect("open renamed player");
+    assert!(!reopened.exists("Veteran.c4i"));
+    assert!(reopened.exists("CAPTAIN.C4I"));
+    assert_eq!(
+        reopened.read_entry_bytes("captain.c4i").unwrap(),
+        crew_image
+    );
+    let renamed = reopened.entries().unwrap().remove(0);
+    assert_eq!(renamed.time, source_entry.time);
+    assert_eq!(renamed.executable, source_entry.executable);
+    assert_eq!(renamed.crc_state, source_entry.crc_state);
+    assert_eq!(renamed.stored_crc, source_entry.stored_crc);
+}
+
+#[test]
+fn mutable_group_rename_rejects_a_distinct_case_insensitive_target() {
+    let mut group = MutableGroup::new("Player.c4p");
+    group.add_file("Alpha.c4i", b"alpha".to_vec()).unwrap();
+    group.add_file("Bravo.c4i", b"bravo".to_vec()).unwrap();
+
+    assert!(!group.rename_entry("missing.c4i", "Renamed.c4i"));
+    assert!(!group.rename_entry("Alpha.c4i", ""));
+    assert!(!group.rename_entry("Alpha.c4i", "Bad\0Name.c4i"));
+    assert!(!group.rename_entry("ALPHA.C4I", "brAVo.C4i"));
+    assert_eq!(group.entry_names(), ["Alpha.c4i", "Bravo.c4i"]);
+    assert!(group.rename_entry("alpha.c4i", "ALPHA.C4I"));
+    assert_eq!(group.entry_names(), ["ALPHA.C4I", "Bravo.c4i"]);
+}
+
+#[test]
+fn mutable_group_rename_updates_an_expanded_childs_sort_filename() {
+    let mut child = MutableGroup::new("Unsorted.bin");
+    child.add_file("z.raw", b"last".to_vec()).unwrap();
+    child.add_file("ObjectInfo.txt", b"first".to_vec()).unwrap();
+    let mut player = MutableGroup::new("Player.c4p");
+    player.add_child("Unsorted.bin", child).unwrap();
+
+    assert!(player.rename_entry("unsorted.BIN", "Veteran.c4i"));
+
+    let packed = Group::from_memory(PathBuf::from("Player.c4p"), player.pack_raw().unwrap())
+        .expect("open player");
+    let crew = packed.open_child("VETERAN.C4I").expect("open renamed crew");
+    assert_eq!(
+        crew.entries()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name_bytes)
+            .collect::<Vec<_>>(),
+        [b"ObjectInfo.txt".to_vec(), b"z.raw".to_vec()]
+    );
+}
+
+#[test]
 fn cpp_add_entry_truncates_to_the_platform_filename_limit() {
     // AddEntry copies through SCopy(..., _MAX_FNAME): NAME_MAX (255) on Unix
     // and the CRT's 256-byte _MAX_FNAME on Windows. The 260-byte core remains
