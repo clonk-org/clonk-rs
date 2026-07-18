@@ -46573,6 +46573,87 @@ func Award()
     }
 
     #[test]
+    fn inventory_and_menu_color_modulation_alpha_fades_without_filling_background() {
+        let mut definition =
+            Definition::from_script("FADE", "Fade", "").expect("definition compiles");
+        definition.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([
+                0, 0, 0, 0xff, // opaque texel
+                0, 0, 0, 0, // transparent background texel
+            ]),
+            color_mask: None,
+        }));
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let mut object = make_object(1, "FADE", Vector2::ZERO);
+        object.color_modulation = 0x00ff_ffff;
+        let unchanged = inventory_object_picture(&engine, &object).expect("unfaded picture");
+        assert_eq!(unchanged.pixels(), &[0, 0, 0, 0xff, 0, 0, 0, 0]);
+
+        object.color_modulation = 0x80ff_ffff;
+        let inventory = inventory_object_picture(&engine, &object).expect("inventory picture");
+        assert_eq!(
+            inventory.pixels(),
+            &[0, 0, 0, 0x7f, 0, 0, 0, 0],
+            "the fast picture path subtracts C4 transparency from texel opacity"
+        );
+
+        let item = lc_engine::ObjectMenuItem {
+            caption: "Fade".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 1,
+            item_id: "FADE".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::Object { object: object.id },
+            presentation_definition_id: Some("FADE".to_string()),
+            picture_snapshot: Some(lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "FADE".to_string(),
+                symbol_size: 2,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 0,
+                color: 0,
+                color_modulation: 0x80ff_ffff,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            }),
+            picture_object: None,
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+            text_display_progress: -1,
+        };
+        let menu = object_menu_item_picture(
+            &engine,
+            &make_snapshot(Vec::new(), Vec::new()),
+            &item,
+            0,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("cached menu picture");
+        assert_eq!((menu.width(), menu.height()), (2, 2));
+        assert_eq!(
+            menu.pixels(),
+            &[0, 0, 0, 0x7f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "the menu fades opaque texels without filling transparent background or padding"
+        );
+    }
+
+    #[test]
     fn picture_overlay_transform_keeps_shear_and_projective_row_at_center() {
         // C4GraphicsOverlay::DrawPicture scales only c/f, then rebases the
         // complete matrix around the picture center. This asymmetric matrix

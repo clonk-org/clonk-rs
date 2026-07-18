@@ -760,10 +760,29 @@ mod tests {
             &src,
             Rect::new(0, 0, 1, 1),
             Point::new(0, 0),
-            Color::new(128, 0, 0, 255),
+            Color::new(128, 0, 0, 0),
         )
         .unwrap();
         assert_eq!(dest.get_pixel(0, 0), Some(Color::new(100, 0, 0, 255)));
+    }
+
+    #[test]
+    fn blit_modulation_alpha_fades_without_revealing_transparent_pixels() {
+        let mut dest = Surface::new(2, 1, PixelFormat::Rgba8888);
+        let mut src = Surface::new(2, 1, PixelFormat::Rgba8888);
+        src.set_pixel(0, 0, Color::opaque(255, 255, 255)).unwrap();
+        src.set_pixel(1, 0, Color::new(10, 20, 30, 0)).unwrap();
+
+        dest.blit_region_modulated(
+            &src,
+            Rect::new(0, 0, 2, 1),
+            Point::new(0, 0),
+            Color::new(255, 255, 255, 128),
+        )
+        .unwrap();
+
+        assert_eq!(dest.get_pixel(0, 0).map(|pixel| pixel.a), Some(127));
+        assert_eq!(dest.get_pixel(1, 0), Some(Color::transparent()));
     }
 
     #[test]

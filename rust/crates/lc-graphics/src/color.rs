@@ -33,23 +33,22 @@ impl Color {
         }
     }
 
-    /// Modulate this color by `modulation`, mirroring C++ `ModulateClr`
-    /// (`src/StdColors.h:159`): each RGB channel is `(a * b) >> 8` and the alpha
-    /// channel is the screen combine `min(a + b - ((a * b) >> 8), 0xff)`. This is
-    /// the per-pixel application of a blit's `dwModClr` (team/owner tinting, fades,
-    /// damage flashes, …). The `>> 8` (not `/ 255`) is deliberate: white·white =
-    /// `(255*255)>>8 = 254`, exactly as C++ produces, so modulated output matches
-    /// the engine bit-for-bit.
+    /// Apply a packed C4 blit modulation to this opacity-alpha texel. Each RGB
+    /// channel is `(a * b) >> 8`; `modulation.a` is C4 transparency, so the
+    /// resulting opacity is `self.a.saturating_sub(modulation.a)`. This mirrors
+    /// StdGL's texture-transparency addition (`GL_COMBINE_ALPHA = GL_ADD`), after
+    /// converting back to Rust's opacity convention. Combining two packed C4
+    /// modulation dwords is a different operation and still uses alpha screen.
+    ///
+    /// The `>> 8` (not `/ 255`) is deliberate: white·white = 254, matching the
+    /// engine's modulation channel math bit-for-bit.
     pub fn modulate_clr(self, modulation: Color) -> Color {
         let mul = |a: u8, b: u8| -> u8 { ((a as u16 * b as u16) >> 8) as u8 };
-        let screen = |a: u8, b: u8| -> u8 {
-            (a as u16 + b as u16 - ((a as u16 * b as u16) >> 8)).min(0xff) as u8
-        };
         Color {
             r: mul(self.r, modulation.r),
             g: mul(self.g, modulation.g),
             b: mul(self.b, modulation.b),
-            a: screen(self.a, modulation.a),
+            a: self.a.saturating_sub(modulation.a),
         }
     }
 
@@ -162,23 +161,42 @@ mod tests {
     }
 
     #[test]
-    fn modulate_clr_matches_cpp_modulateclr() {
-        // RGB = (a*b)>>8, exactly as C++ ModulateClr (src/StdColors.h:159).
+    fn modulate_clr_matches_c4_blit_channel_math() {
+        // RGB = (a*b)>>8, exactly as C++ modulation channel math.
         // White-by-half-grey: (200*128)>>8 = 100.
         assert_eq!(
-            Color::new(200, 200, 200, 255).modulate_clr(Color::new(128, 128, 128, 255)),
+            Color::new(200, 200, 200, 255).modulate_clr(Color::new(128, 128, 128, 0)),
             Color::new(100, 100, 100, 255)
         );
         // Parity-critical quirk: white·white = (255*255)>>8 = 254 per channel,
-        // NOT 255. Alpha screen: min(255+255-254, 255) = 255.
+        // NOT 255. A zero C4 transparency byte leaves opacity unchanged.
         assert_eq!(
-            Color::opaque(255, 255, 255).modulate_clr(Color::opaque(255, 255, 255)),
+            Color::opaque(255, 255, 255).modulate_clr(Color::new(255, 255, 255, 0)),
             Color::new(254, 254, 254, 255)
         );
         // Identity-ish: modulating by white leaves RGB nearly unchanged but shows
         // the >>8 rounding (254 not 255 for full channels).
-        let m = Color::new(255, 0, 128, 255).modulate_clr(Color::opaque(255, 255, 255));
+        let m = Color::new(255, 0, 128, 255).modulate_clr(Color::new(255, 255, 255, 0));
         assert_eq!(m, Color::new(254, 0, 127, 255));
+    }
+
+    #[test]
+    fn modulate_clr_converts_c4_transparency_to_opacity() {
+        for source_alpha in u8::MIN..=u8::MAX {
+            for modulation_alpha in u8::MIN..=u8::MAX {
+                let actual = Color::new(40, 80, 120, source_alpha).modulate_clr(Color::new(
+                    255,
+                    255,
+                    255,
+                    modulation_alpha,
+                ));
+                assert_eq!(
+                    actual.a,
+                    source_alpha.saturating_sub(modulation_alpha),
+                    "source opacity {source_alpha}, C4 transparency {modulation_alpha}"
+                );
+            }
+        }
     }
 
     #[test]
