@@ -5035,6 +5035,7 @@ fn run_integration_test(
         kind: ScenarioKind::Scenario,
         is_editable: false,
         is_playable: true,
+        mission_access: None,
         path: Some(scenario_path.to_path_buf()),
         source_paths: Vec::new(),
         root_label: None,
@@ -8909,6 +8910,9 @@ struct GameApp {
     save_browser_return_to_menu: bool,
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
+    /// Cached `C4ScenarioListLoader::Entry::CanOpen` result for the current
+    /// selector mode. Rows stay actionable; this controls label color only.
+    scenario_entry_enabled: HashMap<String, bool>,
     active_scenario: Option<FrontendScenario>,
     /// Effective definition vector from the active game. C++ backs this up
     /// across Restart/Next Mission and restores it as FixedDefinitions.
@@ -12986,6 +12990,9 @@ fn build_map_folder_data(
         } else {
             Some(load_map_folder_image(group, &scenario.overlay_image)?)
         };
+        if entry.is_some_and(|entry| !entry.has_mission_access(mission_access)) {
+            continue;
+        }
         scenarios.push(MapFolderScenarioButton {
             entry: entry.cloned(),
             base_image,
@@ -13334,6 +13341,9 @@ struct FrontendScenario {
     kind: ScenarioKind,
     is_editable: bool,
     is_playable: bool,
+    /// Scenario.txt `[Head] MissionAccess`. This is presentation/catalog
+    /// metadata only; the live process-local store decides current access.
+    mission_access: Option<String>,
     path: Option<PathBuf>,
     /// Every real/logical group path that contributed to this merged entry.
     /// `path` remains the first-root presentation source, while parity
@@ -13388,6 +13398,7 @@ impl FrontendScenario {
             kind,
             is_editable,
             is_playable,
+            mission_access,
             preview,
             title_picture,
             children,
@@ -13427,6 +13438,7 @@ impl FrontendScenario {
             kind,
             is_editable,
             is_playable,
+            mission_access,
             path: Some(path),
             source_paths,
             root_label: Some(root_label.to_string()),
@@ -13442,6 +13454,15 @@ impl FrontendScenario {
             allow_user_change,
             definition_modules,
         }
+    }
+
+    /// Mission-only visibility predicate shared by list rows and map-folder
+    /// button construction. Player-count failures deliberately do not hide
+    /// map buttons in C++.
+    fn has_mission_access(&self, access: &MissionAccessStore) -> bool {
+        self.mission_access
+            .as_deref()
+            .is_none_or(|password| password.is_empty() || access.contains(password))
     }
 
     fn location_label(&self) -> Option<String> {
@@ -13478,6 +13499,7 @@ impl FrontendScenario {
             kind: ScenarioKind::Scenario,
             is_editable: true,
             is_playable: true,
+            mission_access: None,
             path: None,
             source_paths: Vec::new(),
             root_label: None,
@@ -14269,6 +14291,7 @@ impl SavedScenarioInfo {
             kind: ScenarioKind::Scenario,
             is_editable: self.is_editable,
             is_playable: self.is_playable,
+            mission_access: None,
             path: self.path.clone(),
             source_paths: Vec::new(),
             root_label: self.root_label.clone(),
@@ -17629,6 +17652,7 @@ impl GameApp {
             save_browser_return_to_menu: false,
             mode: AppMode::Loading,
             scenario_catalog,
+            scenario_entry_enabled: HashMap::new(),
             active_scenario: None,
             active_definition_load: None,
             active_game_graphics: None,
@@ -20039,6 +20063,7 @@ impl GameApp {
                     .unwrap_or_default()
             });
         self.scenario_catalog = build_scenario_catalog(&entries);
+        self.refresh_scenario_entry_enabled();
         let selected_identifier = selected_identifier.map(str::to_string);
         self.handle_menu_input(move |menu| {
             menu.replace_discovered_entries(
@@ -20074,10 +20099,12 @@ impl GameApp {
             return Ok(());
         }
         self.scenario_catalog = build_scenario_catalog(&entries);
+        self.refresh_scenario_entry_enabled();
         let identifier = identifier.to_string();
         self.handle_menu_input(move |menu| {
             menu.replace_discovered_entries(entries, Some(&identifier), true, false)
         })?;
+        self.configure_current_folder_map();
         self.menu_state.sync_definition_checkbox_to_selection();
         self.sync_scenario_game_option_constraint();
         Ok(())
@@ -24395,6 +24422,7 @@ impl GameApp {
             kind: ScenarioKind::Scenario,
             is_editable: false,
             is_playable: true,
+            mission_access: None,
             path: Some(combined_path.clone()),
             source_paths: vec![combined_path],
             root_label: None,
@@ -29593,33 +29621,16 @@ impl GameApp {
             if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
                 if self.startup_view == StartupView::ScenarioBrowser {
                     if let Some(message) = self
-                        .scenario_mission_access_error(&scenario)
+                        .scenario_selector_open_error(&scenario, self.scenario_selector_mode)
                         .map_err(classic_parity_engine_error)?
                     {
+                        let caption = self
+                            .runtime_resource_string("IDS_MSG_CANNOTSTARTSCENARIO");
                         self.status_text.clear();
                         self.push_message_dialog(
                             lc_frontend::message_dialog::MessageDialogState::regular_ok(
                                 message,
-                                "Cannot start scenario.",
-                                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
-                            ),
-                            MessageDialogContinuation::None,
-                        )?;
-                        return Ok(());
-                    }
-                }
-                if self.startup_view == StartupView::ScenarioBrowser
-                    && self.scenario_selector_mode == ScenarioSelectorMode::Local
-                {
-                    if let Some(message) = self
-                        .local_scenario_player_count_error(&scenario)
-                        .map_err(classic_parity_engine_error)?
-                    {
-                        self.status_text.clear();
-                        self.push_message_dialog(
-                            lc_frontend::message_dialog::MessageDialogState::regular_ok(
-                                message,
-                                "Cannot start scenario.",
+                                caption,
                                 lc_frontend::message_dialog::MessageDialogIcon::ERROR,
                             ),
                             MessageDialogContinuation::None,
@@ -34308,6 +34319,7 @@ impl GameApp {
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
+        self.refresh_scenario_entry_enabled();
         self.menu_state.refresh_menu_entries();
         let width = self.graphics.surface().width() as f32;
         let height = self.graphics.surface().height() as f32;
@@ -38440,6 +38452,7 @@ impl GameApp {
                     self.assets.as_ref(),
                     &mut self.main_menu_state,
                     &mut self.menu_state,
+                    &self.scenario_entry_enabled,
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
                     self.startup_player_properties_dialog
@@ -41126,47 +41139,21 @@ impl GameApp {
         self.start_scenario_with_definition_load(scenario, definition_load)
     }
 
-    /// The first `C4ScenarioListLoader::Scenario::CanOpen` gate: scenarios
-    /// with a nonempty `[Head] MissionAccess` password stay visible but do not
-    /// start until the process-local mission-access module has been granted.
-    fn scenario_mission_access_error(
-        &self,
-        scenario: &FrontendScenario,
-    ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
-        let Some(path) = scenario.path.as_deref() else {
-            return Ok(None);
-        };
-        let Some(paths) = self.app_paths.as_ref() else {
-            return Ok(None);
-        };
-        let inspect_error = |error: &dyn fmt::Display| {
-            report_classic_parity_boundary(ClassicParityBoundary::ScenarioStartInspection {
-                path: path.to_path_buf(),
-                detail: error.to_string(),
-            })
-        };
-        let group = Group::open(path).map_err(|error| inspect_error(&error))?;
-        let head = load_classic_scenario_loader_head(&group, paths)
-            .map_err(|error| inspect_error(&error))?;
-        if head.mission_access().is_empty()
-            || self.mission_access.contains(head.mission_access())
-        {
-            return Ok(None);
-        }
-        let message = load_runtime_language_table(Some(paths))
+    fn runtime_resource_string(&self, key: &str) -> String {
+        load_runtime_language_table(self.app_paths.as_ref())
+            .or_else(|_| load_runtime_language_table(None))
             .ok()
-            .and_then(|table| table.entries.get("IDS_PRC_NOMISSIONACCESS").cloned())
-            .unwrap_or_else(|| "Access to this mission not yet granted.".to_string());
-        Ok(Some(message))
+            .and_then(|table| table.entries.get(key).cloned())
+            .unwrap_or_else(|| format!("[Undefined: {key}]"))
     }
 
-    /// Local `C4ScenarioListLoader::Scenario::CanOpen` player-count gate.
-    /// Replays bypass the regular-game checks. Savegames lift a stale zero
-    /// maximum to their effective minimum before the upper-bound comparison.
-    fn local_scenario_player_count_error(
+    fn scenario_loader_head_for_start(
         &self,
         scenario: &FrontendScenario,
-    ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
+    ) -> std::result::Result<Option<ScenarioLoaderHead>, ClassicParityBoundary> {
+        if !matches!(scenario.kind, ScenarioKind::Scenario) {
+            return Ok(None);
+        }
         let Some(path) = scenario.path.as_deref() else {
             return Ok(None);
         };
@@ -41184,9 +41171,68 @@ impl GameApp {
         let group = Group::open(path).map_err(|error| inspect_error(&error))?;
         let head = load_classic_scenario_loader_head(&group, paths)
             .map_err(|error| inspect_error(&error))?;
+        Ok(Some(head))
+    }
+
+    /// `C4ScenarioListLoader::Scenario::CanOpen`: mission access is checked
+    /// before replay/player rules and applies to local and network selectors.
+    fn scenario_selector_open_error(
+        &self,
+        scenario: &FrontendScenario,
+        selector_mode: ScenarioSelectorMode,
+    ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
+        if !scenario.has_mission_access(&self.mission_access) {
+            return Ok(Some(
+                self.runtime_resource_string("IDS_PRC_NOMISSIONACCESS"),
+            ));
+        }
+        let Some(head) = self.scenario_loader_head_for_start(scenario)? else {
+            return Ok(None);
+        };
+        if !head.mission_access().is_empty()
+            && !self.mission_access.contains(head.mission_access())
+        {
+            return Ok(Some(
+                self.runtime_resource_string("IDS_PRC_NOMISSIONACCESS"),
+            ));
+        }
+        if selector_mode == ScenarioSelectorMode::NetworkHost {
+            // Network too-few-player warnings and replay refusal belong to
+            // the host-staging parity ticket; MissionAccess never does.
+            return Ok(None);
+        }
+        self.local_scenario_player_count_error_from_head(&head)
+    }
+
+    /// Local `C4ScenarioListLoader::Scenario::CanOpen` player-count gate.
+    /// Replays bypass the regular-game checks. Savegames lift a stale zero
+    /// maximum to their effective minimum before the upper-bound comparison.
+    fn local_scenario_player_count_error(
+        &self,
+        scenario: &FrontendScenario,
+    ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
+        let Some(head) = self.scenario_loader_head_for_start(scenario)? else {
+            return Ok(None);
+        };
+        self.local_scenario_player_count_error_from_head(&head)
+    }
+
+    fn local_scenario_player_count_error_from_head(
+        &self,
+        head: &ScenarioLoaderHead,
+    ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
         if head.is_replay() {
             return Ok(None);
         }
+        let Some(paths) = self.app_paths.as_ref() else {
+            return Ok(None);
+        };
+        let inspect_error = |error: &dyn fmt::Display| {
+            report_classic_parity_boundary(ClassicParityBoundary::ScenarioStartInspection {
+                path: PathBuf::from("Config.General.Participants"),
+                detail: error.to_string(),
+            })
+        };
         let player_count =
             startup_participant_module_count(paths).map_err(|error| inspect_error(&error))?;
         if player_count < head.min_players() {
@@ -41206,6 +41252,27 @@ impl GameApp {
                 head.max_players()
             )
         }))
+    }
+
+    /// Rebuilds the label-color cache when the selector is opened or local
+    /// MissionAccess/player configuration changes. A failed inspection is a
+    /// fail-closed disabled row, while activation still reports the boundary.
+    fn refresh_scenario_entry_enabled(&mut self) {
+        let selector_mode = self.scenario_selector_mode;
+        self.scenario_entry_enabled = self
+            .scenario_catalog
+            .iter()
+            .map(|(identifier, scenario)| {
+                let enabled = match self.scenario_selector_open_error(scenario, selector_mode) {
+                    Ok(error) => error.is_none(),
+                    Err(error) => {
+                        tracing::error!(scenario = %identifier, %error, "failed to inspect scenario CanOpen state");
+                        false
+                    }
+                };
+                (identifier.clone(), enabled)
+            })
+            .collect();
     }
 
     fn scenario_seed_definition_load(&self) -> ScenarioDefinitionLoad {
@@ -43852,6 +43919,7 @@ fn draw_scensel_rename_edit(
 fn draw_scensel_dynamic(
     surface: &mut Surface,
     scenario_menu: &mut MenuState,
+    scenario_entry_enabled: &HashMap<String, bool>,
     assets: &lc_frontend::startup_scensel::ScenSelAssets,
     button_down: &ImageData,
     fonts: &lc_frontend::ClonkFontSet,
@@ -43910,18 +43978,27 @@ fn draw_scensel_dynamic(
     if scenario_menu.list_scroll_selection != Some(selected) {
         scenario_menu.ensure_list_selection_visible(viewport_height, pitch, item_h);
     }
-    let rows: Vec<(String, u32, String)> = scenario_menu
+    let rows: Vec<(String, u32, String, bool)> = scenario_menu
         .visible_entries()
         .iter()
         .map(|entry| {
             let mut title = entry.title.clone();
             Markup::strip_markup(&mut title);
-            (entry.identifier.clone(), scensel_entry_icon(entry), title)
+            let enabled = scenario_entry_enabled
+                .get(&entry.identifier)
+                .copied()
+                .unwrap_or(!matches!(entry.kind, ScenarioKind::Scenario));
+            (
+                entry.identifier.clone(),
+                scensel_entry_icon(entry),
+                title,
+                enabled,
+            )
         })
         .collect();
     let mut list_layer = surface.clone();
     let mut y = top - scenario_menu.scenario_list_scroll();
-    for (index, (identifier, icon, title)) in rows.iter().enumerate() {
+    for (index, (identifier, icon, title, enabled)) in rows.iter().enumerate() {
         if y >= bottom {
             break;
         }
@@ -43961,7 +44038,7 @@ fn draw_scensel_dynamic(
                 y,
                 *icon,
                 if is_renaming { "" } else { title },
-                true,
+                *enabled,
             );
             if is_renaming {
                 let edit_x = x + item_h + 2;
@@ -44155,6 +44232,7 @@ fn render_startup_frame(
     assets: &FrontendAssets,
     main_menu: &mut MainMenuState,
     scenario_menu: &mut MenuState,
+    scenario_entry_enabled: &HashMap<String, bool>,
     network_dialog: Option<&lc_frontend::startup_netdlg::NetDlgController>,
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
     player_properties: Option<
@@ -44272,6 +44350,7 @@ fn render_startup_frame(
                         draw_scensel_dynamic(
                             surface,
                             scenario_menu,
+                            scenario_entry_enabled,
                             &dlg_assets,
                             button_down,
                             fonts,
@@ -53498,6 +53577,7 @@ func Award()
             kind: ScenarioKind::Scenario,
             is_editable: false,
             is_playable: true,
+            mission_access: None,
             path: Some(scenario_dir.clone()),
             source_paths: Vec::new(),
             root_label: None,
@@ -55910,6 +55990,7 @@ func Award()
             kind: ScenarioKind::Scenario,
             is_editable: true,
             is_playable: true,
+            mission_access: None,
             path: None,
             source_paths: Vec::new(),
             root_label: None,
@@ -55933,6 +56014,7 @@ func Award()
             kind: ScenarioKind::Folder,
             is_editable: false,
             is_playable: false,
+            mission_access: None,
             path: None,
             source_paths: Vec::new(),
             root_label: None,
@@ -55964,6 +56046,7 @@ func Award()
             kind: ScenarioKind::Scenario,
             is_editable: false,
             is_playable: true,
+            mission_access: None,
             path: None,
             source_paths: Vec::new(),
             root_label: None,
@@ -59132,6 +59215,7 @@ func Award()
             kind: ScenarioKind::Scenario,
             is_editable: true,
             is_playable: true,
+            mission_access: None,
             path: Some(PathBuf::from("/tmp/test.c4s")),
             source_paths: Vec::new(),
             root_label: Some("Scenarios".into()),
@@ -59550,6 +59634,251 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.message_dialogs.is_empty());
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
         assert!(app.status_text.is_empty());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_mission_access_gates_rows_start_and_map_buttons_live() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated mission-gate user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        persist_config_value(&paths, "General", "LanguageEx", "DE")
+            .expect("select German mission-gate resources");
+        persist_config_value(&paths, "General", "MissionAccess", "")
+            .expect("start without mission access");
+        let scenario_root = paths.scenario_dir().to_path_buf();
+        fs::create_dir_all(&scenario_root).expect("create mission-gate scenario root");
+        for (name, core) in [
+            (
+                "Allowed.c4s",
+                "[Head]\nTitle=Allowed\nMinPlayer=1\nMaxPlayer=4\n",
+            ),
+            (
+                "Locked.c4s",
+                "[Head]\nTitle=Locked\nMinPlayer=1\nMaxPlayer=4\nMissionAccess=Secret\n\n[Definitions]\nAllowUserChange=1\n",
+            ),
+            (
+                "TooFew.c4s",
+                "[Head]\nTitle=Too few\nMinPlayer=2\nMaxPlayer=4\n",
+            ),
+        ] {
+            let path = scenario_root.join(name);
+            fs::create_dir(&path).expect("create scenario group");
+            fs::write(path.join("Scenario.txt"), core).expect("write scenario core");
+        }
+        let native_path = scenario_root.join("Native.c4s");
+        fs::create_dir(&native_path).expect("create native-byte scenario group");
+        fs::write(
+            native_path.join("Scenario.txt"),
+            b"[Head]\nTitle=Native access\nMinPlayer=1\nMaxPlayer=4\nMissionAccess=Secr\x80t\n",
+        )
+        .expect("write native-byte scenario core");
+
+        let map_path = scenario_root.join("Map.c4f");
+        let map_scenario_path = map_path.join("MapLocked.c4s");
+        fs::create_dir_all(&map_scenario_path).expect("create mission-gated map scenario");
+        fs::write(map_path.join("Folder.txt"), "[Head]\nTitle=Access Map\n")
+            .expect("write map folder core");
+        write_map_png(&map_path.join("FolderMap.png"), 8, 8, [20, 30, 40, 255]);
+        fs::write(
+            map_path.join("FolderMap.txt"),
+            "[FolderMap]\n    [Scenario]\n    File=MapLocked.c4s\n    Area=0,0,8,8\n",
+        )
+        .expect("write mission-gated map layout");
+        fs::write(
+            map_scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Map locked\nMinPlayer=1\nMaxPlayer=4\nMissionAccess=Secret\n",
+        )
+        .expect("write mission-gated map scenario core");
+
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let scenarios = resource_scenario::discover(&scenario_root)
+            .expect("discover mission-gate scenarios")
+            .into_iter()
+            .map(|entry| FrontendScenario::from_resource(entry, "Test scenarios"))
+            .collect::<Vec<_>>();
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("mission-gate menu");
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+
+        assert_eq!(app.scenario_entry_enabled.get("Allowed.c4s"), Some(&true));
+        assert_eq!(app.scenario_entry_enabled.get("Locked.c4s"), Some(&false));
+        assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&false));
+        assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s"), Some(&false));
+
+        // The dynamic renderer must pass CanOpen to ScenListItem: only the
+        // label alpha changes; icons and row activation remain intact.
+        let assets = app.assets.scensel_assets().expect("scenario assets");
+        let button_down = app
+            .assets
+            .dialog_image("GUIButtonDown.png")
+            .expect("scenario button-down plank");
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let book = app.assets.book_fonts.clone().expect("book fonts");
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        draw_scensel_dynamic(
+            &mut surface,
+            &mut app.menu_state,
+            &app.scenario_entry_enabled,
+            &assets,
+            &button_down,
+            &fonts,
+            &book,
+            startup_gamma(),
+            true,
+        )
+        .expect("render mission-gated rows");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, &fonts);
+        let item_h = lc_frontend::startup_scensel::scen_list_item_height(&book.text);
+        let label_x = layout.list.x + 3 + item_h + 2;
+        let label_top = layout.list.y + 3;
+        for (index, entry) in app.menu_state.visible_entries().iter().enumerate() {
+            let row_y = label_top + index as i32 * (item_h + 1);
+            let max_alpha = (label_x..label_x + 120)
+                .flat_map(|x| (row_y..row_y + item_h).map(move |y| (x, y)))
+                .filter_map(|(x, y)| surface.get_pixel(x as u32, y as u32))
+                .map(|color| color.a)
+                .max()
+                .unwrap_or(0);
+            let enabled = app.scenario_entry_enabled[&entry.identifier];
+            if enabled {
+                assert!(
+                    max_alpha > 200,
+                    "{} row is enabled (max alpha {max_alpha})",
+                    entry.title
+                );
+            } else {
+                assert!(
+                    max_alpha > 0 && max_alpha < 200,
+                    "{} row uses disabled 50%-black text (max alpha {max_alpha})",
+                    entry.title
+                );
+            }
+        }
+
+        let locked = app.scenario_catalog["Locked.c4s"].clone();
+        assert!(locked.is_playable, "denied rows remain actionable");
+        assert!(!locked.has_mission_access(&app.mission_access));
+        app.enter_scenario_folder("Map.c4f");
+        assert_eq!(
+            app.menu_state
+                .current_map()
+                .expect("mission-gated map view")
+                .scenarios
+                .len(),
+            0,
+            "a denied scenario produces no map button"
+        );
+        app.menu_state.leave_folder();
+        app.configure_current_folder_map();
+
+        app.menu_state.definition_checkbox_checked = true;
+        app.handle_menu_input(|_| {
+            vec![StartupMenuAction::StartScenario(
+                lc_frontend::ScenarioSummary {
+                    identifier: locked.identifier.clone(),
+                    title: locked.title.clone(),
+                    kind: ScenarioKind::Scenario,
+                },
+            )]
+        })
+        .expect("mission denial is a handled modal");
+        assert!(app.loading_state.is_none());
+        assert!(app.definition_selector.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Start nicht möglich.");
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Noch kein Zugang zu dieser Mission."
+        );
+        assert_eq!(
+            app.message_dialogs[0].state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss mission-access error");
+
+        let native_password = lc_script::c4_string_from_bytes(b"Secr\x80t");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set Alt for Mission Access");
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("open Mission Access dialog");
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("Mission Access dialog")
+                .purpose,
+            PendingInputDialogPurpose::ScenarioMissionAccess
+        );
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            " secret ".to_string(),
+        )])
+        .expect("grant and reload Mission Access");
+        assert_eq!(app.mission_access.snapshot(), "secret");
+        assert_eq!(
+            load_configured_mission_access(&paths).expect("load persisted mission access"),
+            "secret"
+        );
+        assert_eq!(app.scenario_entry_enabled.get("Locked.c4s"), Some(&true));
+        assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&false));
+        assert!(locked.has_mission_access(&app.mission_access));
+        app.enter_scenario_folder("Map.c4f");
+        assert_eq!(
+            app.menu_state
+                .current_map()
+                .expect("granted map view")
+                .scenarios
+                .len(),
+            1,
+            "Alt+M grant immediately enables map-button creation after reload"
+        );
+        app.menu_state.leave_folder();
+        app.configure_current_folder_map();
+
+        // The classic text dialog cannot synthesize an arbitrary native byte,
+        // but the same live apply path must preserve one loaded from config.
+        app.apply_scenario_mission_access(&native_password)
+            .expect("apply native-byte mission access");
+        assert_eq!(
+            app.mission_access.snapshot(),
+            format!("secret;{native_password}")
+        );
+        assert_eq!(app.scenario_entry_enabled.get("Native.c4s"), Some(&true));
+        assert_eq!(app.scenario_entry_enabled.get("TooFew.c4s"), Some(&false));
+        assert_eq!(
+            app.scenario_selector_open_error(
+                &app.scenario_catalog["Native.c4s"],
+                ScenarioSelectorMode::Local,
+            )
+            .expect("inspect native-byte access"),
+            None,
+            "granted native bytes survive both catalog and loader-head parsers"
+        );
+
+        app.menu_state.definition_checkbox_checked = true;
+        app.handle_menu_input(|_| {
+            vec![StartupMenuAction::StartScenario(
+                lc_frontend::ScenarioSummary {
+                    identifier: locked.identifier.clone(),
+                    title: locked.title.clone(),
+                    kind: ScenarioKind::Scenario,
+                },
+            )]
+        })
+        .expect("granted mission continues through DoOK");
+        assert!(app.message_dialogs.is_empty());
+        assert!(
+            app.definition_selector.is_some(),
+            "the same catalog entry proceeds to the start flow after grant"
+        );
         reset_cached_app_paths();
     }
 
@@ -63725,6 +64054,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         draw_scensel_dynamic(
             &mut focused,
             &mut app.menu_state,
+            &app.scenario_entry_enabled,
             &assets,
             &button_down,
             &fonts,
@@ -63736,6 +64066,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         draw_scensel_dynamic(
             &mut suppressed,
             &mut app.menu_state,
+            &app.scenario_entry_enabled,
             &assets,
             &button_down,
             &fonts,
@@ -68639,11 +68970,7 @@ ScenInfoArea=70,5,25,90
         .expect("FolderMap data");
         let alpha = map_test_scenario(&map_path, "Alpha.c4s", "Alpha Mission");
         let beta = map_test_scenario(&map_path, "Beta.c4s", "Beta Mission");
-        let gamma = map_test_scenario(&map_path, "Gamma.c4s", "Gamma Mission");
-        let folder = map_test_folder(
-            &map_path,
-            vec![alpha.clone(), beta.clone(), gamma.clone()],
-        );
+        let folder = map_test_folder(&map_path, vec![alpha.clone(), beta.clone()]);
         let mut app = new_menu_app(640, 480);
         app.mission_access = MissionAccessStore::new("Other; mappass ");
 
@@ -68654,14 +68981,8 @@ ScenInfoArea=70,5,25,90
         assert_eq!(map.scenarios.len(), 3);
         assert_eq!(map.scenarios[0].title, "Play Alpha Mission");
         assert_eq!(map.scenarios[1].title, "Visit Beta Mission now");
-        assert_eq!(
-            map.scenarios[2]
-                .entry
-                .as_ref()
-                .map(|entry| entry.identifier.as_str()),
-            Some(gamma.identifier.as_str()),
-            "every configured scenario entry gets a map button"
-        );
+        assert!(map.scenarios[2].entry.is_none());
+        assert_eq!(map.scenarios[2].title, "<c ff0000>ERROR</c>");
         assert_eq!(map.access_overlays.len(), 2);
         assert_eq!(
             map.access_overlays[0]
@@ -68748,12 +69069,15 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn folder_map_locked_button_stays_visible_but_shared_do_ok_rejects_it() {
+    fn folder_map_hides_locked_button_until_access_is_granted() {
         let _lock = env_lock().lock();
         reset_cached_app_paths();
-        let root = tempdir().expect("locked FolderMap fixture");
-        let map_path = root.path().join("Map.c4f");
-        fs::create_dir(&map_path).expect("map folder");
+        let user_data = tempdir().expect("locked FolderMap user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "MissionAccess", "OtherPass")
+            .expect("configure unrelated mission access");
+        let map_path = paths.scenario_dir().join("Map.c4f");
+        fs::create_dir_all(&map_path).expect("map folder");
         write_map_png(&map_path.join("FolderMap.png"), 8, 8, [20, 30, 40, 255]);
         fs::write(
             map_path.join("FolderMap.txt"),
@@ -68767,15 +69091,9 @@ ScenInfoArea=70,5,25,90
             "[Head]\nTitle=Locked Mission\nMissionAccess=MissingPass\n",
         )
         .expect("locked scenario core");
-        let locked = map_test_scenario(&map_path, "Locked.c4s", "Locked Mission");
-        let folder = map_test_folder(&map_path, vec![locked]);
-        let user_data = tempdir().expect("locked FolderMap user data");
-        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        persist_config_value(&paths, "General", "MissionAccess", "OtherPass")
-            .expect("configure unrelated mission access");
         let mut app = new_menu_app_with_paths(640, 480, &paths);
-
-        open_map_test_folder(&mut app, folder);
+        app.open_scenario_browser();
+        app.enter_scenario_folder("Map.c4f");
 
         assert_eq!(
             app.menu_state
@@ -68783,19 +69101,22 @@ ScenInfoArea=70,5,25,90
                 .expect("map view active")
                 .scenarios
                 .len(),
-            1,
-            "current C++ creates the button before CanOpen enforces access"
+            0,
+            "a denied real scenario has no map button or base image"
         );
-        app.handle_menu_input(|menu| {
-            menu.activate_map_button(0).into_iter().collect()
-        })
-        .expect("mission denial is a handled modal");
-        assert_eq!(app.mode, AppMode::Menu);
-        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-        assert_eq!(app.message_dialogs.len(), 1);
+
+        app.apply_scenario_mission_access("MissingPass")
+            .expect("grant, persist, and reload mission access");
+        assert_eq!(app.mission_access.snapshot(), "OtherPass;MissingPass");
+        app.enter_scenario_folder("Map.c4f");
         assert_eq!(
-            app.message_dialogs[0].state.message(),
-            "Access to this mission not yet granted."
+            app.menu_state
+                .current_map()
+                .expect("map view restored")
+                .scenarios
+                .len(),
+            1,
+            "granting the module creates the map button on rebuild"
         );
         reset_cached_app_paths();
     }
@@ -68806,7 +69127,8 @@ ScenInfoArea=70,5,25,90
         let map_path = root.path().join("Map.c4f");
         fs::create_dir(&map_path).expect("map folder");
         write_map_png(&map_path.join("FolderMap.png"), 4, 4, [10, 20, 30, 255]);
-        let child = map_test_scenario(&map_path, "Alpha.c4s", "Alpha");
+        let mut child = map_test_scenario(&map_path, "Alpha.c4s", "Alpha");
+        child.mission_access = Some("Never".to_string());
         let folder = map_test_folder(&map_path, vec![child]);
         let access = MissionAccessStore::default();
 
@@ -68845,6 +69167,23 @@ ScenInfoArea=70,5,25,90
             )
             .is_none(),
             "even an inaccessible named image is loaded before access filtering"
+        );
+
+        fs::write(
+            map_path.join("FolderMap.txt"),
+            "[FolderMap]\n    [Scenario]\n    File=Alpha.c4s\n    BaseImage=Missing.png\n",
+        )
+        .expect("denied scenario with missing image map");
+        assert!(
+            load_map_folder_data(
+                &folder,
+                640,
+                480,
+                &access,
+                &["US".to_string()],
+            )
+            .is_none(),
+            "a denied scenario image is still loaded before the button is filtered"
         );
     }
 
@@ -68909,6 +69248,20 @@ ScenInfoArea=70,5,25,90
         )
         .expect("later contributing map loads");
         assert_eq!(map.source_path, later);
+    }
+
+    #[test]
+    fn merged_scenario_keeps_first_root_mission_access_requirement() {
+        let mut unlocked = FrontendScenario::fallback();
+        unlocked.identifier = "Duplicate.c4s".to_string();
+        let mut locked = unlocked.clone();
+        locked.mission_access = Some("Secret".to_string());
+
+        let user_first = merge_frontend_scenarios(vec![unlocked.clone(), locked.clone()]);
+        assert_eq!(user_first[0].mission_access, None);
+
+        let install_first = merge_frontend_scenarios(vec![locked, unlocked]);
+        assert_eq!(install_first[0].mission_access.as_deref(), Some("Secret"));
     }
 
     #[test]

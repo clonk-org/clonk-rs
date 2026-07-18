@@ -760,8 +760,8 @@ pub struct ScenarioLoaderMetadata {
 pub struct ScenarioLoaderHead {
     loader: ScenarioLoaderMetadata,
     font: String,
-    origin: Option<String>,
     mission_access: String,
+    origin: Option<String>,
     definition_modules: Vec<String>,
     local_only: bool,
     effective_min_players: i32,
@@ -835,8 +835,8 @@ impl ScenarioLoaderHead {
                 configured_specification: manifest.core.head.loader.clone(),
             },
             font: manifest.core.head.font.clone(),
-            origin: manifest.core.head.origin.clone(),
             mission_access: manifest.core.head.mission_access.clone(),
+            origin: manifest.core.head.origin.clone(),
             definition_modules: manifest.definition_specs,
             local_only: manifest.core.definitions.local_only,
             effective_min_players: legacy_effective_min_players(&manifest.core),
@@ -857,15 +857,15 @@ impl ScenarioLoaderHead {
         &self.font
     }
 
+    /// Raw `Head.MissionAccess` after the scenario compiler's RCT_All
+    /// adaptation. Empty means the scenario is not access-gated.
+    pub fn mission_access(&self) -> &str {
+        &self.mission_access
+    }
+
     /// Raw Scenario.txt Origin after StdCompiler string adaptation.
     pub fn origin(&self) -> Option<&str> {
         self.origin.as_deref()
-    }
-
-    /// Raw `[Head] MissionAccess` password used by
-    /// `C4ScenarioListLoader::Scenario::CanOpen`.
-    pub fn mission_access(&self) -> &str {
-        &self.mission_access
     }
 
     pub fn configured_definition_modules(&self) -> &[String] {
@@ -5280,7 +5280,7 @@ impl LegacyHead {
                 }
                 "missionaccess" => {
                     if !raw.is_empty() {
-                        self.mission_access = raw.to_string();
+                        self.mission_access = truncate_legacy_c4_string(raw.to_string(), 512);
                     }
                 }
                 "networkgame" => {
@@ -6702,8 +6702,7 @@ fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifes
     // carry its terminating NUL in the stored size; anything after the first
     // NUL is invisible to C++ and must not influence loader metadata.
     let visible_len = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    let text = String::from_utf8(bytes[..visible_len].to_vec())
-        .map_err(|_| ScenarioError::LegacyCoreEncoding)?;
+    let text = lc_script::c4_string_from_bytes(&bytes[..visible_len]);
     parse_legacy_scenario_text(&text)
 }
 
@@ -7257,7 +7256,7 @@ fn apply_scenario_rct_all_strings(
             core.head.engine = value;
         }
         if let Some(value) = raw("head", "MissionAccess") {
-            core.head.mission_access = value;
+            core.head.mission_access = truncate_legacy_c4_string(value, 512);
         }
         if let Some(value) = raw("head", "Origin") {
             core.head.origin = Some(validate_subpath_filename(value));
@@ -8777,6 +8776,12 @@ fn truncate_legacy_string(value: String, max_bytes: usize) -> String {
     } else {
         String::from_utf8_lossy(&value.as_bytes()[..max_bytes]).into_owned()
     }
+}
+
+fn truncate_legacy_c4_string(value: String, max_bytes: usize) -> String {
+    let mut bytes = lc_script::c4_string_bytes(&value);
+    bytes.truncate(max_bytes);
+    lc_script::c4_string_from_bytes(&bytes)
 }
 
 fn parse_std_string(raw: &str) -> String {
@@ -14731,6 +14736,7 @@ RandomTeamCount=2
                 "MaxPlayer=0\n",
                 "SaveGame=1\n",
                 "Replay=0\n",
+                "MissionAccess=Secret\n",
                 "\n",
                 "[Game]\n",
                 "Mode=1\n",
@@ -14744,6 +14750,23 @@ RandomTeamCount=2
         assert_eq!(head.max_players(), 0);
         assert!(head.is_save_game());
         assert!(!head.is_replay());
+        assert_eq!(head.mission_access(), "Secret");
+    }
+
+    #[test]
+    fn loader_head_retains_native_byte_and_capped_mission_access() {
+        let directory = tempdir().expect("scenario directory");
+        let mut core = b"[Head]\nMissionAccess=Secr\x80t".to_vec();
+        core.extend(std::iter::repeat_n(b'A', 520));
+        core.extend_from_slice(b"\n");
+        std::fs::write(directory.path().join("Scenario.txt"), core)
+            .expect("native-byte scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let access = lc_script::c4_string_bytes(head.mission_access());
+        assert_eq!(&access[..6], b"Secr\x80t");
+        assert_eq!(access.len(), 512, "C4MaxTitle truncates the fixed buffer");
     }
 
     #[test]

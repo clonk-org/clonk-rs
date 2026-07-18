@@ -101,6 +101,9 @@ pub struct ScenarioEntry {
     pub kind: ScenarioEntryKind,
     pub is_editable: bool,
     pub is_playable: bool,
+    /// Scenario.txt `[Head] MissionAccess`; kept separate from `is_playable`
+    /// because grants can change while the catalog remains loaded.
+    pub mission_access: Option<String>,
     pub preview: Option<ScenarioPreview>,
     /// The right-page Title.png/Title.bmp picture (C4ScenarioListLoader::
     /// Entry fctTitle, C4StartupScenSelDlg.cpp:532-534); shares pixel data
@@ -132,6 +135,7 @@ struct LegacyCoreInfo {
     difficulty: Option<i32>,
     save_game: Option<bool>,
     replay: Option<bool>,
+    mission_access: Option<String>,
     local_only: Option<bool>,
     allow_user_change: Option<bool>,
     definition_modules: Vec<String>,
@@ -459,8 +463,117 @@ fn legacy_core_info(group: &Group) -> Result<Option<LegacyCoreInfo>, ScenarioDis
     };
 
     let text = decode_legacy_text(&bytes);
+    let mut info = parse_legacy_core_info(&text);
+    // Mission passwords are opaque native bytes, unlike presentation text.
+    // Reparse just this field through the C4 string byte projection so it
+    // compares losslessly with Config.General.MissionAccess.
+    let visible_len = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let native_text = lc_script::c4_string_from_bytes(&bytes[..visible_len]);
+    info.mission_access = parse_legacy_mission_access(&native_text);
 
-    Ok(Some(parse_legacy_core_info(&text)))
+    Ok(Some(info))
+}
+
+/// Reads the first exact `[Head] MissionAccess` value through RCT_All. Unlike
+/// the older presentation-metadata parser below, this preserves native bytes,
+/// inline `//`, and trailing spaces; section/key names are case-sensitive.
+fn parse_legacy_mission_access(text: &str) -> Option<String> {
+    struct Node {
+        name: String,
+        value: Option<String>,
+        section: bool,
+        indent: isize,
+        parent: usize,
+    }
+
+    let mut nodes = vec![Node {
+        name: String::new(),
+        value: None,
+        section: true,
+        indent: -1,
+        parent: 0,
+    }];
+    let mut current = 0usize;
+
+    for raw_line in text.split_inclusive('\n').flat_map(|line| {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        line.split('\r')
+    }) {
+        let indent = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+            .count();
+        let bytes = raw_line.as_bytes();
+        let mut position = indent;
+        let section = bytes.get(position) == Some(&b'[')
+            && bytes
+                .get(position + 1)
+                .is_some_and(u8::is_ascii_alphabetic);
+        if section {
+            position += 1;
+        } else if !bytes
+            .get(position)
+            .is_some_and(u8::is_ascii_alphabetic)
+        {
+            continue;
+        }
+        let name_start = position;
+        while bytes
+            .get(position)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_'))
+        {
+            position += 1;
+        }
+        let name = &raw_line[name_start..position];
+        while bytes
+            .get(position)
+            .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+        {
+            position += 1;
+        }
+        let expected = if section { b']' } else { b'=' };
+        if bytes.get(position) != Some(&expected) {
+            continue;
+        }
+        position += 1;
+        let node_indent = (indent + usize::from(!section)) as isize;
+        while current != 0 && nodes[current].indent >= node_indent {
+            current = nodes[current].parent;
+        }
+        let index = nodes.len();
+        nodes.push(Node {
+            name: name.to_string(),
+            value: (!section).then(|| raw_line[position..].to_string()),
+            section,
+            indent: node_indent,
+            parent: current,
+        });
+        if section {
+            current = index;
+        }
+    }
+
+    let head = nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.parent == 0 && node.section && node.name == "Head")
+        .map(|(index, _)| index)?;
+    let raw = nodes
+        .iter()
+        .find(|node| {
+            node.parent == head && !node.section && node.name == "MissionAccess"
+        })?
+        .value
+        .as_deref()?
+        .trim_start_matches([' ', '\t']);
+    if raw.is_empty() {
+        return None;
+    }
+    let mut bytes = lc_script::c4_string_bytes(raw);
+    bytes.truncate(512); // C4MaxTitle, the fixed MissionAccess buffer.
+    Some(lc_script::c4_string_from_bytes(&bytes))
 }
 
 fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
@@ -802,6 +915,9 @@ fn build_scenario_entry(
         kind: ScenarioEntryKind::Scenario,
         is_editable: group.is_directory(),
         is_playable: true,
+        mission_access: legacy
+            .as_ref()
+            .and_then(|info| info.mission_access.clone()),
         preview,
         title_picture,
         children: Vec::new(),
@@ -857,6 +973,7 @@ fn build_folder_entry(
         kind: ScenarioEntryKind::Folder,
         is_editable: group.is_directory(),
         is_playable: false,
+        mission_access: None,
         preview,
         title_picture,
         children,
@@ -1816,6 +1933,104 @@ mod tests {
     // [Definitions] LocalOnly/AllowUserChange feed the "Choose definitions"
     // checkbox (C4StartupScenSelDlg.cpp:1590-1599; defaults false,
     // C4Scenario.cpp:150,482-483). Version.txt feeds the version line.
+    #[test]
+    fn discovers_native_byte_mission_access_without_changing_playability() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Locked.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            b"[Head]\nTitle=Locked\nMissionAccess=Secr\x80t\n",
+        )
+        .unwrap();
+
+        let entries = discover(dir.path()).expect("discover locked scenario");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_playable, "access does not change row actions");
+        assert_eq!(
+            lc_script::c4_string_bytes(
+                entries[0]
+                    .mission_access
+                    .as_deref()
+                    .expect("mission access metadata"),
+            ),
+            b"Secr\x80t"
+        );
+    }
+
+    #[test]
+    fn discovery_ignores_mission_access_after_the_native_nul() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Nul.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            b"[Head]\nTitle=Visible\0\nMissionAccess=Invisible\n",
+        )
+        .unwrap();
+
+        let entries = discover(dir.path()).expect("discover NUL-terminated scenario");
+        assert_eq!(entries[0].mission_access, None);
+    }
+
+    #[test]
+    fn mission_access_uses_the_first_head_key_even_when_empty() {
+        let empty_first = parse_legacy_mission_access(
+            "[Head]\nMissionAccess=\nMissionAccess=MustNotWin\n",
+        );
+        assert_eq!(empty_first, None);
+
+        let first = parse_legacy_mission_access(
+            "[Head]\nMissionAccess=Secret\nMissionAccess=Ignored\n",
+        );
+        assert_eq!(first.as_deref(), Some("Secret"));
+    }
+
+    #[test]
+    fn mission_access_uses_exact_names_and_preserves_rct_all_bytes() {
+        assert_eq!(
+            parse_legacy_mission_access(
+                "MissionAccess=Root\n[head]\nMissionAccess=WrongSection\n",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_legacy_mission_access(
+                "\u{feff}[Head]\nMissionAccess=BomMustNotOpenHead\n",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_legacy_mission_access(
+                "[Head]\nmissionaccess=WrongKey\nMissionAccess=Secret//part  \n",
+            )
+            .as_deref(),
+            Some("Secret//part  ")
+        );
+        assert_eq!(
+            parse_legacy_mission_access("    [Head]\nMissionAccess=NestedRootKey\n"),
+            None,
+            "a dedented key is not a child of an indented Head"
+        );
+        assert_eq!(
+            parse_legacy_mission_access(
+                "[Head]\n [Nested]\nMissionAccess=BackInHead\n",
+            )
+            .as_deref(),
+            Some("BackInHead"),
+            "dedenting from a nested section restores Head ownership"
+        );
+
+        let oversized = format!("[Head]\nMissionAccess={}\n", "A".repeat(520));
+        assert_eq!(
+            lc_script::c4_string_bytes(
+                &parse_legacy_mission_access(&oversized).expect("capped access")
+            )
+            .len(),
+            512
+        );
+    }
+
     #[test]
     fn reads_definitions_flags_and_version() {
         let dir = tempdir().unwrap();

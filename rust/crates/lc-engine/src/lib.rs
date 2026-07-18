@@ -16407,6 +16407,9 @@ fn mission_access_store_can_be_shared_across_engines() {
 
     first.mission_access.inner.borrow_mut().push_str(";Second");
     assert_eq!(&*second.mission_access.inner.borrow(), "First;Second");
+    assert!(second.mission_access.contains("first"));
+    assert!(second.mission_access.contains("SECOND"));
+    assert!(!second.mission_access.contains("Fir"));
 }
 
 #[cfg(test)]
