@@ -1815,6 +1815,7 @@ fn resolve_game_graphics_resources(
         energy_bars: Some(load("EnergyBars")?),
         select_mark: Some(load("SelectMark")?),
         control: Some(load("Control")?),
+        gamepad: Some(load("Gamepad")?),
         background: Some(load("Background")?),
     };
     let options = Some(Arc::new(load("Options")?));
@@ -3484,6 +3485,7 @@ impl FrontendAssets {
             "EnergyBars.png",
             "SelectMark.png",
             "Control.png",
+            "Gamepad.png",
             "Background.png",
         ]
         .into_iter()
@@ -4286,6 +4288,7 @@ impl FrontendAssets {
             energy_bars: load("EnergyBars.png"),
             select_mark: load("SelectMark.png"),
             control: load("Control.png"),
+            gamepad: load("Gamepad.png"),
             background: load("Background.png"),
         };
 
@@ -8080,7 +8083,7 @@ struct GameApp {
     /// Process-global C4ChatInputDialog projection for ordinary game chat.
     running_chat: Option<RunningChatState>,
     message_input_history: VecDeque<String>,
-    /// `C4Player::ShowStartup` for the local player: keyboard hint + name
+    /// `C4Player::ShowStartup` for the local player: device hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).
     show_startup_hint: bool,
     /// `LC_APP_HUD_DEBUG=1`: draw the FRAME/POS/VEL debug lines on top of
@@ -37208,9 +37211,17 @@ fn collect_player_overlays(
             eliminated: player.eliminated,
             owner_color,
             select_count,
-            show_startup: detail_map
+            show_startup: snapshot.hud.local_players.contains(&player.owner)
+                && detail_map
+                    .get(&player.owner)
+                    .is_some_and(|state| state.show_startup),
+            control_set: detail_map
                 .get(&player.owner)
-                .is_some_and(|state| state.show_startup),
+                .map(|state| state.control_set)
+                .unwrap_or(-1),
+            mouse_control: detail_map
+                .get(&player.owner)
+                .is_some_and(|state| state.mouse_control != 0),
             show_control,
             show_control_position,
             last_com,
@@ -46980,7 +46991,7 @@ func Award()
                 messages: Vec::new(),
                 scoreboard: Default::default(),
                 scoreboard_presentations: Vec::new(),
-                local_players: Vec::new(),
+                local_players: vec![1],
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
@@ -47002,6 +47013,8 @@ func Award()
             crew: vec![focus, teammate],
             select_count: 1,
             show_startup: true,
+            control_set: 6,
+            mouse_control: -2,
             show_control: 1 | 1 << 10,
             show_control_position: 3,
             control: lc_engine::PlayerControlState {
@@ -47043,6 +47056,8 @@ func Award()
         // HUD projection consumes C4Player's cached SelectCount.
         assert_eq!(player.select_count, 1);
         assert!(player.show_startup, "startup hint owner matches");
+        assert_eq!(player.control_set, 6, "runtime GamePad3 set is projected");
+        assert!(player.mouse_control, "any nonzero MouseControl is true");
         assert_eq!(player.show_control, 1 | 1 << 10);
         assert_eq!(player.show_control_position, 3);
         assert_eq!(player.last_com, 5);
@@ -47055,6 +47070,14 @@ func Award()
                     .expect("throw has a default binding")
             )
         );
+
+        snapshot.hud.local_players.clear();
+        let remote_overlay = collect_player_overlays(&engine, &snapshot, Some(focus), &bindings);
+        assert!(
+            !remote_overlay[0].show_startup,
+            "C++ suppresses startup hints for non-local players"
+        );
+        snapshot.hud.local_players.push(1);
 
         let mut focused = player
             .crew
@@ -47113,6 +47136,16 @@ func Award()
                 .map(|crew| (crew.hide_hud_elements, crew.hide_hud_bars)),
             Some((0, 0))
         );
+    }
+
+    #[test]
+    fn hud_graphics_loads_gamepad_startup_phases() {
+        let paths = AppPaths::discover().expect("discover repository install");
+        let graphics = GraphicsResource::open(paths.planet_dir().join("Graphics.c4g"))
+            .expect("open Graphics.c4g");
+        let hud = FrontendAssets::load_hud_graphics(&graphics);
+        let gamepad = hud.gamepad.as_ref().expect("Gamepad.png loaded into HUD");
+        assert_eq!((gamepad.width(), gamepad.height()), (320, 36));
     }
 
     #[test]
@@ -57304,6 +57337,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "EnergyBars",
             "SelectMark",
             "Control",
+            "Gamepad",
             "Background",
             "Options",
         ] {
@@ -57345,6 +57379,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         fs::write(scenario_path.join("C4.pal"), scenario_palette)
             .expect("scenario C4.pal");
         write_preview_png(&scenario_path.join("Control.png"), [80, 90, 100, 255]);
+        write_preview_png(&scenario_path.join("Gamepad.png"), [140, 150, 160, 255]);
         write_preview_png(&scenario_path.join("Options.png"), [110, 120, 130, 255]);
         let mut embedded_palette = [[0_u8; 3]; 256];
         embedded_palette[10] = [0, 255, 0];
@@ -57397,6 +57432,16 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .expect("scenario control")
                 .pixels(),
             [80, 90, 100, 255]
+        );
+        assert_eq!(
+            active
+                .hud_graphics
+                .gamepad
+                .as_ref()
+                .expect("scenario gamepad")
+                .pixels(),
+            [140, 150, 160, 255],
+            "the active group set reloads the startup gamepad facet"
         );
         assert_eq!(active.palette.color(6), Color::opaque(12, 16, 20));
         assert_eq!(

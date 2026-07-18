@@ -10,8 +10,8 @@
 //!   with `C4ObjectInfo::Draw` (src/C4ObjectInfo.cpp:302-371) — portrait,
 //!   rank symbol, crew name and the vertical energy bar.
 //! - Player startup hint: `C4Viewport::DrawPlayerStartup`
-//!   (src/C4Viewport.cpp:1446-1476) — keyboard graphic and player name in
-//!   the player color.
+//!   (src/C4Viewport.cpp:1446-1476) — keyboard/gamepad graphic, optional
+//!   mouse symbol, and player name in the player color.
 //! - Message board: `C4MessageBoard::Draw` (src/C4MessageBoard.cpp:243-306)
 //!   — one log line over the tiled background strip at the screen bottom.
 
@@ -34,6 +34,11 @@ pub const SYMBOL_BORDER: i32 = 5;
 pub const DRAW_MESSAGE_OFFSET: i32 = -35;
 /// `fctKeyboard` cell inside Control.png (src/C4GraphicsResource.cpp:201).
 const KEYBOARD_CELL: (u32, u32) = (80, 36);
+/// `fctMouse` inside Control.png (src/C4GraphicsResource.cpp:205).
+const MOUSE_SOURCE: (u32, u32, u32, u32) = (198, 100, 32, 32);
+/// `fctGamepad` is loaded with an 80px phase width and the image's full
+/// height (src/C4GraphicsResource.cpp:229).
+const GAMEPAD_CELL_WIDTH: u32 = 80;
 /// White HUD text (`CStdDDraw::DEFAULT_MESSAGE_COLOR`, src/StdDDraw2.h:361).
 const MESSAGE_COLOR: Color = Color::opaque(255, 255, 255);
 /// FontRegular is the 14px main font (`C4Fonts.cpp:280-288`); the fallback
@@ -1584,7 +1589,7 @@ fn draw_bar(
 }
 
 /// `C4Viewport::DrawPlayerStartup` (src/C4Viewport.cpp:1446-1476):
-/// keyboard graphic + player name in the player color.
+/// keyboard/gamepad graphic, optional mouse symbol, and player name.
 pub fn draw_player_startup(
     surface: &mut Surface,
     font: &HudFont<'_>,
@@ -1592,6 +1597,8 @@ pub fn draw_player_startup(
     viewport: SurfaceRect,
     player_name: &str,
     player_color: Color,
+    control_set: i32,
+    mouse_control: bool,
 ) {
     draw_player_startup_with_gamma(
         surface,
@@ -1600,6 +1607,8 @@ pub fn draw_player_startup(
         viewport,
         player_name,
         player_color,
+        control_set,
+        mouse_control,
         None,
     );
 }
@@ -1612,33 +1621,72 @@ pub(crate) fn draw_player_startup_with_gamma(
     viewport: SurfaceRect,
     player_name: &str,
     player_color: Color,
+    control_set: i32,
+    mouse_control: bool,
     gamma: Option<&GammaRamp>,
 ) {
     let (cell_w, cell_h) = KEYBOARD_CELL;
+    let dest_x = viewport.x + (viewport.width as i32 - cell_w as i32) / 2;
+    let dest_y = viewport.y + viewport.height as i32 * 2 / 3 + DRAW_MESSAGE_OFFSET;
     let mut name_height_off = 0;
-    if let Some(control) = hud.control.as_ref() {
-        if control.width() >= cell_w && control.height() >= cell_h {
-            // fctKeyboard phase 0 = keyboard set 1
-            // (src/C4Viewport.cpp:1461-1466).
+
+    // MouseControl is independent of the keyboard/gamepad branch and draws
+    // first, so the later control facet wins in their overlap.
+    if mouse_control {
+        if let Some(control) = hud.control.as_ref() {
+            let (src_x, src_y, src_w, src_h) = MOUSE_SOURCE;
             draw_hud_image_strip(
                 surface,
-                viewport.x + (viewport.width as i32 - cell_w as i32) / 2,
-                viewport.y + viewport.height as i32 * 2 / 3 + DRAW_MESSAGE_OFFSET,
+                dest_x + 55,
+                dest_y - 10,
                 control,
-                0,
+                src_x,
+                src_y,
+                src_w,
+                src_h,
+                gamma,
+            );
+        }
+    }
+
+    if (0..=3).contains(&control_set) {
+        if let Some(control) = hud.control.as_ref() {
+            draw_hud_image_strip(
+                surface,
+                dest_x,
+                dest_y,
+                control,
+                control_set as u32 * cell_w,
                 0,
                 cell_w,
                 cell_h,
                 gamma,
             );
-            name_height_off = cell_h as i32;
+        }
+        name_height_off = cell_h as i32;
+    } else if (4..=7).contains(&control_set) {
+        if let Some(gamepad) = hud.gamepad.as_ref() {
+            let gamepad_height = gamepad.height();
+            draw_hud_image_strip(
+                surface,
+                dest_x,
+                dest_y,
+                gamepad,
+                (control_set as u32 - 4) * GAMEPAD_CELL_WIDTH,
+                0,
+                GAMEPAD_CELL_WIDTH,
+                gamepad_height,
+                gamma,
+            );
+            name_height_off = gamepad_height as i32;
         }
     }
+
     // Name in ColorDw | 0xff000000, centered (src/C4Viewport.cpp:1471-1475).
     font.draw_with_gamma(
         surface,
         viewport.x + viewport.width as i32 / 2,
-        viewport.y + viewport.height as i32 * 2 / 3 + name_height_off + DRAW_MESSAGE_OFFSET,
+        dest_y + name_height_off,
         player_name,
         Color::opaque(player_color.r, player_color.g, player_color.b),
         TextAlign::Center,
@@ -1829,7 +1877,33 @@ pub(crate) fn draw_message_board_with_gamma(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_graphics::PixelFormat;
+    use lc_graphics::{FontMetrics, PixelFormat, TextFont};
+
+    struct MarkerFont;
+
+    impl TextFont for MarkerFont {
+        fn measure_text(&self, _text: &str, _font_size: f32) -> FontMetrics {
+            FontMetrics {
+                width: 1.0,
+                height: 1.0,
+                lines: 1,
+            }
+        }
+
+        fn draw_text(
+            &self,
+            surface: &mut Surface,
+            origin_x: f32,
+            origin_y: f32,
+            _text: &str,
+            _font_size: f32,
+            color: Color,
+        ) {
+            if origin_x >= 0.0 && origin_y >= 0.0 {
+                let _ = surface.set_pixel(origin_x as u32, origin_y as u32, color);
+            }
+        }
+    }
 
     fn solid_image(width: u32, height: u32, color: [u8; 4]) -> ImageData {
         let pixels = color
@@ -1859,6 +1933,123 @@ mod tests {
 
     fn bitmap_font() -> lc_graphics::BitmapFont {
         lc_graphics::BitmapFont::new()
+    }
+
+    fn startup_control_sheet() -> ImageData {
+        let width = 400u32;
+        let height = 164u32;
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        let keyboard = [
+            [200, 10, 10, 255],
+            [10, 200, 10, 255],
+            [10, 10, 200, 255],
+            [200, 200, 10, 255],
+        ];
+        for (phase, color) in keyboard.into_iter().enumerate() {
+            let left = phase as u32 * KEYBOARD_CELL.0;
+            for y in 0..KEYBOARD_CELL.1 {
+                for x in left..left + KEYBOARD_CELL.0 {
+                    let index = ((y * width + x) * 4) as usize;
+                    pixels[index..index + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        for y in MOUSE_SOURCE.1..MOUSE_SOURCE.1 + MOUSE_SOURCE.3 {
+            for x in MOUSE_SOURCE.0..MOUSE_SOURCE.0 + MOUSE_SOURCE.2 {
+                let index = ((y * width + x) * 4) as usize;
+                pixels[index..index + 4].copy_from_slice(&[200, 10, 200, 255]);
+            }
+        }
+        ImageData::new(width, height, pixels)
+    }
+
+    fn startup_gamepad_sheet(height: u32) -> ImageData {
+        let colors = [
+            [10, 100, 100, 255],
+            [100, 10, 100, 255],
+            [100, 100, 10, 255],
+            [180, 80, 20, 255],
+        ];
+        let width = GAMEPAD_CELL_WIDTH * colors.len() as u32;
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..height {
+            for color in colors {
+                pixels.extend(std::iter::repeat_n(color, GAMEPAD_CELL_WIDTH as usize).flatten());
+            }
+        }
+        ImageData::new(width, height, pixels)
+    }
+
+    #[test]
+    fn player_startup_uses_keyboard_mouse_and_gamepad_facets() {
+        let viewport = SurfaceRect::new(10, 20, 240, 180);
+        let dest_x = 90;
+        let dest_y = 105;
+        let text_x = 130;
+        let text_color = Color::opaque(7, 8, 9);
+        let hud = HudGraphics {
+            control: Some(startup_control_sheet()),
+            // A non-shipped height proves that the name offset comes from the
+            // loaded fctGamepad height rather than the keyboard constant.
+            gamepad: Some(startup_gamepad_sheet(20)),
+            ..HudGraphics::default()
+        };
+        let marker = MarkerFont;
+        let font = HudFont::Fallback(&marker);
+        let render = |control_set, mouse_control| {
+            let mut target = surface(280, 220);
+            draw_player_startup(
+                &mut target,
+                &font,
+                &hud,
+                viewport,
+                "P",
+                text_color,
+                control_set,
+                mouse_control,
+            );
+            target
+        };
+
+        let keyboard_colors = [
+            Color::opaque(200, 10, 10),
+            Color::opaque(10, 200, 10),
+            Color::opaque(10, 10, 200),
+            Color::opaque(200, 200, 10),
+        ];
+        for (control_set, expected) in keyboard_colors.into_iter().enumerate() {
+            let target = render(control_set as i32, false);
+            assert_eq!(target.get_pixel(dest_x, dest_y), Some(expected));
+            assert_eq!(target.get_pixel(text_x, dest_y + 36), Some(text_color));
+        }
+
+        let with_mouse = render(0, true);
+        assert_eq!(
+            with_mouse.get_pixel(dest_x + 55, dest_y - 10),
+            Some(Color::opaque(200, 10, 200)),
+            "fctMouse uses the +55/-10 destination offset"
+        );
+        assert_eq!(
+            with_mouse.get_pixel(dest_x + 55, dest_y),
+            Some(keyboard_colors[0]),
+            "the keyboard facet draws after and over the mouse overlap"
+        );
+
+        let gamepad_colors = [
+            Color::opaque(10, 100, 100),
+            Color::opaque(100, 10, 100),
+            Color::opaque(100, 100, 10),
+            Color::opaque(180, 80, 20),
+        ];
+        for (phase, expected) in gamepad_colors.into_iter().enumerate() {
+            let target = render(phase as i32 + 4, false);
+            assert_eq!(target.get_pixel(dest_x, dest_y), Some(expected));
+            assert_eq!(
+                target.get_pixel(text_x, dest_y + 20),
+                Some(text_color),
+                "name follows the loaded gamepad height"
+            );
+        }
     }
 
     #[test]

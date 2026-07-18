@@ -520,6 +520,9 @@ pub struct HudGraphics {
     /// Control.png — `sfcControl` with the `fctKeyboard` cell at (0,0,80,36)
     /// (src/C4GraphicsResource.cpp:200-205).
     pub control: Option<ImageData>,
+    /// Gamepad.png — four 80px-wide `fctGamepad` phases loaded at their full
+    /// image height (src/C4GraphicsResource.cpp:229).
+    pub gamepad: Option<ImageData>,
     /// Background.png — `fctBackground`, the message board backdrop tile
     /// (src/C4GraphicsResource.cpp:209, src/C4MessageBoard.cpp:258).
     pub background: Option<ImageData>,
@@ -1975,9 +1978,15 @@ pub struct PlayerOverlay {
     /// `C4Player::SelectCount` for the crew display value
     /// (src/C4Viewport.cpp:1320).
     pub select_count: i32,
-    /// `C4Player::ShowStartup` — keyboard hint + name until the first
-    /// control com (src/C4Player.cpp:1376, src/C4Viewport.cpp:1450).
+    /// `C4Player::ShowStartup` — device hint + name until the first control
+    /// com (src/C4Player.cpp:1376, src/C4Viewport.cpp:1450).
     pub show_startup: bool,
+    /// Effective `C4Player::Control` set used to select the keyboard/gamepad
+    /// startup phase. Keyboard1-4 are 0..=3; GamePad1-4 are 4..=7.
+    pub control_set: i32,
+    /// C++ truthiness of the raw `C4Player::MouseControl` integer. The mouse
+    /// startup symbol co-renders with the selected keyboard/gamepad phase.
+    pub mouse_control: bool,
     /// `C4Player::ShowControl` and `ShowControlPos`, consumed by
     /// `C4Viewport::DrawPlayerControls` (src/C4Viewport.cpp:1394-1441).
     pub show_control: i32,
@@ -6884,6 +6893,8 @@ impl GraphicsSystem {
                     rect,
                     &player_name,
                     player.owner_color,
+                    player.control_set,
+                    player.mouse_control,
                     gamma,
                 );
             }
@@ -15235,6 +15246,8 @@ mod tests {
                 owner_color: Color::opaque(0, 100, 200),
                 select_count: 0,
                 show_startup: false,
+                control_set: -1,
+                mouse_control: false,
                 show_control: 1,
                 show_control_position: 0,
                 last_com: 5,
@@ -17859,6 +17872,8 @@ mod tests {
             owner_color: Color::opaque(0, 100, 200),
             select_count: 1,
             show_startup: false,
+            control_set: -1,
+            mouse_control: false,
             show_control: 0,
             show_control_position: 0,
             last_com: 0,
