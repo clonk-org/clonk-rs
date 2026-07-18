@@ -320,8 +320,9 @@ impl LeagueDisconnectReason {
 ///
 /// Unlike Update and End, the native client permits an empty CSID here: a
 /// joined client may need to report the host before it has received a session
-/// identifier. Every joined, non-removed player is emitted, while FBID is
-/// optional and looked up by the player's byte-preserving league account.
+/// identifier. Every joined, non-removed player is emitted in packet order.
+/// The FBID is optional and looked up by the player's byte-preserving league
+/// account.
 pub fn encode_league_report_disconnect_request(
     csid: &LegacyCString,
     reason: LeagueDisconnectReason,
@@ -338,12 +339,16 @@ pub fn encode_league_report_disconnect_request(
         request.extend_from_slice(b"\r\n");
     }
 
-    request.extend_from_slice(b"\r\n[PlayerInfos]\r\n");
+    let mut emitted_player_infos = false;
     for player in &player_infos.players {
         if player.flags & PLAYER_INFO_FLAG_JOINED == 0
             || player.flags & PLAYER_INFO_FLAG_REMOVED != 0
         {
             continue;
+        }
+        if !emitted_player_infos {
+            request.extend_from_slice(b"\r\n[PlayerInfos]\r\n");
+            emitted_player_infos = true;
         }
         request.extend_from_slice(b"\r\n  [Player]\r\n  ID=");
         request.extend_from_slice(player.id.to_string().as_bytes());
@@ -1822,10 +1827,10 @@ Checksum=-----\r\n"
     }
 
     #[test]
-    fn report_disconnect_request_matches_cpp_sections_and_filters_players() {
+    fn report_disconnect_request_matches_cpp_bytes_and_complete_checksum() {
         // ReportDisconnect inserts Request and PlayerInfos as top-level
         // siblings. DisconnectData emits only joined/non-removed players and
-        // looks up each optional FBID by its league-account bytes
+        // looks up each optional FBID by its exact league-account bytes
         // (src/C4League.cpp:74-89,247-286,483-497).
         let alice_account = legacy(b"A\x80");
         let bob_account = legacy(b"Bob");
@@ -1859,27 +1864,19 @@ Checksum=-----\r\n"
             ],
         };
 
-        let request = encode_league_report_disconnect_request(
-            &legacy(b"session-\x82"),
-            LeagueDisconnectReason::ConnectionFailed,
-            &players,
-            &fbids,
-            0x1234_5678,
-        )
-        .expect("disconnect checksum has a C++ candidate");
-        let checksum = request
-            .windows(b"Checksum=".len())
-            .position(|window| window == b"Checksum=")
-            .map(|offset| offset + b"Checksum=".len())
-            .expect("encoded request has checksum");
-        let mut layout = request;
-        layout[checksum..checksum + 5].copy_from_slice(b"-----");
         assert_eq!(
-            layout,
+            encode_league_report_disconnect_request(
+                &legacy(b"session-\x82"),
+                LeagueDisconnectReason::ConnectionFailed,
+                &players,
+                &fbids,
+                0x1234_5678,
+            )
+            .expect("disconnect checksum has a C++ candidate"),
             b"[Request]\r\n\
 Action=ReportDisconnect\r\n\
 CSID=session-\x82\r\n\
-Checksum=-----\r\n\
+Checksum=8HSoj\r\n\
 Reason=ConnectionFailed\r\n\
 \r\n\
 [PlayerInfos]\r\n\
@@ -1894,29 +1891,71 @@ Reason=ConnectionFailed\r\n\
     }
 
     #[test]
-    fn report_disconnect_allows_empty_csid_and_elides_unknown_reason() {
+    fn report_disconnect_omits_empty_player_infos_and_unknown_reason() {
+        // StdCompilerINIWrite cannot represent an empty named section, so an
+        // all-filtered PlayerInfos sibling is omitted together with the
+        // default Unknown reason (src/StdCompiler.cpp:248-280).
         let request = encode_league_report_disconnect_request(
             &LegacyCString::default(),
             LeagueDisconnectReason::Unknown,
             &ClientPlayerInfosSnapshot {
                 client_id: 4,
                 flags: 0,
-                players: Vec::new(),
+                players: vec![ControlPlayerInfoEntry {
+                    id: 9,
+                    ..Default::default()
+                }],
             },
             &LeagueFbidRegistry::new(),
             0,
         )
         .expect("disconnect checksum has a C++ candidate");
 
-        assert!(!request.windows(5).any(|window| window == b"CSID"));
-        assert!(!request.windows(6).any(|window| window == b"Reason"));
-        assert!(request.ends_with(b"\r\n[PlayerInfos]\r\n"));
-
-        let response = decode_league_report_disconnect_response(
-            b"[Response]\r\nStatus=Success\r\nMessage=Recorded\r\n",
+        assert_eq!(
+            request,
+            b"[Request]\r\nAction=ReportDisconnect\r\nChecksum=B4FAA\r\n"
         );
-        assert!(response.is_success());
-        assert_eq!(response.message.as_bytes(), b"Recorded");
+    }
+
+    #[test]
+    fn report_disconnect_desync_empty_fbid_and_reply_follow_cpp_semantics() {
+        let account = legacy(b"A \x80\\");
+        let mut fbids = LeagueFbidRegistry::new();
+        fbids.insert(account.clone(), LegacyCString::default());
+        let request = encode_league_report_disconnect_request(
+            &legacy(b"session"),
+            LeagueDisconnectReason::Desync,
+            &ClientPlayerInfosSnapshot {
+                client_id: 4,
+                flags: 0,
+                players: vec![ControlPlayerInfoEntry {
+                    flags: PLAYER_INFO_FLAG_JOINED,
+                    id: -7,
+                    league_account: account,
+                    ..Default::default()
+                }],
+            },
+            &fbids,
+            0,
+        )
+        .expect("disconnect checksum has a C++ candidate");
+        assert!(request
+            .windows(b"Reason=Desync\r\n".len())
+            .any(|window| window == b"Reason=Desync\r\n"));
+        assert!(request
+            .windows(b"  ID=-7\r\n  FBID=\r\n".len())
+            .any(|window| window == b"  ID=-7\r\n  FBID=\r\n"));
+
+        let success = decode_league_report_disconnect_response(
+            b"[Response]\r\nStatus=sUcCeSs!ignored\r\nMessage= Recorded \x80  \r\n",
+        );
+        assert!(success.is_success());
+        assert_eq!(success.message.as_bytes(), b"Recorded \x80  ");
+        let failure = decode_league_report_disconnect_response(
+            b"[Response]\r\nStatus=SuccessExtra\r\nMessage=Rejected\r\n",
+        );
+        assert!(!failure.is_success());
+        assert_eq!(failure.message.as_bytes(), b"Rejected");
     }
 
     #[test]
