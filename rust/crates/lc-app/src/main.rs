@@ -3163,7 +3163,6 @@ impl NetworkTickGate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AdmissionResourceUnavailable {
     Unloadable,
-    NoTransferBackend,
     TransferFailed,
 }
 
@@ -3194,6 +3193,23 @@ impl AdmissionResourceStore {
             self.register_lobby_resource(core);
         }
         self.register_lobby_resource(&join_data.dynamic);
+        for client in &join_data.parameters.player_infos.clients {
+            self.register_player_info_resources(&client.players);
+        }
+    }
+
+    fn register_player_info_resources(&mut self, players: &[lc_engine::ControlPlayerInfoEntry]) {
+        for player in players {
+            if player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+                || player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED != 0
+                || player.flags & lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0
+            {
+                continue;
+            }
+            if let Some(core) = &player.resource {
+                self.ensure_by_core(core);
+            }
+        }
     }
 
     fn lobby_ready_available(&self) -> bool {
@@ -3209,12 +3225,15 @@ impl AdmissionResourceStore {
     }
 
     fn ensure_by_core(&mut self, core: &lc_engine::NetworkResourceCore) -> &AdmissionResourceState {
+        self.resource_types
+            .entry(core.id)
+            .or_insert(core.resource_type);
         self.resources.entry(core.id).or_insert_with(|| {
-            AdmissionResourceState::Unavailable(if core.loadable {
-                AdmissionResourceUnavailable::NoTransferBackend
+            if core.loadable {
+                AdmissionResourceState::Loading { removed: false }
             } else {
-                AdmissionResourceUnavailable::Unloadable
-            })
+                AdmissionResourceState::Unavailable(AdmissionResourceUnavailable::Unloadable)
+            }
         })
     }
 
@@ -3254,15 +3273,17 @@ impl AdmissionResourceStore {
 
 fn preflight_admission_resources(
     resources: &mut AdmissionResourceStore,
+    clients: &ControlClientRegistry,
     controls: &[NetworkControl],
 ) -> bool {
     let mut ready = true;
     for control in controls {
         let control_ready = match control {
             NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                at_client,
                 source: lc_engine::JoinPlayerSource::Resource(core),
                 ..
-            }) => !matches!(
+            }) if clients.contains(*at_client) => !matches!(
                 resources.ensure_by_core(core),
                 AdmissionResourceState::Loading { .. }
             ),
@@ -21981,10 +22002,11 @@ impl GameApp {
         Ok(())
     }
 
-    fn submit_initial_client_player_info(&self, client_id: i32) -> bool {
+    fn submit_initial_client_player_info(&mut self, client_id: i32) -> bool {
         let Some(network) = self.network.as_ref() else {
             return false;
         };
+        let mut completed_resources = Vec::new();
         let empty_request = || lc_network::PlayerInfoUpdateRequest {
             client_id,
             flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -22004,6 +22026,9 @@ impl GameApp {
                             wire_name: publication.wire_name,
                             group_maker: publication.group_maker,
                         })
+                        .inspect(|core| {
+                            completed_resources.push((core.clone(), source_path.clone()));
+                        })
                         .inspect_err(|error| {
                             tracing::warn!(
                                 path = %source_path.display(),
@@ -22014,6 +22039,10 @@ impl GameApp {
                 })
             })
             .unwrap_or_else(empty_request);
+        for (core, path) in completed_resources {
+            self.admission_resources.ensure_by_core(&core);
+            self.admission_resources.mark_complete(core.id, path);
+        }
         match network.submit_player_info_update(request) {
             Ok(()) => true,
             Err(error) => {
@@ -22068,14 +22097,9 @@ impl GameApp {
         let request = selected
             .runtime_add_player_info_update(client_id, resource)
             .map_err(|error| error.to_string())?;
-        if !host {
-            return network
-                .submit_player_info_update(request)
-                .map_err(|error| error.to_string());
-        }
-
-        // A locally published resource keeps its original file for the host's
-        // JoinPlayer while the backend serves the optimized standalone
+        // A locally published resource keeps its original file for this
+        // process's JoinPlayer while the backend serves the optimized
+        // standalone to peers
         // (src/C4Network2Res.cpp:409-424,1168-1189;
         // src/C4Network2Players.cpp:353-382).
         let resource_core = request
@@ -22088,6 +22112,12 @@ impl GameApp {
             .register_lobby_resource(&resource_core);
         self.admission_resources
             .mark_complete(resource_core.id, source_path);
+        if !host {
+            return network
+                .submit_player_info_update(request)
+                .map_err(|error| error.to_string());
+        }
+
         let info = match self.network_team_assignment.as_mut() {
             Some(team_assignment) => team_assignment.admit_request(
                 &mut self.control_player_infos,
@@ -22957,6 +22987,8 @@ impl GameApp {
                         }
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
+                            self.admission_resources
+                                .register_player_info_resources(&info.players);
                             self.control_player_infos.apply(info);
                             self.recheck_team_memberships_from_player_infos();
                             seed_engine_player_info_parameters(
@@ -30540,6 +30572,8 @@ impl GameApp {
         for control in controls {
             result = match control {
                 NetworkControl::PlayerInfo(info) => {
+                    self.admission_resources
+                        .register_player_info_resources(&info.players);
                     self.control_player_infos.apply(info);
                     self.recheck_team_memberships_from_player_infos();
                     seed_engine_player_info_parameters(
@@ -31306,6 +31340,7 @@ impl GameApp {
                             self.network_ticks.take_exact_if_ready(tick, |controls| {
                                 preflight_admission_resources(
                                     &mut self.admission_resources,
+                                    &self.control_clients,
                                     controls,
                                 )
                             })
@@ -68003,6 +68038,82 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn direct_and_synchronized_player_info_register_loadable_resources() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let player_info = |player_id, resource_id| {
+            let core = lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Player as u8,
+                id: resource_id,
+                loadable: true,
+                ..Default::default()
+            };
+            lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: player_id,
+                    flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(core),
+                    ..Default::default()
+                }],
+                by_client: 0,
+                ..Default::default()
+            }
+        };
+
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                player_info(1, 48),
+            )))
+            .expect("queue direct PlayerInfo");
+        app.process_network_events().expect("apply direct PlayerInfo");
+        assert_eq!(
+            app.admission_resources.status(48),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
+
+        app.apply_ready_controls(0, vec![NetworkControl::PlayerInfo(player_info(2, 49))])
+            .expect("apply synchronized PlayerInfo");
+        assert_eq!(
+            app.admission_resources.status(49),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
+    }
+
+    #[test]
+    fn missing_join_client_does_not_start_or_stall_a_resource_load() {
+        let resource_id = 50;
+        let controls = vec![NetworkControl::JoinPlayer(
+            lc_engine::JoinPlayerControlData {
+                at_client: 9,
+                info_id: 1,
+                source: lc_engine::JoinPlayerSource::Resource(
+                    lc_engine::NetworkResourceCore {
+                        resource_type: lc_network::HostResourceType::Player as u8,
+                        id: resource_id,
+                        loadable: true,
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            },
+        )];
+        let mut resources = AdmissionResourceStore::default();
+
+        assert!(preflight_admission_resources(
+            &mut resources,
+            &ControlClientRegistry::default(),
+            &controls
+        ));
+        assert_eq!(resources.status(resource_id), None);
+    }
+
+    #[test]
     fn lobby_ready_toggle_is_disabled_while_non_player_resource_loads() {
         // UpdatePreloadingGUIState disables the Ready checkbox until every
         // registered non-player resource is complete, so OnReadyCheck cannot
@@ -68051,6 +68162,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let scenario = resource(lc_network::HostResourceType::Scenario as u8, 44);
         let dynamic = resource(lc_network::HostResourceType::Dynamic as u8, 45);
         let definitions = resource(lc_network::HostResourceType::Definitions as u8, 46);
+        let player = resource(lc_network::HostResourceType::Player as u8, 47);
         let host_config = lc_network::HostConfig::default();
         let mut snapshot = host_config
             .initial_join_snapshot
@@ -68072,6 +68184,19 @@ public func Grant(password) { return GainMissionAccess(password); }
         };
         snapshot.parameters.scenario = scenario.clone();
         snapshot.parameters.game_resources = vec![definitions.clone()];
+        snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 1,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(player.clone()),
+                    ..Default::default()
+                }],
+            }],
+        };
         snapshot.dynamic = dynamic.clone();
         let join_data = lc_network::JoinDataEnvelope {
             client_id: 7,
@@ -68086,6 +68211,10 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         app.process_network_events().expect("install JoinData");
         assert!(!app.admission_resources.lobby_ready_available());
+        assert_eq!(
+            app.admission_resources.status(player.id),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
 
         for (core, path) in [
             (scenario, "Scenario.c4s"),
@@ -68104,6 +68233,11 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("apply resource completions");
 
         assert!(app.admission_resources.lobby_ready_available());
+        assert_eq!(
+            app.admission_resources.status(player.id),
+            Some(&AdmissionResourceState::Loading { removed: false }),
+            "an incomplete player resource is tracked but does not block lobby readiness"
+        );
     }
 
     #[test]
@@ -70152,6 +70286,11 @@ public func Grant(password) { return GainMissionAccess(password); }
             player_path.to_string_lossy().into_owned(),
         ))
         .expect("runtime player menu action");
+        assert_eq!(
+            app.admission_resources.complete_path(expected_resource.id),
+            Some(player_path.as_path()),
+            "the publishing client keeps its own player resource complete"
+        );
         drop(app.network.take());
 
         let (order, publications, player_infos, acknowledgements) =
@@ -70577,6 +70716,13 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         app.process_network_events()
             .expect("initialize client lobby");
+        for (core, path) in expected_cores.iter().zip(&configured_paths) {
+            assert_eq!(
+                app.admission_resources.complete_path(core.id),
+                Some(path.as_path()),
+                "the publishing client keeps each initial player resource complete"
+            );
+        }
 
         let (order, publications, player_infos, acknowledgements) =
             command_observer.join().expect("command observer");
@@ -74252,6 +74398,139 @@ protected func InputCallback(string answer, int player)
         assert_eq!(
             app.admission_resources.complete_path(resource_id),
             Some(path.as_path())
+        );
+    }
+
+    #[test]
+    fn unknown_loadable_resource_join_stalls_until_resource_completion() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let initial_frame = app.engine.frame();
+        let info_id = 18;
+        let resource_id = 62;
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: resource_id,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: 1,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            id: info_id,
+                            name: lc_engine::LegacyCString::from_bytes(
+                                b"Delayed resource".to_vec(),
+                            )
+                            .unwrap(),
+                            flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                            resource: Some(core.clone()),
+                            ..Default::default()
+                        }],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                        at_client: 0,
+                        info_id,
+                        source: lc_engine::JoinPlayerSource::Resource(core.clone()),
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                ],
+            })
+            .expect("queue resource-backed join before completion");
+
+        app.update().expect("pending resource stalls the control tick");
+
+        assert_eq!(app.engine.frame(), initial_frame);
+        assert!(app.network_ticks.ready.contains_key(&tick));
+        assert!(app.control_player_infos.get(info_id).is_none());
+        assert_eq!(
+            app.admission_resources.status(resource_id),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
+
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id,
+                core,
+                path: path.clone(),
+            })
+            .expect("complete delayed player resource");
+        app.update().expect("completed resource releases control tick");
+
+        assert_eq!(app.engine.frame(), initial_frame + 1);
+        assert!(!app.network_ticks.ready.contains_key(&tick));
+        assert_eq!(
+            app.admission_resources.complete_path(resource_id),
+            Some(path.as_path())
+        );
+        assert!(app
+            .snapshot
+            .players
+            .iter()
+            .any(|player| player.player_info_id == info_id));
+    }
+
+    #[test]
+    fn failed_loadable_resource_releases_the_stalled_tick_as_a_noop() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let initial_frame = app.engine.frame();
+        let resource_id = 63;
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: resource_id,
+            loadable: true,
+            ..Default::default()
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![NetworkControl::JoinPlayer(
+                    lc_engine::JoinPlayerControlData {
+                        at_client: 0,
+                        info_id: 99,
+                        source: lc_engine::JoinPlayerSource::Resource(core),
+                        by_client: 1,
+                        ..Default::default()
+                    },
+                )],
+            })
+            .expect("queue resource-backed join before failure");
+
+        app.update().expect("pending resource stalls the control tick");
+        assert_eq!(app.engine.frame(), initial_frame);
+        assert_eq!(
+            app.admission_resources.status(resource_id),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
+
+        event_tx
+            .send(NetworkEvent::ResourceLoadFailed { resource_id })
+            .expect("fail delayed player resource");
+        app.update().expect("failed resource releases control tick");
+
+        assert_eq!(app.engine.frame(), initial_frame + 1);
+        assert_eq!(
+            app.admission_resources.status(resource_id),
+            Some(&AdmissionResourceState::Unavailable(
+                AdmissionResourceUnavailable::TransferFailed
+            ))
         );
     }
 

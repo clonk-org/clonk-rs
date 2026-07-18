@@ -1677,14 +1677,19 @@ impl ClientResourceState {
         self.add_bootstrap_resource(&resource)
     }
 
-    fn load_authoritative_player_resources(&mut self, info: &mut lc_engine::PlayerInfoControlData) {
+    fn load_authoritative_player_resources(
+        &mut self,
+        info: &mut lc_engine::PlayerInfoControlData,
+    ) -> Vec<(PathBuf, lc_engine::NetworkResourceCore)> {
         let local_sources = load_authoritative_player_resources(
             &self.resource_resolver,
             &mut self.catalog,
             self.backend.as_mut(),
             info,
         );
-        self.local_resource_sources.extend(local_sources);
+        self.local_resource_sources
+            .extend(local_sources.iter().cloned());
+        local_sources
     }
 
     #[cfg(test)]
@@ -3515,6 +3520,16 @@ async fn broadcast_packet(
                     state.resource_backend.as_mut(),
                     info,
                 );
+                for (path, core) in &local_sources {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::ResourceComplete {
+                            resource_id: core.id,
+                            core: core.clone(),
+                            path: path.clone(),
+                        })
+                        .await;
+                }
                 state.published_player_sources.extend(local_sources);
                 if let Ok(normalized) = crate::encode_control_entry_payload(&control) {
                     local_data = normalized;
@@ -4591,13 +4606,29 @@ async fn run_client_loop_with_addresses<S>(
                             ControlDelivery::Direct | ControlDelivery::Private => {
                                 let mut local_data = data;
                                 if let Ok(mut control) = decode_control_entry_payload(&local_data) {
-                                    if let lc_engine::ControlPacket::PlayerInfo(info) = &mut control {
-                                        resource_state.load_authoritative_player_resources(info);
-                                        if let Ok(normalized) =
-                                            crate::encode_control_entry_payload(&control)
+                                    let local_sources =
+                                        if let lc_engine::ControlPacket::PlayerInfo(info) =
+                                            &mut control
                                         {
-                                            local_data = normalized;
-                                        }
+                                            let local_sources = resource_state
+                                                .load_authoritative_player_resources(info);
+                                            if let Ok(normalized) =
+                                                crate::encode_control_entry_payload(&control)
+                                            {
+                                                local_data = normalized;
+                                            }
+                                            local_sources
+                                        } else {
+                                            Vec::new()
+                                        };
+                                    for (path, core) in local_sources {
+                                        let _ = event_tx
+                                            .send(ClientEvent::ResourceComplete {
+                                                resource_id: core.id,
+                                                core,
+                                                path,
+                                            })
+                                            .await;
                                     }
                                     let ready = match resource_state
                                         .control
@@ -6280,7 +6311,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        state.load_authoritative_player_resources(&mut info);
+        let completed = state.load_authoritative_player_resources(&mut info);
+        assert_eq!(completed, vec![(player.clone(), publication.core.clone())]);
 
         let reused = state
             .publish_player_resource(crate::ClientPlayerResourceRequest {
@@ -6681,7 +6713,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        local_state.load_authoritative_player_resources(&mut local_info);
+        let local_sources = local_state.load_authoritative_player_resources(&mut local_info);
+        assert_eq!(local_sources, vec![(source.clone(), valid_core.clone())]);
         assert!(local_state.catalog.contains_resource(valid_core.id));
         let local_backend = local_state.backend.as_ref().unwrap();
         assert_eq!(local_backend.core(valid_core.id), Some(&valid_core));
@@ -6875,7 +6908,8 @@ mod tests {
             local_resource_roots: vec![local_root],
             ..HostConfig::default()
         };
-        let host = start_host(listener, host_config).await.unwrap();
+        let mut host = start_host(listener, host_config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
         let mut client = connect_client(
             address,
             ClientConfig::new("Alice", ParticipantKind::Player)
@@ -6902,6 +6936,50 @@ mod tests {
         )
         .await
         .unwrap();
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ResourceComplete {
+                    resource_id,
+                    core: completed,
+                    path,
+                }) if resource_id == core.id => {
+                    assert_eq!(completed, core);
+                    assert_eq!(path, source);
+                    break;
+                }
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("host could not resolve local PlayerInfo resource: {error}");
+                }
+                Some(HostEvent::Direct { data, .. })
+                    if matches!(
+                        decode_control_entry_payload(&data),
+                        Ok(lc_engine::ControlPacket::PlayerInfo(_))
+                    ) =>
+                {
+                    panic!("host exposed PlayerInfo before its local resource completion");
+                }
+                Some(_) => {}
+                None => panic!("host event stream ended"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct { data, .. })
+                    if matches!(
+                        decode_control_entry_payload(&data),
+                        Ok(lc_engine::ControlPacket::PlayerInfo(_))
+                    ) =>
+                {
+                    break;
+                }
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("host could not expose local PlayerInfo: {error}");
+                }
+                Some(_) => {}
+                None => panic!("host event stream ended"),
+            }
+        }
 
         loop {
             match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
@@ -6934,6 +7012,119 @@ mod tests {
             reused, core,
             "AddByFile reuses the locally resolved authoritative resource"
         );
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_resolves_local_player_resource_before_exposing_direct_control() {
+        let directories = SessionResourceDirectories::new();
+        let host_root = directories.root.join("host-local");
+        let client_root = directories.root.join("client-local");
+        fs::create_dir_all(&host_root).unwrap();
+        fs::create_dir_all(&client_root).unwrap();
+        let host_source = host_root.join("Alice.c4p");
+        let client_source = client_root.join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"shared local player".to_vec(), 1, false)
+            .unwrap();
+        let player_bytes = group.pack().unwrap();
+        fs::write(&host_source, &player_bytes).unwrap();
+        fs::write(&client_source, player_bytes).unwrap();
+        let core = crate::build_host_resource_core(
+            &host_source,
+            directories.root.join("core"),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                "Host",
+            ),
+        )
+        .unwrap()
+        .core;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host_config = HostConfig {
+            resource_directory: Some(directories.host.clone()),
+            local_resource_roots: vec![host_root],
+            ..HostConfig::default()
+        };
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_local_resource_roots([client_root]),
+        )
+        .await
+        .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let info = lc_engine::PlayerInfoControlData {
+            client_id: 1,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                id: 1,
+                flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(core.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+        };
+        host.submit_packet(
+            ControlDelivery::Direct,
+            crate::encode_control_entry_payload(&lc_engine::ControlPacket::PlayerInfo(info))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::ResourceComplete {
+                    resource_id,
+                    core: completed,
+                    path,
+                }) if resource_id == core.id => {
+                    assert_eq!(completed, core);
+                    assert_eq!(path, client_source);
+                    break;
+                }
+                Some(ClientEvent::Direct { data, .. })
+                    if matches!(
+                        decode_control_entry_payload(&data),
+                        Ok(lc_engine::ControlPacket::PlayerInfo(_))
+                    ) =>
+                {
+                    panic!("client exposed PlayerInfo before its local resource completion");
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client could not resolve local PlayerInfo resource: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct { data, .. })
+                    if matches!(
+                        decode_control_entry_payload(&data),
+                        Ok(lc_engine::ControlPacket::PlayerInfo(_))
+                    ) =>
+                {
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client could not expose local PlayerInfo: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
