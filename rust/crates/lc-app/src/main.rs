@@ -190,6 +190,8 @@ const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
 const MAX_REFRESH_INTERVAL: Duration = Duration::from_millis(30);
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
+const NETWORK_CONTROL_OVERFLOW_LIMIT: u32 = 3;
+const NETWORK_RENDER_SKIP_BEHIND: u32 = 25;
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 /// `C4NetDeactivationDelay` is measured in simulation frames, despite the
 /// native header's historical "ticks" comment (`src/C4Network2.h:57-60`).
@@ -3214,6 +3216,35 @@ impl NetworkTickGate {
         self.ready.remove(&expected_tick)
     }
 
+    /// Number of consecutive ready control ticks beginning at `expected_tick`.
+    /// C++ advances `iControlReady` only across a gap-free prefix, so a future
+    /// out-of-order packet must not trigger catch-up by itself.
+    fn contiguous_ready_behind_if<F>(&self, expected_tick: Tick, mut is_ready: F) -> u32
+    where
+        F: FnMut(&[NetworkControl]) -> bool,
+    {
+        let mut next_tick = expected_tick;
+        let mut behind = 0_u32;
+        for (&tick, controls) in self.ready.range(expected_tick..) {
+            if tick != next_tick {
+                break;
+            }
+            if !is_ready(controls) {
+                break;
+            }
+            behind = behind.saturating_add(1);
+            let Some(next) = next_tick.checked_add(1) else {
+                break;
+            };
+            next_tick = next;
+        }
+        behind
+    }
+
+    fn contiguous_ready_behind(&self, expected_tick: Tick) -> u32 {
+        self.contiguous_ready_behind_if(expected_tick, |_| true)
+    }
+
     fn clear(&mut self) {
         self.ready.clear();
     }
@@ -5351,43 +5382,36 @@ fn main() -> Result<()> {
                     frame_time,
                 );
 
-                while accumulator >= frame_schedule.simulation_interval {
-                    let executed_interval = frame_schedule.simulation_interval;
-                    if let Err(err) = app.update() {
-                        // Script errors during the simulation tick show in
-                        // the log and the game keeps running, like the C++
-                        // fail-safe exec; only engine-internal errors are
-                        // fatal.
-                        if matches!(err, lc_engine::EngineError::Script { .. }) {
-                            tracing::warn!(error = %err, "script error during tick; continuing like C++");
-                        } else {
-                            tracing::error!(error = ?err, "tick failed");
-                            control_flow.set_exit();
-                            return;
-                        }
+                let simulation_pass = match advance_simulation_pass(
+                    &mut app,
+                    &mut frame_schedule,
+                    &mut accumulator,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        tracing::error!(error = ?err, "tick failed");
+                        control_flow.set_exit();
+                        return;
                     }
-                    accumulator -= executed_interval;
-                    did_update = true;
-
-                    if synchronize_frame_schedule(
-                        app.mode,
-                        app.engine.game_tick_delay_ms(),
-                        app.engine.game_tick_delay_revision(),
-                        &mut frame_schedule,
-                        &mut accumulator,
-                    ) {
-                        break;
-                    }
+                };
+                did_update |= simulation_pass.did_update;
+                if simulation_pass.skipped_render_frames > 0 {
+                    tracing::trace!(
+                        frames = simulation_pass.executed_frames,
+                        skipped_renders = simulation_pass.skipped_render_frames,
+                        "network control catch-up skipped intermediate renders"
+                    );
                 }
 
                 if app.take_user_attention_request() {
                     window.request_user_attention(Some(UserAttentionType::Informational));
                 }
 
-                if did_update
-                    || (app.mode == AppMode::Running
-                        && frame_schedule.refresh_interval
-                            < frame_schedule.simulation_interval)
+                if !simulation_pass.skip_redraw
+                    && (did_update
+                        || (app.mode == AppMode::Running
+                            && frame_schedule.refresh_interval
+                                < frame_schedule.simulation_interval))
                 {
                     window.request_redraw();
                 }
@@ -10261,6 +10285,21 @@ struct FrameSchedule {
     running_revision: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NetworkControlPacing {
+    behind: u32,
+    overflow: bool,
+    skip_render: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SimulationPassOutcome {
+    did_update: bool,
+    executed_frames: u32,
+    skipped_render_frames: u32,
+    skip_redraw: bool,
+}
+
 fn frame_schedule_for_mode(
     mode: AppMode,
     game_tick_delay_ms: u64,
@@ -10333,6 +10372,72 @@ fn accumulate_frame_time_for_mode(
         frame_schedule,
         accumulator,
     );
+}
+
+/// Executes timer-paced updates and any C++-style network catch-up frames in
+/// one event-loop pass. Immediate catch-up frames do not consume elapsed-time
+/// budget; a stalled pre-execution gate breaks the loop instead of spinning.
+fn advance_simulation_pass(
+    app: &mut GameApp,
+    frame_schedule: &mut FrameSchedule,
+    accumulator: &mut Duration,
+) -> Result<SimulationPassOutcome, EngineError> {
+    let mut outcome = SimulationPassOutcome::default();
+    let mut catch_up = false;
+
+    loop {
+        let timer_due = *accumulator >= frame_schedule.simulation_interval;
+        if !timer_due && !catch_up {
+            break;
+        }
+
+        let executed_interval = frame_schedule.simulation_interval;
+        let frame_before = app.engine.frame();
+        if let Err(error) = app.update() {
+            // Script errors during the simulation tick show in the log and
+            // the game keeps running, like the C++ fail-safe exec; only
+            // engine-internal errors are fatal.
+            if matches!(error, EngineError::Script { .. }) {
+                tracing::warn!(error = %error, "script error during tick; continuing like C++");
+            } else {
+                return Err(error);
+            }
+        }
+        if timer_due {
+            *accumulator -= executed_interval;
+        }
+        outcome.did_update = true;
+
+        let frame_advanced = app.engine.frame() != frame_before;
+        let pacing = frame_advanced
+            .then(|| app.network_control_pacing())
+            .unwrap_or_default();
+        if frame_advanced {
+            outcome.executed_frames = outcome.executed_frames.saturating_add(1);
+            if pacing.skip_render {
+                outcome.skipped_render_frames =
+                    outcome.skipped_render_frames.saturating_add(1);
+            }
+        }
+        // Winit already coalesces intermediate catch-up frames into this one
+        // pass. The post-pass redraw follows only the latest C++ frame-skip
+        // decision; an earlier skipped frame must not hide recovered state.
+        outcome.skip_redraw = frame_advanced && pacing.skip_render;
+        catch_up = frame_advanced && pacing.overflow;
+
+        let schedule_changed = synchronize_frame_schedule(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
+            frame_schedule,
+            accumulator,
+        );
+        if schedule_changed && !catch_up {
+            break;
+        }
+    }
+
+    Ok(outcome)
 }
 
 struct MenuState {
@@ -19971,6 +20076,51 @@ impl GameApp {
         self.network_control_clock
             .and_then(|clock| Tick::try_from(clock.current_tick()).ok())
             .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
+    }
+
+    fn network_control_pacing(&mut self) -> NetworkControlPacing {
+        if self.mode != AppMode::Running
+            || self.network.is_none()
+            || !self.network_control_running
+            || self.game_over_dialog.is_some()
+        {
+            return NetworkControlPacing::default();
+        }
+
+        let expected_tick = self.expected_network_control_tick();
+        let behind = {
+            let network_ticks = &self.network_ticks;
+            let admission_resources = &mut self.admission_resources;
+            let control_clients = &self.control_clients;
+            network_ticks.contiguous_ready_behind_if(expected_tick, |controls| {
+                preflight_admission_resources(admission_resources, control_clients, controls)
+            })
+        };
+        // NetworkControlClock advances as soon as a cadence-frame control is
+        // consumed. C++ retains that ControlTick until the new FrameCounter
+        // reaches the next rate boundary, so its inclusive GetBehind still
+        // counts the just-executed tick during the intervening frames.
+        let behind = match self.network_control_clock {
+            Some(clock)
+                if Tick::try_from(clock.current_tick()).is_ok()
+                    && self.engine.frame() % clock.control_rate() as u64 != 0 =>
+            {
+                behind.saturating_add(1)
+            }
+            _ => behind,
+        };
+        let overflow = behind > NETWORK_CONTROL_OVERFLOW_LIMIT;
+        let skip_render = if overflow && behind >= NETWORK_RENDER_SKIP_BEHIND {
+            let divisor = behind.saturating_add(15) / 20;
+            self.engine.frame() % u64::from(divisor) != 0
+        } else {
+            false
+        };
+        NetworkControlPacing {
+            behind,
+            overflow,
+            skip_render,
+        }
     }
 
     fn clear_local_control(&mut self, owner: i32) -> Result<(), EngineError> {
@@ -46097,6 +46247,122 @@ func Award()
         app.sec1_timer().expect("capture the next second FPS");
         assert_eq!(app.frames_per_second, 1);
         assert_eq!(app.frames_since_second, 0);
+    }
+
+    fn network_catch_up_fixture(
+        ready_count: u32,
+        control_rate: i32,
+    ) -> (GameApp, FrameSchedule, Duration) {
+        let mut app = new_running_sandbox_app();
+        let (manager, events) = NetworkManager::test_stub();
+        let start_tick = 41_u32;
+        app.network = Some(manager);
+        app.network_control_clock = Some(NetworkControlClock::new(
+            i32::try_from(start_tick).unwrap(),
+            control_rate,
+        ));
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(
+                i32::try_from(start_tick).unwrap(),
+                control_rate,
+            )
+            .expect("valid catch-up control timing"),
+        );
+        for offset in 0..ready_count {
+            events
+                .send(NetworkEvent::ReadyTick {
+                    tick: start_tick + offset,
+                    controls: Vec::new(),
+                })
+                .expect("queue ready control tick");
+        }
+        let schedule = frame_schedule_for_mode(
+            app.mode,
+            app.engine.game_tick_delay_ms(),
+            app.engine.game_tick_delay_revision(),
+        );
+        let accumulator = schedule.simulation_interval;
+        (app, schedule, accumulator)
+    }
+
+    #[test]
+    fn network_control_catch_up_drains_ten_ready_ticks_in_one_pass() {
+        let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(11, 1);
+        let frame_before = app.engine.frame();
+
+        let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("catch up ready control backlog");
+
+        assert_eq!(outcome.executed_frames, 8);
+        assert_eq!(app.engine.frame(), frame_before + 8);
+        assert_eq!(app.network_control_pacing().behind, 3);
+        assert!(!app.network_control_pacing().overflow);
+        assert_eq!(accumulator, Duration::ZERO);
+    }
+
+    #[test]
+    fn network_control_catch_up_latches_and_releases_render_skip() {
+        let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(31, 1);
+
+        let catch_up = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("catch up deep ready-control backlog");
+        assert!(catch_up.skipped_render_frames > 0);
+        assert!(!catch_up.skip_redraw, "the recovered final frame is rendered");
+        assert_eq!(app.network_control_pacing().behind, 3);
+        assert!(!app.network_control_pacing().skip_render);
+
+        accumulator += schedule.simulation_interval;
+        let paced = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("resume normal rendering after catch-up");
+        assert_eq!(paced.executed_frames, 1);
+        assert!(!paced.skip_redraw);
+    }
+
+    #[test]
+    fn network_control_within_overflow_limit_keeps_normal_pacing() {
+        let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(4, 1);
+
+        let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("execute one timer-paced network frame");
+
+        assert_eq!(outcome.executed_frames, 1);
+        assert_eq!(app.network_control_pacing().behind, 3);
+        assert!(!outcome.skip_redraw);
+        assert_eq!(accumulator, Duration::ZERO);
+    }
+
+    #[test]
+    fn network_control_catch_up_stops_at_a_ready_tick_gap() {
+        let mut gate = NetworkTickGate::default();
+        gate.queue(7, 7, Vec::new());
+        gate.queue(7, 11, Vec::new());
+
+        assert_eq!(gate.contiguous_ready_behind(7), 1);
+
+        gate.queue(7, 8, Vec::new());
+        gate.queue(7, 9, Vec::new());
+        let mut inspected = 0;
+        assert_eq!(
+            gate.contiguous_ready_behind_if(7, |_| {
+                inspected += 1;
+                inspected < 2
+            }),
+            1,
+            "a future control that fails PreExecute ends the ready prefix"
+        );
+    }
+
+    #[test]
+    fn network_control_catch_up_advances_non_control_frames() {
+        let (mut app, mut schedule, mut accumulator) = network_catch_up_fixture(11, 2);
+        assert_eq!(app.engine.frame() % 2, 0, "fixture starts on control cadence");
+
+        let outcome = advance_simulation_pass(&mut app, &mut schedule, &mut accumulator)
+            .expect("catch up across rate-two non-control frames");
+
+        assert_eq!(outcome.executed_frames, 16);
+        assert_eq!(app.network_control_pacing().behind, 3);
+        assert!(!app.network_control_pacing().overflow);
     }
 
     #[test]
