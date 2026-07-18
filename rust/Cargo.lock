@@ -2145,6 +2145,7 @@ dependencies = [
  "lc-graphics",
  "lc-gui",
  "lc-resources",
+ "lc-scaling",
  "lc-script",
  "serde_json",
  "tempfile",

@@ -5305,6 +5305,7 @@ fn main() -> Result<()> {
                 *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
+                app.graphics.set_presentation_scale(presenter.scale());
                 let ordered_native_text =
                     app.can_present_ordered_native_text(presenter.scale());
                 let defer_native_main_text = !ordered_native_text

@@ -1907,44 +1907,44 @@ impl CursorAtlas {
     }
 
     pub fn image_for_resolution(&self, width: u32) -> Option<ImageData> {
-        if self.images.is_empty() {
-            return None;
-        }
+        self.image_for_scaled_resolution(width, 1.0)
+    }
 
+    /// Select the resolution-dependent cursor sheet like
+    /// `C4GraphicsResource::ReloadResolutionDependentFiles`
+    /// (src/C4GraphicsResource.cpp:468-504).
+    pub fn image_for_scaled_resolution(
+        &self,
+        logical_width: u32,
+        scale: f32,
+    ) -> Option<ImageData> {
+        let index = Self::index_for_scaled_resolution(logical_width, scale);
+        self.images.get(index).and_then(Clone::clone)
+    }
+
+    fn index_for_scaled_resolution(logical_width: u32, scale: f32) -> usize {
         const DEFAULT_INDEX: usize = 5;
-        const BREAKPOINTS: [u32; 2] = [1280, 800];
+        const BREAKPOINTS: [f32; 2] = [1280.0, 800.0];
 
+        let scale = if scale.is_finite() {
+            scale.max(f32::EPSILON)
+        } else {
+            1.0
+        };
+        let physical_width = logical_width as f32 * scale;
         let mut index = DEFAULT_INDEX;
-        if width <= BREAKPOINTS[0] {
+        if physical_width > BREAKPOINTS[0] {
+            let scale_shift = (scale.max(1.0) - 0.5) as usize;
+            index -= index.min(scale_shift);
+        } else {
             for &bp in &BREAKPOINTS {
-                if width >= bp {
+                if physical_width >= bp {
                     break;
                 }
                 index += 1;
             }
         }
-        if index >= self.images.len() {
-            index = self.images.len() - 1;
-        }
-
-        let mut candidates = Vec::with_capacity(self.images.len());
-        candidates.push(index);
-        for offset in 1..self.images.len() {
-            if let Some(left) = index.checked_sub(offset) {
-                candidates.push(left);
-            }
-            let right = index + offset;
-            if right < self.images.len() {
-                candidates.push(right);
-            }
-        }
-
-        for idx in candidates {
-            if let Some(image) = self.images[idx].clone() {
-                return Some(image);
-            }
-        }
-        None
+        index
     }
 }
 
@@ -2317,6 +2317,13 @@ pub struct GraphicsSystem {
     viewport_x: f32,
     viewport_y: f32,
     viewport_zoom: f32,
+    /// Global logical `Config.Graphics.ResX`. Per-viewport rendering
+    /// temporarily replaces `surface_width`, but cursor-sheet selection is
+    /// resolution-global in C++.
+    logical_resolution_width: u32,
+    /// `Application.GetScale()` / `Config.Graphics.Scale / 100` supplied by
+    /// the frame presenter before composition.
+    presentation_scale: f32,
     surface_width: u32,
     surface_height: u32,
     fallback_ground_height: i32,
@@ -2397,6 +2404,8 @@ impl GraphicsSystem {
             viewport_x: 0.0,
             viewport_y: 0.0,
             viewport_zoom: 1.0,
+            logical_resolution_width: surface_width,
+            presentation_scale: 1.0,
             surface_width,
             surface_height,
             fallback_ground_height,
@@ -2427,6 +2436,14 @@ impl GraphicsSystem {
 
     pub fn set_object_sprites(&mut self, sprites: Arc<HashMap<String, DefinitionSprite>>) {
         self.object_sprites = sprites;
+    }
+
+    pub fn set_presentation_scale(&mut self, scale: f32) {
+        self.presentation_scale = if scale.is_finite() {
+            scale.max(f32::EPSILON)
+        } else {
+            1.0
+        };
     }
 
     pub fn set_rotateable_definitions(&mut self, definitions: HashSet<DefinitionId>) {
@@ -6920,6 +6937,23 @@ impl GraphicsSystem {
             && rect.y + rect.height <= height
     }
 
+    fn cursor_mark_rect(
+        screen_x: f32,
+        screen_y: f32,
+        shape_height: f32,
+        cell: i32,
+        scale: f32,
+    ) -> GuiRect {
+        let inverse_scale = scale.recip();
+        // C++ casts cox/coy*scale before subtracting the unscaled physical
+        // facet offsets; Wdt/2 and Shape.Hgt/2 are integer divisions.
+        let x = ((screen_x * scale).trunc() - (cell / 2) as f32) * inverse_scale;
+        let y = ((screen_y * scale).trunc() - (shape_height / 2.0).trunc() - cell as f32)
+            * inverse_scale;
+        let size = cell as f32 * inverse_scale;
+        GuiRect::from_origin_size(GuiPoint::new(x, y), GuiSize::new(size, size))
+    }
+
     /// `C4Game::DrawCursors` (src/C4Game.cpp:1852-1874): while a player's
     /// CursorFlash/SelectFlash timer runs, the fctCursor mark — the 35th
     /// square cell of the mouse-cursor sheet, phase +1 when the crew is
@@ -6934,7 +6968,10 @@ impl GraphicsSystem {
         zoom: f32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
-        let Some(image) = self.cursor_atlas.image_for_resolution(self.surface_width) else {
+        let Some(image) = self.cursor_atlas.image_for_scaled_resolution(
+            self.logical_resolution_width,
+            self.presentation_scale,
+        ) else {
             return;
         };
 
@@ -7008,13 +7045,18 @@ impl GraphicsSystem {
                 .map(|sprite| (Self::sprite_def_shape(sprite).height as f32 * zoom).max(1.0))
                 .unwrap_or(12.0 * zoom)
         };
-        let cursor_size = cell as f32;
+        // DrawT applies an inverse Application.GetScale() transform after
+        // choosing a physically sized cursor sheet (src/C4Game.cpp:1859-1880).
+        // The frame presenter supplies the matching forward scale later.
+        let inverse_scale = self.presentation_scale.recip();
         let fog = self.fog_draw_context();
 
-        let mark_top = screen_y - shape_height / 2.0 - cursor_size;
-        let rect = GuiRect::from_origin_size(
-            GuiPoint::new(screen_x - cursor_size / 2.0, mark_top),
-            GuiSize::new(cursor_size, cursor_size),
+        let rect = Self::cursor_mark_rect(
+            screen_x,
+            screen_y,
+            shape_height,
+            cell,
+            self.presentation_scale,
         );
         draw_image_region(
             &mut self.surface,
@@ -7056,7 +7098,12 @@ impl GraphicsSystem {
                 .unwrap_or_else(|| vec![name]);
             let text_height = line_height * lines.len() as i32;
             let text_x = screen_x.round() as i32;
-            let mut text_y = mark_top.round() as i32 - 2 - text_height;
+            // TextOut is not under DrawT's transform. C++ offsets it by the
+            // ordinary logical shape height and trunc(fctCursor.Hgt / scale).
+            let label_mark_top = screen_y
+                - shape_height / 2.0
+                - (cell as f32 * inverse_scale).trunc();
+            let mut text_y = label_mark_top.round() as i32 - 2 - text_height;
             for line in &lines {
                 let color = Color::opaque(0xff, 0x00, 0x00);
                 if let Some(fog) = fog.as_ref() {
@@ -18373,7 +18420,64 @@ mod tests {
     }
 
     #[test]
-    fn render_frame_draws_player_cursor() {
+    fn cursor_atlas_matches_cpp_scale_selection() {
+        let entries = (0u8..8)
+            .map(|index| Some(ImageData::new(1, 1, vec![index, 0, 0, 255])))
+            .collect();
+        let atlas = CursorAtlas::new(entries);
+
+        // Scale=100 keeps the legacy width-only choice byte-for-byte.
+        for width in 640..=3840 {
+            let legacy_index = if width >= 1280 {
+                5
+            } else if width >= 800 {
+                6
+            } else {
+                7
+            };
+            assert_eq!(
+                CursorAtlas::index_for_scaled_resolution(width, 1.0),
+                legacy_index,
+                "Scale=100 width {width}"
+            );
+            assert_eq!(
+                atlas
+                    .image_for_scaled_resolution(width, 1.0)
+                    .expect("selected cursor sheet")
+                    .pixels()[0],
+                legacy_index as u8
+            );
+        }
+
+        // Strict physical-width edges and the truncated scale shift from
+        // C4GraphicsResource.cpp:474-490.
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(399, 2.0), 7);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(400, 2.0), 6);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(639, 2.0), 6);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(640, 2.0), 5);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(641, 2.0), 4);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(1280, 2.0), 4);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(853, 1.5), 6);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(854, 1.5), 4);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(512, 2.5), 5);
+        assert_eq!(CursorAtlas::index_for_scaled_resolution(513, 2.5), 3);
+
+        let odd_cell = GraphicsSystem::cursor_mark_rect(100.0, 100.0, 12.0, 75, 2.0);
+        assert_eq!(odd_cell.origin, GuiPoint::new(81.5, 59.5));
+        assert_eq!(odd_cell.size, GuiSize::new(37.5, 37.5));
+
+        let mut sparse = vec![None; 8];
+        sparse[5] = Some(ImageData::new(1, 1, vec![1, 2, 3, 255]));
+        assert!(
+            CursorAtlas::new(sparse)
+                .image_for_scaled_resolution(320, 1.0)
+                .is_none(),
+            "C++ does not substitute a nearby loaded cursor sheet"
+        );
+    }
+
+    #[test]
+    fn render_frame_draws_scale_selected_player_cursor() {
         // C4Game::DrawCursors (src/C4Game.cpp:1852-1874): while CursorFlash
         // or SelectFlash runs, ONE cell of the mouse-cursor sheet is drawn
         // above the cursor clonk — fctCursor is the 35th square cell (cell
@@ -18407,11 +18511,11 @@ mod tests {
         let cursor_pixels = Arc::from(cursor_pixels.into_boxed_slice());
         let cursor_image = ImageData::from_arc(40 * cell, cell, cursor_pixels);
         let mut cursor_entries = vec![None; 8];
-        cursor_entries[5] = Some(cursor_image);
+        cursor_entries[4] = Some(cursor_image);
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
         let mut graphics = GraphicsSystem::new(
-            320,
+            800,
             180,
             150,
             "Cursor Scenario",
@@ -18420,8 +18524,12 @@ mod tests {
             cursor_atlas,
             empty_hud_graphics(),
         );
+        graphics.set_presentation_scale(2.0);
         let focus = &snapshot.objects[0];
-        let viewports = vec![ViewportInput::from_focus(focus)];
+        let viewports = vec![
+            ViewportInput::from_focus(focus),
+            ViewportInput::from_focus(focus),
+        ];
         graphics.render_frame(&snapshot, &viewports);
 
         let cell_color = [123u8, 45, 210, 255];
@@ -18438,6 +18546,100 @@ mod tests {
         }
         assert!(found, "expected the fctCursor cell above the cursor crew");
         assert!(!leaked, "other sheet cells must not be drawn");
+    }
+
+    #[test]
+    fn scale_two_cursor_mark_keeps_selected_native_cell_size() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        let object_id = snapshot.objects[0].id;
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(object_id),
+            control: lc_engine::PlayerControlState {
+                cursor_flash: 30,
+                ..Default::default()
+            },
+            ..PlayerState::default()
+        });
+
+        // Scale=200 and logical width 800 select CursorXLarge (index 4),
+        // whose shipped cell is 75 physical pixels.
+        let cell = 75u32;
+        let mark = [123u8, 45, 210, 255];
+        let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                pixels.extend_from_slice(if (35 * cell..36 * cell).contains(&x) {
+                    &mark
+                } else {
+                    &[0, 200, 0, 255]
+                });
+            }
+        }
+        let image = ImageData::new(40 * cell, cell, pixels);
+        let mut entries = vec![None; 8];
+        entries[4] = Some(image);
+        let mut graphics = GraphicsSystem::new(
+            800,
+            180,
+            150,
+            "Scaled Cursor Scenario",
+            test_font(),
+            empty_sprites(),
+            Arc::new(CursorAtlas::new(entries)),
+            empty_hud_graphics(),
+        );
+        graphics.set_presentation_scale(2.0);
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        let mut presenter = lc_scaling::FramePresenter::new(2.0, 1600, 360);
+        let mut physical = vec![0; 1600 * 360 * 4];
+        presenter
+            .present(&mut physical, |frame| {
+                graphics.render_frame(&snapshot, &viewports);
+                frame.copy_from_slice(graphics.surface().pixels());
+                Ok::<bool, ()>(true)
+            })
+            .expect("present scaled cursor frame");
+
+        let points = physical
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(index, pixel)| {
+                (pixel == mark).then_some((index % 1600, index / 1600))
+            })
+            .collect::<Vec<_>>();
+        let min_x = points
+            .iter()
+            .map(|point| point.0)
+            .min()
+            .expect("cursor pixels");
+        let max_x = points
+            .iter()
+            .map(|point| point.0)
+            .max()
+            .expect("cursor pixels");
+        let min_y = points
+            .iter()
+            .map(|point| point.1)
+            .min()
+            .expect("cursor pixels");
+        let max_y = points
+            .iter()
+            .map(|point| point.1)
+            .max()
+            .expect("cursor pixels");
+        let physical_width = max_x - min_x + 1;
+        let physical_height = max_y - min_y + 1;
+        assert!(
+            physical_width.abs_diff(cell as usize) <= 1,
+            "inverse-scaled 75px cell rendered {physical_width}px wide"
+        );
+        assert!(
+            physical_height.abs_diff(cell as usize) <= 1,
+            "inverse-scaled 75px cell rendered {physical_height}px high"
+        );
     }
 
     /// Cursor + flash + a 40-cell atlas sheet so the mark (cell 35) draws.
@@ -18462,7 +18664,7 @@ mod tests {
             .collect();
         let cursor_image = ImageData::new(40 * cell, cell, pixels);
         let mut cursor_entries = vec![None; 8];
-        cursor_entries[5] = Some(cursor_image);
+        cursor_entries[7] = Some(cursor_image);
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
         let mut graphics = GraphicsSystem::new(
@@ -19302,7 +19504,7 @@ mod tests {
             .collect();
         let cursor_image = ImageData::from_arc(40 * cell, cell, Arc::from(pixels.into_boxed_slice()));
         let mut cursor_entries = vec![None; 8];
-        cursor_entries[5] = Some(cursor_image);
+        cursor_entries[7] = Some(cursor_image);
         let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
 
         let mut graphics = GraphicsSystem::new(
