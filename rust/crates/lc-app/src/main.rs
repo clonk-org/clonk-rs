@@ -10817,6 +10817,7 @@ enum LobbyAction {
 }
 
 const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
+const ALMOST_START_LOBBY_COUNTDOWN_SECONDS: i32 = 10;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MessageControlOutcome {
@@ -23955,8 +23956,22 @@ impl GameApp {
                         self.status_text = format!("{name} joined the lobby");
                     }
                     NetworkEvent::PeerDisconnected { client_id, reason } => {
+                        let abort_countdown_for_disconnected_client = matches!(
+                            self.network_mode,
+                            Some(NetworkMode::Host(_))
+                        ) && self.network_lobby.as_ref().is_some_and(|lobby| {
+                            lobby.countdown.is_some_and(|remaining| {
+                                remaining <= ALMOST_START_LOBBY_COUNTDOWN_SECONDS
+                            })
+                        })
+                            && i32::try_from(client_id).ok().is_some_and(|client_id| {
+                                !self.control_player_infos.client_info_ids(client_id).is_empty()
+                            });
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.unregister_peer(client_id);
+                        }
+                        if abort_countdown_for_disconnected_client {
+                            self.abort_network_lobby_countdown();
                         }
                         let local_client_id = (client_id == 0
                             && matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))))
@@ -71606,6 +71621,148 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         assert!(app.host_lobby_countdown.is_none());
         assert_eq!(app.network_lobby.as_ref().unwrap().countdown, None);
+    }
+
+    fn host_countdown_disconnect_fixture(
+        client_id: ClientId,
+        kind: ParticipantKind,
+        remaining: i32,
+        player_ids: &[i32],
+    ) -> (
+        GameApp,
+        std::sync::mpsc::Sender<NetworkEvent>,
+        crate::network::TestNetworkCommands,
+    ) {
+        let mut app = new_menu_app(320, 200);
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.register_peer(client_id, "Remote".to_string(), kind);
+        lobby.countdown = Some(remaining);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.host_lobby_countdown = Some(HostLobbyCountdown { remaining });
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: i32::try_from(client_id).expect("fixture client fits i32"),
+                players: player_ids
+                    .iter()
+                    .map(|id| lc_engine::ControlPlayerInfoEntry {
+                        id: *id,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        (app, event_tx, commands)
+    }
+
+    #[test]
+    fn host_disconnect_of_player_owning_client_aborts_lobby_countdown() {
+        // C4Network2 captures GetPrimaryInfoByClientID before CtrlRemove,
+        // then aborts after removing that client (src/C4Network2.cpp:1787-1800).
+        // Display kind is intentionally Observer: player infos are authoritative.
+        let client_id = 7;
+        let (mut app, event_tx, mut commands) = host_countdown_disconnect_fixture(
+            client_id,
+            ParticipantKind::Observer,
+            ALMOST_START_LOBBY_COUNTDOWN_SECONDS,
+            &[1],
+        );
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id,
+                reason: Some("connection lost".to_string()),
+            })
+            .expect("queue player-owning client disconnect");
+
+        app.process_network_events()
+            .expect("apply player-owning client disconnect");
+
+        assert!(!app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .participants
+            .contains_key(&client_id));
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, None);
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(
+                lc_network::LobbyCountdownPacket::ABORT,
+            )]
+        );
+
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id,
+                reason: None,
+            })
+            .expect("queue duplicate disconnect");
+        app.process_network_events()
+            .expect("ignore duplicate countdown abort");
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+    }
+
+    #[test]
+    fn host_disconnect_of_playerless_observer_keeps_lobby_countdown() {
+        let client_id = 9;
+        let (mut app, event_tx, mut commands) = host_countdown_disconnect_fixture(
+            client_id,
+            ParticipantKind::Observer,
+            5,
+            &[],
+        );
+        assert!(app.control_player_infos.client_info_ids(9).is_empty());
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id,
+                reason: None,
+            })
+            .expect("queue observer disconnect");
+
+        app.process_network_events()
+            .expect("apply observer disconnect");
+
+        assert!(!app
+            .network_lobby
+            .as_ref()
+            .unwrap()
+            .participants
+            .contains_key(&client_id));
+        assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown::new()));
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+    }
+
+    #[test]
+    fn host_disconnect_during_long_countdown_keeps_native_timer() {
+        // MainDlg::IsCountdown excludes CDS_LongCountdown (>10 seconds)
+        // (src/C4GameLobby.h:43,92-94; src/C4GameLobby.cpp:392-425).
+        let (mut app, event_tx, mut commands) = host_countdown_disconnect_fixture(
+            7,
+            ParticipantKind::Player,
+            11,
+            &[1],
+        );
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: 7,
+                reason: None,
+            })
+            .expect("queue long-countdown disconnect");
+
+        app.process_network_events()
+            .expect("apply long-countdown disconnect");
+
+        assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown { remaining: 11 }));
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(11));
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
     }
 
     #[test]
