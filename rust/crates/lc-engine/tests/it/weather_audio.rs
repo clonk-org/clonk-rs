@@ -71,6 +71,7 @@ fn tutorial07_tick10_starts_cpp_wind_loop_at_level_40() {
 fn is_wind_event(event: &AudioCommand) -> bool {
     match event {
         AudioCommand::PlaySound { name, .. }
+        | AudioCommand::PlaySoundAt { name, .. }
         | AudioCommand::StopSound { name, .. }
         | AudioCommand::SetSoundVolume { name, .. } => name.eq_ignore_ascii_case("Wind"),
         AudioCommand::DetachObjectSounds { .. }

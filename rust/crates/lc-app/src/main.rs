@@ -5757,6 +5757,23 @@ impl AudioContext {
         viewport_center: Vector2,
         runtime_music_enabled: &mut bool,
     ) {
+        self.process_audio_with_viewports(
+            snapshot,
+            focus,
+            viewport_center,
+            &[],
+            runtime_music_enabled,
+        );
+    }
+
+    fn process_audio_with_viewports(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
+        runtime_music_enabled: &mut bool,
+    ) {
         let events = &snapshot.audio;
         if !events.is_empty() {
             self.handle_events(
@@ -5764,6 +5781,7 @@ impl AudioContext {
                 snapshot,
                 focus,
                 viewport_center,
+                viewports,
                 runtime_music_enabled,
             );
         }
@@ -5938,6 +5956,7 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
         runtime_music_enabled: &mut bool,
     ) {
         for event in events {
@@ -5972,6 +5991,24 @@ impl AudioContext {
                         focus,
                         viewport_center,
                     );
+                }
+                AudioCommand::PlaySoundAt { name, position } => {
+                    let (volume, pan) =
+                        compute_positional_mix_values(*position, snapshot, viewports);
+                    if let Err(err) = self.try_start_sound_with_mix(
+                        name,
+                        None,
+                        volume,
+                        false,
+                        true,
+                        None,
+                        Some((f32::from(volume) / 100.0, pan)),
+                        snapshot,
+                        focus,
+                        viewport_center,
+                    ) {
+                        tracing::error!(sound = %name, error = %err, "failed to play positional sound");
+                    }
                 }
                 AudioCommand::StopSound { name, target } => {
                     self.stop_sound(name, *target);
@@ -6074,6 +6111,34 @@ impl AudioContext {
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
     ) -> Result<bool, AudioError> {
+        self.try_start_sound_with_mix(
+            name,
+            target,
+            volume,
+            looped,
+            multiple,
+            custom_falloff,
+            None,
+            snapshot,
+            focus,
+            viewport_center,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_start_sound_with_mix(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        multiple: bool,
+        custom_falloff: Option<i32>,
+        initial_mix: Option<(f32, f32)>,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
+    ) -> Result<bool, AudioError> {
         let key = SoundInstanceKey::new(name, target);
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
         // caller explicitly requests multiple instances (C4Script.cpp:
@@ -6124,7 +6189,7 @@ impl AudioContext {
             volume,
             custom_falloff,
             started_at: Instant::now(),
-            detached_mix: None,
+            detached_mix: initial_mix,
         };
         let (mut mix_volume, pan) =
             compute_mix_values(&mut info, snapshot, focus, viewport_center);
@@ -31200,11 +31265,13 @@ impl GameApp {
         // the music system to stop/play. Fold that flag in command order so
         // a SetPlayList restart sees the state at its exact event position.
         let mut runtime_music_enabled = self.runtime_music_enabled;
+        let viewports = self.graphics.active_viewport_projections();
         if let Some(audio) = self.audio.as_mut() {
-            audio.process_audio(
+            audio.process_audio_with_viewports(
                 &self.snapshot,
                 self.focus_snapshot.as_ref(),
                 viewport_center,
+                &viewports,
                 &mut runtime_music_enabled,
             );
         } else {
@@ -41245,6 +41312,70 @@ fn compute_mix_values_for(
     (base_volume * audibility, pan)
 }
 
+/// `C4GraphicsSystem::GetAudibility` for `StartSoundEffectAt`. Unlike
+/// object-bound sounds, C++ evaluates this once when the instance starts.
+fn compute_positional_mix_values(
+    source: Vector2,
+    snapshot: &SimulationSnapshot,
+    viewports: &[ActiveViewportProjection],
+) -> (u8, f32) {
+    let mut volume = 0u8;
+    let mut pan = 0i32;
+
+    for viewport in viewports {
+        let center = Vector2::new(
+            viewport.target_x.wrapping_add(viewport.logical_width / 2),
+            viewport.target_y.wrapping_add(viewport.logical_height / 2),
+        );
+        let listener = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == viewport.owner)
+            .and_then(|player| {
+                player
+                    .view_cursor
+                    .and_then(|object| snapshot.object(object))
+                    .or_else(|| {
+                        player
+                            .view_target
+                            .and_then(|object| snapshot.object(object))
+                    })
+                    .or_else(|| player.cursor.and_then(|object| snapshot.object(object)))
+            })
+            .map(|object| object.position)
+            .unwrap_or(center);
+        volume = volume.max(positional_audibility(source, listener));
+        pan = pan.wrapping_add((source.x.wrapping_sub(center.x)) / 5);
+    }
+
+    (volume, pan.clamp(-100, 100) as f32 / 100.0)
+}
+
+fn positional_audibility(source: Vector2, listener: Vector2) -> u8 {
+    const AUDIBILITY_RADIUS: i32 = 700;
+    let distance = c4_audio_distance(source, listener);
+    (100 - 100 * distance / AUDIBILITY_RADIUS).clamp(0, 100) as u8
+}
+
+/// `Distance` (C4Math.cpp): integer square root with the post-sqrt
+/// correction used by GetAudibility's integer arithmetic.
+fn c4_audio_distance(first: Vector2, second: Vector2) -> i32 {
+    let dx = i64::from(first.x) - i64::from(second.x);
+    let dy = i64::from(first.y) - i64::from(second.y);
+    let squared = dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy));
+    if squared < 0 {
+        return -1;
+    }
+    let mut distance = (squared as f64).sqrt() as i64;
+    if distance.wrapping_mul(distance) < squared {
+        distance += 1;
+    }
+    if distance.wrapping_mul(distance) > squared {
+        distance -= 1;
+    }
+    distance as i32
+}
+
 fn walker_script() -> &'static str {
     r#"
 global func Initialize(state, random) { return nil; }
@@ -47121,6 +47252,175 @@ func Award()
         );
         assert!((volume - 0.8).abs() < 1e-6);
         assert_eq!(pan, 0.0);
+    }
+
+    fn audio_viewport(
+        index: usize,
+        owner: i32,
+        center: Vector2,
+    ) -> ActiveViewportProjection {
+        ActiveViewportProjection {
+            index,
+            owner,
+            rect: Rect::new(0, 0, 200, 100),
+            content_rect: Rect::new(0, 0, 200, 100),
+            target_x: center.x - 100,
+            target_y: center.y - 50,
+            logical_width: 200,
+            logical_height: 100,
+            content_origin_x: 0.0,
+            content_origin_y: 0.0,
+            zoom: 1.0,
+        }
+    }
+
+    #[test]
+    fn positional_mix_uses_player_listener_for_volume_and_viewport_for_pan() {
+        let listener = make_object(1, "Listener", Vector2::new(1000, 1000));
+        let mut snapshot = make_snapshot(vec![listener.clone()], Vec::new());
+        snapshot.players = vec![PlayerState {
+            id: 7,
+            view_cursor: Some(listener.id),
+            // This is the requested camera center, not the live smoothed
+            // C4Viewport center used by GetAudibility.
+            viewports: vec![lc_engine::PlayerViewport::new(Vector2::new(5000, 5000))],
+            ..Default::default()
+        }];
+        snapshot.hud.local_players = vec![7];
+        let viewports = [audio_viewport(0, 7, Vector2::new(800, 1000))];
+
+        // Volume listens at ViewCursor (150px away), while pan uses the
+        // physical viewport center (350px away): 79% and +0.70.
+        assert_eq!(
+            compute_positional_mix_values(Vector2::new(1150, 1000), &snapshot, &viewports),
+            (79, 0.7),
+        );
+        assert_eq!(
+            compute_positional_mix_values(Vector2::new(1700, 1000), &snapshot, &viewports),
+            (0, 1.0),
+            "an event at the audibility radius is silent and fully right-panned",
+        );
+    }
+
+    #[test]
+    fn positional_mix_takes_max_volume_and_sums_only_active_viewport_pans() {
+        let source = make_object(1, "Source", Vector2::new(350, 100));
+        let local_left = PlayerState {
+            id: 1,
+            view_cursor: Some(source.id),
+            viewports: vec![lc_engine::PlayerViewport::new(Vector2::new(0, 100))],
+            ..Default::default()
+        };
+        let local_right = PlayerState {
+            id: 2,
+            view_cursor: Some(source.id),
+            viewports: vec![lc_engine::PlayerViewport::new(Vector2::new(1000, 100))],
+            ..Default::default()
+        };
+        let remote = PlayerState {
+            id: 3,
+            view_cursor: Some(source.id),
+            viewports: vec![lc_engine::PlayerViewport::new(Vector2::new(-1000, 100))],
+            ..Default::default()
+        };
+        let mut snapshot = make_snapshot(vec![source], Vec::new());
+        snapshot.players = vec![local_left, local_right, remote];
+        snapshot.hud.local_players = vec![1, 2];
+        let viewports = [
+            audio_viewport(0, 1, Vector2::new(0, 100)),
+            audio_viewport(1, 2, Vector2::new(1000, 100)),
+        ];
+
+        assert_eq!(
+            compute_positional_mix_values(Vector2::new(350, 100), &snapshot, &viewports),
+            (100, -0.6),
+            "pan is +70-130, not averaged; a player without an active viewport contributes nothing",
+        );
+    }
+
+    #[test]
+    fn positional_mix_ownerless_viewport_listens_at_its_live_center() {
+        let player_listener = make_object(1, "Listener", Vector2::new(350, 100));
+        let mut snapshot = make_snapshot(vec![player_listener.clone()], Vec::new());
+        snapshot.players = vec![PlayerState {
+            id: 1,
+            view_cursor: Some(player_listener.id),
+            ..Default::default()
+        }];
+        let viewports = [audio_viewport(0, OWNER_NONE, Vector2::new(0, 100))];
+
+        assert_eq!(
+            compute_positional_mix_values(Vector2::new(350, 100), &snapshot, &viewports),
+            (50, 0.7),
+            "a NO_OWNER viewport has no player listener override",
+        );
+        assert_eq!(
+            compute_positional_mix_values(Vector2::new(350, 100), &snapshot, &[]),
+            (0, 0.0),
+            "no active C4Viewport means no audibility or pan contribution",
+        );
+    }
+
+    #[test]
+    fn positional_audio_handler_freezes_mix_and_rejects_second_global_instance() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Goldrush.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Pshshsh.wav"), silent_pcm_wav(1_000))
+            .expect("write positional sound");
+
+        let options = AudioOptions {
+            max_channels: 2,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+
+        let listener = make_object(1, "Listener", Vector2::new(1000, 1000));
+        let mut snapshot = make_snapshot(vec![listener.clone()], Vec::new());
+        snapshot.players = vec![PlayerState {
+            id: 7,
+            view_cursor: Some(listener.id),
+            ..Default::default()
+        }];
+        let viewports = [audio_viewport(0, 7, Vector2::new(800, 1000))];
+        let event = AudioCommand::PlaySoundAt {
+            name: "Pshshsh".to_string(),
+            position: Vector2::new(1150, 1000),
+        };
+        let mut runtime_music_enabled = false;
+
+        audio.handle_events(
+            std::slice::from_ref(&event),
+            &snapshot,
+            Some(&listener),
+            Vector2::ZERO,
+            &viewports,
+            &mut runtime_music_enabled,
+        );
+        let key = SoundInstanceKey::new("Pshshsh", None);
+        let first = audio
+            .active_channels
+            .get(&key)
+            .expect("positional sound starts as a global instance")
+            .clone();
+        assert!(!first.looped);
+        assert_eq!(first.target, None);
+        assert_eq!(first.volume, 79);
+        let (frozen_volume, frozen_pan) = first.detached_mix.expect("positional mix is frozen");
+        assert!((frozen_volume - 0.79).abs() < f32::EPSILON);
+        assert!((frozen_pan - 0.7).abs() < f32::EPSILON);
+
+        audio.handle_events(
+            std::slice::from_ref(&event),
+            &snapshot,
+            Some(&listener),
+            Vector2::ZERO,
+            &viewports,
+            &mut runtime_music_enabled,
+        );
+        assert_eq!(audio.active_channels.len(), 1);
+        assert_eq!(audio.active_channels[&key].channel, first.channel);
     }
 
     #[test]
@@ -55052,6 +55352,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &snapshot,
             None,
             Vector2::ZERO,
+            &[],
             &mut runtime_music_enabled,
         );
         assert_eq!(
@@ -55074,6 +55375,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &snapshot,
             None,
             Vector2::ZERO,
+            &[],
             &mut runtime_music_enabled,
         );
         assert_ne!(
@@ -55096,6 +55398,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &snapshot,
             None,
             Vector2::ZERO,
+            &[],
             &mut runtime_music_enabled,
         );
         assert!(!runtime_music_enabled);
@@ -55118,6 +55421,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             &snapshot,
             None,
             Vector2::ZERO,
+            &[],
             &mut runtime_music_enabled,
         );
         assert!(runtime_music_enabled);

@@ -16016,6 +16016,13 @@ pub enum AudioCommand {
         target: ObjectId,
         position: Vector2,
     },
+    /// `StartSoundEffectAt`: a non-looping global sample whose mix is
+    /// calculated once from this landscape position by the presentation
+    /// layer.
+    PlaySoundAt {
+        name: String,
+        position: Vector2,
+    },
     StopSound {
         name: String,
         target: Option<ObjectId>,
@@ -51689,8 +51696,15 @@ impl Engine {
                 if self.rng.rnd3() == 0 {
                     self.spawn_smoke(*x, *y, 3);
                 }
-                // !Rnd3() → "Pshshsh" sound; the draw is sync-relevant.
-                let _ = self.rng.rnd3();
+                // !Rnd3() → "Pshshsh". Reuse the existing synchronized
+                // draw as the presentation gate; emitting the command draws
+                // no additional randomness.
+                if self.rng.rnd3() == 0 {
+                    self.pending_audio.push(AudioCommand::PlaySoundAt {
+                        name: "Pshshsh".to_string(),
+                        position: Vector2::new(*x, *y),
+                    });
+                }
                 true
             }
             // mrfCorrode (C4Material.cpp:691-745)
@@ -51745,7 +51759,12 @@ impl Engine {
                         let level = 3 + self.rng.random(3);
                         self.spawn_smoke(*x, *y, level);
                     }
-                    let _ = self.rng.random(20);
+                    if self.rng.random(20) == 0 {
+                        self.pending_audio.push(AudioCommand::PlaySoundAt {
+                            name: "Corrode".to_string(),
+                            position: Vector2::new(*x, *y),
+                        });
+                    }
                 } else {
                     // Else: dead. C++ routes through the full InsertMaterial
                     // slide/reaction/thrust path (C4Material.cpp:737-740).
@@ -51942,6 +51961,7 @@ impl Engine {
         }
         let mut instability_probes = Vec::new();
         let mut smoke_request = None;
+        let mut sound_request = None;
         let result = {
             let Some(landscape) = self.landscape.as_mut() else {
                 return material::MaterialReactionExecution::Unhandled;
@@ -51956,6 +51976,7 @@ impl Engine {
                 &mut self.rng,
                 &mut instability_probes,
                 &mut smoke_request,
+                &mut sound_request,
             )
         };
         // The CheckInstabilityRange half of each ExtractMaterial the
@@ -51965,6 +51986,12 @@ impl Engine {
         }
         if let Some(request) = smoke_request {
             self.spawn_smoke(request.x, request.y, request.level);
+        }
+        if let Some(request) = sound_request {
+            self.pending_audio.push(AudioCommand::PlaySoundAt {
+                name: request.name.to_string(),
+                position: Vector2::new(request.x, request.y),
+            });
         }
         result
     }

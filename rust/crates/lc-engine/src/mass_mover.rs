@@ -1247,11 +1247,11 @@ mod tests {
         let mut engine = engine_with(materials, landscape);
         register_smoke_particle(&mut engine);
         assert!(engine.mass_mover_create(1, 4, false));
-        engine.rng = crate::rng::LcgRng::seed_from_u64(9_876);
+        engine.rng = crate::rng::LcgRng::seed_from_u64(1);
 
         let mut expected = engine.rng.clone();
         assert_eq!(expected.rnd3(), 0, "the smoke branch is forced");
-        let _ = expected.rnd3(); // Pshshsh sound gate
+        assert_eq!(expected.rnd3(), 0, "the Pshshsh branch is forced");
 
         engine.tick_mass_movers();
 
@@ -1266,6 +1266,13 @@ mod tests {
         assert_eq!(smoke[0].x.to_bits(), 1.0f32.to_bits());
         assert_eq!(smoke[0].y.to_bits(), 3.0f32.to_bits());
         assert_eq!(smoke[0].a.to_bits(), 3.0f32.to_bits());
+        assert_eq!(
+            engine.pending_audio,
+            vec![crate::AudioCommand::PlaySoundAt {
+                name: "Pshshsh".to_string(),
+                position: crate::Vector2::new(1, 4),
+            }]
+        );
     }
 
     #[test]
@@ -1299,14 +1306,14 @@ mod tests {
         let mut engine = engine_with(materials, landscape);
         register_smoke_particle(&mut engine);
         assert!(engine.mass_mover_create(1, 4, false));
-        engine.rng = crate::rng::LcgRng::seed_from_u64(202);
+        engine.rng = crate::rng::LcgRng::seed_from_u64(20);
 
         let mut expected = engine.rng.clone();
         assert!(expected.random(100) < 100);
         assert!(expected.random(100) < 100);
         assert_eq!(expected.random(5), 0, "the smoke branch is forced");
         let expected_level = 3 + expected.random(3);
-        let _ = expected.random(20); // Corrode sound gate
+        assert_eq!(expected.random(20), 0, "the Corrode branch is forced");
 
         engine.tick_mass_movers();
 
@@ -1324,6 +1331,75 @@ mod tests {
             (4.0f32 - (expected_level / 2) as f32).to_bits()
         );
         assert_eq!(smoke[0].a.to_bits(), (expected_level as f32).to_bits());
+        assert_eq!(
+            engine.pending_audio,
+            vec![crate::AudioCommand::PlaySoundAt {
+                name: "Corrode".to_string(),
+                position: crate::Vector2::new(1, 4),
+            }]
+        );
+    }
+
+    #[test]
+    fn pxs_pos_poof_emits_positional_sound_without_changing_rnd3_ledger() {
+        let materials = materials(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Extinguisher=1
+
+            [Material Lava]
+            Name=Lava
+            Density=80
+            Incindiary=1
+            "#,
+        );
+        let water = materials.id_of("Water").expect("water material");
+        let lava = materials.id_of("Lava").expect("lava material");
+        let landscape = Landscape::flat_with_material(5, 5, Some(lava));
+        let mut engine = engine_with(materials, landscape);
+        register_smoke_particle(&mut engine);
+        engine.rng = crate::rng::LcgRng::seed_from_u64(1);
+
+        let reaction = engine.materials.reaction_for_event(
+            Some(water),
+            Some(lava),
+            MaterialInteractionEvent::PxsPos,
+        );
+        let mut pixel = crate::pxs::Pxs {
+            mat: water,
+            x: crate::math::itofix(2),
+            y: crate::math::itofix(3),
+            xdir: crate::math::C4Fixed::ZERO,
+            ydir: crate::math::C4Fixed::ZERO,
+        };
+        let (mut x, mut y) = (2, 3);
+        let mut pos_changed = false;
+        let mut expected = engine.rng.clone();
+        assert_eq!(expected.rnd3(), 0, "the smoke branch is forced");
+        assert_eq!(expected.rnd3(), 0, "the Pshshsh branch is forced");
+
+        assert!(engine.execute_pxs_reaction(
+            reaction,
+            &mut x,
+            &mut y,
+            2,
+            3,
+            &mut pixel,
+            Some(lava),
+            MaterialInteractionEvent::PxsPos,
+            &mut pos_changed,
+        ));
+
+        assert_eq!(engine.rng, expected, "Poof still consumes exactly two Rnd3 draws");
+        assert_eq!(
+            engine.pending_audio,
+            vec![crate::AudioCommand::PlaySoundAt {
+                name: "Pshshsh".to_string(),
+                position: crate::Vector2::new(2, 3),
+            }]
+        );
     }
 
     #[test]
@@ -1755,6 +1831,7 @@ mod tests {
         let mut engine = Engine::with_seed(2);
         engine.set_materials(materials);
         engine.set_landscape(landscape);
+        engine.rng = crate::rng::LcgRng::seed_from_u64(20);
 
         let reaction = engine.materials.reaction_for_event(
             Some(acid),
@@ -1770,6 +1847,12 @@ mod tests {
         };
         let (mut x, mut y) = (2, 1);
         let mut pos_changed = false;
+        let mut expected = engine.rng.clone();
+        assert!(expected.random(100) < 100);
+        assert!(expected.random(100) < 100);
+        assert_eq!(expected.random(5), 0, "the smoke branch is forced");
+        assert_eq!(expected.random(3), 0, "the smoke level is forced");
+        assert_eq!(expected.random(20), 0, "the Corrode branch is forced");
         let died = engine.execute_pxs_reaction(
             reaction,
             &mut x,
@@ -1782,6 +1865,14 @@ mod tests {
             &mut pos_changed,
         );
         assert!(died, "corrosion at 100/100 always consumes the PXS");
+        assert_eq!(engine.rng, expected, "Corrode draw order remains unchanged");
+        assert_eq!(
+            engine.pending_audio,
+            vec![crate::AudioCommand::PlaySoundAt {
+                name: "Corrode".to_string(),
+                position: crate::Vector2::new(2, 1),
+            }]
+        );
         let at = |engine: &Engine, x: i32, y: i32| {
             engine
                 .landscape

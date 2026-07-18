@@ -208,6 +208,13 @@ pub(crate) struct SmokeRequest {
     pub(crate) level: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PositionalSoundRequest {
+    pub(crate) name: &'static str,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+}
+
 fn normalize_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
@@ -990,6 +997,7 @@ impl MaterialSet {
         instability_probes: &mut Vec<(i32, i32)>,
     ) -> MaterialReactionExecution {
         let mut smoke_request = None;
+        let mut sound_request = None;
         self.execute_mass_move_reaction_with_smoke(
             landscape,
             pxs_material,
@@ -1000,6 +1008,7 @@ impl MaterialSet {
             rng,
             instability_probes,
             &mut smoke_request,
+            &mut sound_request,
         )
     }
 
@@ -1014,6 +1023,7 @@ impl MaterialSet {
         rng: &mut LcgRng,
         instability_probes: &mut Vec<(i32, i32)>,
         smoke_request: &mut Option<SmokeRequest>,
+        sound_request: &mut Option<PositionalSoundRequest>,
     ) -> MaterialReactionExecution {
         let landscape_material = landscape.border_material_at(landscape_x, landscape_y);
         let reaction = self.reaction_for_event(
@@ -1033,6 +1043,7 @@ impl MaterialSet {
             rng,
             instability_probes,
             smoke_request,
+            sound_request,
         )
     }
 
@@ -1068,19 +1079,18 @@ pub fn evaluate_corrosion(
 }
 
 pub fn consume_corrosion_effect_rng(rng: &mut LcgRng) {
-    let _ = corrosion_effect_smoke_level(rng);
+    let _ = corrosion_effect_gates(rng);
 }
 
-fn corrosion_effect_smoke_level(rng: &mut LcgRng) -> Option<i32> {
+fn corrosion_effect_gates(rng: &mut LcgRng) -> (Option<i32>, bool) {
     let smoke_level = if rng.random(5) == 0 {
         Some(3 + rng.random(3))
     } else {
         None
     };
     // The positional Corrode sound check follows Smoke synchronously.
-    // Sound playback is not modeled, but its Random(20) draw is synced.
-    let _ = rng.random(20);
-    smoke_level
+    let play_sound = rng.random(20) == 0;
+    (smoke_level, play_sound)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1096,6 +1106,7 @@ fn execute_mass_move_reaction_kind(
     rng: &mut LcgRng,
     instability_probes: &mut Vec<(i32, i32)>,
     smoke_request: &mut Option<SmokeRequest>,
+    sound_request: &mut Option<PositionalSoundRequest>,
 ) -> MaterialReactionExecution {
     match reaction {
         MaterialReactionKind::None | MaterialReactionKind::Insert => {
@@ -1129,7 +1140,13 @@ fn execute_mass_move_reaction_kind(
                     level: 3,
                 });
             }
-            let _ = rng.rnd3();
+            if rng.rnd3() == 0 {
+                *sound_request = Some(PositionalSoundRequest {
+                    name: "Pshshsh",
+                    x: pxs_x,
+                    y: pxs_y,
+                });
+            }
             MaterialReactionExecution::Consumed
         }
         MaterialReactionKind::Corrode {
@@ -1150,11 +1167,19 @@ fn execute_mass_move_reaction_kind(
                     // column-model fixture worlds keep the column removal
                     let _ = landscape.extract_material_at(landscape_x, landscape_y);
                 }
-                if let Some(level) = corrosion_effect_smoke_level(rng) {
+                let (smoke_level, play_sound) = corrosion_effect_gates(rng);
+                if let Some(level) = smoke_level {
                     *smoke_request = Some(SmokeRequest {
                         x: pxs_x,
                         y: pxs_y,
                         level,
+                    });
+                }
+                if play_sound {
+                    *sound_request = Some(PositionalSoundRequest {
+                        name: "Corrode",
+                        x: pxs_x,
+                        y: pxs_y,
                     });
                 }
                 MaterialReactionExecution::Consumed
