@@ -592,14 +592,28 @@ struct GameGraphicsResources {
     liquid_animation: Option<Arc<ImageData>>,
 }
 
-// C4LoaderScreen uses SafeRandom, which is the platform C library's global
-// rand() stream. Keep the whole reservoir pass atomic so Rust worker/tests
-// cannot interleave calls that C++ makes serially on its main thread. Future
-// ports of SafeRandom/FixRandom consumers must share this owner.
+// C4LoaderScreen and wildcard sound selection use SafeRandom, which is the
+// platform C library's global rand() stream. Keep each C++ main-thread draw
+// sequence atomic so Rust worker/tests cannot interleave it. Future ports of
+// SafeRandom/FixRandom consumers must share this owner.
 static CLASSIC_SAFE_RANDOM_LOCK: Mutex<()> = Mutex::new(());
 
 extern "C" {
     fn rand() -> std::os::raw::c_int;
+}
+
+fn classic_safe_random_unlocked(range: usize) -> usize {
+    if range == 0 {
+        return 0;
+    }
+    // SAFETY: C rand takes no arguments and C guarantees a non-negative
+    // result. Callers serialize access with CLASSIC_SAFE_RANDOM_LOCK.
+    (unsafe { rand() } as usize) % range
+}
+
+fn classic_safe_random(range: usize) -> usize {
+    let _guard = lock_unpoisoned(&CLASSIC_SAFE_RANDOM_LOCK);
+    classic_safe_random_unlocked(range)
 }
 
 fn select_loader_with_safe_random(
@@ -610,12 +624,12 @@ fn select_loader_with_safe_random(
     let _guard = CLASSIC_SAFE_RANDOM_LOCK
         .lock()
         .map_err(|_| anyhow!("classic SafeRandom lock was poisoned"))?;
-    select_loader_source(groups, graphics, specification, |range| {
-        debug_assert!(range > 0);
-        // SAFETY: C rand takes no arguments and C guarantees a non-negative
-        // result. The process-global lock above serializes the shared state.
-        (unsafe { rand() } as usize) % range
-    })
+    select_loader_source(
+        groups,
+        graphics,
+        specification,
+        classic_safe_random_unlocked,
+    )
 }
 
 fn select_loader_source(
@@ -6497,9 +6511,37 @@ impl SoundResolver {
     }
 
     fn resolve_entry(&self, name: &str) -> Option<ResolvedSound<'_>> {
+        self.resolve_entry_with_random(name, classic_safe_random)
+    }
+
+    fn resolve_entry_with_random(
+        &self,
+        name: &str,
+        next_random: impl FnOnce(usize) -> usize,
+    ) -> Option<ResolvedSound<'_>> {
         let terms = SoundSearchTerms::new(name);
+        if let Some(pattern) = terms.wildcard_pattern.as_deref() {
+            let mut matches = Vec::new();
+            for library in self.scenario.iter().chain(self.global.iter()) {
+                matches.extend(
+                    library
+                        .wildcard_match_indices(pattern)
+                        .map(|entry_index| (library, entry_index)),
+                );
+            }
+            if matches.is_empty() {
+                return None;
+            }
+            let selected = next_random(matches.len());
+            let (library, entry_index) = matches.get(selected).copied()?;
+            return Some(ResolvedSound {
+                library,
+                entry_index,
+            });
+        }
+
         for library in self.scenario.iter().chain(self.global.iter()) {
-            if let Some(index) = library.find_entry(&terms) {
+            if let Some(index) = library.find_exact_entry(&terms.search_names) {
                 return Some(ResolvedSound {
                     library,
                     entry_index: index,
@@ -6587,11 +6629,8 @@ impl SoundLibrary {
         self.by_file_name.entry(file_key).or_default().push(index);
     }
 
-    fn find_entry(&self, terms: &SoundSearchTerms) -> Option<usize> {
-        if let Some(pattern) = &terms.wildcard_pattern {
-            return self.find_wildcard(pattern);
-        }
-        for file_name in &terms.search_names {
+    fn find_exact_entry(&self, search_names: &[String]) -> Option<usize> {
+        for file_name in search_names {
             if let Some(indices) = self.by_file_name.get(file_name) {
                 return Some(self.pick_best_index(indices));
             }
@@ -6599,18 +6638,16 @@ impl SoundLibrary {
         None
     }
 
-    fn find_wildcard(&self, pattern: &str) -> Option<usize> {
-        let mut matches = Vec::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if matches_sound_pattern(pattern, &entry.file_name) {
-                matches.push(index);
-            }
-        }
-        match matches.len() {
-            0 => None,
-            1 => matches.first().copied(),
-            _ => Some(self.pick_best_index(&matches)),
-        }
+    fn wildcard_match_indices<'a>(
+        &'a self,
+        pattern: &'a str,
+    ) -> impl Iterator<Item = usize> + 'a {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, entry)| {
+                matches_sound_pattern(pattern, &entry.file_name).then_some(index)
+            })
     }
 
     fn pick_best_index(&self, indices: &[usize]) -> usize {
@@ -46683,6 +46720,87 @@ func Award()
                 .expect("resolved sample loads"),
             b"one extra character"
         );
+    }
+
+    fn wildcard_sound_resolver_fixture() -> (tempfile::TempDir, SoundResolver) {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Scenario.c4s");
+        let global = dir.path().join("Sound.c4g");
+        let definition = dir.path().join("Blast.c4d");
+        for path in [&scenario, &global, &definition] {
+            fs::create_dir_all(path).expect("sound group");
+        }
+        fs::write(scenario.join("Blast1.wav"), b"scenario blast").expect("scenario sound");
+        fs::write(global.join("Blast2.wav"), b"global blast").expect("global sound");
+        fs::write(definition.join("Blast3.wav"), b"definition blast")
+            .expect("definition sound");
+
+        let mut resolver = SoundResolver {
+            global: collect_sound_libraries_for_path(&global),
+            scenario: collect_sound_libraries_for_path(&scenario),
+            scenario_root: Some(scenario),
+            registered_definitions: HashSet::new(),
+        };
+        let definition_group = Group::open(&definition).expect("definition group");
+        resolver.register_definition_group("BLST", &definition_group);
+        (dir, resolver)
+    }
+
+    #[test]
+    fn wildcard_sound_resolution_varies_without_advancing_synced_rng() {
+        let (_dir, resolver) = wildcard_sound_resolver_fixture();
+        let mut with_sound = lc_engine::LcgRng::seed_from_u64(0xc4);
+        let mut without_sound = with_sound.clone();
+        let resolved = (0..100)
+            .map(|_| {
+                resolver
+                    .resolve_entry("Blast*")
+                    .expect("wildcard sound")
+                    .cache_key()
+            })
+            .collect::<HashSet<_>>();
+
+        assert!(
+            resolved.len() > 1,
+            "one hundred SafeRandom selections must not collapse to one sample"
+        );
+        assert_eq!(
+            with_sound, without_sound,
+            "sound resolution must not touch the synchronized LCG state"
+        );
+        let with_sound_draws = (0..16)
+            .map(|_| with_sound.random(10_000))
+            .collect::<Vec<_>>();
+        let without_sound_draws = (0..16)
+            .map(|_| without_sound.random(10_000))
+            .collect::<Vec<_>>();
+        assert_eq!(with_sound_draws, without_sound_draws);
+    }
+
+    #[test]
+    fn wildcard_sound_resolution_spans_scenario_global_and_definitions() {
+        let (_dir, resolver) = wildcard_sound_resolver_fixture();
+        let expected = [
+            b"scenario blast".as_slice(),
+            b"global blast".as_slice(),
+            b"definition blast".as_slice(),
+        ];
+        for (selected, expected) in expected.into_iter().enumerate() {
+            let resolved = resolver
+                .resolve_entry_with_random("Blast*", |range| {
+                    assert_eq!(range, 3, "every resolved library contributes a match");
+                    selected
+                })
+                .expect("selected wildcard sound");
+            assert_eq!(resolved.load_audio().expect("sound bytes"), expected);
+        }
+
+        let exact = resolver
+            .resolve_entry_with_random("Blast2", |_| {
+                panic!("exact sound resolution must not consume SafeRandom")
+            })
+            .expect("exact global sound");
+        assert_eq!(exact.load_audio().expect("exact sound bytes"), b"global blast");
     }
 
     #[test]
