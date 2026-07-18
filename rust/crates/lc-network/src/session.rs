@@ -2704,7 +2704,6 @@ async fn handle_client_message(
         ControlMessage::ReadyCheck(packet) => {
             apply_ready_check_to_host_state(packet, state);
             let _ = state.event_tx.send(HostEvent::ReadyCheck { packet }).await;
-            broadcast_ready_check(packet, Some(client_id), state).await;
         }
         ControlMessage::ActivationRequest { tick } => {
             let waited_for = matches!(
@@ -2845,6 +2844,27 @@ async fn handle_forward_request(
     packet: crate::ForwardPacket,
     state: &mut HostState,
 ) {
+    // These are the two canonical no-mesh BroadcastMsgToClients shapes emitted
+    // by the Rust client. Keep this compatibility bridge shape-restricted;
+    // generic C4 forwarding still needs to preserve arbitrary nested bytes.
+    if packet.negative_list {
+        match crate::transport::parse_complete_packet(&packet.nested_packet) {
+            Ok(Some(ControlMessage::Packet { delivery, data }))
+                if packet.clients.is_empty()
+                    && matches!(delivery, ControlDelivery::Direct | ControlDelivery::Private) =>
+            {
+                broadcast_packet(delivery, data, Some(source), state).await;
+                return;
+            }
+            Ok(Some(ControlMessage::ReadyCheck(ready)))
+                if packet.clients == [HOST_CLIENT_ID as i32] && !ready.data.vote_requested() =>
+            {
+                broadcast_ready_check(ready, Some(source), state).await;
+                return;
+            }
+            _ => {}
+        }
+    }
     let control = match authenticated_forwarded_control(source, &packet) {
         Ok(control) => control,
         Err(error) => {
@@ -4068,10 +4088,26 @@ async fn run_client_loop_with_addresses<S>(
                         }
                     }
                     ClientCommand::SubmitReadyCheck(packet) => {
-                        if let Err(error) = transport
+                        let raw_result = transport
                             .send_message(ControlMessage::ReadyCheck(packet))
-                            .await
-                        {
+                            .await;
+                        let forward_result = match raw_result {
+                            Ok(()) => {
+                                let nested_packet =
+                                    crate::transport::encode_complete_ready_check_packet(packet);
+                                transport
+                                    .send_message(ControlMessage::ForwardRequest(
+                                        crate::ForwardPacket {
+                                            negative_list: true,
+                                            clients: vec![resource_state.host_peer_id],
+                                            nested_packet,
+                                        },
+                                    ))
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = forward_result {
                             let _ = event_tx
                                 .send(ClientEvent::Disconnected {
                                     reason: Some(format!("send failed: {error}")),
@@ -4163,10 +4199,22 @@ async fn run_client_loop_with_addresses<S>(
                         }
                     }
                     ClientCommand::SubmitPacket { delivery, data } => {
-                        if let Err(error) = transport
-                            .send_message(ControlMessage::Packet { delivery, data })
-                            .await
-                        {
+                        let message = if matches!(
+                            delivery,
+                            ControlDelivery::Direct | ControlDelivery::Private
+                        ) {
+                            ControlMessage::ForwardRequest(crate::ForwardPacket {
+                                negative_list: true,
+                                clients: Vec::new(),
+                                nested_packet:
+                                    crate::transport::encode_complete_control_delivery_packet(
+                                        delivery, &data,
+                                    ),
+                            })
+                        } else {
+                            ControlMessage::Packet { delivery, data }
+                        };
+                        if let Err(error) = transport.send_message(message).await {
                             let _ = event_tx
                                 .send(ClientEvent::Disconnected {
                                     reason: Some(format!("send failed: {error}")),
@@ -4970,6 +5018,247 @@ mod tests {
         shutdown_tx.send(()).ok();
         drop(command_tx);
         client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_direct_and_private_packets_send_only_forward_request() {
+        // CDT_Direct and CDT_Private exclude the host from the direct leg.
+        // With no peer mesh, only the host FwdReq remains and its negative
+        // list is empty (pristine C++ src/C4Network2Client.cpp:515-541;
+        // src/C4GameControlNetwork.cpp:224-240).
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(2);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_handle = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        for delivery in [ControlDelivery::Direct, ControlDelivery::Private] {
+            command_tx
+                .send(ClientCommand::SubmitPacket {
+                    delivery,
+                    data: vec![0xaa, 0xbb],
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                timeout(EVENT_WAIT, host_transport.read_message())
+                    .await
+                    .expect("forward request send wait")
+                    .expect("read forward request"),
+                ControlMessage::ForwardRequest(crate::ForwardPacket {
+                    negative_list: true,
+                    clients: Vec::new(),
+                    nested_packet: vec![0x42, u8::from(delivery), 0xaa, 0xbb],
+                })
+            );
+        }
+        assert!(
+            timeout(Duration::from_millis(50), host_transport.read_message())
+                .await
+                .is_err(),
+            "direct/private submission emitted an extra raw packet"
+        );
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_ready_check_sends_raw_then_host_excluding_forward_request() {
+        // ReadyCheck uses includeHost=true: the host receives the raw packet
+        // first and is then excluded from the fallback FwdReq (pristine C++
+        // src/C4Network2Client.cpp:515-541; src/C4GameLobby.cpp:329-343).
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.host_peer_id = 7;
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let packet = ReadyCheckPacket {
+            client_id: 12,
+            data: crate::ReadyCheckData::Ready,
+        };
+
+        command_tx
+            .send(ClientCommand::SubmitReadyCheck(packet))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(EVENT_WAIT, host_transport.read_message())
+                .await
+                .expect("raw ready-check send wait")
+                .expect("read raw ready-check"),
+            ControlMessage::ReadyCheck(packet)
+        );
+        let mut nested_packet = vec![0x21];
+        nested_packet.extend_from_slice(&packet.client_id.to_ne_bytes());
+        nested_packet.extend_from_slice(&i32::from(packet.data).to_ne_bytes());
+        assert_eq!(
+            timeout(EVENT_WAIT, host_transport.read_message())
+                .await
+                .expect("ready-check forward request send wait")
+                .expect("read ready-check forward request"),
+            ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: vec![7],
+                nested_packet,
+            })
+        );
+        assert!(
+            timeout(Duration::from_millis(50), host_transport.read_message())
+                .await
+                .is_err(),
+            "ready-check submission emitted an extra packet"
+        );
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rust_client_direct_packet_reaches_rust_host_and_observer_once() {
+        // The client now reaches the host only through FwdReq for direct
+        // packets. Preserve Rust-host interoperability while the generic
+        // opaque forwarding router remains separate work.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let source = connect_client(
+            address,
+            ClientConfig::new("Source", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let mut observer_a = connect_client(
+            address,
+            ClientConfig::new("Observer A", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let mut observer_a_events = observer_a.take_event_receiver();
+        let mut observer_b = connect_client(
+            address,
+            ClientConfig::new("Observer B", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let mut observer_b_events = observer_b.take_event_receiver();
+        let source_id = source.client_id();
+        let data =
+            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
+                player: i32::try_from(source_id).unwrap(),
+                command: 0x22,
+                data: 0x33,
+                by_client: i32::try_from(source_id).unwrap(),
+            }))
+            .unwrap();
+
+        source
+            .submit_packet(ControlDelivery::Direct, data.clone())
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct {
+                    client_id,
+                    delivery: ControlDelivery::Direct,
+                    data: received,
+                }) if client_id == source_id && received == data => break,
+                Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                }) if client_id == source_id => {
+                    panic!("source forwarding failed: {error}")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before direct packet"),
+            }
+        }
+        for (name, events) in [
+            ("observer A", &mut observer_a_events),
+            ("observer B", &mut observer_b_events),
+        ] {
+            loop {
+                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                    Some(ClientEvent::Direct {
+                        delivery: ControlDelivery::Direct,
+                        data: received,
+                    }) if received == data => break,
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("{name} disconnected during direct forwarding: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("{name} event stream ended before direct packet"),
+                }
+            }
+        }
+
+        let host_duplicate_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = timeout_at(host_duplicate_deadline, host_events.recv()).await {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::Direct {
+                        client_id,
+                        delivery: ControlDelivery::Direct,
+                        data: ref received,
+                    } if client_id == source_id && *received == data
+                ),
+                "host executed the forwarded direct packet twice"
+            );
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        ..
+                    } if client_id == source_id
+                ),
+                "host rejected the direct forwarding leg"
+            );
+        }
+        for (name, events) in [
+            ("observer A", &mut observer_a_events),
+            ("observer B", &mut observer_b_events),
+        ] {
+            let duplicate_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+            while let Ok(Some(event)) = timeout_at(duplicate_deadline, events.recv()).await {
+                assert!(
+                    !matches!(
+                        event,
+                        ClientEvent::Direct {
+                            delivery: ControlDelivery::Direct,
+                            data: ref received,
+                        } if *received == data
+                    ),
+                    "{name} received the forwarded direct packet twice"
+                );
+            }
+        }
+
+        source.shutdown().await.unwrap();
+        observer_a.shutdown().await.unwrap();
+        observer_b.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11095,6 +11384,30 @@ mod tests {
                 Some(_) => continue,
                 None => panic!("beta event stream ended before ready-check relay"),
             }
+        }
+        let host_duplicate_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = timeout_at(host_duplicate_deadline, host_events.recv()).await {
+            assert!(
+                !matches!(event, HostEvent::ReadyCheck { packet } if packet == relayed),
+                "host handled one ready-check toggle twice"
+            );
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        ..
+                    } if client_id == alpha.client_id()
+                ),
+                "host rejected the ready-check forwarding leg"
+            );
+        }
+        let beta_duplicate_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = timeout_at(beta_duplicate_deadline, beta_events.recv()).await {
+            assert!(
+                !matches!(event, ClientEvent::ReadyCheck { packet } if packet == relayed),
+                "beta received one ready-check toggle twice"
+            );
         }
 
         let local = ReadyCheckPacket {

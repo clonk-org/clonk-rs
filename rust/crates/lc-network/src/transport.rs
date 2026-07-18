@@ -464,8 +464,7 @@ where
                 frame.extend_from_slice(&packet.countdown().to_ne_bytes());
             }
             ControlMessage::ReadyCheck(packet) => {
-                frame.push(PID_READY_CHECK);
-                encode_ready_check(packet, &mut frame);
+                frame.extend(encode_complete_ready_check_packet(packet));
             }
             ControlMessage::ActivationRequest { tick } => {
                 frame.push(PID_CLIENT_ACT_REQ);
@@ -488,9 +487,7 @@ where
                 encode_packed_i32(from_tick, &mut frame);
             }
             ControlMessage::Packet { delivery, data } => {
-                frame.push(PID_CONTROL_PKT);
-                frame.push(u8::from(delivery));
-                frame.extend_from_slice(&data);
+                frame.extend(encode_complete_control_delivery_packet(delivery, &data));
             }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
@@ -583,6 +580,21 @@ pub(crate) fn encode_complete_control_packet(
     encode_packed_i32(tick, &mut body);
     body.extend_from_slice(packet.payload());
     Ok(body)
+}
+
+pub(crate) fn encode_complete_ready_check_packet(packet: ReadyCheckPacket) -> Vec<u8> {
+    let mut body = vec![PID_READY_CHECK];
+    encode_ready_check(packet, &mut body);
+    body
+}
+
+pub(crate) fn encode_complete_control_delivery_packet(
+    delivery: ControlDelivery,
+    data: &[u8],
+) -> Vec<u8> {
+    let mut body = vec![PID_CONTROL_PKT, u8::from(delivery)];
+    body.extend_from_slice(data);
+    body
 }
 
 fn parse_ping(data: &[u8]) -> Result<PingPacket, TransportError> {
