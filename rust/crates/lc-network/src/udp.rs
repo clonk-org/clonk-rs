@@ -568,7 +568,7 @@ pub fn encode_reliable_udp_close(close: &ReliableUdpClose) -> Vec<u8> {
 
 /// Decodes C++'s packed close notification.
 pub fn decode_reliable_udp_close(wire: &[u8]) -> Result<ReliableUdpClose, ReliableUdpDecodeError> {
-    if wire.len() != CLOSE_PACKET_SIZE {
+    if wire.len() < CLOSE_PACKET_SIZE {
         return Err(ReliableUdpDecodeError::InvalidLength {
             expected: CLOSE_PACKET_SIZE,
             actual: wire.len(),
@@ -579,7 +579,7 @@ pub fn decode_reliable_udp_close(wire: &[u8]) -> Result<ReliableUdpClose, Reliab
     }
     Ok(ReliableUdpClose {
         packet_number: decode_native_u32(wire, 1).expect("checked close packet length"),
-        address: decode_bin_address(&wire[5..])?,
+        address: decode_bin_address(&wire[5..CLOSE_PACKET_SIZE])?,
     })
 }
 
@@ -952,6 +952,69 @@ mod tests {
         let mut wrong_version = fixture;
         wrong_version[5..9].copy_from_slice(&3_u32.to_ne_bytes());
         assert_eq!(decode_reliable_udp_connect(&wrong_version), Ok(None));
+    }
+
+    #[test]
+    fn cpp_close_codec_is_the_packed_24_byte_ipv4_and_ipv6_layout() {
+        // ClosePacket is PacketHdr followed by BinAddr. C++ accepts any
+        // datagram containing at least the complete packed structure.
+        let cases = [
+            (
+                ReliableUdpClose {
+                    packet_number: 0,
+                    address: SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(203, 0, 113, 7),
+                        11_115,
+                    )),
+                },
+                [203, 0, 113, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                1,
+            ),
+            (
+                ReliableUdpClose {
+                    packet_number: 0,
+                    address: SocketAddr::V6(SocketAddrV6::new(
+                        "2001:db8::1234".parse::<Ipv6Addr>().unwrap(),
+                        11_113,
+                        0,
+                        0,
+                    )),
+                },
+                "2001:db8::1234".parse::<Ipv6Addr>().unwrap().octets(),
+                2,
+            ),
+        ];
+
+        for &(close, address_octets, address_type) in &cases {
+            let mut fixture = vec![0x06];
+            fixture.extend_from_slice(&close.packet_number.to_ne_bytes());
+            fixture.extend_from_slice(&close.address.port().to_ne_bytes());
+            fixture.push(address_type);
+            fixture.extend_from_slice(&address_octets);
+
+            assert_eq!(fixture.len(), CLOSE_PACKET_SIZE);
+            assert_eq!(encode_reliable_udp_close(&close), fixture);
+            assert_eq!(decode_reliable_udp_close(&fixture), Ok(close));
+
+            let mut multicast_flagged = fixture.clone();
+            multicast_flagged[0] |= 0x80;
+            assert_eq!(decode_reliable_udp_close(&multicast_flagged), Ok(close));
+
+            let mut oversized = fixture;
+            oversized.push(0xaa);
+            assert_eq!(decode_reliable_udp_close(&oversized), Ok(close));
+        }
+
+        let fixture = encode_reliable_udp_close(&cases[0].0);
+        for length in 0..CLOSE_PACKET_SIZE {
+            assert_eq!(
+                decode_reliable_udp_close(&fixture[..length]),
+                Err(ReliableUdpDecodeError::InvalidLength {
+                    expected: CLOSE_PACKET_SIZE,
+                    actual: length,
+                })
+            );
+        }
     }
 
     #[test]

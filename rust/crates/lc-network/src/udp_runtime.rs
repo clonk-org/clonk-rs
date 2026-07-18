@@ -35,6 +35,7 @@ pub enum ReliableUdpPeerStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReliableUdpDisconnectReason {
+    Closed,
     ConnectionTimeout,
     Starvation,
     ConnectionReset,
@@ -45,6 +46,7 @@ pub enum ReliableUdpDisconnectReason {
 impl ReliableUdpDisconnectReason {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Closed => "closed",
             Self::ConnectionTimeout => "connection timeout",
             Self::Starvation => "starvation",
             Self::ConnectionReset => "connection reset",
@@ -504,20 +506,24 @@ impl ReliableUdpEndpointCore {
     }
 
     pub fn report_unreachable(&mut self, peer: SocketAddr) -> ReliableUdpStep {
+        self.close_peer_with_reason(peer, ReliableUdpDisconnectReason::ConnectionReset)
+    }
+
+    /// Plans C++'s best-effort Close datagram and removes the local peer.
+    pub fn close_peer(&mut self, peer: SocketAddr) -> ReliableUdpStep {
+        self.close_peer_with_reason(peer, ReliableUdpDisconnectReason::Closed)
+    }
+
+    fn close_peer_with_reason(
+        &mut self,
+        peer: SocketAddr,
+        reason: ReliableUdpDisconnectReason,
+    ) -> ReliableUdpStep {
         let peer = canonical_reliable_udp_peer_address(peer);
-        let step = self
-            .peers
-            .get_mut(&peer)
-            .map(|peer| peer.close(ReliableUdpDisconnectReason::ConnectionReset))
-            .unwrap_or_default();
-        if self
-            .peers
-            .get(&peer)
-            .is_some_and(|peer| peer.status == ReliableUdpPeerStatus::Closed)
-        {
-            self.peers.remove(&peer);
-        }
-        step
+        self.peers
+            .remove(&peer)
+            .map(|mut peer| peer.close(reason))
+            .unwrap_or_default()
     }
 
     pub fn peer_status(&self, peer: SocketAddr) -> Option<ReliableUdpPeerStatus> {
@@ -661,6 +667,12 @@ impl ReliableUdpSocketDriver {
         peer: SocketAddr,
     ) -> io::Result<Vec<ReliableUdpEvent>> {
         let step = self.core.report_unreachable(peer);
+        self.flush_step(step).await
+    }
+
+    /// Sends one best-effort Close datagram before reporting local teardown.
+    pub async fn close_peer(&mut self, peer: SocketAddr) -> io::Result<Vec<ReliableUdpEvent>> {
+        let step = self.core.close_peer(peer);
         self.flush_step(step).await
     }
 
@@ -1033,6 +1045,59 @@ mod tests {
     }
 
     #[test]
+    fn explicit_close_emits_once_and_matching_peer_close_does_not_reply() {
+        let (a_address, b_address, mut a, mut b) = handshake_pair();
+        let incoming_close = encode_reliable_udp_close(&ReliableUdpClose {
+            packet_number: 0,
+            address: a_address,
+        });
+        for length in 0..incoming_close.len() {
+            assert_eq!(
+                a.receive_at(b_address, &incoming_close[..length], Duration::ZERO),
+                ReliableUdpStep::default(),
+                "short Close length {length}"
+            );
+        }
+        assert_eq!(
+            a.peer_status(b_address),
+            Some(ReliableUdpPeerStatus::Working)
+        );
+
+        let local_close = a.close_peer(b_address);
+        assert_eq!(local_close.datagrams.len(), 1);
+        assert_eq!(
+            local_close.events,
+            vec![ReliableUdpEvent::Disconnected {
+                peer: b_address,
+                reason: ReliableUdpDisconnectReason::Closed,
+            }]
+        );
+        assert_eq!(a.peer_status(b_address), None);
+        assert_eq!(
+            decode_reliable_udp_close(&local_close.datagrams[0].payload).unwrap(),
+            ReliableUdpClose {
+                packet_number: 0,
+                address: b_address,
+            }
+        );
+        assert_eq!(a.close_peer(b_address), ReliableUdpStep::default());
+
+        let remote_close =
+            b.receive_at(a_address, &local_close.datagrams[0].payload, Duration::ZERO);
+        assert!(remote_close.datagrams.is_empty());
+        assert_eq!(
+            remote_close.events,
+            vec![ReliableUdpEvent::Disconnected {
+                peer: a_address,
+                reason: ReliableUdpDisconnectReason::ClosedByPeer,
+            }]
+        );
+        assert_eq!(b.peer_status(a_address), None);
+        let replay = b.receive_at(a_address, &local_close.datagrams[0].payload, Duration::ZERO);
+        assert_eq!(replay, ReliableUdpStep::default());
+    }
+
+    #[test]
     fn evicted_backlog_request_closes_for_starvation() {
         let (_, b_address, mut a, _) = handshake_pair();
         for value in 0..=RELIABLE_UDP_OUTGOING_PACKET_CAPACITY {
@@ -1199,6 +1264,96 @@ mod tests {
         assert_eq!(
             b.core().peer_status(a_address),
             Some(ReliableUdpPeerStatus::Working)
+        );
+
+        assert_eq!(
+            a.close_peer(b_address).await.unwrap(),
+            vec![ReliableUdpEvent::Disconnected {
+                peer: b_address,
+                reason: ReliableUdpDisconnectReason::Closed,
+            }]
+        );
+        assert_eq!(a.core().peer_status(b_address), None);
+        assert!(a.close_peer(b_address).await.unwrap().is_empty());
+        assert_eq!(
+            next_events(&mut b).await,
+            vec![ReliableUdpEvent::Disconnected {
+                peer: a_address,
+                reason: ReliableUdpDisconnectReason::ClosedByPeer,
+            }]
+        );
+        assert_eq!(b.core().peer_status(a_address), None);
+    }
+
+    #[tokio::test]
+    async fn socket_driver_close_emits_exactly_one_close_datagram() {
+        let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+        let mut driver = ReliableUdpSocketDriver::bind(wildcard).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let spy_address = spy.local_addr().unwrap();
+        let mut buffer = [0; 512];
+
+        assert!(driver.connect(spy_address).await.unwrap().is_empty());
+        let (connect_length, driver_address) =
+            tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            reliable_udp_packet_kind(&buffer[..connect_length]),
+            Some(ReliableUdpPacketKind::Connect)
+        );
+
+        let reciprocal_connect = encode_reliable_udp_connect(&ReliableUdpConnect::unicast(
+            0,
+            canonical_reliable_udp_peer_address(driver_address),
+        ));
+        spy.send_to(&reciprocal_connect, driver_address)
+            .await
+            .unwrap();
+        assert!(matches!(
+            driver.poll().await.unwrap().as_slice(),
+            [ReliableUdpEvent::Connected { peer, .. }] if *peer == spy_address
+        ));
+        let (connect_ok_length, _) =
+            tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            reliable_udp_packet_kind(&buffer[..connect_ok_length]),
+            Some(ReliableUdpPacketKind::ConnectOk)
+        );
+
+        assert_eq!(
+            driver.close_peer(spy_address).await.unwrap(),
+            vec![ReliableUdpEvent::Disconnected {
+                peer: spy_address,
+                reason: ReliableUdpDisconnectReason::Closed,
+            }]
+        );
+        assert_eq!(driver.core().peer_status(spy_address), None);
+        let (close_length, _) =
+            tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            &buffer[..close_length],
+            encode_reliable_udp_close(&ReliableUdpClose {
+                packet_number: 0,
+                address: spy_address,
+            })
+        );
+
+        assert!(driver.close_peer(spy_address).await.unwrap().is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), spy.recv_from(&mut buffer))
+                .await
+                .is_err(),
+            "a repeated close must not emit another datagram"
         );
     }
 }
