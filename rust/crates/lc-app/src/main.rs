@@ -5561,6 +5561,7 @@ struct MusicControlState {
     generation: u64,
     configured_volume: f32,
     scenario_level: Option<u8>,
+    most_recently_played: Option<Arc<MusicAssetIdentity>>,
 }
 
 impl MusicControlState {
@@ -5569,6 +5570,7 @@ impl MusicControlState {
             generation: 0,
             configured_volume: configured_volume.clamp(0.0, 1.0),
             scenario_level: None,
+            most_recently_played: None,
         }
     }
 
@@ -5656,6 +5658,15 @@ impl AudioContext {
     }
 
     fn play_music(&mut self, data: &[u8], looped: bool) -> Result<(), AudioError> {
+        self.play_music_asset(data, looped, None)
+    }
+
+    fn play_music_asset(
+        &mut self,
+        data: &[u8],
+        looped: bool,
+        identity: Option<Arc<MusicAssetIdentity>>,
+    ) -> Result<(), AudioError> {
         self.stop_music();
         // Decode off-thread: a MIDI track is a full FluidSynth render and
         // was the single largest scenario-activation cost. C++ streams
@@ -5677,7 +5688,7 @@ impl AudioContext {
                     return;
                 }
             };
-            let control = lock_unpoisoned(&control);
+            let mut control = lock_unpoisoned(&control);
             let Some(volume) = control.start_volume(generation) else {
                 return;
             };
@@ -5686,6 +5697,12 @@ impl AudioContext {
                 return;
             }
             worker.music_set_volume(volume);
+            if let Some(identity) = identity {
+                // C4MusicSystem updates mostRecentlyPlayed only after the
+                // replacement successfully starts. A decode/play failure or
+                // superseded worker must leave the previous exclusion intact.
+                control.most_recently_played = Some(identity);
+            }
             *lock_unpoisoned(&slot) = Some(music);
         });
         Ok(())
@@ -5776,7 +5793,15 @@ impl AudioContext {
             None => self.music_resolver.configure_scenario(path),
         };
         match configured {
-            Ok(true) => self.set_scenario_music_level(path.map(|_| 100)),
+            Ok(true) => {
+                // C4MusicSystem::ClearSongs clears mostRecentlyPlayed when a
+                // local scenario catalog replaces the global song list.
+                if self.music_resolver.scenario_has_local_sources {
+                    self.stop_music();
+                    lock_unpoisoned(&self.music_control).most_recently_played = None;
+                }
+                self.set_scenario_music_level(path.map(|_| 100));
+            }
             Ok(false) => {}
             Err(error) => {
                 tracing::warn!(
@@ -5788,25 +5813,48 @@ impl AudioContext {
         }
     }
 
-    fn load_default_music(&self) -> anyhow::Result<Option<Vec<u8>>> {
-        self.music_resolver
-            .first_default()
-            .map(MusicAsset::load_audio)
-            .transpose()
-            .context("failed to read default music asset")
+    fn play_default_music(&mut self, looped: bool) -> anyhow::Result<bool> {
+        let recent = lock_unpoisoned(&self.music_control)
+            .most_recently_played
+            .clone();
+        let selected = {
+            let _guard = CLASSIC_SAFE_RANDOM_LOCK
+                .lock()
+                .map_err(|_| anyhow!("classic SafeRandom lock was poisoned"))?;
+            self.music_resolver
+                .select_default_with(recent.as_ref(), |range| {
+                    debug_assert!(range > 0);
+                    // SAFETY: C rand takes no arguments and C guarantees a
+                    // non-negative result. The process-global lock above
+                    // serializes this shared unsynced stream with the loader.
+                    (unsafe { rand() } as usize) % range
+                })
+        };
+        let Some(selected) = selected else {
+            return Ok(false);
+        };
+        let (identity, data) = (
+            Arc::clone(&selected.identity),
+            selected
+                .load_audio()
+                .context("failed to read default music asset")?,
+        );
+        self.play_music_asset(&data, looped, Some(identity))
+            .context("failed to play default music")?;
+        Ok(true)
     }
 
     fn play_named_music(&mut self, name: &str, looped: bool) -> anyhow::Result<bool> {
-        let data = self
-            .music_resolver
-            .resolve(name)
-            .map(MusicAsset::load_audio)
-            .transpose()
-            .with_context(|| format!("failed to read named music asset `{name}`"))?;
-        let Some(data) = data else {
+        let Some(selected) = self.music_resolver.resolve(name) else {
             return Ok(false);
         };
-        self.play_music(&data, looped)
+        let (identity, data) = (
+            Arc::clone(&selected.identity),
+            selected
+                .load_audio()
+                .with_context(|| format!("failed to read named music asset `{name}`"))?,
+        );
+        self.play_music_asset(&data, looped, Some(identity))
             .with_context(|| format!("failed to play named music asset `{name}`"))?;
         Ok(true)
     }
@@ -5931,14 +5979,7 @@ impl AudioContext {
                 AudioCommand::PlayMusic { name, looped } => {
                     *runtime_music_enabled = true;
                     let result = if name.is_empty() {
-                        self.load_default_music().and_then(|data| {
-                            let Some(data) = data else {
-                                return Ok(false);
-                            };
-                            self.play_music(&data, *looped)
-                                .context("failed to play default music")?;
-                            Ok(true)
-                        })
+                        self.play_default_music(*looped)
                     } else {
                         self.play_named_music(name, *looped)
                     };
@@ -5964,14 +6005,7 @@ impl AudioContext {
                     if !*restart || !*runtime_music_enabled {
                         continue;
                     }
-                    let result = self.load_default_music().and_then(|data| {
-                        let Some(data) = data else {
-                            return Ok(false);
-                        };
-                        self.play_music(&data, false)
-                            .context("failed to restart filtered music")?;
-                        Ok(true)
-                    });
+                    let result = self.play_default_music(false);
                     match result {
                         Ok(true) => {}
                         Ok(false) => {
@@ -36855,20 +36889,11 @@ impl GameApp {
                 audio.stop_music();
                 return;
             }
-            match audio.load_default_music() {
-                Ok(Some(bytes)) => {
-                    // C4MusicSystem::PlayScenarioMusic calls Play() with its
-                    // non-looping default. Do not repeat one asset forever.
-                    if let Err(err) = audio.play_music(bytes.as_slice(), false) {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %err,
-                            "failed to start music"
-                        );
-                        audio.stop_music();
-                    }
-                }
-                Ok(None) => audio.stop_music(),
+            // C4MusicSystem::PlayScenarioMusic calls Play() with its
+            // non-looping default. Do not repeat one asset forever.
+            match audio.play_default_music(false) {
+                Ok(true) => {}
+                Ok(false) => audio.stop_music(),
                 Err(err) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -40571,12 +40596,50 @@ impl MusicCatalog {
     }
 
     fn first_enabled(&self, playlist: Option<&str>) -> Option<&MusicAsset> {
-        self.assets.iter().find(|asset| match playlist {
+        self.assets
+            .iter()
+            .find(|asset| Self::is_enabled(asset, playlist))
+    }
+
+    fn select_enabled_with(
+        &self,
+        playlist: Option<&str>,
+        most_recently_played: Option<&Arc<MusicAssetIdentity>>,
+        mut next_mod: impl FnMut(usize) -> usize,
+    ) -> Option<&MusicAsset> {
+        let candidates = self
+            .assets
+            .iter()
+            .filter(|asset| {
+                Self::is_enabled(asset, playlist)
+                    && most_recently_played
+                        .map_or(true, |recent| !Arc::ptr_eq(&asset.identity, recent))
+            })
+            .collect::<Vec<_>>();
+        if !candidates.is_empty() {
+            // C4MusicSystem::Play makes exactly one SafeRandom call whenever
+            // there is a fresh candidate, including SafeRandom(1).
+            let index = next_mod(candidates.len());
+            assert!(index < candidates.len(), "random selector exceeded its range");
+            return Some(candidates[index]);
+        }
+
+        // If the recent song is the sole enabled choice, C++ reuses it
+        // without consuming another SafeRandom value.
+        most_recently_played.and_then(|recent| {
+            self.assets.iter().find(|asset| {
+                Arc::ptr_eq(&asset.identity, recent) && Self::is_enabled(asset, playlist)
+            })
+        })
+    }
+
+    fn is_enabled(asset: &MusicAsset, playlist: Option<&str>) -> bool {
+        match playlist {
             Some(playlist) => music_playlist_matches(playlist, &asset.file_name),
             None => !["@", "Credits.", "Frontend."]
                 .iter()
                 .any(|prefix| asset.file_name.starts_with(prefix)),
-        })
+        }
     }
 
     fn filenames(&self) -> Vec<String> {
@@ -40592,7 +40655,11 @@ struct MusicAsset {
     relative_path: PathBuf,
     full_path: String,
     file_name: String,
+    identity: Arc<MusicAssetIdentity>,
 }
+
+#[derive(Debug)]
+struct MusicAssetIdentity;
 
 impl MusicAsset {
     fn new(source: Arc<Group>, relative_path: PathBuf) -> Self {
@@ -40610,6 +40677,7 @@ impl MusicAsset {
             relative_path,
             full_path,
             file_name,
+            identity: Arc::new(MusicAssetIdentity),
         }
     }
 
@@ -40752,6 +40820,18 @@ impl MusicResolver {
     fn first_default(&self) -> Option<&MusicAsset> {
         self.active_catalog()
             .first_enabled(self.playlist.as_deref())
+    }
+
+    fn select_default_with(
+        &self,
+        most_recently_played: Option<&Arc<MusicAssetIdentity>>,
+        next_mod: impl FnMut(usize) -> usize,
+    ) -> Option<&MusicAsset> {
+        self.active_catalog().select_enabled_with(
+            self.playlist.as_deref(),
+            most_recently_played,
+            next_mod,
+        )
     }
 }
 
@@ -54683,6 +54763,143 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn default_music_selection_uses_unsynced_choices_without_immediate_repeats() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        for name in ["A.ogg", "B.ogg", "C.ogg"] {
+            fs::write(global.join(name), name.as_bytes()).expect("write music fixture");
+        }
+
+        let resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let engine = Engine::with_seed(0x1234_5678);
+        let synced_rng_before = engine.snapshot().rng;
+        let mut choices = VecDeque::from([0usize, 0, 1, 0]);
+        let mut bounds = Vec::new();
+        let mut recent = None;
+        let mut selected_names = Vec::new();
+
+        for _ in 0..4 {
+            let selected = resolver
+                .select_default_with(recent.as_ref(), |range| {
+                    bounds.push(range);
+                    choices.pop_front().expect("stubbed SafeRandom choice")
+                })
+                .expect("enabled music candidate");
+            selected_names.push(selected.file_name.clone());
+            recent = Some(Arc::clone(&selected.identity));
+        }
+
+        assert_eq!(selected_names, ["A.ogg", "B.ogg", "C.ogg", "A.ogg"]);
+        assert_eq!(bounds, [3, 2, 2, 2]);
+        assert!(
+            selected_names.windows(2).all(|pair| pair[0] != pair[1]),
+            "the most recently started track is excluded while alternatives exist"
+        );
+        assert_eq!(
+            engine.snapshot().rng,
+            synced_rng_before,
+            "music selection must not consume the engine's synchronized LCG"
+        );
+    }
+
+    #[test]
+    fn singleton_default_music_replays_without_a_second_random_draw() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("Only.ogg"), b"only").expect("write music fixture");
+        let resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let mut draws = 0;
+
+        let first = resolver
+            .select_default_with(None, |range| {
+                draws += 1;
+                assert_eq!(range, 1, "SafeRandom(1) is still consumed initially");
+                0
+            })
+            .expect("initial singleton selection");
+        let recent = Arc::clone(&first.identity);
+        let second = resolver
+            .select_default_with(Some(&recent), |_| {
+                panic!("sole recent fallback must not consume SafeRandom")
+            })
+            .expect("recent singleton fallback");
+
+        assert_eq!(draws, 1);
+        assert!(Arc::ptr_eq(&second.identity, &recent));
+    }
+
+    #[test]
+    fn duplicate_music_records_exclude_only_the_record_that_started() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("Shared.ogg"), b"shared").expect("write music fixture");
+        let source = Arc::new(Group::open(dir.path()).expect("open music fixture root"));
+        let catalog = MusicCatalog {
+            assets: vec![
+                MusicAsset::new(Arc::clone(&source), PathBuf::from("Shared.ogg")),
+                MusicAsset::new(source, PathBuf::from("Shared.ogg")),
+            ],
+        };
+
+        let first = catalog
+            .select_enabled_with(None, None, |range| {
+                assert_eq!(range, 2);
+                0
+            })
+            .expect("first duplicate record");
+        let recent = Arc::clone(&first.identity);
+        let second = catalog
+            .select_enabled_with(None, Some(&recent), |range| {
+                assert_eq!(range, 1);
+                0
+            })
+            .expect("other duplicate record remains eligible");
+
+        assert_eq!(first.full_path, second.full_path);
+        assert!(!Arc::ptr_eq(&first.identity, &second.identity));
+    }
+
+    #[test]
+    fn playlist_restart_selection_randomizes_new_matches_and_named_lookup_bypasses_filter() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        for name in ["A.ogg", "B.ogg", "C.ogg"] {
+            fs::write(global.join(name), name.as_bytes()).expect("write music fixture");
+        }
+        let mut resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        resolver.set_playlist(Some("B.*;C.*".to_string()));
+
+        assert_eq!(
+            resolver
+                .resolve("A")
+                .map(|asset| asset.file_name.as_str()),
+            Some("A.ogg"),
+            "an explicit Music(\"Name\") lookup ignores the default playlist"
+        );
+        let selected = resolver
+            .select_default_with(None, |range| {
+                assert_eq!(range, 2);
+                1
+            })
+            .expect("filtered default selection");
+        assert_eq!(
+            selected.file_name, "C.ogg",
+            "a restarted playlist uses the random choice instead of its first match"
+        );
+    }
+
+    #[test]
     fn set_music_playlist_command_restarts_only_when_enabled_at_its_event_position() {
         let dir = tempdir().expect("tempdir");
         let global = dir.path().join("Music.c4g");
@@ -55116,6 +55333,71 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let after = lock_unpoisoned(&audio.music_control).generation;
         assert_eq!(after, before, "a miss must leave current playback intact");
+    }
+
+    #[test]
+    fn most_recent_music_changes_only_after_a_successful_start() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("Good.ogg"), silent_pcm_wav(100))
+            .expect("write decodable music fixture");
+        fs::write(global.join("Broken.ogg"), b"not audio")
+            .expect("write malformed music fixture");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.music_resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let good_identity = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("Good")
+                .expect("resolve valid named music")
+                .identity,
+        );
+        audio.set_music_playlist(Some("Broken.*".to_string()));
+        audio
+            .play_named_music("Good", false)
+            .expect("explicit named music bypasses the active playlist");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .is_none()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let started = lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .clone()
+            .expect("successful worker records its asset");
+        assert!(Arc::ptr_eq(&started, &good_identity));
+
+        audio
+            .play_named_music("Broken", false)
+            .expect("schedule malformed named music");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while audio.music_load_pending.load(AtomicOrdering::Acquire) != 0
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            audio.music_load_pending.load(AtomicOrdering::Acquire),
+            0,
+            "malformed decode worker completed before the assertion"
+        );
+        let after_failure = lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .clone()
+            .expect("decode failure preserves prior marker");
+        assert!(
+            Arc::ptr_eq(&after_failure, &started),
+            "a decode failure preserves the last successfully started asset"
+        );
     }
 
     #[test]
