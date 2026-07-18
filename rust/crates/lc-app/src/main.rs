@@ -9732,6 +9732,7 @@ enum ClassicGameLobbyChild {
     AddScriptPlayer,
     TeamSelection(i32),
     Chat,
+    ExternalIrcChat,
     GameOptionSideEffect(&'static str),
     NetworkEvent(&'static str),
 }
@@ -10147,6 +10148,7 @@ enum ClassicParityBoundary {
         action: &'static str,
     },
     RuntimeFlashProducer(RuntimeFlashProducerBoundary),
+    RuntimeIrcChatToggle,
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
     Scoreboard {
@@ -10193,6 +10195,10 @@ impl fmt::Display for ClassicParityBoundary {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            Self::StartupSubscreen(ClassicStartupSubscreen::NetworkGameChat) => write!(
+                f,
+                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the startup Chat pane"
             ),
             Self::StartupSubscreen(subscreen) => write!(
                 f,
@@ -10316,6 +10322,10 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic timed flash producer {producer:?} is unavailable because its authoritative runtime state is not modeled; refusing the producer action and partial flash mutation"
             ),
+            Self::RuntimeIrcChatToggle => write!(
+                f,
+                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the runtime Alt+C toggle"
+            ),
             Self::RuntimeClientListToggle(role) => write!(
                 f,
                 "classic runtime C4Network2ClientListDlg toggle is unavailable for {role:?} network role; refusing generic client pane"
@@ -10395,6 +10405,12 @@ impl fmt::Display for ClassicParityBoundary {
             Self::GameLobby(ClassicGameLobbyBoundary::Model { detail }) => write!(
                 f,
                 "classic game-lobby model is unavailable: {detail}; refusing guessed lobby state"
+            ),
+            Self::GameLobby(ClassicGameLobbyBoundary::Child(
+                ClassicGameLobbyChild::ExternalIrcChat,
+            )) => write!(
+                f,
+                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the game-lobby IRC button"
             ),
             Self::GameLobby(ClassicGameLobbyBoundary::Child(child)) => write!(
                 f,
@@ -19715,6 +19731,30 @@ impl GameApp {
         )))
     }
 
+    fn handle_runtime_irc_drop_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if key != VirtualKeyCode::C || c4_modifiers != ModifiersState::ALT {
+            return Ok(false);
+        }
+        if state == ElementState::Pressed {
+            return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeIrcChatToggle,
+            )));
+        }
+        // ToggleChat is a PRIO_Base C4KeyCB with no Up callback. Consume the
+        // exact modified release after higher-priority GUI owners without
+        // clearing a modifier-blind player control also bound to physical C.
+        Ok(true)
+    }
+
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.guard_runtime_key_dispatch(key)?;
@@ -19831,6 +19871,9 @@ impl GameApp {
                     boundary,
                 )));
             }
+            return Ok(());
+        }
+        if self.handle_runtime_irc_drop_key(key, state)? {
             return Ok(());
         }
         if self.handle_running_chat_key(key, state) {
@@ -30890,7 +30933,9 @@ impl GameApp {
                 // request is safe until the recursive context menu is wired.
             }
             LobbyChatRequest::OpenExternalDialog => {
-                return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Chat));
+                return Err(classic_game_lobby_child_error(
+                    ClassicGameLobbyChild::ExternalIrcChat,
+                ));
             }
         }
         Ok(())
@@ -61172,6 +61217,27 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("global GUI fixture sheet")
     }
 
+    fn activate_startup_network_chat(app: &mut GameApp) -> EngineError {
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let button =
+            lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics).btn_chat;
+        let point = PhysicalPosition::new(
+            f64::from(button.x + button.w / 2),
+            f64::from(button.y + button.h / 2),
+        );
+        app.handle_cursor_moved(point).expect("hover Chat");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Chat");
+        app.handle_mouse_button(ElementState::Released)
+            .expect_err("dropped Chat page must fail on entry")
+    }
+
     fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartupSubscreen) {
         match subscreen {
             ClassicStartupSubscreen::Options(target) => {
@@ -61205,25 +61271,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             }
             ClassicStartupSubscreen::NetworkGameChat => {
                 app.open_network_game_dialog();
-                let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
-                    caption_back_extent: 51,
-                    text_ip_extent: 18,
-                    text_line_height: 22,
-                    caption_line_height: 25,
-                    title_line_height: 34,
-                };
-                let button =
-                    lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics).btn_chat;
-                let point = PhysicalPosition::new(
-                    f64::from(button.x + button.w / 2),
-                    f64::from(button.y + button.h / 2),
-                );
-                app.handle_cursor_moved(point).expect("hover Chat");
-                app.handle_mouse_button(ElementState::Pressed)
-                    .expect("press Chat");
-                let error = app
-                    .handle_mouse_button(ElementState::Released)
-                    .expect_err("unported Chat page must fail on entry");
+                let error = activate_startup_network_chat(app);
                 assert_engine_parity_boundary(
                     error,
                     ClassicParityBoundary::StartupSubscreen(
@@ -61231,6 +61279,131 @@ public func Grant(password) { return GainMissionAccess(password); }
                     ),
                 );
             }
+        }
+    }
+
+    #[test]
+    fn legacy_plaintext_irc_chat_is_intentionally_dropped_at_retained_entry_points() {
+        let mut app = new_classic_menu_app(640, 480);
+        let boundary = ClassicParityBoundary::StartupSubscreen(
+            ClassicStartupSubscreen::NetworkGameChat,
+        );
+        let expected = boundary.to_string();
+        assert_eq!(
+            expected,
+            "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the startup Chat pane"
+        );
+
+        app.open_network_game_dialog();
+        let browser_status = app.status_text.clone();
+        let error = activate_startup_network_chat(&mut app);
+        match &error {
+            EngineError::ClassicMenuParityBoundary { detail } => {
+                assert_eq!(detail, &expected);
+            }
+            other => panic!("unexpected engine error: {other}"),
+        }
+        assert!(app.network.is_none());
+        assert_eq!(app.status_text, browser_status);
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().mode(),
+            lc_frontend::startup_netdlg::NetDlgMode::Chat
+        );
+
+        let mut frame = vec![0xa5; 640 * 480 * 4];
+        let render_error = app
+            .render(&mut frame)
+            .expect_err("dropped IRC pane must be rejected before pixels");
+        assert_eq!(
+            render_error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&boundary)
+        );
+        assert_eq!(render_error.to_string(), expected);
+        assert!(frame.iter().all(|byte| *byte == 0xa5));
+
+        let mut lobby_app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut lobby_app);
+        let lobby_boundary = ClassicParityBoundary::GameLobby(
+            ClassicGameLobbyBoundary::Child(ClassicGameLobbyChild::ExternalIrcChat),
+        );
+        let lobby_expected = lobby_boundary.to_string();
+        assert_eq!(
+            lobby_expected,
+            "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the game-lobby IRC button"
+        );
+        let lobby_error = lobby_app
+            .process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
+                LobbyChatRequest::OpenExternalDialog,
+            )])
+            .expect_err("retained lobby IRC button must fail at the drop boundary");
+        assert_engine_parity_boundary(lobby_error, lobby_boundary);
+
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::ALT | ModifiersState::LOGO,
+        ] {
+            let mut runtime_app = new_running_sandbox_app();
+            runtime_app
+                .bindings
+                .rebind(ControlBindingId::Left, VirtualKeyCode::C);
+            runtime_app
+                .handle_modifiers_changed(modifiers)
+                .expect("set the exact legacy IRC chord");
+            let before = runtime_global_ui_snapshot(&runtime_app);
+            let runtime_boundary = ClassicParityBoundary::RuntimeIrcChatToggle;
+            let runtime_expected = runtime_boundary.to_string();
+            assert_eq!(
+                runtime_expected,
+                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the runtime Alt+C toggle"
+            );
+            for _ in 0..2 {
+                let runtime_error = runtime_app
+                    .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+                    .expect_err("runtime IRC chord must fail at the drop boundary");
+                let mut after = runtime_global_ui_snapshot(&runtime_app);
+                after.menu_render_version = before.menu_render_version;
+                assert_eq!(after, before);
+                assert_engine_parity_boundary(runtime_error, runtime_boundary.clone());
+            }
+
+            runtime_app
+                .engine
+                .player_mut(runtime_app.local_owner)
+                .expect("local sandbox player")
+                .control
+                .pressed_coms = 1 << lc_engine::COM_LEFT;
+            runtime_app
+                .handle_key(VirtualKeyCode::C, ElementState::Released)
+                .expect("runtime IRC chord release must be consumed");
+            assert_ne!(
+                runtime_app
+                    .engine
+                    .player(runtime_app.local_owner)
+                    .expect("local sandbox player")
+                    .control
+                    .pressed_coms
+                    & (1 << lc_engine::COM_LEFT),
+                0,
+                "runtime IRC release must not leak to modifier-blind player control"
+            );
+        }
+
+        let mut ignored_runtime = new_running_sandbox_app();
+        for modifiers in [
+            ModifiersState::empty(),
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::LOGO,
+            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            ignored_runtime
+                .handle_modifiers_changed(modifiers)
+                .expect("set non-IRC modifiers");
+            assert!(!ignored_runtime
+                .handle_runtime_irc_drop_key(VirtualKeyCode::C, ElementState::Pressed)
+                .expect("non-IRC chord is unhandled"));
         }
     }
 
@@ -98236,6 +98409,7 @@ protected func InputCallback(string answer, int player)
     #[test]
     fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
         for key in [
+            VirtualKeyCode::C,
             VirtualKeyCode::F1,
             VirtualKeyCode::F4,
             VirtualKeyCode::Pause,
@@ -98268,6 +98442,12 @@ protected func InputCallback(string answer, int player)
             menu.handle_key(key, ElementState::Released)
                 .expect("release remains outside the running-only global helper");
         }
+        menu.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set menu Alt modifier");
+        menu.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("runtime IRC drop is not registered in Menu mode");
+        menu.handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("menu IRC chord release remains outside the runtime helper");
 
         let mut loading = new_running_sandbox_app();
         loading.mode = AppMode::Loading;
@@ -98283,6 +98463,15 @@ protected func InputCallback(string answer, int player)
                 .handle_key(key, ElementState::Released)
                 .expect("release remains outside the running-only global helper");
         }
+        loading
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set loading Alt modifier");
+        loading
+            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("runtime IRC drop is not registered in Loading mode");
+        loading
+            .handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("loading IRC chord release remains outside the runtime helper");
     }
 
     #[test]
