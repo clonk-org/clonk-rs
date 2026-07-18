@@ -32,8 +32,9 @@ pub const RELIABLE_UDP_DATA_PAYLOAD_LIMIT: usize =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReliableUdpConnect {
     pub packet_number: u32,
+    pub protocol_version: u32,
     pub address: SocketAddr,
-    pub multicast_address: SocketAddr,
+    pub multicast_address: Option<SocketAddr>,
 }
 
 /// C++ `ConnOKPacket::MCMode` values.
@@ -448,9 +449,49 @@ pub fn encode_reliable_udp_connect(connection: &ReliableUdpConnect) -> Vec<u8> {
     let mut wire = Vec::with_capacity(CONNECT_PACKET_SIZE);
     wire.push(IPID_CONN);
     wire.extend_from_slice(&connection.packet_number.to_ne_bytes());
-    wire.extend_from_slice(&RELIABLE_UDP_PROTOCOL_VERSION.to_ne_bytes());
+    wire.extend_from_slice(&connection.protocol_version.to_ne_bytes());
     encode_bin_address(connection.address, &mut wire);
-    encode_bin_address(connection.multicast_address, &mut wire);
+    encode_optional_bin_address(connection.multicast_address, &mut wire);
+    wire
+}
+
+/// Decodes a packed C++ connection request. Size and version mismatches are
+/// silently ignored by C++ and therefore return `Ok(None)` here.
+pub fn decode_reliable_udp_connect(
+    wire: &[u8],
+) -> Result<Option<ReliableUdpConnect>, ReliableUdpDecodeError> {
+    if wire.len() != CONNECT_PACKET_SIZE {
+        return Ok(None);
+    }
+    if wire[0] & INTERNAL_PACKET_TYPE_MASK != IPID_CONN {
+        return Err(ReliableUdpDecodeError::UnexpectedType(wire[0]));
+    }
+    let packet_number = u32::from_ne_bytes(wire[1..5].try_into().expect("checked packet length"));
+    let protocol_version =
+        u32::from_ne_bytes(wire[5..9].try_into().expect("checked packet length"));
+    if protocol_version != RELIABLE_UDP_PROTOCOL_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(ReliableUdpConnect {
+        packet_number,
+        protocol_version,
+        address: decode_bin_address(&wire[9..28])?,
+        multicast_address: decode_optional_bin_address(&wire[28..])?,
+    }))
+}
+
+/// Encodes the packed response that reports the observed source endpoint.
+pub fn encode_reliable_udp_connect_ok(connection: &ReliableUdpConnectOk) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(CONNECT_OK_PACKET_SIZE);
+    wire.push(IPID_CONN_OK);
+    wire.extend_from_slice(&connection.packet_number.to_ne_bytes());
+    let multicast_mode = match connection.multicast_mode {
+        ReliableUdpMulticastMode::NoMulticast => 0_i32,
+        ReliableUdpMulticastMode::Multicast => 1,
+        ReliableUdpMulticastMode::MulticastOk => 2,
+    };
+    wire.extend_from_slice(&multicast_mode.to_ne_bytes());
+    encode_bin_address(connection.observed_address, &mut wire);
     wire
 }
 
@@ -680,6 +721,14 @@ fn encode_bin_address(address: SocketAddr, wire: &mut Vec<u8>) {
     }
 }
 
+fn encode_optional_bin_address(address: Option<SocketAddr>, wire: &mut Vec<u8>) {
+    encode_bin_address(
+        address
+            .unwrap_or_else(|| SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0))),
+        wire,
+    );
+}
+
 fn decode_bin_address(wire: &[u8]) -> Result<SocketAddr, ReliableUdpDecodeError> {
     debug_assert_eq!(wire.len(), BIN_ADDR_SIZE);
     let port = u16::from_ne_bytes(wire[..2].try_into().expect("checked BinAddr length"));
@@ -702,6 +751,16 @@ fn decode_bin_address(wire: &[u8]) -> Result<SocketAddr, ReliableUdpDecodeError>
     }
 }
 
+fn decode_optional_bin_address(wire: &[u8]) -> Result<Option<SocketAddr>, ReliableUdpDecodeError> {
+    debug_assert_eq!(wire.len(), BIN_ADDR_SIZE);
+    match wire[2] {
+        1 | 2 => decode_bin_address(wire).map(|address| {
+            (!address.ip().is_unspecified() || address.port() != 0).then_some(address)
+        }),
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -709,23 +768,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cpp_conn_encoding_and_conn_ok_decoding_preserve_the_observed_endpoint() {
+    fn cpp_conn_codec_preserves_the_addresses_and_native_layout() {
         // C4NetIOUDP uses packed native-endian headers. Conn carries protocol
         // version 2, destination BinAddr, then multicast BinAddr; ConnOK carries
         // the endpoint that the peer observed for this same UDP socket
         // (pristine 9ffa0a5d src/C4NetIO.cpp:1921-2047, 2861-2968).
         let connection = ReliableUdpConnect {
             packet_number: 0x1122_3344,
-            address: SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(203, 0, 113, 7),
-                11_115,
-            )),
-            multicast_address: SocketAddr::V6(SocketAddrV6::new(
+            protocol_version: RELIABLE_UDP_PROTOCOL_VERSION,
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 11_115)),
+            multicast_address: Some(SocketAddr::V6(SocketAddrV6::new(
                 "ff3e:40:2001:db8::1234".parse::<Ipv6Addr>().unwrap(),
                 11_113,
                 0,
                 0,
-            )),
+            ))),
         };
         let mut expected_connection = vec![0x02];
         expected_connection.extend_from_slice(&0x1122_3344_u32.to_ne_bytes());
@@ -744,12 +801,17 @@ mod tests {
         );
 
         assert_eq!(RELIABLE_UDP_PROTOCOL_VERSION, 2);
-        assert_eq!(encode_reliable_udp_connect(&connection), expected_connection);
+        assert_eq!(
+            encode_reliable_udp_connect(&connection),
+            expected_connection
+        );
+        assert_eq!(
+            decode_reliable_udp_connect(&expected_connection),
+            Ok(Some(connection))
+        );
 
-        let observed_address = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(198, 51, 100, 23),
-            62_000,
-        ));
+        let observed_address =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 23), 62_000));
         let mut connection_ok = vec![0x03];
         connection_ok.extend_from_slice(&0x5566_7788_u32.to_ne_bytes());
         connection_ok.extend_from_slice(&0_i32.to_ne_bytes());
@@ -759,6 +821,14 @@ mod tests {
         connection_ok.extend_from_slice(&[0; 12]);
 
         assert_eq!(
+            encode_reliable_udp_connect_ok(&ReliableUdpConnectOk {
+                packet_number: 0x5566_7788,
+                multicast_mode: ReliableUdpMulticastMode::NoMulticast,
+                observed_address,
+            }),
+            connection_ok
+        );
+        assert_eq!(
             decode_reliable_udp_connect_ok(&connection_ok).unwrap(),
             ReliableUdpConnectOk {
                 packet_number: 0x5566_7788,
@@ -766,6 +836,51 @@ mod tests {
                 observed_address,
             }
         );
+    }
+
+    #[test]
+    fn cpp_conn_decoder_normalizes_null_and_unknown_multicast_types() {
+        let connection = ReliableUdpConnect {
+            packet_number: 7,
+            protocol_version: RELIABLE_UDP_PROTOCOL_VERSION,
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 11_111)),
+            multicast_address: None,
+        };
+        let canonical = encode_reliable_udp_connect(&connection);
+        assert_eq!(canonical.len(), CONNECT_PACKET_SIZE);
+        assert_eq!(canonical[30], 2, "C++ null address is IPv6 unspecified");
+
+        for unknown_type in [0x00, 0xcd] {
+            let mut fixture = canonical.clone();
+            fixture[30] = unknown_type;
+            let decoded = decode_reliable_udp_connect(&fixture)
+                .unwrap()
+                .expect("valid Conn is not ignored");
+            assert_eq!(decoded.multicast_address, None);
+            assert_eq!(encode_reliable_udp_connect(&decoded), canonical);
+        }
+    }
+
+    #[test]
+    fn cpp_conn_decoder_ignores_size_and_protocol_mismatches() {
+        let connection = ReliableUdpConnect {
+            packet_number: 9,
+            protocol_version: RELIABLE_UDP_PROTOCOL_VERSION,
+            address: SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 11_111, 0, 0)),
+            multicast_address: None,
+        };
+        let fixture = encode_reliable_udp_connect(&connection);
+        assert_eq!(
+            decode_reliable_udp_connect(&fixture[..fixture.len() - 1]),
+            Ok(None)
+        );
+        let mut oversized = fixture.clone();
+        oversized.push(0);
+        assert_eq!(decode_reliable_udp_connect(&oversized), Ok(None));
+
+        let mut wrong_version = fixture;
+        wrong_version[5..9].copy_from_slice(&3_u32.to_ne_bytes());
+        assert_eq!(decode_reliable_udp_connect(&wrong_version), Ok(None));
     }
 
     #[test]
