@@ -5899,6 +5899,18 @@ impl AudioContext {
         Ok(true)
     }
 
+    fn prepare_frontend_music(&mut self) {
+        self.configure_scenario(None);
+        self.set_scenario_music_level(None);
+        self.music_resolver
+            .set_playlist(Some("Frontend.*".to_string()));
+    }
+
+    fn play_frontend_music(&mut self) -> anyhow::Result<bool> {
+        self.prepare_frontend_music();
+        self.play_default_music(false)
+    }
+
     fn play_named_music(&mut self, name: &str, looped: bool) -> anyhow::Result<bool> {
         let Some(selected) = self.music_resolver.resolve(name) else {
             return Ok(false);
@@ -8347,6 +8359,10 @@ struct GameApp {
     /// A game-transition fade is still owning the mixer. Startup music is
     /// requested once after that fade completes instead of hard-replacing it.
     resume_frontend_music_after_fade: bool,
+    /// `C4Startup::DoStartup` calls PlayFrontendMusic exactly once per startup
+    /// entry. Dialog navigation must not restart a non-looping track after it
+    /// ends; returning from a game resets this guard.
+    frontend_music_attempted_for_entry: bool,
     assets: Arc<FrontendAssets>,
     /// Winning scenario/folder/definition C4GUI sources that cannot yet be
     /// rebound. Empty means the accepted initial base/Extra bundle is active.
@@ -15994,6 +16010,7 @@ impl GameApp {
             audio,
             runtime_music_enabled: false,
             resume_frontend_music_after_fade: false,
+            frontend_music_attempted_for_entry: false,
             assets: assets.clone(),
             active_global_gui_overrides: HashMap::new(),
             native_startup_fonts: None,
@@ -20894,12 +20911,16 @@ impl GameApp {
                 },
             ))
         })?;
+        self.frontend_music_attempted_for_entry = true;
         audio.options.menu_music_enabled = enabled;
         if enabled {
-            audio.configure_scenario(None);
-            if let Err(error) = audio.play_music(sandbox_music_bytes(), true) {
-                tracing::warn!(%error, "failed to start frontend music after option change");
-                audio.stop_music();
+            match audio.play_frontend_music() {
+                Ok(true) => {}
+                Ok(false) => audio.stop_music(),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to start frontend music after option change");
+                    audio.stop_music();
+                }
             }
         } else {
             audio.stop_music();
@@ -28649,7 +28670,7 @@ impl GameApp {
                     // that ordering; Escape and Alt+X enqueue no click.
                     self.play_classic_lobby_sounds();
                     self.show_main_menu();
-                    self.ensure_menu_music();
+                    self.begin_frontend_music_entry();
                     return Ok(());
                 }
                 ClassicLobbyAction::StartRequested { .. } => {
@@ -31606,7 +31627,7 @@ impl GameApp {
                         self.loading_state = None;
                         self.mode = AppMode::Menu;
                         self.restore_startup_fonts();
-                        self.ensure_menu_music();
+                        self.begin_frontend_music_entry();
                     } else if prepared_go {
                         // C4Game::InitGameFinal calls CheckStatusReached only
                         // after the already-opened scenario has initialized.
@@ -31655,7 +31676,7 @@ impl GameApp {
                     self.loading_state = None;
                     self.mode = AppMode::Menu;
                     self.restore_startup_fonts();
-                    self.ensure_menu_music();
+                    self.begin_frontend_music_entry();
                 }
             }
         }
@@ -31706,7 +31727,7 @@ impl GameApp {
                 } else {
                     self.show_main_menu();
                 }
-                self.ensure_menu_music();
+                self.begin_frontend_music_entry();
                 // `--sandbox`: jump straight into the built-in sandbox once boot
                 // completes, so the in-game scene can be launched/captured without
                 // navigating the menu. One-shot, so return_to_menu works after.
@@ -35032,7 +35053,7 @@ impl GameApp {
 
     fn return_to_menu(&mut self) {
         // C4Game::Clear starts the fade before tearing down game state.
-        let music_fading = self.fade_out_game_music();
+        self.fade_out_game_music();
         self.active_game_graphics = None;
         self.ingame_menu_gfx = None;
         self.active_global_gui_overrides.clear();
@@ -35162,29 +35183,46 @@ impl GameApp {
 
         self.mode = AppMode::Menu;
         self.show_main_menu();
-        if !music_fading {
-            self.ensure_menu_music();
+        self.begin_frontend_music_entry();
+    }
+
+    fn begin_frontend_music_entry(&mut self) {
+        self.frontend_music_attempted_for_entry = false;
+        if let Some(audio) = self.audio.as_mut() {
+            lock_unpoisoned(&audio.music_control).most_recently_played = None;
+            if self.resume_frontend_music_after_fade {
+                audio.prepare_frontend_music();
+            }
         }
+        if self.resume_frontend_music_after_fade {
+            return;
+        }
+        self.ensure_menu_music();
     }
 
     fn ensure_menu_music(&mut self) {
-        if !matches!(self.mode, AppMode::Menu) {
+        if !matches!(self.mode, AppMode::Menu)
+            || self.frontend_music_attempted_for_entry
+            || self.resume_frontend_music_after_fade
+        {
             return;
         }
+        self.frontend_music_attempted_for_entry = true;
         if let Some(audio) = self.audio.as_mut() {
-            audio.configure_scenario(None);
+            audio.prepare_frontend_music();
             if !audio.menu_music_enabled() {
                 self.resume_frontend_music_after_fade = false;
                 audio.stop_music();
                 return;
             }
-            if audio.music_is_playing() {
-                return;
-            }
             self.resume_frontend_music_after_fade = false;
-            if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
-                tracing::warn!(error = %err, "failed to start menu music");
-                audio.stop_music();
+            match audio.play_default_music(false) {
+                Ok(true) => {}
+                Ok(false) => audio.stop_music(),
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to start menu music");
+                    audio.stop_music();
+                }
             }
         }
     }
@@ -37062,6 +37100,7 @@ impl GameApp {
         let runtime_music_enabled = self.runtime_music_enabled;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
+            audio.set_music_playlist(None);
             if !runtime_music_enabled {
                 audio.stop_music();
                 return;
@@ -55579,6 +55618,142 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .map(|asset| asset.file_name.as_str()),
             Some("Theme.ogg"),
             "restoring the default playlist excludes frontend/credits/@ tracks again"
+        );
+    }
+
+    #[test]
+    fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create music group");
+        // The decoder sniffs the payload; naming valid WAV bytes `.mid` lets
+        // this test exercise catalog-extension handling without FluidSynth.
+        fs::write(global.join("Frontend.mid"), silent_pcm_wav(1_000))
+            .expect("write frontend MIDI fixture");
+
+        let mut app = new_menu_app(320, 200);
+        let audio = app.audio.as_mut().expect("test audio");
+        audio.stop_music();
+        audio.music_resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        audio.options.menu_music_enabled = false;
+        audio.set_scenario_music_level(Some(25));
+        let stale_recent = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("Frontend.mid")
+                .expect("frontend fixture")
+                .identity,
+        );
+        lock_unpoisoned(&audio.music_control).most_recently_played = Some(stale_recent);
+
+        app.begin_frontend_music_entry();
+        assert!(app.frontend_music_attempted_for_entry);
+        let audio = app.audio.as_ref().expect("test audio");
+        assert_eq!(
+            audio.music_resolver.playlist.as_deref(),
+            Some("Frontend.*")
+        );
+        assert_eq!(
+            audio
+                .music_resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Frontend.mid"),
+            "all C++ music extensions resolve through the frontend playlist"
+        );
+        assert_eq!(lock_unpoisoned(&audio.music_control).scenario_level, None);
+        assert!(lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .is_none());
+        assert!(!audio.music_is_playing());
+
+        app.set_frontend_music_option(true)
+            .expect("enable frontend music");
+        let audio = app.audio.as_ref().expect("test audio");
+        let first_generation = lock_unpoisoned(&audio.music_control).generation;
+
+        let wait_for_mixer_start = |app: &GameApp| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !app
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .system
+                .music_is_playing()
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .system
+                .music_is_playing()
+        };
+        assert!(wait_for_mixer_start(&app), "Frontend.mid starts playback");
+
+        let mixer = Arc::clone(app.audio.as_ref().expect("test audio").system.mixer());
+        let mut output = vec![0_i16; mixer.sample_rate() as usize * 2 * 2];
+        mixer.mix_i16(&mut output);
+        assert!(
+            !app
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .system
+                .music_is_playing(),
+            "draining past the asset end proves frontend music is non-looping"
+        );
+
+        app.update().expect("idle frontend update");
+        app.ensure_menu_music();
+        assert_eq!(
+            lock_unpoisoned(&app.audio.as_ref().expect("test audio").music_control).generation,
+            first_generation,
+            "frontend navigation does not pump an ended track"
+        );
+
+        app.return_to_menu();
+        assert!(app.frontend_music_attempted_for_entry);
+        assert!(
+            wait_for_mixer_start(&app),
+            "a new startup entry restarts frontend music"
+        );
+
+        app.set_frontend_music_option(false)
+            .expect("disable frontend music");
+        assert!(!app
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .options
+            .menu_music_enabled);
+        assert!(!app
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .system
+            .music_is_playing());
+        app.set_frontend_music_option(true)
+            .expect("re-enable frontend music");
+        assert!(
+            wait_for_mixer_start(&app),
+            "FEMusic re-enable restarts the frontend playlist"
+        );
+
+        app.runtime_music_enabled = false;
+        app.play_sandbox_audio();
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .music_resolver
+                .playlist,
+            None,
+            "game entry restores the default playlist"
         );
     }
 
