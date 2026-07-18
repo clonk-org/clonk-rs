@@ -4678,6 +4678,7 @@ fn client_settings_for_paths(
         language_charset: query.language_charset,
         language_sequence: query.language_sequence,
     };
+    settings.league_auth = load_league_auth_settings(paths);
     if let Some(paths) = paths {
         let config = Config::load(paths.config_file()).ok();
         let network_port = |key: &str, default: u16| {
@@ -8555,6 +8556,20 @@ fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
             .is_some_and(|snapshot| synchronized_parameters_are_league(&snapshot.parameters)),
         NetworkMode::Host(_) | NetworkMode::Client(_) => false,
     })
+}
+
+fn retain_player_infos_with_cpp_swap_remove(
+    players: &mut Vec<lc_engine::ControlPlayerInfoEntry>,
+    mut retain: impl FnMut(&mut lc_engine::ControlPlayerInfoEntry) -> bool,
+) {
+    let mut index = 0;
+    while index < players.len() {
+        if retain(&mut players[index]) {
+            index += 1;
+        } else {
+            players.swap_remove(index);
+        }
+    }
 }
 
 fn initial_network_league_name(network_mode: Option<&NetworkMode>) -> Vec<u8> {
@@ -15075,6 +15090,27 @@ fn load_reference_query_settings(paths: Option<&AppPaths>) -> lc_network::Refere
     }
 }
 
+fn load_league_auth_settings(paths: Option<&AppPaths>) -> lc_network::LeagueAuthRequestHead {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let value = |key| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some("Network"), key))
+            .and_then(|value| {
+                lc_engine::LegacyCString::from_bytes(value.as_bytes().to_vec())
+            })
+            .unwrap_or_default()
+    };
+    lc_network::LeagueAuthRequestHead {
+        account: value("LeagueNick"),
+        // Native keeps this session-only; accepting the key here also gives
+        // headless/front-end integrations an explicit injection point.
+        password: value("LeaguePassword"),
+        new_account: lc_engine::LegacyCString::default(),
+        new_password: lc_engine::LegacyCString::default(),
+    }
+}
+
 fn load_network_advertiser_settings(
     paths: Option<&AppPaths>,
 ) -> lc_network::NetworkGameAdvertiserConfig {
@@ -17029,6 +17065,89 @@ impl GameApp {
         self.network.is_some()
             && matches!(self.mode, AppMode::Menu)
             && (self.network_lobby.is_some() || self.classic_host_lobby.is_some())
+    }
+
+    fn league_player_auth_settings(&self) -> lc_network::LeagueAuthRequestHead {
+        match self.network_mode.as_ref() {
+            Some(NetworkMode::Client(settings)) => settings.league_auth.clone(),
+            Some(NetworkMode::Host(_)) | None => {
+                load_league_auth_settings(self.app_paths.as_ref())
+            }
+        }
+    }
+
+    fn finalize_prepared_host_players(
+        &self,
+        manager: &NetworkManager,
+        prepared: &mut prepared_host_bootstrap::PreparedHostBootstrap,
+        is_league: bool,
+    ) -> Result<(), String> {
+        let auth = self.league_player_auth_settings();
+        let league = prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .map(|snapshot| synchronized_league_name(&snapshot.parameters))
+            .and_then(lc_engine::LegacyCString::from_bytes)
+            .unwrap_or_default();
+        let mut players = prepared
+            .pending_initial_league_players()
+            .unwrap_or_default()
+            .to_vec();
+        // JoinLocalPlayer obtains AUIDs before ID allocation, team assignment,
+        // or attribute conflict resolution.
+        if is_league {
+            retain_player_infos_with_cpp_swap_remove(&mut players, |player| {
+                match manager.authenticate_league_player(auth.clone(), player) {
+                    Ok(true) => true,
+                    Ok(false) => false,
+                    Err(error) => {
+                        tracing::warn!(name = ?player.name, %error, "host league player authentication failed");
+                        false
+                    }
+                }
+            });
+        }
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+            self.generated_team_name_template.clone(),
+        );
+        prepared
+            .finalize_initial_league_players(
+                players,
+                &mut oracle,
+                // The callback runs after full host normalization. Restore
+                // script rows are appended only after it returns.
+                |player| {
+                    if !is_league {
+                        return true;
+                    }
+                    match manager.check_league_player(&league, player) {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            tracing::warn!(player_id = player.id, %error, "host league player check failed");
+                            false
+                        }
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// `C4Network2::isLobbyActive` is false as soon as a non-lobby status is
+    /// installed, even while the UI still renders its transition screen.
+    fn league_player_auth_lobby_active(&self) -> bool {
+        if self.mode != AppMode::Menu
+            || self
+                .pending_client_start_status
+                .is_some_and(|status| status.state != lc_network::NETWORK_STATE_LOBBY)
+            || self
+                .runtime_network_status_barrier
+                .is_some_and(|pending| pending.status.state != lc_network::NETWORK_STATE_LOBBY)
+        {
+            return false;
+        }
+        self.network_lobby.is_some() || self.classic_host_lobby_active()
     }
 
     fn set_scensel_dialog_focus(&mut self, focus: ScenselDialogFocus) {
@@ -22686,6 +22805,8 @@ impl GameApp {
     }
 
     fn submit_initial_client_player_info(&mut self, client_id: i32) -> bool {
+        let league_auth = self.league_player_auth_settings();
+        let authenticate_players = self.network_is_league;
         let Some(network) = self.network.as_ref() else {
             return false;
         };
@@ -22695,7 +22816,7 @@ impl GameApp {
             flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
             players: Vec::new(),
         };
-        let request = self
+        let mut request = self
             .app_paths
             .as_ref()
             .zip(self.configured_client_player_selection.as_ref())
@@ -22725,6 +22846,17 @@ impl GameApp {
         for (core, path) in completed_resources {
             self.admission_resources.ensure_by_core(&core);
             self.admission_resources.mark_complete(core.id, path);
+        }
+        if authenticate_players {
+            retain_player_infos_with_cpp_swap_remove(&mut request.players, |player| {
+                match network.authenticate_league_player(league_auth.clone(), player) {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::warn!(name = ?player.name, %error, "league player authentication failed");
+                        false
+                    }
+                }
+            });
         }
         match network.submit_player_info_update(request) {
             Ok(()) => true,
@@ -22899,7 +23031,44 @@ impl GameApp {
         self.broadcast_and_preexecute_player_info(admitted, false, true)
     }
 
+    fn finalize_host_player_info_admission(
+        &mut self,
+        mut admission: lc_engine::PlayerInfoAdmission,
+    ) -> Option<lc_engine::PlayerInfoAdmission> {
+        // Native resets gains after ID/team/attribute normalization for every
+        // request, before its league/lobby branch.
+        self.control_player_infos
+            .reset_projected_gains_for_admission(&mut admission);
+        if !self.network_is_league {
+            return Some(admission);
+        }
+        // League player-info requests outside GS_Lobby are rejected in full;
+        // they are not admitted without authentication.
+        if !self.league_player_auth_lobby_active() {
+            return None;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return None;
+        };
+        let league = lc_engine::LegacyCString::from_bytes(self.network_league_name.clone())
+            .unwrap_or_default();
+        retain_player_infos_with_cpp_swap_remove(&mut admission.admitted.players, |player| {
+            if self.control_player_infos.get(player.id).is_some() {
+                return true;
+            }
+            match network.check_league_player(&league, player) {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::warn!(player_id = player.id, %error, "league player check failed");
+                    false
+                }
+            }
+        });
+        Some(admission)
+    }
+
     fn submit_runtime_network_player(&mut self, file: &str) -> Result<(), String> {
+        let league_auth = self.league_player_auth_settings();
         let host = match self.network_mode.as_ref() {
             Some(NetworkMode::Host(_)) => true,
             Some(NetworkMode::Client(_)) => false,
@@ -22941,7 +23110,7 @@ impl GameApp {
             network.publish_client_player_resource(publication)
         }
         .map_err(|error| error.to_string())?;
-        let request = selected
+        let mut request = selected
             .runtime_add_player_info_update(client_id, resource)
             .map_err(|error| error.to_string())?;
         // A locally published resource keeps its original file for this
@@ -22959,6 +23128,18 @@ impl GameApp {
             .register_lobby_resource(&resource_core);
         self.admission_resources
             .mark_complete(resource_core.id, source_path);
+        if self.network_is_league {
+            let Some(player) = request.players.first_mut() else {
+                return Err("runtime player request has no player".to_string());
+            };
+            match network.authenticate_league_player(league_auth, player) {
+                Ok(true) => {}
+                Ok(false) => return Err("league player authentication was rejected".to_string()),
+                Err(error) => {
+                    return Err(format!("league player authentication failed: {error}"));
+                }
+            }
+        }
         if !host {
             return network
                 .submit_player_info_update(request)
@@ -22993,6 +23174,9 @@ impl GameApp {
         }
         .map_err(|error| format!("host rejected the runtime player attributes: {error}"))?
         .ok_or_else(|| "host rejected the runtime player request".to_string())?;
+        let admission = self
+            .finalize_host_player_info_admission(admission)
+            .ok_or_else(|| "host rejected the runtime league player request".to_string())?;
         self.commit_host_player_info_admission(admission)
             .map_err(|error| error.to_string())
     }
@@ -23910,9 +24094,12 @@ impl GameApp {
                         };
                         match admission {
                             Ok(Some(admission)) => {
-                                if let Err(error) =
-                                    self.commit_host_player_info_admission(admission)
-                                {
+                                let Some(admission) =
+                                    self.finalize_host_player_info_admission(admission)
+                                else {
+                                    continue;
+                                };
+                                if let Err(error) = self.commit_host_player_info_admission(admission) {
                                     tracing::error!(%error, "failed to broadcast authoritative PlayerInfo");
                                 }
                             }
@@ -28136,6 +28323,45 @@ impl GameApp {
                     if response.max_players != 0 {
                         if let Some(staged) = self.staged_network_host_scenario.as_mut() {
                             staged.lobby.max_players = response.max_players;
+                        }
+                    }
+                }
+                if purpose == Some(StartupNetworkPurpose::StagedHost) {
+                    if let NetworkMode::Host(HostSettings {
+                        prepared: Some(prepared),
+                        ..
+                    }) = &mut mode
+                    {
+                        let is_league = prepared
+                            .host_config()
+                            .initial_join_snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| {
+                                synchronized_parameters_are_league(&snapshot.parameters)
+                            });
+                        if prepared.pending_initial_league_players().is_some() {
+                            if let Err(error) = self
+                                .finalize_prepared_host_players(&manager, prepared, is_league)
+                            {
+                                self.status_text = format!(
+                                    "Unable to finalize initial host players: {error}"
+                                );
+                                self.mode = AppMode::Menu;
+                                self.restore_startup_fonts();
+                                return;
+                            }
+                            if let Some(snapshot) =
+                                prepared.host_config().initial_join_snapshot.clone()
+                            {
+                                if let Err(error) = manager.publish_join_snapshot(snapshot) {
+                                    self.status_text = format!(
+                                        "Unable to publish initial host players: {error}"
+                                    );
+                                    self.mode = AppMode::Menu;
+                                    self.restore_startup_fonts();
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
@@ -57012,16 +57238,22 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.process_network_events()
             .expect("classic lobby admits PlayerInfo requests");
         let broadcasts = commands.take_broadcast_player_infos();
-        let [info] = broadcasts.as_slice() else {
-            panic!("expected one authoritative PlayerInfo broadcast, got {broadcasts:?}");
+        let [gain_reset, admitted] = broadcasts.as_slice() else {
+            panic!("expected gain reset then authoritative admission, got {broadcasts:?}");
         };
-        events
-            .send(NetworkEvent::PreexecutedPlayerInfoEcho {
-                original: info.clone(),
-                info: info.clone(),
-                join_players_on_echo: Vec::new(),
-            })
-            .expect("queue supported classic-lobby PlayerInfo echo");
+        assert_eq!(gain_reset.client_id, 0);
+        assert_eq!(gain_reset.players[0].id, 7);
+        assert_eq!(gain_reset.players[0].league_projected_gain, -1);
+        assert_eq!(admitted.client_id, 1);
+        for info in broadcasts {
+            events
+                .send(NetworkEvent::PreexecutedPlayerInfoEcho {
+                    original: info.clone(),
+                    info,
+                    join_players_on_echo: Vec::new(),
+                })
+                .expect("queue supported classic-lobby PlayerInfo echo");
+        }
         app.process_network_events()
             .expect("classic lobby applies authoritative PlayerInfo echoes");
         assert!(app.control_player_infos.contains_client(1));
@@ -73745,6 +73977,184 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn league_player_rejection_uses_cpp_swap_with_last_iteration_order() {
+        let mut players = [1, 2, 3, 4]
+            .into_iter()
+            .map(|id| lc_engine::ControlPlayerInfoEntry {
+                id,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let mut visited = Vec::new();
+
+        retain_player_infos_with_cpp_swap_remove(&mut players, |player| {
+            visited.push(player.id);
+            player.id != 1 && player.id != 3
+        });
+
+        assert_eq!(visited, vec![1, 4, 2, 3]);
+        assert_eq!(
+            players.iter().map(|player| player.id).collect::<Vec<_>>(),
+            vec![4, 2]
+        );
+    }
+
+    #[test]
+    fn league_client_authenticates_each_published_player_and_submits_only_auid_survivors() {
+        // JoinLocalPlayer publishes player resources first, authenticates each
+        // loaded row in packet order, removes failures in place, and sends the
+        // successful AUIDs in one CIF_Initial packet
+        // (src/C4Network2Players.cpp:78-137;
+        // src/C4Network2.cpp:2596-2738).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let players = tempdir().expect("configured players");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        let write_player = |filename: &str, name: &str, color: u32| {
+            let path = players.path().join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw={color}\n")
+                        .into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write player group");
+            path
+        };
+        let accepted_path = write_player("Accepted.c4p", "Accepted", 0x11_22_33);
+        let rejected_path = write_player("Rejected.c4p", "Rejected", 0x44_55_66);
+        let mut config = b"[General]\nName=Maker\nParticipants=\"".to_vec();
+        config.extend_from_slice(accepted_path.as_os_str().as_encoded_bytes());
+        config.push(b';');
+        config.extend_from_slice(rejected_path.as_os_str().as_encoded_bytes());
+        config.extend_from_slice(b"\"\n");
+        fs::write(paths.config_file(), config).expect("write configured participants");
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app");
+        wait_for_menu(&mut app);
+        app.freeze_configured_client_players_for_game()
+            .expect("freeze configured players");
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        let auth = lc_network::LeagueAuthRequestHead {
+            account: lc_engine::LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: lc_engine::LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.network_mode = Some(NetworkMode::Client(
+            ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )
+            .with_league_auth(auth.clone()),
+        ));
+        app.network_is_league = true;
+        let configured_paths = [accepted_path, rejected_path];
+        let cores = configured_paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Player as u8,
+                id: (7 << 16) + index as i32,
+                loadable: true,
+                filename: lc_engine::LegacyCString::from_bytes(
+                    path.as_os_str().as_encoded_bytes().to_vec(),
+                )
+                .unwrap(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let all_rejected_cores = cores.clone();
+        let responses = vec![
+            lc_network::decode_league_auth_response(
+                b"[Response]\r\nStatus=Success\r\nAUID=accepted-token\r\n",
+            ),
+            lc_network::decode_league_auth_response(
+                b"[Response]\r\nStatus=Success\r\nAUID=\r\n",
+            ),
+        ];
+        let observer = thread::spawn(move || {
+            commands.complete_initial_league_client_join(cores, responses)
+        });
+
+        assert!(app.submit_initial_client_player_info(7));
+        let (order, auth_heads, auth_players, requests) =
+            observer.join().expect("league command observer");
+
+        assert_eq!(
+            order,
+            vec!["publish", "publish", "auth", "auth", "player-info"]
+        );
+        assert_eq!(auth_heads, vec![auth.clone(), auth]);
+        assert_eq!(
+            auth_players
+                .iter()
+                .map(|player| player.name.as_bytes())
+                .collect::<Vec<_>>(),
+            vec![b"Accepted".as_slice(), b"Rejected".as_slice()]
+        );
+        let [request] = requests.as_slice() else {
+            panic!("expected one initial PlayerInfo request");
+        };
+        assert_eq!(request.flags, lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL);
+        let [player] = request.players.as_slice() else {
+            panic!("only the authenticated player should survive");
+        };
+        assert_eq!(player.name.as_bytes(), b"Accepted");
+        assert_eq!(player.auth_id.as_bytes(), b"accepted-token");
+
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        app.network = Some(manager);
+        let observer = thread::spawn(move || {
+            commands.complete_initial_league_client_join(
+                all_rejected_cores,
+                vec![
+                    lc_network::decode_league_auth_response(
+                        b"[Response]\r\nStatus=Failure\r\n",
+                    ),
+                    lc_network::decode_league_auth_response(
+                        b"[Response]\r\nStatus=Success\r\nAUID=\r\n",
+                    ),
+                ],
+            )
+        });
+        assert!(app.submit_initial_client_player_info(7));
+        let (_, _, _, requests) = observer.join().expect("all-rejected observer");
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].players.is_empty(),
+            "an initial all-failed auth still sends the empty observer packet"
+        );
+    }
+
+    #[test]
     fn startup_network_client_enters_and_acknowledges_lobby_when_boot_completes() {
         // A command-line direct join completes network initialization before
         // C4Game::Init enters C4Network2::DoLobby. DoLobby then marks the lobby
@@ -74267,6 +74677,184 @@ public func Grant(password) { return GainMissionAccess(password); }
         };
         assert_eq!(player.id, 1);
         assert!(app.control_player_infos.get(1).is_some());
+    }
+
+    #[test]
+    fn league_lobby_checks_only_new_ids_removes_failures_and_consumes_successful_auid() {
+        // HandlePlayerInfoUpdRequest resets gains after normalization, checks
+        // only IDs absent from the retained list, removes rejected rows without
+        // skipping the shifted successor, and clears a successful AUID before
+        // SendUpdatedPlayers/CID_PlrInfo
+        // (src/C4Network2Players.cpp:160-239).
+        let legacy = |bytes: &[u8]| {
+            lc_engine::LegacyCString::from_bytes(bytes.to_vec()).expect("NUL-free fixture")
+        };
+        let mut app = new_menu_app(320, 200);
+        app.network_is_league = true;
+        app.network_league_name = b"Cup".to_vec();
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    name: legacy(b"Existing"),
+                    color: 0x0011_2233,
+                    original_color: 0x0011_2233,
+                    league_projected_gain: 6,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let (manager, event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(manager);
+        let responses = vec![
+            lc_network::decode_league_join_response(
+                b"[Response]\r\nStatus=Failure\r\nMessage=Rejected\r\n",
+            ),
+            lc_network::decode_league_join_response(
+                b"[Response]\r\nStatus=Success\r\nAccount=Alice\r\nLeague=Cup\r\nScore=42\r\nRank=7\r\nRankSymbol=9\r\nProgressData=level3\r\nClanTag=TAG\r\n",
+            ),
+        ];
+        let observer = thread::spawn(move || {
+            commands.complete_host_league_player_checks(responses, 2)
+        });
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 3,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![
+                        lc_engine::ControlPlayerInfoEntry {
+                            id: 1,
+                            name: legacy(b"Existing"),
+                            color: 0x0011_2233,
+                            original_color: 0x0011_2233,
+                            league_projected_gain: 8,
+                            ..Default::default()
+                        },
+                        lc_engine::ControlPlayerInfoEntry {
+                            name: legacy(b"Rejected"),
+                            auth_id: legacy(b"reject-token"),
+                            color: 0x0044_5566,
+                            original_color: 0x0044_5566,
+                            league_projected_gain: 9,
+                            ..Default::default()
+                        },
+                        lc_engine::ControlPlayerInfoEntry {
+                            name: legacy(b"Accepted"),
+                            auth_id: legacy(b"accept-token"),
+                            color: 0x0077_8899,
+                            original_color: 0x0077_8899,
+                            league_projected_gain: 10,
+                            ..Default::default()
+                        },
+                    ],
+                },
+                by_host: false,
+            })
+            .expect("queue league PlayerInfo request");
+
+        app.process_network_events()
+            .expect("process league PlayerInfo request");
+        let (checked, broadcasts) = observer.join().expect("league check observer");
+
+        assert_eq!(
+            checked
+                .iter()
+                .map(|player| (player.id, player.auth_id.as_bytes()))
+                .collect::<Vec<_>>(),
+            vec![(2, b"reject-token".as_slice()), (3, b"accept-token".as_slice())]
+        );
+        let [gain_reset, admitted, ..] = broadcasts.as_slice() else {
+            panic!("expected gain reset before admitted PlayerInfo");
+        };
+        assert_eq!(gain_reset.client_id, 3);
+        assert_eq!(gain_reset.players[0].league_projected_gain, -1);
+        assert_eq!(
+            admitted
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert!(admitted.players[0].auth_id.is_empty());
+        assert_eq!(admitted.players[0].league_projected_gain, -1);
+        let accepted = &admitted.players[1];
+        assert!(accepted.auth_id.is_empty());
+        assert_eq!(accepted.league_account.as_bytes(), b"Alice");
+        assert_eq!(accepted.clan_tag.as_bytes(), b"TAG");
+        assert_eq!(
+            (
+                accepted.league_score,
+                accepted.league_rank,
+                accepted.league_rank_symbol,
+                accepted.league_progress_data.as_bytes(),
+                accepted.league_projected_gain,
+            ),
+            (42, 7, 9, b"level3".as_slice(), -1)
+        );
+    }
+
+    #[test]
+    fn league_player_info_request_after_lobby_resets_stored_gains_but_is_not_admitted() {
+        // The league branch returns when network state is no longer GS_Lobby.
+        // ID allocation/normalization and the internal gain reset precede that
+        // return, but neither auth checks nor direct broadcasts occur
+        // (src/C4Network2Players.cpp:160-239).
+        let mut app = new_running_sandbox_app();
+        app.network_is_league = true;
+        app.network_league_name = b"Cup".to_vec();
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 2,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    league_projected_gain: 5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 3,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        auth_id: lc_engine::LegacyCString::from_bytes(b"unchecked".to_vec())
+                            .unwrap(),
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue post-lobby PlayerInfo request");
+
+        app.process_network_events()
+            .expect("reject post-lobby league request");
+
+        assert_eq!(
+            app.control_player_infos
+                .get(1)
+                .expect("retained player")
+                .league_projected_gain,
+            -1
+        );
+        assert!(app.control_player_infos.get(2).is_none());
+        assert!(commands.take_broadcast_player_infos().is_empty());
     }
 
     #[test]

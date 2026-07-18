@@ -63,6 +63,7 @@ pub struct ClientSettings {
     pub local_system_path: Option<PathBuf>,
     pub local_resource_roots: Vec<PathBuf>,
     pub league_transport: lc_network::LeagueHttpTransportConfig,
+    pub league_auth: lc_network::LeagueAuthRequestHead,
     pub mesh_tcp_bind_address: Option<SocketAddr>,
     pub mesh_udp_bind_address: Option<SocketAddr>,
     pub netpuncher_address: Option<String>,
@@ -87,6 +88,7 @@ impl ClientSettings {
             local_system_path: None,
             local_resource_roots: Vec::new(),
             league_transport: lc_network::LeagueHttpTransportConfig::default(),
+            league_auth: lc_network::LeagueAuthRequestHead::default(),
             mesh_tcp_bind_address: Some(wildcard),
             mesh_udp_bind_address: Some(wildcard),
             netpuncher_address: None,
@@ -115,6 +117,11 @@ impl ClientSettings {
         let address = address.into();
         self.netpuncher_address = (!address.is_empty()).then_some(address);
         self.netpuncher_game_ids = game_ids;
+        self
+    }
+
+    pub fn with_league_auth(mut self, auth: lc_network::LeagueAuthRequestHead) -> Self {
+        self.league_auth = auth;
         self
     }
 }
@@ -347,6 +354,15 @@ struct NetworkWorkerReady {
 
 #[derive(Debug)]
 enum LeagueRuntimeCommand {
+    AuthenticatePlayer {
+        auth: lc_network::LeagueAuthRequestHead,
+        player: lc_engine::ControlPlayerInfoEntry,
+        completion: Sender<std::result::Result<lc_network::LeagueAuthResponse, String>>,
+    },
+    CheckPlayer {
+        player: lc_engine::ControlPlayerInfoEntry,
+        completion: Sender<std::result::Result<lc_network::LeagueJoinResponse, String>>,
+    },
     Update {
         now: i64,
         reference: lc_network::HostGameReference,
@@ -437,6 +453,7 @@ struct LeagueRuntimeState {
     heartbeat: Option<lc_network::LeagueHeartbeat>,
     end_sent: bool,
     projected_gains: HashMap<i32, i32>,
+    fbids: lc_network::LeagueFbidRegistry,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -772,6 +789,105 @@ impl TestNetworkCommands {
             }
         }
         (order, publications, player_infos, acknowledgements)
+    }
+
+    pub(crate) fn complete_initial_league_client_join(
+        mut self,
+        published_cores: Vec<lc_engine::NetworkResourceCore>,
+        auth_responses: Vec<lc_network::LeagueAuthResponse>,
+    ) -> (
+        Vec<&'static str>,
+        Vec<lc_network::LeagueAuthRequestHead>,
+        Vec<lc_engine::ControlPlayerInfoEntry>,
+        Vec<lc_network::PlayerInfoUpdateRequest>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut order = Vec::new();
+        let mut publications = 0;
+        let mut auth_heads = Vec::new();
+        let mut auth_players = Vec::new();
+        let mut player_infos = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match self.command_rx.try_recv() {
+                Ok(NetworkCommand::PublishPlayerResource { completion, .. }) => {
+                    order.push("publish");
+                    let result = published_cores
+                        .get(publications)
+                        .cloned()
+                        .ok_or_else(|| "test did not provide a publication core".to_string());
+                    publications += 1;
+                    let _ = completion.send(result);
+                }
+                Ok(NetworkCommand::LeagueAuthenticatePlayer {
+                    auth,
+                    player,
+                    completion,
+                }) => {
+                    order.push("auth");
+                    let response = auth_responses
+                        .get(auth_players.len())
+                        .cloned()
+                        .ok_or_else(|| "test did not provide an Auth response".to_string());
+                    auth_heads.push(auth);
+                    auth_players.push(player);
+                    let _ = completion.send(response);
+                }
+                Ok(NetworkCommand::SubmitPlayerInfoUpdate(request)) => {
+                    order.push("player-info");
+                    player_infos.push(request);
+                    break;
+                }
+                Ok(NetworkCommand::Shutdown) => break,
+                Ok(command) => panic!("unexpected league-client command: {command:?}"),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        (order, auth_heads, auth_players, player_infos)
+    }
+
+    pub(crate) fn complete_host_league_player_checks(
+        mut self,
+        responses: Vec<lc_network::LeagueJoinResponse>,
+        expected_broadcasts: usize,
+    ) -> (
+        Vec<lc_engine::ControlPlayerInfoEntry>,
+        Vec<PlayerInfoControlData>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut checked = Vec::new();
+        let mut broadcasts = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match self.command_rx.try_recv() {
+                Ok(NetworkCommand::LeagueCheckPlayer { player, completion }) => {
+                    let response = responses
+                        .get(checked.len())
+                        .cloned()
+                        .ok_or_else(|| "test did not provide a Join response".to_string());
+                    checked.push(player);
+                    let _ = completion.send(response);
+                }
+                Ok(NetworkCommand::BroadcastPlayerInfo(info))
+                | Ok(NetworkCommand::BroadcastPreexecutedPlayerInfo { info, .. }) => {
+                    broadcasts.push(info);
+                }
+                Ok(NetworkCommand::PublishJoinSnapshot { .. }) => {}
+                Ok(NetworkCommand::Shutdown) => break,
+                Ok(command) => panic!("unexpected league-host command: {command:?}"),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                    if checked.len() == responses.len()
+                        && broadcasts.len() >= expected_broadcasts
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        (checked, broadcasts)
     }
 
     pub(crate) fn take_submitted_local(&mut self) -> Vec<(i32, ControlEvent, Tick)> {
@@ -1339,6 +1455,15 @@ enum NetworkCommand {
         join_players_on_echo: Vec<lc_engine::ControlPlayerInfoEntry>,
     },
     BroadcastLeagueRoundResults(lc_network::LeagueRoundResultsPacket),
+    LeagueAuthenticatePlayer {
+        auth: lc_network::LeagueAuthRequestHead,
+        player: lc_engine::ControlPlayerInfoEntry,
+        completion: Sender<std::result::Result<lc_network::LeagueAuthResponse, String>>,
+    },
+    LeagueCheckPlayer {
+        player: lc_engine::ControlPlayerInfoEntry,
+        completion: Sender<std::result::Result<lc_network::LeagueJoinResponse, String>>,
+    },
     LeagueUpdate {
         now: i64,
         reference: lc_network::HostGameReference,
@@ -1980,6 +2105,58 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting league round results"))
     }
 
+    /// Runs the local-player `Action=Auth` exchange and installs its one-use
+    /// AUID. A missing league runtime is the native `!pLeagueClient` failure.
+    pub fn authenticate_league_player(
+        &self,
+        auth: lc_network::LeagueAuthRequestHead,
+        player: &mut lc_engine::ControlPlayerInfoEntry,
+    ) -> Result<bool> {
+        if !self.league_runtime_available {
+            return Ok(false);
+        }
+        let (completion, completed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::LeagueAuthenticatePlayer {
+                auth,
+                player: player.clone(),
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting league authentication"))?;
+        let response = completed
+            .recv_timeout(lc_network::LEAGUE_HTTP_TIMEOUT + Duration::from_secs(1))
+            .map_err(|_| anyhow!("league runtime did not finish authenticating the player"))?
+            .map_err(|message| anyhow!(message))?;
+        Ok(response.apply_player_auth(player))
+    }
+
+    /// Runs the host's `Action=Join` check and applies the synchronized league
+    /// fields to an accepted new player. The response consumes its AUID.
+    pub fn check_league_player(
+        &self,
+        league: &lc_engine::LegacyCString,
+        player: &mut lc_engine::ControlPlayerInfoEntry,
+    ) -> Result<bool> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!("only the network host may check league players"));
+        }
+        if !self.league_runtime_available {
+            return Ok(false);
+        }
+        let (completion, completed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::LeagueCheckPlayer {
+                player: player.clone(),
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting league player checks"))?;
+        let response = completed
+            .recv_timeout(lc_network::LEAGUE_HTTP_TIMEOUT + Duration::from_secs(1))
+            .map_err(|_| anyhow!("league runtime did not finish checking the player"))?
+            .map_err(|message| anyhow!(message))?;
+        Ok(response.apply_auth_check(league, player))
+    }
+
     pub fn update_league_reference(
         &self,
         now: i64,
@@ -2429,6 +2606,7 @@ async fn register_league_host(
             session: Some(session),
             end_sent: false,
             projected_gains: HashMap::new(),
+            fbids: lc_network::LeagueFbidRegistry::new(),
         },
         command_rx,
         gate,
@@ -2458,6 +2636,7 @@ fn spawn_league_client(
             heartbeat: None,
             end_sent: false,
             projected_gains: HashMap::new(),
+            fbids: lc_network::LeagueFbidRegistry::new(),
         },
         command_rx,
         gate,
@@ -2502,6 +2681,56 @@ async fn finish_league_runtime(
         .map_err(|_| "league runtime ended before finishing the game".to_string())
 }
 
+async fn authenticate_league_runtime_player(
+    state: &LeagueRuntimeState,
+    auth: &lc_network::LeagueAuthRequestHead,
+    player: &lc_engine::ControlPlayerInfoEntry,
+) -> std::result::Result<lc_network::LeagueAuthResponse, String> {
+    let player_info = lc_network::encode_league_player_info_section(player)
+        .map_err(|error| error.to_string())?;
+    let request = lc_network::encode_league_auth_request(
+        auth,
+        &player_info,
+        league_checksum_start(),
+    )
+    .map_err(|error| error.to_string())?;
+    let reply = state
+        .transport
+        .post(&state.config.endpoint, &request, &state.config.transport)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(lc_network::decode_league_auth_response(&reply))
+}
+
+async fn check_league_runtime_player(
+    state: &LeagueRuntimeState,
+    player: &lc_engine::ControlPlayerInfoEntry,
+) -> std::result::Result<lc_network::LeagueJoinResponse, String> {
+    let csid = state
+        .session
+        .as_ref()
+        .and_then(lc_network::LeagueHostSession::csid)
+        .cloned()
+        .ok_or_else(|| "league host session has no CSID".to_string())?;
+    let player_info = lc_network::encode_league_player_info_section(player)
+        .map_err(|error| error.to_string())?;
+    let request = lc_network::encode_league_join_request(
+        &lc_network::LeagueJoinRequestHead {
+            csid,
+            auid: player.auth_id.clone(),
+        },
+        &player_info,
+        league_checksum_start(),
+    )
+    .map_err(|error| error.to_string())?;
+    let reply = state
+        .transport
+        .post(&state.config.endpoint, &request, &state.config.transport)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(lc_network::decode_league_join_response(&reply))
+}
+
 async fn run_league_runtime(
     mut state: LeagueRuntimeState,
     mut command_rx: tokio_mpsc::Receiver<LeagueRuntimeCommand>,
@@ -2515,6 +2744,25 @@ async fn run_league_runtime(
             priority,
         };
         match command {
+            LeagueRuntimeCommand::AuthenticatePlayer {
+                auth,
+                player,
+                completion,
+            } => {
+                let result = authenticate_league_runtime_player(&state, &auth, &player).await;
+                if let Ok(response) = &result {
+                    if response.is_success() && !response.auid.is_empty() {
+                        state
+                            .fbids
+                            .insert(response.account.clone(), response.fbid.clone());
+                    }
+                }
+                let _ = completion.send(result);
+            }
+            LeagueRuntimeCommand::CheckPlayer { player, completion } => {
+                let result = check_league_runtime_player(&state, &player).await;
+                let _ = completion.send(result);
+            }
             LeagueRuntimeCommand::Update { now, reference } => {
                 let (Some(session), Some(heartbeat)) =
                     (state.session.as_ref(), state.heartbeat.as_mut())
@@ -2629,6 +2877,8 @@ async fn run_league_runtime(
                 fbids,
                 completion,
             } => {
+                let mut fbids_with_authenticated_players = state.fbids.clone();
+                fbids_with_authenticated_players.extend_from(&fbids);
                 let csid = state
                     .session
                     .as_ref()
@@ -2639,7 +2889,7 @@ async fn run_league_runtime(
                     &csid,
                     reason,
                     &players,
-                    &fbids,
+                    &fbids_with_authenticated_players,
                     league_checksum_start(),
                 ) {
                     Ok(request) => request,
@@ -3120,6 +3370,31 @@ async fn run_host_worker(
                         host.broadcast_league_round_results(packet)
                             .await
                             .map_err(|error| anyhow!("host league-result broadcast failed: {error}"))?;
+                    }
+                    NetworkCommand::LeagueAuthenticatePlayer { auth, player, completion } => {
+                        if let Some(runtime) = league_runtime.as_ref() {
+                            if runtime.send_priority(LeagueRuntimeCommand::AuthenticatePlayer {
+                                auth,
+                                player,
+                                completion: completion.clone(),
+                            }).await.is_err() {
+                                let _ = completion.send(Err("league runtime is unavailable".to_string()));
+                            }
+                        } else {
+                            let _ = completion.send(Err("league runtime is unavailable".to_string()));
+                        }
+                    }
+                    NetworkCommand::LeagueCheckPlayer { player, completion } => {
+                        if let Some(runtime) = league_runtime.as_ref() {
+                            if runtime.send_priority(LeagueRuntimeCommand::CheckPlayer {
+                                player,
+                                completion: completion.clone(),
+                            }).await.is_err() {
+                                let _ = completion.send(Err("league runtime is unavailable".to_string()));
+                            }
+                        } else {
+                            let _ = completion.send(Err("league runtime is unavailable".to_string()));
+                        }
                     }
                     NetworkCommand::LeagueUpdate { now, reference } => {
                         if let Some(runtime) = league_runtime.as_ref() {
@@ -3709,6 +3984,12 @@ async fn run_client_worker(
                                 ));
                             }
                         }
+                        NetworkCommand::LeagueAuthenticatePlayer { completion, .. } => {
+                            let _ = completion.send(Err(unavailable.clone()));
+                        }
+                        NetworkCommand::LeagueCheckPlayer { completion, .. } => {
+                            let _ = completion.send(Err(unavailable));
+                        }
                         NetworkCommand::PublishPlayerResource { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
@@ -3774,6 +4055,24 @@ async fn run_client_worker(
                     NetworkCommand::BroadcastLeagueRoundResults(_) => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to broadcast league round results".to_string(),
+                        ));
+                    }
+                    NetworkCommand::LeagueAuthenticatePlayer { auth, player, completion } => {
+                        if let Some(runtime) = league_runtime.as_ref() {
+                            if runtime.send_priority(LeagueRuntimeCommand::AuthenticatePlayer {
+                                auth,
+                                player,
+                                completion: completion.clone(),
+                            }).await.is_err() {
+                                let _ = completion.send(Err("league runtime is unavailable".to_string()));
+                            }
+                        } else {
+                            let _ = completion.send(Err("league runtime is unavailable".to_string()));
+                        }
+                    }
+                    NetworkCommand::LeagueCheckPlayer { completion, .. } => {
+                        let _ = completion.send(Err(
+                            "client attempted to check a league player".to_string(),
                         ));
                     }
                     NetworkCommand::LeagueUpdate { .. } => {
@@ -4637,11 +4936,26 @@ mod tests {
     ) -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fixture");
+        listener.set_nonblocking(true).expect("nonblocking fixture");
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
             let mut bodies = Vec::new();
             for reply in replies {
-                let (mut stream, _) = listener.accept().expect("accept league request");
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "timed out waiting for league request"
+                            );
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("accept league request: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).expect("blocking fixture stream");
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -4824,6 +5138,151 @@ mod tests {
                 .filter(|address| client_join_protocol_enabled(address, false, true))
                 .collect::<Vec<_>>(),
             [NetworkAddress::new(NetworkProtocol::Udp, endpoint)]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn league_runtime_posts_exact_player_auth_and_host_check_requests() {
+        let (endpoint, server) = league_http_fixture(vec![
+            b"[Response]\r\nStatus=Success\r\nCSID=host-session\r\nLeague=Cup\r\nMaxPlayers=4\r\n",
+            b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\nAccount=Alice\r\nFBID=feedback-token\r\n",
+            b"[Response]\r\nStatus=Success\r\nAccount=Alice\r\nLeague=Cup\r\nScore=12\r\nRank=3\r\nRankSymbol=4\r\nProgressData=ready\r\n",
+            b"[Response]\r\nStatus=Success\r\n",
+        ]);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let reference = minimal_league_reference();
+        let (_start, runtime) = register_league_host(
+            PreparedLeagueHostConfig {
+                endpoint,
+                transport: lc_network::LeagueHttpTransportConfig::default(),
+                update_period_secs: 120,
+                league_server_signup: true,
+            },
+            &reference,
+            event_tx,
+        )
+        .await
+        .expect("register league host");
+        let auth = lc_network::LeagueAuthRequestHead {
+            account: lc_engine::LegacyCString::from_bytes(b"account".to_vec()).unwrap(),
+            password: lc_engine::LegacyCString::from_bytes(b"password".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let mut player = lc_engine::ControlPlayerInfoEntry {
+            id: 17,
+            name: lc_engine::LegacyCString::from_bytes(b"Player".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let auth_player = player.clone();
+        let (auth_completion, auth_completed) = mpsc::channel();
+        runtime
+            .send_priority(LeagueRuntimeCommand::AuthenticatePlayer {
+                auth: auth.clone(),
+                player: auth_player.clone(),
+                completion: auth_completion,
+            })
+            .await
+            .unwrap();
+        let auth_response = auth_completed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Auth completion")
+            .expect("Auth exchange");
+        assert!(auth_response.apply_player_auth(&mut player));
+
+        let checked_player = player.clone();
+        let (check_completion, check_completed) = mpsc::channel();
+        runtime
+            .send_priority(LeagueRuntimeCommand::CheckPlayer {
+                player: checked_player.clone(),
+                completion: check_completion,
+            })
+            .await
+            .unwrap();
+        let check_response = check_completed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Join completion")
+            .expect("Join exchange");
+        assert!(check_response.head.is_success());
+        let disconnect_players = lc_network::ClientPlayerInfosSnapshot {
+            client_id: 0,
+            flags: 0,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                id: 17,
+                flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                league_account: lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                ..Default::default()
+            }],
+        };
+        let (disconnect_completion, disconnect_completed) = mpsc::channel();
+        runtime
+            .send_priority(LeagueRuntimeCommand::ReportDisconnect {
+                reason: lc_network::LeagueDisconnectReason::ConnectionFailed,
+                players: disconnect_players.clone(),
+                fbids: lc_network::LeagueFbidRegistry::new(),
+                completion: disconnect_completion,
+            })
+            .await
+            .unwrap();
+        disconnect_completed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("ReportDisconnect completion")
+            .expect("ReportDisconnect exchange");
+        drop(runtime);
+
+        let bodies = server.join().expect("join league HTTP fixture");
+        let auth_player_info =
+            lc_network::encode_league_player_info_section(&auth_player).unwrap();
+        let expected_auth = lc_network::encode_league_auth_request(
+            &auth,
+            &auth_player_info,
+            league_checksum_start(),
+        )
+        .unwrap();
+        let check_player_info =
+            lc_network::encode_league_player_info_section(&checked_player).unwrap();
+        let expected_check = lc_network::encode_league_join_request(
+            &lc_network::LeagueJoinRequestHead {
+                csid: lc_engine::LegacyCString::from_bytes(b"host-session".to_vec()).unwrap(),
+                auid: lc_engine::LegacyCString::from_bytes(b"one-use-token".to_vec()).unwrap(),
+            },
+            &check_player_info,
+            league_checksum_start(),
+        )
+        .unwrap();
+        let without_random_checksum = |mut body: Vec<u8>| {
+            let checksum = body
+                .windows(b"Checksum=".len())
+                .position(|window| window == b"Checksum=")
+                .expect("Checksum field")
+                + b"Checksum=".len();
+            assert_ne!(&body[checksum..checksum + 5], b"-----");
+            body[checksum..checksum + 5].copy_from_slice(b"-----");
+            body
+        };
+        assert_eq!(
+            without_random_checksum(bodies[1].clone()),
+            without_random_checksum(expected_auth)
+        );
+        assert_eq!(
+            without_random_checksum(bodies[2].clone()),
+            without_random_checksum(expected_check)
+        );
+        let mut expected_fbids = lc_network::LeagueFbidRegistry::new();
+        expected_fbids.insert(
+            lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+            lc_engine::LegacyCString::from_bytes(b"feedback-token".to_vec()).unwrap(),
+        );
+        let expected_disconnect = lc_network::encode_league_report_disconnect_request(
+            &lc_engine::LegacyCString::from_bytes(b"host-session".to_vec()).unwrap(),
+            lc_network::LeagueDisconnectReason::ConnectionFailed,
+            &disconnect_players,
+            &expected_fbids,
+            league_checksum_start(),
+        )
+        .unwrap();
+        assert_eq!(
+            without_random_checksum(bodies[3].clone()),
+            without_random_checksum(expected_disconnect)
         );
     }
 

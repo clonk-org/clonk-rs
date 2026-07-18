@@ -582,6 +582,18 @@ impl LeagueAuthResponse {
     pub fn is_register(&self) -> bool {
         self.status.as_bytes().eq_ignore_ascii_case(b"Register")
     }
+
+    /// Applies a successful client-side `Auth` reply to the pending player.
+    ///
+    /// Native `GetAuthReply` rejects nominally successful replies that omit
+    /// the one-use AUID, so callers must not submit such players to the host.
+    pub fn apply_player_auth(&self, player: &mut ControlPlayerInfoEntry) -> bool {
+        if !self.is_success() || self.auid.is_empty() {
+            return false;
+        }
+        player.auth_id.clone_from(&self.auid);
+        true
+    }
 }
 
 /// Decodes the common `[Response]` fields of an authentication reply.
@@ -1740,6 +1752,13 @@ impl LeagueFbidRegistry {
         self.entries.get(account)
     }
 
+    pub fn extend_from(&mut self, other: &Self) {
+        self.entries
+            .extend(other.entries.iter().map(|(account, fbid)| {
+                (account.clone(), fbid.clone())
+            }));
+    }
+
     /// Returns the number of tracked accounts.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -2053,6 +2072,30 @@ FBID=feedback id\r\n",
         assert_eq!(response.fbid.as_bytes(), b"feedback id");
         assert!(response.is_success());
         assert!(!response.is_register());
+    }
+
+    #[test]
+    fn client_auth_requires_success_with_a_nonempty_auid() {
+        // GetAuthReply accepts a local player only after both Status=Success
+        // and a nonempty AUID, then JoinLocalPlayer carries that exact token
+        // to the host (src/C4League.cpp:423-448;
+        // src/C4Network2.cpp:2680-2688).
+        let mut player = lc_engine::ControlPlayerInfoEntry::default();
+        let success = decode_league_auth_response(
+            b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\n",
+        );
+        assert!(success.apply_player_auth(&mut player));
+        assert_eq!(player.auth_id.as_bytes(), b"one-use-token");
+
+        let empty = decode_league_auth_response(b"[Response]\r\nStatus=Success\r\nAUID=\r\n");
+        assert!(!empty.apply_player_auth(&mut player));
+        assert_eq!(player.auth_id.as_bytes(), b"one-use-token");
+
+        let rejected = decode_league_auth_response(
+            b"[Response]\r\nStatus=Failure\r\nAUID=unused-token\r\n",
+        );
+        assert!(!rejected.apply_player_auth(&mut player));
+        assert_eq!(player.auth_id.as_bytes(), b"one-use-token");
     }
 
     #[test]

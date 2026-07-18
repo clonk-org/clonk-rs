@@ -225,7 +225,16 @@ pub struct PreparedHostBootstrap {
     league: Option<PreparedLeagueHostConfig>,
     stream_address: LegacyCString,
     local_player_resources: Vec<(NetworkResourceCore, PathBuf)>,
+    pending_initial_league_players: Option<PendingInitialLeaguePlayers>,
     lifetime: Arc<PreparedHostLifetime>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingInitialLeaguePlayers {
+    players: Vec<ControlPlayerInfoEntry>,
+    restore_players: Vec<ControlPlayerInfoEntry>,
+    restore_last_player_id: i32,
+    team_metadata: InitialNetworkTeamMetadata,
 }
 
 impl PreparedHostBootstrap {
@@ -392,6 +401,53 @@ impl PreparedHostBootstrap {
     /// `C4Network2Players::Init` before joining is opened.
     pub fn initial_host_player_info_control(&self) -> &PlayerInfoControlData {
         &self.initial_host_player_info_control
+    }
+
+    pub fn pending_initial_league_players(&self) -> Option<&[ControlPlayerInfoEntry]> {
+        self.pending_initial_league_players
+            .as_ref()
+            .map(|pending| pending.players.as_slice())
+    }
+
+    /// Runs the post-Auth half of the host's initial local-player admission.
+    /// The callback is the lobby-only `Action=Join` check and therefore sees
+    /// host-assigned IDs, teams, colors and names. Restore script rows are
+    /// appended only after this callback, matching `Players.Init`.
+    pub fn finalize_initial_league_players(
+        &mut self,
+        authenticated_players: Vec<ControlPlayerInfoEntry>,
+        team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
+        check: impl FnMut(&mut ControlPlayerInfoEntry) -> bool,
+    ) -> Result<bool, PrepareHostBootstrapError> {
+        let Some(pending) = self.pending_initial_league_players.take() else {
+            return Ok(false);
+        };
+        let max_players = usize::try_from(self.admission.max_players).map_err(|_| {
+            PrepareHostBootstrapError::MaxPlayersOutOfRange(self.admission.max_players)
+        })?;
+        let (control, team_metadata, last_player_id) = finalize_initial_host_player_info(
+            authenticated_players,
+            pending.restore_last_player_id,
+            max_players,
+            &pending.restore_players,
+            pending.team_metadata,
+            team_assignment_oracle,
+            check,
+        )?;
+        self.initial_host_player_info_control = control.clone();
+        self.runtime_team_metadata = team_metadata.clone();
+        if let Some(snapshot) = self.host_config.initial_join_snapshot.as_mut() {
+            snapshot.parameters.player_infos = PlayerInfoListSnapshot {
+                last_player_id,
+                clients: vec![ClientPlayerInfosSnapshot {
+                    client_id: control.client_id,
+                    flags: control.flags & !CLIENT_PLAYER_INFO_FLAG_UPDATED,
+                    players: control.players,
+                }],
+            };
+            snapshot.parameters.teams = join_team_list_snapshot(team_metadata);
+        }
+        Ok(true)
     }
 
     /// The live team list after initial host PlayerInfo assignment. C++ keeps
@@ -680,6 +736,79 @@ fn append_unclaimed_script_restore_infos(
     }
 }
 
+fn swap_remove_rejected_players(
+    players: &mut Vec<ControlPlayerInfoEntry>,
+    mut retain: impl FnMut(&mut ControlPlayerInfoEntry) -> bool,
+) {
+    let mut index = 0;
+    while index < players.len() {
+        if retain(&mut players[index]) {
+            index += 1;
+        } else {
+            players.swap_remove(index);
+        }
+    }
+}
+
+fn finalize_initial_host_player_info(
+    initial_players: Vec<ControlPlayerInfoEntry>,
+    restore_last_player_id: i32,
+    max_players: usize,
+    restore_players: &[ControlPlayerInfoEntry],
+    mut team_metadata: InitialNetworkTeamMetadata,
+    team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
+    mut check: impl FnMut(&mut ControlPlayerInfoEntry) -> bool,
+) -> Result<
+    (PlayerInfoControlData, InitialNetworkTeamMetadata, i32),
+    PrepareHostBootstrapError,
+> {
+    let mut player_allocator = lc_engine::ControlPlayerInfoRegistry::default();
+    player_allocator.replace_snapshot(
+        restore_last_player_id,
+        std::iter::empty::<PlayerInfoControlData>(),
+    );
+    let mut control = player_allocator
+        .admit_request(
+            PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: initial_players,
+            },
+            max_players,
+        )
+        .ok_or(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)?;
+    let generated_team_requested = {
+        let mut oracle = GeneratedTeamDetectingOracle::new(team_assignment_oracle);
+        assign_initial_host_player_teams(&mut team_metadata, &mut control.players, &mut oracle);
+        oracle.generated_team_requested
+    };
+    if generated_team_requested {
+        return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
+    }
+    let admission = player_allocator
+        .resolve_admitted_player_attributes(
+            control,
+            Some(&team_metadata),
+            restore_players,
+            team_assignment_oracle,
+        )
+        .map_err(PrepareHostBootstrapError::LocalPlayerAttributeConflict)?;
+    assert!(
+        admission.updated_existing.is_empty(),
+        "a fresh initial-host registry cannot produce retained PlayerInfo updates"
+    );
+    control = admission.admitted;
+    for player in &mut control.players {
+        player.league_projected_gain = -1;
+    }
+    swap_remove_rejected_players(&mut control.players, &mut check);
+    append_unclaimed_script_restore_infos(&mut control.players, restore_players);
+    player_allocator.apply(control.clone());
+    player_allocator.recheck_team_players(&mut team_metadata);
+    let (last_player_id, _) = player_allocator.retained_rows_snapshot();
+    Ok((control, team_metadata, last_player_id))
+}
+
 /// Builds the exact currently-supported initial host state without opening a
 /// socket, registering with a masterserver, or making the game joinable.
 pub fn prepare_host_bootstrap(
@@ -725,7 +854,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             spec.network_work_path,
         )?;
     let scenario_metadata = scenario.initial_network_scenario_metadata()?;
-    let mut team_metadata = scenario.initial_network_team_metadata()?;
+    let team_metadata = scenario.initial_network_team_metadata()?;
     if !spec.player_sources.is_empty() && team_metadata.auto_generate_teams {
         return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
     }
@@ -899,55 +1028,43 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             }
         })
         .collect();
-    let mut player_allocator = lc_engine::ControlPlayerInfoRegistry::default();
-    player_allocator.replace_snapshot(
-        restore_player_infos.last_player_id,
-        std::iter::empty::<PlayerInfoControlData>(),
-    );
-    let mut initial_host_player_info_control = player_allocator
-        .admit_request(
-            PlayerInfoUpdateRequest {
+    let defer_league_players = spec
+        .league
+        .is_some_and(|league| league.league_server_signup);
+    let (
+        initial_host_player_info_control,
+        runtime_team_metadata,
+        last_player_id,
+        pending_initial_league_players,
+    ) = if defer_league_players {
+        (
+            PlayerInfoControlData {
                 client_id: 0,
                 flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players: initial_players,
+                players: Vec::new(),
+                by_client: 0,
             },
+            team_metadata.clone(),
+            restore_player_infos.last_player_id,
+            Some(PendingInitialLeaguePlayers {
+                players: initial_players,
+                restore_players: restore_players.clone(),
+                restore_last_player_id: restore_player_infos.last_player_id,
+                team_metadata,
+            }),
+        )
+    } else {
+        let (control, team_metadata, last_player_id) = finalize_initial_host_player_info(
+            initial_players,
+            restore_player_infos.last_player_id,
             max_players,
-        )
-        .ok_or(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)?;
-    let generated_team_requested = {
-        let mut oracle = GeneratedTeamDetectingOracle::new(team_assignment_oracle);
-        assign_initial_host_player_teams(
-            &mut team_metadata,
-            &mut initial_host_player_info_control.players,
-            &mut oracle,
-        );
-        oracle.generated_team_requested
-    };
-    if generated_team_requested {
-        return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
-    }
-    let admission = player_allocator
-        .resolve_admitted_player_attributes(
-            initial_host_player_info_control,
-            Some(&team_metadata),
             &restore_players,
+            team_metadata,
             team_assignment_oracle,
-        )
-        .map_err(PrepareHostBootstrapError::LocalPlayerAttributeConflict)?;
-    assert!(
-        admission.updated_existing.is_empty(),
-        "a fresh initial-host registry cannot produce retained PlayerInfo updates"
-    );
-    initial_host_player_info_control = admission.admitted;
-    append_unclaimed_script_restore_infos(
-        &mut initial_host_player_info_control.players,
-        &restore_players,
-    );
-    // CreateRestoreInfosForJoinedScriptPlayers mutates the retained host
-    // packet directly and then makes the team list recognize those rows.
-    player_allocator.apply(initial_host_player_info_control.clone());
-    player_allocator.recheck_team_players(&mut team_metadata);
-    let (last_player_id, _) = player_allocator.retained_rows_snapshot();
+            |_| true,
+        )?;
+        (control, team_metadata, last_player_id, None)
+    };
     publication.join_snapshot.parameters.player_infos = PlayerInfoListSnapshot {
         last_player_id,
         clients: vec![ClientPlayerInfosSnapshot {
@@ -956,8 +1073,8 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             players: initial_host_player_info_control.players.clone(),
         }],
     };
-    let runtime_team_metadata = team_metadata.clone();
-    publication.join_snapshot.parameters.teams = join_team_list_snapshot(team_metadata);
+    publication.join_snapshot.parameters.teams =
+        join_team_list_snapshot(runtime_team_metadata.clone());
     let local_player_resources = local_players
         .iter()
         .zip(&publication.player_cores)
@@ -1001,6 +1118,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         league: spec.league.cloned(),
         stream_address: LegacyCString::default(),
         local_player_resources,
+        pending_initial_league_players,
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
             scenario: Mutex::new(Some(scenario)),
@@ -1110,6 +1228,7 @@ mod definition_root_graphics_tests {
             }),
             stream_address: legacy_string("old-stream"),
             local_player_resources: Vec::new(),
+            pending_initial_league_players: None,
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),
                 scenario: Mutex::new(None),
@@ -1146,6 +1265,128 @@ mod definition_root_graphics_tests {
         assert_eq!(
             prepared.stream_address().as_bytes(),
             b"https://stream.example/upload?"
+        );
+    }
+
+    #[test]
+    fn league_host_finalization_assigns_survivors_before_join_check_and_appends_scripts() {
+        let mut prepared = league_prepared_host(1);
+        let player = |name: &str, color| ControlPlayerInfoEntry {
+            name: legacy_string(name),
+            color,
+            original_color: color,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let script = ControlPlayerInfoEntry {
+            name: legacy_string("Script"),
+            id: 40,
+            player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+            color: 0x000a_0b0c,
+            original_color: 0x000a_0b0c,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let a = player("A", 0x0001_0203);
+        let b = player("B", 0x0004_0506);
+        let c = player("C", 0x0007_0809);
+        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
+            players: vec![a, b.clone(), c.clone()],
+            restore_players: vec![script],
+            restore_last_player_id: 40,
+            team_metadata: prepared.runtime_team_metadata.clone(),
+        });
+        let mut checked = Vec::new();
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
+
+        assert!(
+            prepared
+                .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
+                    checked.push((player.name.clone(), player.id));
+                    true
+                })
+                .expect("finalize authenticated initial players")
+        );
+
+        assert_eq!(
+            prepared
+                .initial_host_player_info_control()
+                .players
+                .iter()
+                .map(|player| (player.name.as_bytes(), player.id, player.savegame_player))
+                .collect::<Vec<_>>(),
+            vec![
+                (b"C".as_slice(), 41, 0),
+                (b"B".as_slice(), 42, 0),
+                (b"Script".as_slice(), 40, 40),
+            ]
+        );
+        assert_eq!(
+            checked
+                .iter()
+                .map(|(name, id)| (name.as_bytes(), *id))
+                .collect::<Vec<_>>(),
+            vec![(b"C".as_slice(), 41), (b"B".as_slice(), 42)]
+        );
+        let snapshot = prepared.host_config().initial_join_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.parameters.player_infos.last_player_id, 42);
+        assert_eq!(snapshot.parameters.player_infos.clients[0].players.len(), 3);
+        assert!(prepared.pending_initial_league_players().is_none());
+    }
+
+    #[test]
+    fn league_start_capacity_is_applied_before_initial_player_ids_are_assigned() {
+        let mut prepared = league_prepared_host(1);
+        let player = |name: &str, color| ControlPlayerInfoEntry {
+            name: legacy_string(name),
+            color,
+            original_color: color,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let b = player("B", 0x0001_0203);
+        let c = player("C", 0x0004_0506);
+        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
+            players: vec![c.clone(), b.clone()],
+            restore_players: Vec::new(),
+            restore_last_player_id: 0,
+            team_metadata: prepared.runtime_team_metadata.clone(),
+        });
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: legacy_string("Gold League"),
+                max_players: 1,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start capacity");
+        let mut checked = Vec::new();
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
+
+        prepared
+            .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
+                checked.push(player.name.clone());
+                true
+            })
+            .expect("finalize capped initial players");
+
+        let players = &prepared.initial_host_player_info_control().players;
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].name.as_bytes(), b"C");
+        assert_eq!(players[0].id, 1);
+        assert_eq!(
+            checked
+                .iter()
+                .map(LegacyCString::as_bytes)
+                .collect::<Vec<_>>(),
+            vec![b"C".as_slice()]
+        );
+        assert_eq!(
+            prepared
+                .host_config()
+                .initial_join_snapshot
+                .as_ref()
+                .unwrap()
+                .parameters
+                .player_infos
+                .last_player_id,
+            1
         );
     }
 

@@ -2691,6 +2691,38 @@ impl ControlPlayerInfoRegistry {
         self.client_packets(&touched_clients)
     }
 
+    /// Executes the projected-gain reset inside
+    /// `HandlePlayerInfoUpdRequest` after attribute resolution.
+    ///
+    /// Existing valid gains mark their retained owner for the ordered
+    /// `SendUpdatedPlayers` prefix. Every incoming row is reset regardless of
+    /// its prior value. Rebuilding the prefix from the registry also folds in
+    /// any packets already changed by attribute conflict resolution, so each
+    /// owner is emitted exactly once with its final pre-admission state.
+    pub fn reset_projected_gains_for_admission(&mut self, admission: &mut PlayerInfoAdmission) {
+        let mut touched_clients = admission
+            .updated_existing
+            .iter()
+            .map(|packet| packet.client_id)
+            .collect::<HashSet<_>>();
+        for client in &mut self.clients {
+            let mut reset_any = false;
+            for player in &mut client.players {
+                if player.league_projected_gain >= 0 {
+                    player.league_projected_gain = -1;
+                    reset_any = true;
+                }
+            }
+            if reset_any {
+                touched_clients.insert(client.client_id);
+            }
+        }
+        for player in &mut admission.admitted.players {
+            player.league_projected_gain = -1;
+        }
+        admission.updated_existing = self.client_packets(&touched_clients);
+    }
+
     pub fn client_id_for_info(&self, info_id: i32) -> Option<i32> {
         self.clients.iter().find_map(|client| {
             client
@@ -3723,6 +3755,50 @@ mod tests {
             vec![7]
         );
         assert_eq!(updates[0].flags & CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
+    }
+
+    #[test]
+    fn admission_projected_gain_reset_merges_existing_updates_and_resets_every_incoming_row() {
+        let mut unchanged_invalid = player(10);
+        unchanged_invalid.league_projected_gain = -1;
+        let mut valid = player(20);
+        valid.league_projected_gain = 7;
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![unchanged_invalid],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 7,
+            players: vec![valid],
+            ..Default::default()
+        });
+        let mut incoming_valid = player(30);
+        incoming_valid.league_projected_gain = 9;
+        let mut admission = PlayerInfoAdmission {
+            updated_existing: vec![registry.client_packets(&HashSet::from([4]))[0].clone()],
+            admitted: PlayerInfoControlData {
+                client_id: 9,
+                players: vec![incoming_valid],
+                ..Default::default()
+            },
+            joined_player_team_updates: Vec::new(),
+        };
+
+        registry.reset_projected_gains_for_admission(&mut admission);
+
+        assert_eq!(registry.get(10).unwrap().league_projected_gain, -1);
+        assert_eq!(registry.get(20).unwrap().league_projected_gain, -1);
+        assert_eq!(admission.admitted.players[0].league_projected_gain, -1);
+        assert_eq!(
+            admission
+                .updated_existing
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
+            vec![4, 7]
+        );
     }
 
     #[test]
