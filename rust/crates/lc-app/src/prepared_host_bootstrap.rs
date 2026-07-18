@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use lc_engine::player_file::PlayerFile;
-use lc_engine::scenario::LegacyDefinitionResolver;
+use lc_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead};
 use lc_engine::{
     CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED, ClientCoreControlData,
     ControlPlayerInfoEntry,
@@ -33,6 +33,7 @@ use lc_network::{
     NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership, compose_initial_network_dynamic,
     fill_scenario_derived_join_parameters, join_team_list_snapshot, publish_host_initial_resources,
 };
+use lc_resources::localize_script_source_with_components;
 use lc_resources::{Group, GroupError, LanguagePacks};
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -407,13 +408,22 @@ impl PreparedHostBootstrap {
         for (core, path) in &self.local_player_resources {
             install_resource(core, path);
         }
+        // Parameters::Load transfers RestorePlayerInfos' raw allocation
+        // counter into PlayerInfos before any local admission. Preserve that
+        // counter even when it is greater than every retained row ID.
         let last_player_id = self
-            .initial_host_player_info_control
-            .players
-            .iter()
-            .map(|player| player.id)
-            .max()
-            .unwrap_or(0);
+            .host_config
+            .initial_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.player_infos.last_player_id)
+            .unwrap_or_else(|| {
+                self.initial_host_player_info_control
+                    .players
+                    .iter()
+                    .map(|player| player.id)
+                    .max()
+                    .unwrap_or(0)
+            });
         registry.replace_snapshot(
             last_player_id,
             [self.initial_host_player_info_control.clone()],
@@ -452,8 +462,6 @@ pub enum PrepareHostBootstrapError {
     ScenarioGameStateUnsupported,
     #[error("scenario PlayerInfos.txt/replay player state is not supported")]
     ScenarioPlayerInfosUnsupported,
-    #[error("scenario SavePlayerInfos.txt restore state is not supported")]
-    RestorePlayerInfosUnsupported,
     #[error("savegame network hosting is not supported by the exact initial-host subset")]
     SavegameUnsupported,
     #[error("replay network hosting is rejected by C++")]
@@ -645,6 +653,27 @@ impl<O: InitialHostTeamAssignmentOracle> InitialHostTeamAssignmentOracle
     }
 }
 
+/// `C4PlayerInfoList::CreateRestoreInfosForJoinedScriptPlayers`: append a
+/// copy of each still-unclaimed restore script player to the first (host)
+/// packet in restore-list storage order.
+fn append_unclaimed_script_restore_infos(
+    host_players: &mut Vec<ControlPlayerInfoEntry>,
+    restore_players: &[ControlPlayerInfoEntry],
+) {
+    for restore in restore_players {
+        if !restore.is_script_player()
+            || host_players
+                .iter()
+                .any(|player| player.savegame_player == restore.id)
+        {
+            continue;
+        }
+        let mut rejoin = restore.clone();
+        rejoin.savegame_player = restore.id;
+        host_players.push(rejoin);
+    }
+}
+
 /// Builds the exact currently-supported initial host state without opening a
 /// socket, registering with a masterserver, or making the game joinable.
 pub fn prepare_host_bootstrap(
@@ -668,6 +697,12 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         }
     })?;
     let original_game_text = validate_scenario_group(&scenario_group)?;
+    let restore_player_infos = load_restore_player_infos(&scenario_group, &spec)?;
+    let restore_players = restore_player_infos
+        .clients
+        .iter()
+        .flat_map(|client| client.players.iter().cloned())
+        .collect::<Vec<_>>();
     let scenario = Scenario::load_from_group_with_languages(
         &scenario_group,
         &InstallRootDefinitionResolver {
@@ -742,10 +777,6 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         nick: host_nick,
         lobby_ready: false,
     };
-    let empty_players = PlayerInfoListSnapshot {
-        last_player_id: 0,
-        clients: Vec::new(),
-    };
     let dynamic_host_player_info_control = PlayerInfoControlData {
         client_id: 0,
         flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -783,7 +814,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         scenario: NetworkResourceCore::default(),
         game_resources: Vec::new(),
         player_infos: initial_host_players,
-        restore_player_infos: empty_players,
+        restore_player_infos: restore_player_infos.clone(),
         teams: empty_team_snapshot(),
         clients: JoinClientRegistrySnapshot {
             clients: vec![local_core.clone()],
@@ -863,6 +894,10 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         })
         .collect();
     let mut player_allocator = lc_engine::ControlPlayerInfoRegistry::default();
+    player_allocator.replace_snapshot(
+        restore_player_infos.last_player_id,
+        std::iter::empty::<PlayerInfoControlData>(),
+    );
     let mut initial_host_player_info_control = player_allocator
         .admit_request(
             PlayerInfoUpdateRequest {
@@ -889,7 +924,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         .resolve_admitted_player_attributes(
             initial_host_player_info_control,
             Some(&team_metadata),
-            &[],
+            &restore_players,
             team_assignment_oracle,
         )
         .map_err(PrepareHostBootstrapError::LocalPlayerAttributeConflict)?;
@@ -898,12 +933,15 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         "a fresh initial-host registry cannot produce retained PlayerInfo updates"
     );
     initial_host_player_info_control = admission.admitted;
-    let last_player_id = initial_host_player_info_control
-        .players
-        .iter()
-        .map(|player| player.id)
-        .max()
-        .unwrap_or(0);
+    append_unclaimed_script_restore_infos(
+        &mut initial_host_player_info_control.players,
+        &restore_players,
+    );
+    // CreateRestoreInfosForJoinedScriptPlayers mutates the retained host
+    // packet directly and then makes the team list recognize those rows.
+    player_allocator.apply(initial_host_player_info_control.clone());
+    player_allocator.recheck_team_players(&mut team_metadata);
+    let (last_player_id, _) = player_allocator.retained_rows_snapshot();
     publication.join_snapshot.parameters.player_infos = PlayerInfoListSnapshot {
         last_player_id,
         clients: vec![ClientPlayerInfosSnapshot {
@@ -1210,6 +1248,50 @@ fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHo
     Ok(())
 }
 
+fn load_restore_player_infos(
+    group: &Group,
+    spec: &PreparedHostBootstrapSpec<'_>,
+) -> Result<PlayerInfoListSnapshot, PrepareHostBootstrapError> {
+    let empty = || PlayerInfoListSnapshot {
+        last_player_id: 0,
+        clients: Vec::new(),
+    };
+    let Some(source) = read_direct_entry(group, "SavePlayerInfos.txt")? else {
+        return Ok(empty());
+    };
+    // C4PlayerInfoList::Load treats an unreadable/empty group entry as an
+    // absent list. The direct-entry read above has already distinguished a
+    // genuine I/O error from this zero-byte legacy case.
+    if source.is_empty() {
+        return Ok(empty());
+    }
+
+    let loader_head = ScenarioLoaderHead::load_from_group_for_resource_registration(group)?;
+    let components = spec
+        .language_packs
+        .component_groups(group, Some(group), loader_head.origin());
+    // SavePlayerInfos is native-byte compiler data, not UTF-8 text. Route it
+    // through C4Script's lossless private-use representation so undefined
+    // Windows-1252 bytes survive localization unchanged.
+    let source = lc_script::c4_string_from_bytes(&source);
+    let localized = localize_script_source_with_components(&components, &source, spec.languages)
+        .map_err(|source| PrepareHostBootstrapError::ScenarioEntry {
+            entry: "SavePlayerInfos.txt",
+            source,
+        })?;
+    let localized = lc_script::c4_string_bytes(&localized);
+    Ok(match lc_network::decode_player_info_list_ini(&localized) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // Parameters::Load deliberately ignores C4PlayerInfoList::Load's
+            // false return after CompileFromBuf_LogWarn. The list was cleared
+            // before compilation, so hosting continues with no restore rows.
+            tracing::warn!(%error, "ignoring malformed SavePlayerInfos.txt");
+            empty()
+        }
+    })
+}
+
 fn validate_scenario_title(value: &str) -> Result<(), PrepareHostBootstrapError> {
     validate_ascii_text("scenario title", value, false)?;
     if value.len() > 120
@@ -1280,9 +1362,6 @@ fn validate_scenario_group(group: &Group) -> Result<Option<Vec<u8>>, PrepareHost
         if !parameters.is_empty() {
             return Err(PrepareHostBootstrapError::ScenarioParametersUnsupported);
         }
-    }
-    if has_direct_entry(group, "SavePlayerInfos.txt")? {
-        return Err(PrepareHostBootstrapError::RestorePlayerInfosUnsupported);
     }
     if has_direct_entry(group, "PlayerInfos.txt")? || has_direct_entry(group, "RecPlayerInfos.txt")?
     {

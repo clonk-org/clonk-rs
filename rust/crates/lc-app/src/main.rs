@@ -437,6 +437,7 @@ enum ScenarioLoadingEvent {
 struct PreparedGoLoadingState {
     status: lc_network::NetworkStatus,
     local_reached: bool,
+    restore_player_infos: Vec<lc_engine::ControlPlayerInfoEntry>,
     random_seed: u64,
     use_fair_crew: bool,
     fair_crew_strength: i32,
@@ -505,6 +506,7 @@ impl ScenarioLoadingState {
         scenario: FrontendScenario,
         data: Scenario,
         status: lc_network::NetworkStatus,
+        restore_player_infos: Vec<lc_engine::ControlPlayerInfoEntry>,
         random_seed: u64,
         use_fair_crew: bool,
         fair_crew_strength: i32,
@@ -527,6 +529,7 @@ impl ScenarioLoadingState {
             prepared_go: Some(PreparedGoLoadingState {
                 status,
                 local_reached: false,
+                restore_player_infos,
                 random_seed,
                 use_fair_crew,
                 fair_crew_strength,
@@ -8127,9 +8130,49 @@ fn host_restore_player_info_entries(
 ) -> Vec<lc_engine::ControlPlayerInfoEntry> {
     snapshot
         .into_iter()
-        .flat_map(|snapshot| &snapshot.parameters.restore_player_infos.clients)
-        .flat_map(|client| client.players.iter().cloned())
+        .flat_map(|snapshot| player_info_list_entries(&snapshot.parameters.restore_player_infos))
         .collect()
+}
+
+fn player_info_list_entries(
+    snapshot: &lc_network::PlayerInfoListSnapshot,
+) -> impl Iterator<Item = lc_engine::ControlPlayerInfoEntry> + '_ {
+    snapshot
+        .clients
+        .iter()
+        .flat_map(|client| client.players.iter().cloned())
+}
+
+/// `C4PlayerInfoList::RestoreSavegameInfos` merges the authoritative restore
+/// rows before `RecreatePlayers` scans joined infos. Keep that transition
+/// separate from ordinary `JoinPlayer` issuance: full legacy Game.txt player
+/// reconstruction belongs to the later savegame-host staging boundary.
+fn route_network_savegame_recreation(
+    player_infos: &mut ControlPlayerInfoRegistry,
+    restore_player_infos: &[lc_engine::ControlPlayerInfoEntry],
+) -> Vec<(i32, i32)> {
+    if !restore_player_infos
+        .iter()
+        .any(|restore| restore.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0)
+    {
+        return Vec::new();
+    }
+    let (_, packets) = player_infos.retained_rows_snapshot();
+    let mut seen_associations = HashSet::new();
+    for savegame_player in packets
+        .iter()
+        .flat_map(|(_, _, players)| players)
+        .map(|player| player.savegame_player)
+        .filter(|id| *id != 0 && seen_associations.insert(*id))
+    {
+        if let Some(restore_info) = restore_player_infos
+            .iter()
+            .find(|restore| restore.id == savegame_player)
+        {
+            player_infos.resume_savegame_player_from_info(restore_info);
+        }
+    }
+    player_infos.recreation_players()
 }
 
 fn synchronized_parameters_are_league(parameters: &lc_network::JoinGameParametersEnvelope) -> bool {
@@ -8795,6 +8838,10 @@ struct GameApp {
     control_clients: ControlClientRegistry,
     network_client_activity: NetworkClientActivity,
     control_player_infos: ControlPlayerInfoRegistry,
+    /// Joined infos selected by RestoreSavegameInfos for the distinct
+    /// RecreatePlayers phase. They must never fall back into normal network
+    /// JoinPlayer issuance while legacy runtime-player loading is deferred.
+    deferred_network_savegame_recreation: Vec<(i32, i32)>,
     /// Frozen Application.ResStrTable template used by GenerateDefaultTeams.
     generated_team_name_template: LegacyCString,
     network_team_assignment: Option<NetworkTeamAssignmentState>,
@@ -16560,6 +16607,7 @@ impl GameApp {
             control_clients,
             network_client_activity: NetworkClientActivity::default(),
             control_player_infos,
+            deferred_network_savegame_recreation: Vec::new(),
             generated_team_name_template,
             network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
@@ -22108,6 +22156,73 @@ impl GameApp {
         }
     }
 
+    fn prepare_network_savegame_recreation(&mut self) {
+        let restore_player_infos = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| prepared.restore_player_infos.clone())
+            .unwrap_or_default();
+        if !restore_player_infos
+            .iter()
+            .any(|restore| restore.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0)
+        {
+            self.deferred_network_savegame_recreation.clear();
+            return;
+        }
+        self.deferred_network_savegame_recreation = route_network_savegame_recreation(
+            &mut self.control_player_infos,
+            &restore_player_infos,
+        );
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
+        );
+
+        let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
+        let exact_teams = self.network_team_assignment.as_mut().map(|assignment| {
+            self.control_player_infos
+                .recheck_team_players(assignment.teams_mut());
+            let metadata = assignment.teams().clone();
+            (
+                runtime_teams_from_initial_metadata(&metadata),
+                lc_network::join_team_list_snapshot(metadata),
+            )
+        });
+        let runtime_teams = if let Some((runtime_teams, snapshot)) = exact_teams {
+            if let Some(host_snapshot) = self.host_join_snapshot.as_mut() {
+                host_snapshot.parameters.teams = snapshot;
+            }
+            runtime_teams
+        } else {
+            let mut runtime_teams = self.engine.teams().to_vec();
+            recheck_runtime_team_memberships_from_infos(&mut runtime_teams, &memberships);
+            if let Some(host_snapshot) = self.host_join_snapshot.as_mut() {
+                recheck_join_team_memberships_from_infos(
+                    &mut host_snapshot.parameters.teams.teams,
+                    &memberships,
+                );
+            }
+            runtime_teams
+        };
+        self.engine.set_teams(runtime_teams.clone());
+        if let Some(prepared) = self
+            .loading_state
+            .as_mut()
+            .and_then(|loading| loading.prepared_go.as_mut())
+        {
+            prepared.team_registry = runtime_teams;
+        }
+        self.publish_current_host_player_infos();
+        if !self.deferred_network_savegame_recreation.is_empty() {
+            tracing::debug!(
+                players = ?self.deferred_network_savegame_recreation,
+                "routed joined savegame infos to deferred recreation"
+            );
+        }
+    }
+
     fn issue_reserved_joins_for_player_snapshot(
         &mut self,
         client_id: i32,
@@ -22398,6 +22513,7 @@ impl GameApp {
             scenario,
             scenario_data,
             status,
+            player_info_list_entries(&join_data.parameters.restore_player_infos).collect(),
             random_seed,
             join_data.parameters.use_fair_crew,
             join_data.parameters.fair_crew_strength,
@@ -29224,6 +29340,7 @@ impl GameApp {
         });
         if let Some(prepared) = prepared {
             let Some((
+                restore_player_infos,
                 random_seed,
                 use_fair_crew,
                 fair_crew_strength,
@@ -29237,6 +29354,8 @@ impl GameApp {
                 .or_else(|| prepared.host_config().initial_join_snapshot.as_ref())
                 .map(|snapshot| {
                     (
+                        player_info_list_entries(&snapshot.parameters.restore_player_infos)
+                            .collect::<Vec<_>>(),
                         u64::from(snapshot.parameters.random_seed as u32),
                         snapshot.parameters.use_fair_crew,
                         snapshot.parameters.fair_crew_strength,
@@ -29304,6 +29423,7 @@ impl GameApp {
                 scenario,
                 scenario_data,
                 status,
+                restore_player_infos,
                 random_seed,
                 use_fair_crew,
                 fair_crew_strength,
@@ -36632,6 +36752,7 @@ impl GameApp {
         self.close_context_menu_silently();
         self.host_lobby_countdown = None;
         self.finish_recording();
+        self.deferred_network_savegame_recreation.clear();
         self.message_dialogs.clear();
         self.message_dialog_consumed_keys.clear();
         self.definition_selector = None;
@@ -37263,6 +37384,7 @@ impl GameApp {
         scenario_data: Scenario,
     ) -> std::result::Result<(), ScenarioActivationError> {
         self.finish_recording();
+        self.deferred_network_savegame_recreation.clear();
         let path = scenario
             .path
             .clone()
@@ -37762,6 +37884,7 @@ impl GameApp {
         self.engine
             .game_start_synchronize()
             .map_err(map_runtime_flash_producer_engine_error)?;
+        self.prepare_network_savegame_recreation();
         self.engine.initialize_scenario_script()?;
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
@@ -37787,6 +37910,7 @@ impl GameApp {
         self.ingame_menu_gfx = None;
         self.active_global_gui_overrides.clear();
         self.finish_recording();
+        self.deferred_network_savegame_recreation.clear();
         self.loading_state = None;
         self.engine = Engine::new();
         self.film_view_player = None;
@@ -76856,6 +76980,7 @@ protected func InputCallback(string answer, int player)
                     target_tick: 0,
                 },
                 local_reached: false,
+                restore_player_infos: Vec::new(),
                 random_seed: 0,
                 use_fair_crew: false,
                 fair_crew_strength: 0,
@@ -92712,6 +92837,145 @@ protected func InputCallback(string answer, int player)
         assert_eq!(player.name(), "Current takeover");
         assert!(player.no_elimination_check());
         assert_eq!(app.control_player_infos.recreation_info_ids(), vec![saved_info_id]);
+    }
+
+    #[test]
+    fn network_restore_routes_associated_info_away_from_plain_join_queue() {
+        let mut player_infos = ControlPlayerInfoRegistry::default();
+        player_infos.replace_snapshot(
+            92,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 91,
+                        savegame_player: 7,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 92,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+        );
+        let restore = lc_engine::ControlPlayerInfoEntry {
+            id: 7,
+            flags: lc_engine::PLAYER_INFO_FLAG_JOINED
+                | lc_engine::PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+            color: 0x0012_3456,
+            team: 2,
+            ..Default::default()
+        };
+        let duplicate_restore = lc_engine::ControlPlayerInfoEntry {
+            id: restore.id,
+            color: 0x00ff_0000,
+            team: 9,
+            ..restore.clone()
+        };
+
+        let plain_joins = player_infos.issue_unjoined_players(3, |_| None);
+        let recreation = route_network_savegame_recreation(
+            &mut player_infos,
+            &[restore.clone(), duplicate_restore],
+        );
+
+        assert_eq!(recreation, vec![(3, 7)]);
+        assert_eq!(plain_joins.len(), 1);
+        assert_eq!(plain_joins[0].info_id, 92);
+        let resumed = player_infos.get(7).expect("associated row takes saved ID");
+        assert_eq!((resumed.color, resumed.team), (restore.color, restore.team));
+        assert_ne!(resumed.flags & lc_engine::PLAYER_INFO_FLAG_JOINED, 0);
+    }
+
+    #[test]
+    fn network_restore_projects_resumed_ids_into_league_teams_and_host_snapshot() {
+        let mut app = new_menu_app(320, 200);
+        let (network, _events) = NetworkManager::test_stub();
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        let team_metadata = set_control_test_metadata(
+            false,
+            vec![
+                set_control_test_team(1, vec![91], 0),
+                set_control_test_team(2, Vec::new(), 0),
+            ],
+        );
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            team_metadata.clone(),
+        ));
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&team_metadata));
+        app.control_player_infos.replace_snapshot(
+            91,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 91,
+                    savegame_player: 7,
+                    team: 1,
+                    league_score: 55,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let restore = lc_engine::ControlPlayerInfoEntry {
+            id: 7,
+            flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+            team: 2,
+            ..Default::default()
+        };
+        let (_sender, receiver) = mpsc::channel();
+        app.loading_state = Some(ScenarioLoadingState {
+            scenario: FrontendScenario::fallback(),
+            refreshed_resources: None,
+            refreshed_tooltip_font: None,
+            refreshed_native_font_source: None,
+            refreshed_global_gui_overrides: None,
+            refresh_requested: false,
+            receiver,
+            finished: false,
+            prepared_go: Some(PreparedGoLoadingState {
+                status: lc_network::NetworkStatus {
+                    state: lc_network::NETWORK_STATE_GO,
+                    control_mode: 0,
+                    target_tick: 0,
+                },
+                local_reached: true,
+                restore_player_infos: vec![restore],
+                random_seed: 0,
+                use_fair_crew: false,
+                fair_crew_strength: 0,
+                fair_crew_forced: false,
+                allow_debug: true,
+                team_configuration: TeamConfiguration::default(),
+                team_registry: Vec::new(),
+            }),
+            offline_startup_players: None,
+        });
+
+        app.prepare_network_savegame_recreation();
+
+        assert_eq!(app.deferred_network_savegame_recreation, vec![(3, 7)]);
+        assert_eq!(
+            app.engine.snapshot().player_info_league_scores.get(&7),
+            Some(&55)
+        );
+        assert!(!app
+            .engine
+            .snapshot()
+            .player_info_league_scores
+            .contains_key(&91));
+        assert!(app.engine.teams()[0].player_ids.is_empty());
+        assert_eq!(app.engine.teams()[1].player_ids, vec![7]);
+        let host = app.host_join_snapshot.as_ref().expect("host JoinData");
+        assert_eq!(host.parameters.player_infos.clients[0].players[0].id, 7);
+        assert!(host.parameters.teams.teams[0].player_ids.is_empty());
+        assert_eq!(host.parameters.teams.teams[1].player_ids, vec![7]);
     }
 
     #[test]

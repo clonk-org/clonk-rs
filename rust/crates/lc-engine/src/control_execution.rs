@@ -1,3 +1,4 @@
+use crate::control::PLAYER_INFO_FLAG_JOIN_ISSUED;
 use crate::{
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
     CLIENT_PLAYER_INFO_FLAG_UPDATED, ControlPlayerInfoEntry, PlayerInfoControlData,
@@ -5,9 +6,10 @@ use crate::{
 use crate::{
     InitialNetworkTeam, InitialNetworkTeamDistribution, InitialNetworkTeamMetadata,
     JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore,
-    PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
-    PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_USER,
-    PlayerInfoUpdateRequest, ScenarioError, player_file::PlayerFile,
+    PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
+    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+    PLAYER_INFO_FLAG_NO_SCENARIO_INIT, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN,
+    PLAYER_INFO_TYPE_USER, PlayerInfoUpdateRequest, ScenarioError, player_file::PlayerFile,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -906,6 +908,71 @@ impl ControlPlayerInfoRegistry {
         Ok(())
     }
 
+    /// Host-side `C4Network2Players::UpdateSavegameAssignments` validation.
+    ///
+    /// Player IDs have already been allocated when native reaches this step.
+    /// The reverse walk is observable: a later row wins an in-packet duplicate,
+    /// and pruning uses `RemoveIndexedInfo`'s swap-with-last behavior rather
+    /// than a stable erase. Retained registry rows always win, except that a
+    /// replacement packet does not conflict with the packet it will replace.
+    fn update_savegame_assignments(
+        &self,
+        admitted: &mut PlayerInfoControlData,
+        restore_players: &[ControlPlayerInfoEntry],
+    ) {
+        let add_packet = admitted.flags & CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS != 0;
+        let mut index = admitted.players.len();
+        while index != 0 {
+            index -= 1;
+            let mut savegame_id = admitted.players[index].savegame_player;
+            if savegame_id == 0 {
+                continue;
+            }
+
+            if !restore_players
+                .iter()
+                .any(|restore| restore.id == savegame_id)
+            {
+                admitted.players[index].savegame_player = 0;
+                admitted.flags |= CLIENT_PLAYER_INFO_FLAG_UPDATED;
+                savegame_id = 0;
+            }
+
+            if savegame_id != 0
+                && admitted.players[index + 1..]
+                    .iter()
+                    .any(|player| player.savegame_player == savegame_id)
+            {
+                admitted.players[index].savegame_player = 0;
+                admitted.flags |= CLIENT_PLAYER_INFO_FLAG_UPDATED;
+                savegame_id = 0;
+            }
+
+            if savegame_id != 0 {
+                let duplicate = self.clients.iter().any(|client| {
+                    if !add_packet && client.client_id == admitted.client_id {
+                        return false;
+                    }
+                    client
+                        .players
+                        .iter()
+                        .any(|player| player.savegame_player == savegame_id)
+                });
+                if duplicate {
+                    admitted.players[index].savegame_player = 0;
+                    admitted.flags |= CLIENT_PLAYER_INFO_FLAG_UPDATED;
+                    savegame_id = 0;
+                }
+            }
+
+            if savegame_id == 0
+                && admitted.players[index].flags & PLAYER_INFO_FLAG_SAVEGAME_JOIN != 0
+            {
+                admitted.players.swap_remove(index);
+            }
+        }
+    }
+
     /// Transactionally allocate and resolve one admission whose team fields
     /// are already final. `None` supplies the no-team-list host path.
     ///
@@ -920,9 +987,10 @@ impl ControlPlayerInfoRegistry {
         oracle: &mut impl InitialHostTeamAssignmentOracle,
     ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
         let mut updated_registry = self.clone();
-        let Some(admitted) = updated_registry.admit_request(request, max_players) else {
+        let Some(mut admitted) = updated_registry.admit_request(request, max_players) else {
             return Ok(None);
         };
+        updated_registry.update_savegame_assignments(&mut admitted, restore_players);
         let admission = updated_registry.resolve_admitted_player_attributes(
             admitted,
             teams,
@@ -953,9 +1021,10 @@ impl ControlPlayerInfoRegistry {
         )
     }
 
-    /// Transactionally execute the native host admission order: allocate
-    /// IDs, validate/assign teams for every active distribution, then update
-    /// and resolve attributes. The registry and team list commit together.
+    /// Transactionally execute the native host admission order: allocate IDs,
+    /// validate savegame associations, validate/assign teams for every active
+    /// distribution, then update and resolve attributes. The registry and team
+    /// list commit together.
     #[allow(clippy::too_many_arguments)]
     pub fn admit_request_with_teams_and_attributes(
         &mut self,
@@ -972,6 +1041,7 @@ impl ControlPlayerInfoRegistry {
         let Some(mut admitted) = updated_registry.admit_request(request, max_players) else {
             return Ok(None);
         };
+        updated_registry.update_savegame_assignments(&mut admitted, restore_players);
         let recheck_teams = updated_teams.active;
         let players_before_team_assignment = admitted.players.clone();
         let mut preflight_teams = updated_teams.clone();
@@ -2572,6 +2642,44 @@ impl ControlPlayerInfoRegistry {
             .into_iter()
             .map(|(_, info_id)| info_id)
             .collect()
+    }
+
+    /// Applies `C4PlayerInfo::SetSavegameResume` from the exact restore-info
+    /// row associated with the first current player in registry order.
+    ///
+    /// File/resource, identity and league fields remain those of the current
+    /// joining player. Native replaces only the saved ID, takeover flag mask,
+    /// current color and team; the player-ID high-water mark was seeded from
+    /// `RestorePlayerInfos` earlier and is deliberately unchanged here.
+    pub fn resume_savegame_player_from_info(
+        &mut self,
+        restore_info: &ControlPlayerInfoEntry,
+    ) -> bool {
+        if restore_info.id == 0 {
+            return false;
+        }
+        let Some(player) = self
+            .clients
+            .iter_mut()
+            .flat_map(|client| &mut client.players)
+            .find(|player| player.savegame_player == restore_info.id)
+        else {
+            return false;
+        };
+
+        const SAVEGAME_TAKEOVER_FLAGS: u16 = PLAYER_INFO_FLAG_JOINED
+            | PLAYER_INFO_FLAG_REMOVED
+            | PLAYER_INFO_FLAG_JOIN_ISSUED
+            | PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+            | PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+            | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK
+            | PLAYER_INFO_FLAG_INVISIBLE;
+        player.id = restore_info.id;
+        player.flags = (player.flags & !SAVEGAME_TAKEOVER_FLAGS)
+            | (restore_info.flags & SAVEGAME_TAKEOVER_FLAGS);
+        player.color = restore_info.color;
+        player.team = restore_info.team;
+        true
     }
 
     /// Applies the `C4PlayerInfo::SetSavegameResume` fields that are
@@ -6648,6 +6756,264 @@ mod tests {
     }
 
     #[test]
+    fn savegame_assignment_missing_rows_reset_prune_and_swap_in_attribute_admission() {
+        let candidate = |name: &[u8], savegame_player, flags, color| {
+            ControlPlayerInfoEntry {
+                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+                flags,
+                color,
+                original_color: color,
+                savegame_player,
+                ..Default::default()
+            }
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![
+                        candidate(b"Retained", 70, 0, 0x00f4_0000),
+                        candidate(
+                            b"Pruned",
+                            71,
+                            PLAYER_INFO_FLAG_SAVEGAME_JOIN,
+                            0x0000_c800,
+                        ),
+                        candidate(
+                            b"Zero association",
+                            0,
+                            PLAYER_INFO_FLAG_SAVEGAME_JOIN,
+                            0x0000_00f4,
+                        ),
+                    ],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("attribute resolution remains available")
+            .expect("post-validation emptiness is not checked here");
+
+        assert_eq!(
+            admission
+                .admitted
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3],
+            "RemoveIndexedInfo swaps the already-visited last row into the hole"
+        );
+        assert!(
+            admission
+                .admitted
+                .players
+                .iter()
+                .all(|player| player.savegame_player == 0)
+        );
+        assert_ne!(
+            admission.admitted.players[1].flags & PLAYER_INFO_FLAG_SAVEGAME_JOIN,
+            0,
+            "an association that arrived as zero is not a failed association"
+        );
+        assert_eq!(
+            admission.admitted.flags,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_UPDATED
+        );
+        assert_eq!(registry.retained_rows_snapshot().0, 3);
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn all_pruned_savegame_add_stays_admitted_in_team_attribute_path() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        let mut teams = InitialNetworkTeamMetadata {
+            active: false,
+            custom: false,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 0,
+            team_distribution: InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        };
+        let teams_before = teams.clone();
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_teams_and_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![
+                        ControlPlayerInfoEntry {
+                            savegame_player: 80,
+                            flags: PLAYER_INFO_FLAG_SAVEGAME_JOIN,
+                            ..Default::default()
+                        },
+                        ControlPlayerInfoEntry {
+                            savegame_player: 81,
+                            flags: PLAYER_INFO_FLAG_SAVEGAME_JOIN,
+                            ..Default::default()
+                        },
+                    ],
+                },
+                8,
+                &mut teams,
+                false,
+                false,
+                &[],
+                &mut oracle,
+            )
+            .expect("empty post-validation packets need no attribute oracle")
+            .expect("native emits an Add packet emptied after ID allocation");
+
+        assert!(admission.admitted.players.is_empty());
+        assert_eq!(
+            admission.admitted.flags,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_UPDATED
+        );
+        assert_eq!(registry.retained_rows_snapshot().0, 2);
+        assert_eq!(teams, teams_before);
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn same_packet_savegame_duplicate_keeps_the_last_row() {
+        let restore = ControlPlayerInfoEntry {
+            id: 40,
+            color: 0x0012_3456,
+            ..Default::default()
+        };
+        let candidate = |name: &[u8], flags| ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            flags,
+            color: restore.color,
+            original_color: restore.color,
+            savegame_player: restore.id,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![
+                        candidate(b"Earlier", PLAYER_INFO_FLAG_SAVEGAME_JOIN),
+                        candidate(b"Later", 0),
+                    ],
+                },
+                8,
+                None,
+                std::slice::from_ref(&restore),
+                &mut oracle,
+            )
+            .expect("association validation is deterministic")
+            .expect("the later duplicate survives");
+
+        assert_eq!(admission.admitted.players.len(), 1);
+        assert_eq!(admission.admitted.players[0].id, 2);
+        assert_eq!(admission.admitted.players[0].name.as_bytes(), b"Later");
+        assert_eq!(admission.admitted.players[0].savegame_player, 40);
+        assert_ne!(
+            admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
+        assert_eq!(registry.retained_rows_snapshot().0, 2);
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn retained_savegame_association_blocks_add_and_other_client_but_not_replacement() {
+        let restore = ControlPlayerInfoEntry {
+            id: 40,
+            color: 0x0012_3456,
+            ..Default::default()
+        };
+        let associated = |id, name: &[u8]| ControlPlayerInfoEntry {
+            id,
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            color: 0x0000_00f4,
+            original_color: 0x0000_00f4,
+            savegame_player: restore.id,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            10,
+            [PlayerInfoControlData {
+                client_id: 3,
+                players: vec![associated(10, b"Existing")],
+                ..Default::default()
+            }],
+        );
+        let admit = |registry: &mut ControlPlayerInfoRegistry, client_id, flags, name: &[u8]| {
+            let mut oracle = RecordingTeamAssignmentOracle {
+                outcomes: [].into(),
+                ranges: Vec::new(),
+            };
+            let admission = registry
+                .admit_request_with_attributes(
+                    PlayerInfoUpdateRequest {
+                        client_id,
+                        flags,
+                        players: vec![associated(0, name)],
+                    },
+                    8,
+                    None,
+                    std::slice::from_ref(&restore),
+                    &mut oracle,
+                )
+                .expect("attributes remain conflict-free")
+                .expect("one row remains admitted");
+            assert!(oracle.ranges.is_empty());
+            admission.admitted
+        };
+
+        let same_client_add = admit(
+            &mut registry,
+            3,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            b"Same-client add",
+        );
+        assert_eq!(same_client_add.players[0].savegame_player, 0);
+        assert_ne!(same_client_add.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
+
+        let same_client_replacement = admit(&mut registry, 3, 0, b"Replacement");
+        assert_eq!(same_client_replacement.players[0].savegame_player, 40);
+
+        let other_client_add = admit(
+            &mut registry,
+            4,
+            CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            b"Other-client add",
+        );
+        assert_eq!(other_client_add.players[0].savegame_player, 0);
+        assert_ne!(other_client_add.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
+    }
+
+    #[test]
     fn savegame_resume_promotes_associated_unjoined_info_before_recreation() {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(PlayerInfoControlData {
@@ -6655,7 +7021,11 @@ mod tests {
             players: vec![ControlPlayerInfoEntry {
                 id: 91,
                 savegame_player: 7,
-                flags: PLAYER_INFO_FLAG_REMOVED | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+                flags: PLAYER_INFO_FLAG_REMOVED
+                    | PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+                    | PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                    | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK
+                    | PLAYER_INFO_FLAG_INVISIBLE,
                 team: 3,
                 ..Default::default()
             }],
@@ -6669,7 +7039,79 @@ mod tests {
         assert_eq!(resumed.flags & PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_JOINED);
         assert_eq!(resumed.flags & PLAYER_INFO_FLAG_REMOVED, 0);
         assert_eq!(resumed.flags & PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, 0);
+        assert_ne!(resumed.flags & PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, 0);
+        assert_ne!(resumed.flags & PLAYER_INFO_FLAG_NO_SCENARIO_INIT, 0);
+        assert_ne!(resumed.flags & PLAYER_INFO_FLAG_INVISIBLE, 0);
         assert_eq!(registry.recreation_players(), vec![(0, 7)]);
+    }
+
+    #[test]
+    fn exact_savegame_resume_copies_only_native_takeover_fields() {
+        let current_name = LegacyCString::from_bytes(b"Current identity".to_vec()).unwrap();
+        let current_filename = LegacyCString::from_bytes(b"Current.c4p".to_vec()).unwrap();
+        let current_flags = PLAYER_INFO_FLAG_SAVEGAME_JOIN
+            | crate::PLAYER_INFO_FLAG_DISCONNECTED
+            | crate::PLAYER_INFO_FLAG_WON
+            | PLAYER_INFO_FLAG_REMOVED
+            | PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+            | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK;
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            100,
+            [PlayerInfoControlData {
+                client_id: 3,
+                players: vec![ControlPlayerInfoEntry {
+                    name: current_name.clone(),
+                    filename: current_filename.clone(),
+                    flags: current_flags,
+                    id: 91,
+                    color: 0x0011_2233,
+                    original_color: 0x0044_5566,
+                    savegame_player: 7,
+                    team: 3,
+                    league_score: 55,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let restore = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Saved identity".to_vec()).unwrap(),
+            filename: LegacyCString::from_bytes(b"Saved.c4p".to_vec()).unwrap(),
+            flags: PLAYER_INFO_FLAG_JOINED
+                | PLAYER_INFO_FLAG_JOIN_ISSUED
+                | PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                | PLAYER_INFO_FLAG_INVISIBLE
+                | crate::PLAYER_INFO_FLAG_VOTED_OUT,
+            id: 7,
+            color: 0x00aa_bbcc,
+            original_color: 0x00dd_eeff,
+            team: 5,
+            league_score: 99,
+            ..Default::default()
+        };
+
+        assert!(registry.resume_savegame_player_from_info(&restore));
+
+        let resumed = registry.get(7).expect("the saved ID replaces the join ID");
+        assert_eq!(resumed.name, current_name);
+        assert_eq!(resumed.filename, current_filename);
+        assert_eq!(resumed.original_color, 0x0044_5566);
+        assert_eq!(resumed.savegame_player, 7);
+        assert_eq!(resumed.league_score, 55);
+        assert_eq!((resumed.color, resumed.team), (0x00aa_bbcc, 5));
+        assert_eq!(
+            resumed.flags,
+            PLAYER_INFO_FLAG_SAVEGAME_JOIN
+                | crate::PLAYER_INFO_FLAG_DISCONNECTED
+                | crate::PLAYER_INFO_FLAG_WON
+                | PLAYER_INFO_FLAG_JOINED
+                | PLAYER_INFO_FLAG_JOIN_ISSUED
+                | PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+                | PLAYER_INFO_FLAG_INVISIBLE
+        );
+        assert_eq!(registry.retained_rows_snapshot().0, 100);
+        assert_eq!(registry.recreation_players(), vec![(3, 7)]);
     }
 
     #[test]

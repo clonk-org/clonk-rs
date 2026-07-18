@@ -303,6 +303,129 @@ fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
 }
 
 #[test]
+fn restore_infos_seed_host_ids_and_recreate_script_players_in_join_data() {
+    // Parameters::Load localizes SavePlayerInfos, transfers its raw ID
+    // counter to the live PlayerInfos list, and Network2Players::Init copies
+    // every unclaimed script restore row into the host packet before opening
+    // admission (src/C4GameParameters.cpp:379-389;
+    // src/C4Network2Players.cpp:38-69;
+    // src/C4PlayerInfo.cpp:1325-1358).
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("StringTblUS.txt"),
+        b"SavedBot=Localized Script\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.scenario_path.join("SavePlayerInfos.txt"),
+        b"[PlayerInfoList]\n\
+LastPlayerID=9\n\
+\n\
+\x20\x20[Client]\n\
+\x20\x20ID=5\n\
+\n\
+\x20\x20\x20\x20[Player]\n\
+\x20\x20\x20\x20Name=\"$SavedBot$\"\n\
+\x20\x20\x20\x20ForcedName=\"Raw\x81\"\n\
+\x20\x20\x20\x20Flags=Joined|AttributesFixed|NoScenarioInit|NoEliminationCheck\n\
+\x20\x20\x20\x20ID=3\n\
+\x20\x20\x20\x20Type=Script\n\
+\x20\x20\x20\x20Color=65535\n\
+\x20\x20\x20\x20OriginalColor=65535\n\
+\x20\x20\x20\x20GameNumber=10\n\
+\x20\x20\x20\x20Team=2\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.scenario_path.join("Teams.txt"),
+        b"[Teams]\nLastTeamID=2\n\
+\n\
+\x20\x20[Team]\n\x20\x20id=1\n\x20\x20Name=One\n\
+\n\
+\x20\x20[Team]\n\x20\x20id=2\n\x20\x20Name=Two\n\x20\x20PlayerCount=1\n\x20\x20Players=3\n",
+    )
+    .unwrap();
+
+    let prepared = prepare(&fixture, &[]).expect("ordinary restore scenario is hostable");
+    let host = prepared.host_config();
+    let snapshot = host
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .clone();
+    let restore = &snapshot.parameters.restore_player_infos;
+    assert_eq!(restore.last_player_id, 9);
+    assert_eq!(restore.clients.len(), 1);
+    assert_eq!(restore.clients[0].client_id, 5);
+    assert_eq!(
+        restore.clients[0].players[0].name.as_bytes(),
+        b"Localized Script"
+    );
+    assert_eq!(
+        restore.clients[0].players[0].forced_name.as_bytes(),
+        b"Raw\x81",
+        "localization preserves undefined native bytes"
+    );
+    assert_eq!(restore.clients[0].players[0].savegame_player, 0);
+
+    assert_eq!(snapshot.parameters.player_infos.last_player_id, 9);
+    let host_script = &snapshot.parameters.player_infos.clients[0].players[0];
+    assert_eq!((host_script.id, host_script.savegame_player), (3, 3));
+    assert_eq!(host_script.name.as_bytes(), b"Localized Script");
+    assert!(host_script.is_script_player());
+    assert!(host_script.is_joined());
+    assert_eq!(
+        snapshot
+            .parameters
+            .teams
+            .teams
+            .iter()
+            .find(|team| team.id == 2)
+            .expect("restore team")
+            .player_ids,
+        vec![3]
+    );
+
+    let wire = lc_network::encode_join_data_envelope(&lc_network::JoinDataEnvelope {
+        client_id: 0,
+        start_control_tick: snapshot.dynamic_tick,
+        status: host.initial_status,
+        dynamic: snapshot.dynamic.clone(),
+        parameters: snapshot.parameters.clone(),
+    })
+    .expect("JoinData encodes");
+    let decoded = lc_network::decode_join_data_envelope(&wire).expect("JoinData decodes");
+    assert_eq!(
+        decoded.parameters.restore_player_infos,
+        snapshot.parameters.restore_player_infos
+    );
+    assert_eq!(
+        decoded.parameters.player_infos,
+        snapshot.parameters.player_infos
+    );
+
+    let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
+    let _ = prepared
+        .install_initial_host_player_state(&mut registry, |_, _| {})
+        .expect("install host restore state");
+    assert_eq!(registry.recreation_players(), vec![(0, 3)]);
+    let next = registry
+        .admit_request(
+            lc_engine::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+            },
+            2,
+        )
+        .expect("one ordinary player slot remains");
+    assert_eq!(
+        next.players[0].id, 10,
+        "restore LastPlayerID seeds allocation"
+    );
+}
+
+#[test]
 fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     let fixture = minimal_install(None);
 
@@ -340,13 +463,19 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
 
     fs::write(
         fixture.scenario_path.join("SavePlayerInfos.txt"),
-        b"[PlayerInfoList]\n",
+        b"[Wrong]\nLastPlayerID=7\n",
     )
     .unwrap();
-    assert!(matches!(
-        prepare(&fixture, &[]),
-        Err(PrepareHostBootstrapError::RestorePlayerInfosUnsupported)
-    ));
+    let malformed_restore =
+        prepare(&fixture, &[]).expect("native logs malformed restore infos and continues");
+    let restore = &malformed_restore
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters
+        .restore_player_infos;
+    assert_eq!((restore.last_player_id, restore.clients.len()), (0, 0));
     fs::remove_file(fixture.scenario_path.join("SavePlayerInfos.txt")).unwrap();
 
     fs::write(
@@ -641,7 +770,9 @@ fn selected_players_are_published_and_admitted_in_module_order() {
     let sources = players
         .iter()
         .map(|(name, wire_name)| {
-            let path = fixture.install_roots[0].join(String::from_utf8_lossy(wire_name).as_ref());
+            let path = fixture
+                .install_roots[0]
+                .join(String::from_utf8_lossy(wire_name).as_ref());
             fs::create_dir_all(&path).unwrap();
             fs::write(
                 path.join("Player.txt"),
@@ -717,9 +848,7 @@ fn selected_players_resolve_duplicate_names_in_the_initial_host_packet() {
     let sources = players
         .iter()
         .map(|(wire_name, color)| {
-            let path = fixture
-                .install_roots[0]
-                .join(String::from_utf8_lossy(wire_name).as_ref());
+            let path = fixture.install_roots[0].join(String::from_utf8_lossy(wire_name).as_ref());
             fs::create_dir_all(&path).unwrap();
             fs::write(
                 path.join("Player.txt"),

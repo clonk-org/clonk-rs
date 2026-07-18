@@ -6,17 +6,17 @@ use lc_engine::{
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
     CLIENT_PLAYER_INFO_FLAG_UPDATED, NETWORK_RESOURCE_TYPE_NULL, PLAYER_INFO_FLAG_ATTRIBUTES_FIXED,
     PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
-    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
-    PLAYER_INFO_FLAG_NO_SCENARIO_INIT, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN,
-    PLAYER_INFO_FLAG_VOTED_OUT, PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_SCRIPT,
-    PLAYER_INFO_TYPE_USER,
+    PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
+    PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN, PLAYER_INFO_FLAG_VOTED_OUT,
+    PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
 };
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
 use crate::advertise::encode_host_game_reference_response;
 use crate::host_game_reference::{HostGameReference, HostGameReferenceError};
-use crate::join_player_registry::ClientPlayerInfosSnapshot;
+use crate::join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
 use crate::league_round_results_packet::{
     LeagueRoundPlayerStatus, LeagueRoundResultsPlayer,
 };
@@ -27,7 +27,7 @@ const CHECKSUM_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const CHECKSUM_TARGET: u32 = 0x7a69;
 const CHECKSUM_MASK: u32 = 0xf0ff;
-const MAX_LEAGUE_RESPONSE_PLAYERS: usize = 5_000;
+const MAX_PLAYER_INFO_COUNT: usize = 5_000;
 const NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE: u32 = 100 * 1024;
 const PLAYER_INFO_FLAG_JOIN_ISSUED: u16 = 1 << 4;
 
@@ -713,6 +713,80 @@ pub enum LeagueResponseDecodeError {
     EndRejected(Box<LeagueEndResponse>),
 }
 
+/// Structural failure while reading C++'s named `C4PlayerInfoList` INI form.
+///
+/// SavePlayerInfos.txt uses the same nested player parser as league updates,
+/// but has a required `[PlayerInfoList]` root and independently bounded Client
+/// and Player section counts (`src/C4PlayerInfo.cpp:601-633,1731-1759`).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PlayerInfoListIniError {
+    #[error("player-info INI has no valid [PlayerInfoList] root section")]
+    MissingRoot,
+    #[error("player-info INI contains {0} Client sections, above the C++ limit")]
+    ClientCountOutOfRange(usize),
+    #[error("player-info INI contains {0} Player sections, above the C++ limit")]
+    PlayerCountOutOfRange(usize),
+    #[error("player-info INI field `{field}` is not a valid {expected}")]
+    InvalidField {
+        field: &'static str,
+        expected: &'static str,
+    },
+    #[error("player-info INI contains a loadable resource with zero chunk size")]
+    ZeroResourceChunkSize,
+}
+
+/// Decodes a named `C4PlayerInfoList`, as stored in SavePlayerInfos.txt.
+///
+/// The parser preserves native string bytes, C++ escaped strings, client and
+/// player section order, and the raw `LastPlayerID` allocation high-water
+/// mark. Missing/malformed scalar values retain the same naming defaults as
+/// the shared league-response player parser.
+pub fn decode_player_info_list_ini(
+    input: &[u8],
+) -> Result<PlayerInfoListSnapshot, PlayerInfoListIniError> {
+    let tree = LeagueIniTree::parse(input);
+    let root = tree
+        .first_root_section(b"PlayerInfoList")
+        .ok_or(PlayerInfoListIniError::MissingRoot)?;
+    let client_nodes = tree.sections(Some(root), b"Client");
+    if client_nodes.len() > MAX_PLAYER_INFO_COUNT {
+        return Err(PlayerInfoListIniError::ClientCountOutOfRange(
+            client_nodes.len(),
+        ));
+    }
+    let last_player_id = tree
+        .first_value(Some(root), b"LastPlayerID")
+        .map(|raw| parse_i32_response(raw, "PlayerInfoList.LastPlayerID").unwrap_or(0))
+        .unwrap_or(0);
+    let clients = client_nodes
+        .into_iter()
+        .map(|node| parse_client_player_infos(&tree, Some(node)).map_err(map_player_info_ini_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PlayerInfoListSnapshot {
+        last_player_id,
+        clients,
+    })
+}
+
+fn map_player_info_ini_error(error: LeagueResponseDecodeError) -> PlayerInfoListIniError {
+    match error {
+        LeagueResponseDecodeError::InvalidField { field, expected } => {
+            PlayerInfoListIniError::InvalidField { field, expected }
+        }
+        LeagueResponseDecodeError::PlayerCountOutOfRange(count) => {
+            PlayerInfoListIniError::PlayerCountOutOfRange(count)
+        }
+        LeagueResponseDecodeError::ZeroResourceChunkSize => {
+            PlayerInfoListIniError::ZeroResourceChunkSize
+        }
+        LeagueResponseDecodeError::StartRejected(_)
+        | LeagueResponseDecodeError::MissingStartCsid(_)
+        | LeagueResponseDecodeError::EndRejected(_) => {
+            unreachable!("player-info parsing cannot produce a response-status error")
+        }
+    }
+}
+
 /// Decodes and validates the Start response, preserving C++ Seed-presence
 /// semantics and escaped-string handling for League/StreamTo.
 pub fn decode_league_start_response(
@@ -1272,7 +1346,7 @@ fn parse_client_player_infos(
     node: Option<usize>,
 ) -> Result<ClientPlayerInfosSnapshot, LeagueResponseDecodeError> {
     let players = tree.sections(node, b"Player");
-    if players.len() > MAX_LEAGUE_RESPONSE_PLAYERS {
+    if players.len() > MAX_PLAYER_INFO_COUNT {
         return Err(LeagueResponseDecodeError::PlayerCountOutOfRange(
             players.len(),
         ));
@@ -1320,6 +1394,10 @@ fn parse_player_info(
                     (b"Removed", u32::from(PLAYER_INFO_FLAG_REMOVED)),
                     (b"HasResource", u32::from(PLAYER_INFO_FLAG_HAS_RESOURCE)),
                     (b"JoinIssued", u32::from(PLAYER_INFO_FLAG_JOIN_ISSUED)),
+                    (
+                        b"InScenarioFile",
+                        u32::from(PLAYER_INFO_FLAG_IN_SCENARIO_FILE),
+                    ),
                     (b"SavegameJoin", u32::from(PLAYER_INFO_FLAG_SAVEGAME_JOIN)),
                     (b"Disconnected", u32::from(PLAYER_INFO_FLAG_DISCONNECTED)),
                     (b"VotedOut", u32::from(PLAYER_INFO_FLAG_VOTED_OUT)),
@@ -1560,7 +1638,7 @@ fn parse_round_results_players(
     node: Option<usize>,
 ) -> Result<Vec<LeagueRoundResultsPlayer>, LeagueResponseDecodeError> {
     let players = tree.sections(node, b"Player");
-    if players.len() > MAX_LEAGUE_RESPONSE_PLAYERS {
+    if players.len() > MAX_PLAYER_INFO_COUNT {
         return Err(LeagueResponseDecodeError::PlayerCountOutOfRange(
             players.len(),
         ));
@@ -1673,18 +1751,21 @@ mod tests {
     use super::{
         decode_league_auth_response, decode_league_end_response, decode_league_join_response,
         decode_league_report_disconnect_response, decode_league_start_response,
-        decode_league_update_response, encode_league_auth_request,
-        encode_league_auth_request_head, encode_league_join_request_head,
-        encode_league_player_info_section, encode_league_report_disconnect_request,
-        solve_league_checksum, LeagueAuthRequestHead, LeagueDisconnectReason, LeagueFbidRegistry,
-        LeagueHostSession, LeagueHttpPostTransport, LeagueHttpTransportConfig,
-        LeagueHttpTransportError, LeagueJoinRequestHead, LeagueResponseDecodeError,
+        decode_league_update_response, decode_player_info_list_ini, encode_league_auth_request,
+        encode_league_auth_request_head,
+        encode_league_join_request_head, encode_league_player_info_section,
+        encode_league_report_disconnect_request, solve_league_checksum, LeagueAuthRequestHead,
+        LeagueDisconnectReason, LeagueFbidRegistry, LeagueHostSession, LeagueHttpPostTransport,
+        LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead,
+        LeagueResponseDecodeError, PlayerInfoListIniError,
     };
     use crate::{ClientPlayerInfosSnapshot, LeagueRoundPlayerStatus};
     use lc_engine::{
         ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
-        CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED,
-        PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+        CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
+        CLIENT_PLAYER_INFO_FLAG_UPDATED, PLAYER_INFO_FLAG_HAS_RESOURCE,
+        PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
+        PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2014,6 +2095,147 @@ MaxPlayers=6\r\n",
             decode_league_start_response(b"[Response]\r\nStatus=Success\r\n"),
             Err(LeagueResponseDecodeError::MissingStartCsid(_))
         ));
+    }
+
+    #[test]
+    fn player_info_list_ini_decodes_ordered_nested_players_and_native_bytes() {
+        // C4PlayerInfoList::Load applies the named PlayerInfoList wrapper and
+        // compiles repeated Client/Player sections in source order. Strings
+        // use the same byte-preserving escaped reader as league PlayerInfos
+        // (src/C4PlayerInfo.cpp:177-268,601-633,1165-1182,1731-1759).
+        let snapshot = decode_player_info_list_ini(
+            b"[PlayerInfoList]\r\n\
+LastPlayerID=41\r\n\
+\r\n\
+\x20\x20[Client]\r\n\
+\x20\x20ID=3\r\n\
+\x20\x20Flags=Initial\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20Name=\"Ren\\200\\\"\"\r\n\
+\x20\x20\x20\x20ForcedName=Native \x81\r\n\
+\x20\x20\x20\x20Filename=\"Players\\\\Ren\\200.c4p\"\r\n\
+\x20\x20\x20\x20Flags=Joined|HasResource|InScenarioFile|Invisible\r\n\
+\x20\x20\x20\x20ID=7\r\n\
+\x20\x20\x20\x20Type=User\r\n\
+\x20\x20\x20\x20Color=1193046\r\n\
+\x20\x20\x20\x20OriginalColor=6636321\r\n\
+\x20\x20\x20\x20SavgamePlayer=5\r\n\
+\x20\x20\x20\x20Team=2\r\n\
+\x20\x20\x20\x20GameNumber=4\r\n\
+\x20\x20\x20\x20GameJoinFrame=23\r\n\
+\x20\x20\x20\x20ExtraData=TEST\r\n\
+\r\n\
+\x20\x20\x20\x20\x20\x20[ResCore]\r\n\
+\x20\x20\x20\x20\x20\x20Type=Player\r\n\
+\x20\x20\x20\x20\x20\x20ID=17\r\n\
+\x20\x20\x20\x20\x20\x20Filename=\"Players\\\\Ren\\200.c4p\"\r\n\
+\x20\x20\x20\x20\x20\x20Author=Host \x82\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20Name=Script\r\n\
+\x20\x20\x20\x20Flags=Invisible\r\n\
+\x20\x20\x20\x20ID=8\r\n\
+\x20\x20\x20\x20Type=Script\r\n\
+\r\n\
+\x20\x20[Client]\r\n\
+\x20\x20ID=4\r\n\
+\x20\x20Flags=AddPlayers\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20Name=Zo\xeb\r\n\
+\x20\x20\x20\x20ID=9\r\n",
+        )
+        .expect("valid SavePlayerInfos-style INI");
+
+        assert_eq!(snapshot.last_player_id, 41);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(
+            snapshot
+                .clients
+                .iter()
+                .map(|client| (client.client_id, client.flags))
+                .collect::<Vec<_>>(),
+            vec![
+                (3, CLIENT_PLAYER_INFO_FLAG_INITIAL),
+                (4, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS),
+            ]
+        );
+        assert_eq!(
+            snapshot.clients[0]
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(snapshot.clients[1].players[0].id, 9);
+
+        let user = &snapshot.clients[0].players[0];
+        assert_eq!(user.name.as_bytes(), b"Ren\x80\"");
+        assert_eq!(user.forced_name.as_bytes(), b"Native \x81");
+        assert_eq!(user.filename.as_bytes(), b"Players\\Ren\x80.c4p");
+        assert_eq!(
+            user.flags,
+            PLAYER_INFO_FLAG_JOINED
+                | PLAYER_INFO_FLAG_HAS_RESOURCE
+                | PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
+            "Invisible is cleared for a user player, but InScenarioFile survives"
+        );
+        assert_eq!((user.color, user.original_color), (1_193_046, 6_636_321));
+        assert_eq!((user.savegame_player, user.team), (5, 2));
+        assert_eq!((user.game_number, user.game_join_frame), (4, 23));
+        assert_eq!(user.extra_data, *b"TEST");
+        let resource = user.resource.as_ref().expect("HasResource parses ResCore");
+        assert_eq!((resource.resource_type, resource.id), (3, 17));
+        #[cfg(windows)]
+        assert_eq!(resource.filename.as_bytes(), b"Players\\Ren\x80.c4p");
+        #[cfg(not(windows))]
+        assert_eq!(resource.filename.as_bytes(), b"Players/Ren\x80.c4p");
+        assert_eq!(resource.author.as_bytes(), b"Host \x82");
+
+        let script = &snapshot.clients[0].players[1];
+        assert_eq!(script.player_type, PLAYER_INFO_TYPE_SCRIPT);
+        assert_eq!(script.flags, PLAYER_INFO_FLAG_INVISIBLE);
+        assert_eq!(snapshot.clients[1].players[0].name.as_bytes(), b"Zo\xeb");
+    }
+
+    #[test]
+    fn player_info_list_ini_requires_a_well_formed_named_root() {
+        for input in [
+            b"".as_slice(),
+            b"[Wrong]\nLastPlayerID=7\n".as_slice(),
+            b"[PlayerInfoList\nLastPlayerID=7\n".as_slice(),
+        ] {
+            assert_eq!(
+                decode_player_info_list_ini(input),
+                Err(PlayerInfoListIniError::MissingRoot)
+            );
+        }
+    }
+
+    #[test]
+    fn player_info_list_ini_enforces_cpp_client_and_player_limits() {
+        // C4MaxClient and C4MaxPlayer are both 5000, independently checked by
+        // C4PlayerInfoList and each C4ClientPlayerInfos during named compile
+        // (src/C4Player.h:33-34; src/C4PlayerInfo.cpp:618-622,1743-1747).
+        let mut too_many_clients = b"[PlayerInfoList]\n".to_vec();
+        for _ in 0..=5_000 {
+            too_many_clients.extend_from_slice(b"  [Client]\n");
+        }
+        assert_eq!(
+            decode_player_info_list_ini(&too_many_clients),
+            Err(PlayerInfoListIniError::ClientCountOutOfRange(5_001))
+        );
+
+        let mut too_many_players = b"[PlayerInfoList]\n  [Client]\n".to_vec();
+        for _ in 0..=5_000 {
+            too_many_players.extend_from_slice(b"    [Player]\n");
+        }
+        assert_eq!(
+            decode_player_info_list_ini(&too_many_players),
+            Err(PlayerInfoListIniError::PlayerCountOutOfRange(5_001))
+        );
     }
 
     #[test]
