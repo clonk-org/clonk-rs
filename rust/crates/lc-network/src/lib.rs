@@ -73,9 +73,9 @@ pub use connection_liveness::{
     PING_TIMEOUT_MS,
 };
 pub use client_bootstrap::{
-    plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
-    ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
-    ClientBootstrapResourceSource,
+    plan_client_bootstrap, plan_client_bootstrap_with_group_maker, ClientBootstrapLocalCandidates,
+    ClientBootstrapPlan, ClientBootstrapPlanError, ClientBootstrapResourcePlan,
+    ClientBootstrapResourceRole, ClientBootstrapResourceSource,
 };
 pub use client_mesh::{
     client_mesh_local_addresses, client_mesh_puncher_variants,
@@ -165,8 +165,8 @@ pub use legacy::{
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use local_resource_resolution::{
-    resolve_local_resource, LocalResourceMatch, LocalResourceResolution,
-    LocalResourceResolutionError, NonLoadableResourceMismatch,
+    resolve_local_resource, resolve_local_resource_with_group_maker, LocalResourceMatch,
+    LocalResourceResolution, LocalResourceResolutionError, NonLoadableResourceMismatch,
 };
 pub use post_mortem::{PostMortemPacket, RecoverablePacketLog};
 pub use puncher::{

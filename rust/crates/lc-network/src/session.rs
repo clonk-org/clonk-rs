@@ -74,6 +74,9 @@ pub struct HostConfig {
     pub max_players: usize,
     pub start_tick: Tick,
     pub local_core: lc_engine::ClientCoreControlData,
+    /// Process-wide `Config.General.Name` used by C4Group rewrites. This is
+    /// independent of the network-visible local client name.
+    pub group_maker: lc_engine::LegacyCString,
     pub initial_status: NetworkStatus,
     pub password: lc_engine::LegacyCString,
     pub allow_join: bool,
@@ -145,6 +148,7 @@ impl Default for HostConfig {
             max_players: 8,
             start_tick: 0,
             local_core: local_core.clone(),
+            group_maker: local_core.name.clone(),
             initial_status: NetworkStatus {
                 state: NETWORK_STATE_LOBBY,
                 control_mode: 0,
@@ -179,6 +183,7 @@ pub struct ClientMeshPuncherConfig {
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub name: String,
+    pub group_maker: lc_engine::LegacyCString,
     pub kind: ParticipantKind,
     pub password: lc_engine::LegacyCString,
     pub resource_directory: Option<PathBuf>,
@@ -197,8 +202,12 @@ pub struct ClientConfig {
 
 impl ClientConfig {
     pub fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
+        let name = name.into();
+        let group_maker = lc_engine::LegacyCString::from_bytes(name.as_bytes().to_vec())
+            .unwrap_or_default();
         Self {
-            name: name.into(),
+            name,
+            group_maker,
             kind,
             password: lc_engine::LegacyCString::default(),
             resource_directory: Some(default_client_resource_directory()),
@@ -213,6 +222,11 @@ impl ClientConfig {
 
     pub fn with_password(mut self, password: lc_engine::LegacyCString) -> Self {
         self.password = password;
+        self
+    }
+
+    pub fn with_group_maker(mut self, group_maker: lc_engine::LegacyCString) -> Self {
+        self.group_maker = group_maker;
         self
     }
 
@@ -1534,6 +1548,7 @@ where
 {
     let ClientConfig {
         name,
+        group_maker,
         kind,
         password,
         resource_directory,
@@ -1683,9 +1698,10 @@ where
     let standalone_directory = resource_directory
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new("Network"));
-    let bootstrap_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+    let bootstrap_resolver = crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
         &bootstrap_local_candidates,
         standalone_directory.to_path_buf(),
+        group_maker,
     );
     let mut initialized_game_resources = 0;
     for core in &join_data.parameters.game_resources {
@@ -4547,12 +4563,13 @@ async fn run_host(
         });
     let mut local_candidates = crate::ClientBootstrapLocalCandidates::default();
     local_candidates.extend_search_roots(&config.local_resource_roots);
-    let resource_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+    let resource_resolver = crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
         &local_candidates,
         config
             .resource_directory
             .clone()
             .unwrap_or_else(|| PathBuf::from("Network")),
+        config.group_maker.clone(),
     );
     let published_player_sources = config.player_resource_sources.iter().cloned().collect();
     let mut state = HostState {
@@ -14175,9 +14192,10 @@ mod tests {
     #[test]
     fn client_bootstrap_keeps_a_nested_player_source_as_the_lookup_key() {
         // C4Group::Open retains a packed child's full mother/child name in
-        // szFile. GetStandalone copies that child to a temporary file but,
-        // unlike the directory branch, does not replace szFile. AddByFile
-        // therefore still finds it by the original nested path (pristine
+        // szFile. GetStandalone copies that child into a gzip-wrapped
+        // temporary standalone but, unlike the directory branch, does not
+        // replace szFile. AddByFile therefore still finds it by the original
+        // nested path (pristine
         // 9ffa0a5d src/C4Group.cpp:656-715,1792-1816,2408-2419;
         // src/C4Network2Res.cpp:431-449,516-588,1397-1417).
         let directories = SessionResourceDirectories::new();
@@ -14187,7 +14205,7 @@ mod tests {
             .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
             .unwrap();
         let contents_crc = player.contents_crc();
-        let player_raw = player.pack_raw().unwrap();
+        let player_standalone = player.pack().unwrap();
         let mut mother = MutableGroup::new("Players.c4f");
         mother
             .add_child_with_metadata("Shared.c4p", player, 1, false)
@@ -14199,8 +14217,8 @@ mod tests {
             id: 1 << 16,
             derived_id: -1,
             loadable: true,
-            file_size: player_raw.len() as u32,
-            file_crc: c4group_file_crc(&player_raw),
+            file_size: player_standalone.len() as u32,
+            file_crc: c4group_file_crc(&player_standalone),
             chunk_size: 100 * 1024,
             contents_crc,
             filename: lc_engine::LegacyCString::from_bytes(b"Players.c4f/Shared.c4p".to_vec())
@@ -14770,7 +14788,7 @@ mod tests {
         local_state.retain_resource_resolver(
             crate::client_bootstrap::ClientBootstrapResolver::new(
                 &local_candidates,
-                local_work_path,
+                local_work_path.clone(),
             ),
         );
         let mut local_info = lc_engine::PlayerInfoControlData {
@@ -14786,7 +14804,10 @@ mod tests {
         assert!(local_state.catalog.contains_resource(valid_core.id));
         let local_backend = local_state.backend.as_ref().unwrap();
         assert_eq!(local_backend.core(valid_core.id), Some(&valid_core));
-        assert_eq!(local_backend.path(valid_core.id), Some(source.as_path()));
+        let local_standalone = local_backend.path(valid_core.id).unwrap();
+        assert_ne!(local_standalone, source);
+        assert_eq!(local_standalone.parent(), Some(local_work_path.as_path()));
+        assert_eq!(fs::read(local_standalone).unwrap(), fs::read(&source).unwrap());
         assert!(local_backend
             .catalog()
             .local_chunks(valid_core.id)

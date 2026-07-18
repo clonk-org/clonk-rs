@@ -1,14 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lc_engine::{LegacyCString, NetworkResourceCore};
 use lc_network::{
-    encode_resource_packet, resolve_local_resource, LocalResourceResolution, ResourceCatalogAction,
-    ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket, ResourceTransferBackend,
-    ResourceTransferEvent, PID_NET_RES_STATUS,
+    build_host_resource_core, encode_resource_packet, resolve_local_resource,
+    resolve_local_resource_with_group_maker, HostResourceCoreSpec, HostResourceType,
+    LocalResourceResolution, ResourceCatalogAction, ResourceDiscoverPacket, ResourceFileOwnership,
+    ResourcePacket, ResourceTransferBackend, ResourceTransferEvent, PID_NET_RES_STATUS,
 };
-use lc_resources::{c4group_file_crc, MutableGroup};
+use lc_resources::{c4group_file_crc, Group, MutableGroup};
 
 #[test]
 fn cpp_set_by_core_accepts_an_exact_plain_file() {
@@ -59,6 +61,188 @@ fn cpp_set_by_core_separates_group_contents_crc_from_physical_crc_and_ignores_sh
         panic!("logically and physically exact C4Group should be selected");
     };
     assert_eq!(local.path(), candidate);
+}
+
+#[test]
+fn cpp_set_by_core_optimizes_a_local_player_before_the_physical_check() {
+    // GetStandalone copies persistent players before recursively deleting
+    // Portrait*.* and a root BigIcon.png larger than 20 KiB. Only then does it
+    // compare the host-published size and file CRC (src/C4Network2Res.cpp:
+    // 653-688,1168-1206).
+    let directory = TestDirectory::new();
+    let player = directory.path().join("Shared.c4p");
+    let host_network = directory.path().join("HostNetwork");
+    let mismatch_network = directory.path().join("MismatchNetwork");
+    let non_player_network = directory.path().join("NonPlayerNetwork");
+
+    let mut crew = MutableGroup::new("Crew.c4i");
+    crew.add_file_with_metadata("ObjectInfo.txt", b"crew".to_vec(), 7, false)
+        .unwrap();
+    crew.add_file_with_metadata("Portrait.bmp", b"nested portrait".to_vec(), 8, false)
+        .unwrap();
+    let mut original = MutableGroup::new("Shared.c4p");
+    original.set_maker("Original Maker");
+    original
+        .add_file_with_metadata("Player.txt", b"player".to_vec(), 5, false)
+        .unwrap();
+    original
+        .add_file_with_metadata("Portrait.png", b"root portrait".to_vec(), 6, false)
+        .unwrap();
+    original
+        .add_file_with_metadata("BigIcon.png", vec![0x42; 20 * 1024 + 1], 9, false)
+        .unwrap();
+    original
+        .add_child_with_metadata("Crew.c4i", crew, 10, false)
+        .unwrap();
+    let original_bytes = original.pack().unwrap();
+    fs::write(&player, &original_bytes).unwrap();
+
+    // Player-group rewrites stamp the current second. Keep the two rewrites in
+    // one second, matching the bounded differential pattern in
+    // host_resource_core.rs.
+    let mut matched = None;
+    for attempt in 0..8 {
+        let before = unix_time_now();
+        let publication = build_host_resource_core(
+            &player,
+            &host_network,
+            HostResourceCoreSpec::new(
+                HostResourceType::Player,
+                7,
+                LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                "Shared Player",
+            ),
+        )
+        .unwrap();
+        let local_network = directory.path().join(format!("LocalNetwork{attempt}"));
+        let resolution = resolve_local_resource_with_group_maker(
+            &publication.core,
+            [&player],
+            &local_network,
+            b"Shared Player",
+        )
+        .unwrap();
+        let after = unix_time_now();
+        if before != after {
+            continue;
+        }
+        let LocalResourceResolution::Local(local) = resolution else {
+            panic!("contents-identical player should remain local");
+        };
+        assert!(local.binary_compatible());
+        matched = Some((publication, local));
+        break;
+    }
+    let (publication, local) =
+        matched.expect("could not complete both player rewrites within one timestamp second");
+    let host_standalone = publication.standalone_path.as_ref().unwrap();
+    let host_bytes = fs::read(host_standalone).unwrap();
+    assert_ne!(host_bytes, original_bytes);
+    assert_eq!(local.source_path(), player);
+    assert_eq!(
+        local.standalone_ownership(),
+        Some(ResourceFileOwnership::Temporary)
+    );
+    assert_eq!(
+        fs::read(local.standalone_path().unwrap()).unwrap(),
+        host_bytes
+    );
+    assert_eq!(fs::read(&player).unwrap(), original_bytes);
+    let optimized = Group::open(local.standalone_path().unwrap()).unwrap();
+    assert!(!optimized.exists("Portrait.png"));
+    assert!(!optimized.exists("BigIcon.png"));
+    assert!(!optimized
+        .open_child("Crew.c4i")
+        .unwrap()
+        .exists("Portrait.bmp"));
+
+    let mut mismatched_core = publication.core.clone();
+    mismatched_core.file_crc ^= u32::MAX;
+    let resolution = resolve_local_resource_with_group_maker(
+        &mismatched_core,
+        [&player],
+        &mismatch_network,
+        b"Shared Player",
+    )
+    .unwrap();
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("contents-identical player should remain local after physical mismatch");
+    };
+    assert!(!local.binary_compatible());
+    assert!(fs::read_dir(&mismatch_network).unwrap().next().is_none());
+
+    let mut non_player_core = publication.core.clone();
+    non_player_core.resource_type = HostResourceType::Definitions as u8;
+    non_player_core.file_size = original_bytes.len() as u32;
+    non_player_core.file_crc = c4group_file_crc(&original_bytes);
+    let resolution =
+        resolve_local_resource(&non_player_core, [&player], &non_player_network).unwrap();
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("raw non-player group should remain local");
+    };
+    assert!(local.binary_compatible());
+    assert_eq!(local.path(), player);
+    assert_eq!(
+        local.standalone_ownership(),
+        Some(ResourceFileOwnership::Persistent)
+    );
+    assert!(!non_player_network.exists());
+}
+
+#[test]
+fn cpp_set_by_core_packs_a_player_directory_with_the_local_group_maker() {
+    // PackDirectoryTo stamps Config.General.Name before OptimizeStandalone.
+    // Even when the player has nothing to strip, the packed bytes therefore
+    // use the local process maker rather than MutableGroup's default.
+    let directory = TestDirectory::new();
+    let player = directory.path().join("Directory.c4p");
+    fs::create_dir(&player).unwrap();
+    fs::write(player.join("Player.txt"), b"player").unwrap();
+
+    let mut matched = None;
+    for attempt in 0..8 {
+        let before = unix_time_now();
+        let publication = build_host_resource_core(
+            &player,
+            directory.path().join(format!("HostDirectoryNetwork{attempt}")),
+            HostResourceCoreSpec::new(
+                HostResourceType::Player,
+                8,
+                LegacyCString::from_bytes(b"Directory.c4p".to_vec()).unwrap(),
+                "Shared Player",
+            ),
+        )
+        .unwrap();
+        let resolution = resolve_local_resource_with_group_maker(
+            &publication.core,
+            [&player],
+            directory.path().join(format!("LocalDirectoryNetwork{attempt}")),
+            b"Shared Player",
+        )
+        .unwrap();
+        let after = unix_time_now();
+        if before != after {
+            continue;
+        }
+        let LocalResourceResolution::Local(local) = resolution else {
+            panic!("contents-identical player directory should remain local");
+        };
+        assert!(local.binary_compatible());
+        matched = Some(local);
+        break;
+    }
+    let local = matched.expect("could not pack both player directories in one timestamp second");
+    assert!(player.is_dir());
+    assert_eq!(
+        local.standalone_ownership(),
+        Some(ResourceFileOwnership::Temporary)
+    );
+    assert_eq!(
+        Group::open(local.standalone_path().unwrap())
+            .unwrap()
+            .maker(),
+        Some("Shared Player")
+    );
 }
 
 #[test]
@@ -510,4 +694,11 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+fn unix_time_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }

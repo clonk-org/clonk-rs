@@ -26,6 +26,12 @@ pub struct ConfiguredClientPlayerSelection {
     group_maker: LegacyCString,
 }
 
+impl ConfiguredClientPlayerSelection {
+    pub fn group_maker(&self) -> &LegacyCString {
+        &self.group_maker
+    }
+}
+
 impl ConfiguredClientPlayers {
     #[cfg(test)]
     pub(crate) fn from_parts(

@@ -4683,6 +4683,9 @@ fn client_settings_for_paths(
     };
     settings.league_auth = load_league_auth_settings(paths);
     if let Some(paths) = paths {
+        if let Ok(selection) = snapshot_configured_client_player_selection(paths) {
+            settings.group_maker = selection.group_maker().clone();
+        }
         let config = Config::load(paths.config_file()).ok();
         let network_port = |key: &str, default: u16| {
             config
@@ -28290,6 +28293,10 @@ impl GameApp {
         let local_owner = self.local_owner;
         let player_name = self.player_name.clone();
         let app_paths = self.app_paths.clone();
+        let group_maker = self
+            .configured_client_player_selection
+            .as_ref()
+            .map(|selection| selection.group_maker().clone());
         let (_, default_port) = load_network_startup_settings(self.app_paths.as_ref());
         let spawn = thread::Builder::new()
             .name("lc-startup-network".to_string())
@@ -28301,11 +28308,15 @@ impl GameApp {
                         ))
                     })
                     .and_then(|server_addr| {
-                        let mode = NetworkMode::Client(client_settings_for_paths(
+                        let mut settings = client_settings_for_paths(
                             server_addr,
                             player_name,
                             app_paths.as_ref(),
-                        ));
+                        );
+                        if let Some(group_maker) = group_maker {
+                            settings.group_maker = group_maker;
+                        }
+                        let mode = NetworkMode::Client(settings);
                         NetworkManager::for_mode(mode.clone(), local_owner)
                             .map(|manager| (mode, manager))
                     });
@@ -28339,13 +28350,17 @@ impl GameApp {
             ipv4: reference.netpuncher_ipv4,
             ipv6: reference.netpuncher_ipv6,
         };
-        let settings = client_settings_for_paths(
+        let mut settings = client_settings_for_paths(
             reference.source_address,
             self.player_name.clone(),
             self.app_paths.as_ref(),
-        )
-        .with_join_attempts(attempts)
-        .with_netpuncher(netpuncher_address, netpuncher_game_ids);
+        );
+        if let Some(selection) = self.configured_client_player_selection.as_ref() {
+            settings.group_maker = selection.group_maker().clone();
+        }
+        let settings = settings
+            .with_join_attempts(attempts)
+            .with_netpuncher(netpuncher_address, netpuncher_game_ids);
         self.startup_game_search = None;
         self.pending_network_join = Some(settings);
         if reference.password_needed {
@@ -66023,6 +66038,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let paths = AppPaths::discover().expect("discover app paths");
         paths.ensure_user_dirs().expect("create config directory");
         let mut config = Config::new();
+        config.set_in(Some("General"), "Name", "Exact maker");
         config.set_in(Some("Network"), "PortTCP", "0");
         config.set_in(Some("Network"), "PortUDP", "22113");
         config.save(paths.config_file()).expect("persist ports");
@@ -66034,6 +66050,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
 
         assert_eq!(settings.mesh_tcp_bind_address, None);
+        assert_eq!(settings.group_maker.as_bytes(), b"Exact maker");
         assert_eq!(
             settings.mesh_udp_bind_address,
             Some(SocketAddr::from(([0_u16; 8], 22_113)))

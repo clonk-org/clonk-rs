@@ -292,7 +292,7 @@ struct OptimizedPlayerGroup {
     changed: bool,
 }
 
-fn optimize_player_standalone(
+pub(crate) fn optimize_player_standalone(
     standalone_path: &Path,
     group_maker: &[u8],
 ) -> Result<(), HostResourceCoreError> {

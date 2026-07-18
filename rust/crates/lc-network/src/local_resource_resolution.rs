@@ -6,10 +6,14 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use lc_engine::NetworkResourceCore;
-use lc_resources::{Group, GroupError, MutableGroup, MutableGroupError};
+use lc_resources::{
+    compress_c4group_image, Group, GroupError, MutableGroup, MutableGroupError,
+};
 use thiserror::Error;
 
-use crate::{ResourceFileOwnership, ResourceTransferBackend, ResourceTransferError};
+use crate::{
+    HostResourceType, ResourceFileOwnership, ResourceTransferBackend, ResourceTransferError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalResourceMatch {
@@ -116,6 +120,21 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    resolve_local_resource_with_group_maker(core, candidates, standalone_directory, b"")
+}
+
+/// Resolves a local resource using the process-wide C4Group maker that a
+/// player-file rewrite would stamp into its standalone.
+pub fn resolve_local_resource_with_group_maker<I, P>(
+    core: &NetworkResourceCore,
+    candidates: I,
+    standalone_directory: impl AsRef<Path>,
+    group_maker: &[u8],
+) -> Result<LocalResourceResolution, LocalResourceResolutionError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
     let standalone_directory = standalone_directory.as_ref();
     for candidate in candidates {
         let path = candidate.as_ref();
@@ -139,7 +158,7 @@ where
         }
 
         let standalone_result = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
-            pack_directory(path)
+            pack_directory(path, group_maker)
                 .and_then(|packed| {
                     write_standalone(standalone_directory, path, &packed)
                         .map(|path| (path, ResourceFileOwnership::Temporary))
@@ -151,6 +170,15 @@ where
             group
                 .raw_image()
                 .map_err(LocalResourceResolutionError::from)
+                .and_then(|image| {
+                    // ExtractEntry wraps child groups in the on-disk gzip
+                    // envelope before OptimizeStandalone opens them.
+                    if core.resource_type == HostResourceType::Player as u8 {
+                        compress_c4group_image(&image).map_err(Into::into)
+                    } else {
+                        Ok(image)
+                    }
+                })
                 .and_then(|packed| {
                     write_standalone(standalone_directory, path, &packed)
                         .map(|path| (path, ResourceFileOwnership::Temporary))
@@ -158,6 +186,19 @@ where
                 .ok()
         } else {
             None
+        };
+        let standalone_result = if core.resource_type == HostResourceType::Player as u8 {
+            standalone_result.and_then(|(standalone, ownership)| {
+                optimize_local_player_standalone(
+                    standalone_directory,
+                    path,
+                    standalone,
+                    ownership,
+                    group_maker,
+                )
+            })
+        } else {
+            standalone_result
         };
         let standalone = standalone_result
             .and_then(|(standalone, ownership)| {
@@ -189,6 +230,31 @@ where
     Ok(fallback(core))
 }
 
+fn optimize_local_player_standalone(
+    standalone_directory: &Path,
+    source_path: &Path,
+    standalone_path: PathBuf,
+    ownership: ResourceFileOwnership,
+    group_maker: &[u8],
+) -> Option<(PathBuf, ResourceFileOwnership)> {
+    let (standalone_path, ownership) = if ownership == ResourceFileOwnership::Persistent {
+        let source = fs::read(&standalone_path).ok()?;
+        let standalone_path = write_standalone(standalone_directory, source_path, &source).ok()?;
+        (standalone_path, ResourceFileOwnership::Temporary)
+    } else {
+        (standalone_path, ownership)
+    };
+
+    if crate::host_resource_core::optimize_player_standalone(&standalone_path, group_maker).is_err()
+    {
+        if ownership == ResourceFileOwnership::Temporary {
+            let _ = fs::remove_file(&standalone_path);
+        }
+        return None;
+    }
+    Some((standalone_path, ownership))
+}
+
 fn open_group_candidate(path: &Path) -> Option<Group> {
     Group::open(path).ok().or_else(|| {
         let mother = path
@@ -200,20 +266,27 @@ fn open_group_candidate(path: &Path) -> Option<Group> {
     })
 }
 
-fn pack_directory(path: &Path) -> Result<Vec<u8>, LocalResourceResolutionError> {
+fn pack_directory(
+    path: &Path,
+    group_maker: &[u8],
+) -> Result<Vec<u8>, LocalResourceResolutionError> {
     let filename = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let group = mutable_directory(path, &filename)?;
+    let group = mutable_directory(path, &filename, group_maker)?;
     group.pack().map_err(Into::into)
 }
 
 fn mutable_directory(
     path: &Path,
     filename: &str,
+    group_maker: &[u8],
 ) -> Result<MutableGroup, LocalResourceResolutionError> {
     let mut group = MutableGroup::new(filename);
+    if !group_maker.is_empty() {
+        group.set_maker_bytes(group_maker);
+    }
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -229,7 +302,7 @@ fn mutable_directory(
             .map(|duration| duration.as_secs() as u32)
             .unwrap_or(0);
         if metadata.is_dir() {
-            let child = mutable_directory(&entry_path, &name)?;
+            let child = mutable_directory(&entry_path, &name, group_maker)?;
             group.add_child_with_metadata(name, child, modified, executable(&metadata))?;
         } else if metadata.is_file() {
             group.add_file_with_metadata(

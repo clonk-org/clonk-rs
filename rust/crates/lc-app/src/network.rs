@@ -59,6 +59,7 @@ pub struct HostSettings {
 pub struct ClientSettings {
     pub server_addresses: Vec<NetworkAddress>,
     pub player_name: String,
+    pub group_maker: lc_engine::LegacyCString,
     pub password: lc_engine::LegacyCString,
     pub resource_directory: PathBuf,
     pub local_system_path: Option<PathBuf>,
@@ -73,6 +74,9 @@ pub struct ClientSettings {
 
 impl ClientSettings {
     pub fn new(server_addr: SocketAddr, player_name: impl Into<String>) -> Self {
+        let player_name = player_name.into();
+        let group_maker = lc_engine::LegacyCString::from_bytes(player_name.as_bytes().to_vec())
+            .unwrap_or_default();
         let wildcard = if server_addr.is_ipv4() {
             SocketAddr::from(([0, 0, 0, 0], 0))
         } else {
@@ -83,7 +87,8 @@ impl ClientSettings {
                 NetworkAddress::new(NetworkProtocol::Tcp, server_addr),
                 NetworkAddress::new(NetworkProtocol::Udp, server_addr),
             ],
-            player_name: player_name.into(),
+            player_name,
+            group_maker,
             password: lc_engine::LegacyCString::default(),
             resource_directory: PathBuf::from("Network"),
             local_system_path: None,
@@ -3653,9 +3658,10 @@ async fn run_host_worker(
                 activated: true,
                 observer: false,
                 name: host_name.clone(),
-                nick: host_name,
+                nick: host_name.clone(),
                 lobby_ready: false,
             },
+            group_maker: host_name,
             // A C++ client must not be admitted until the selected scenario,
             // game resources, and synchronized dynamic are represented by real
             // C4Network2ResCore values and can be served by the resource layer.
@@ -4399,6 +4405,7 @@ async fn run_client_worker(
         Vec::new()
     };
     let mut client_config = ClientConfig::new(player_name.clone(), ParticipantKind::Player)
+        .with_group_maker(settings.group_maker)
         .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)
         .with_local_resource_roots(settings.local_resource_roots)

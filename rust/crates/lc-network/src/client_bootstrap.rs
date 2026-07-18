@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use lc_engine::{
-    NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
-    PLAYER_INFO_FLAG_REMOVED,
+    LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_REMOVED,
 };
 use thiserror::Error;
 
 use crate::{
-    resolve_local_resource, JoinDataEnvelope, LocalResourceMatch, LocalResourceResolution,
-    LocalResourceResolutionError, NonLoadableResourceMismatch,
+    resolve_local_resource_with_group_maker, JoinDataEnvelope, LocalResourceMatch,
+    LocalResourceResolution, LocalResourceResolutionError, NonLoadableResourceMismatch,
 };
 
 /// Candidate paths to search, in C++ search order, for each resource ID.
@@ -284,6 +284,7 @@ impl ClientBootstrapPlan {
 pub(crate) struct ClientBootstrapPlanner {
     local_candidates: ClientBootstrapLocalCandidates,
     standalone_directory: PathBuf,
+    group_maker: Vec<u8>,
     resources: Vec<ClientBootstrapResourcePlan>,
     registered_resource_ids: BTreeSet<i32>,
     initialized_game_resources: usize,
@@ -293,6 +294,7 @@ pub(crate) struct ClientBootstrapPlanner {
 pub(crate) struct ClientBootstrapResolver {
     local_candidates: ClientBootstrapLocalCandidates,
     standalone_directory: PathBuf,
+    group_maker: LegacyCString,
 }
 
 impl ClientBootstrapResolver {
@@ -300,9 +302,22 @@ impl ClientBootstrapResolver {
         local_candidates: &ClientBootstrapLocalCandidates,
         standalone_directory: impl Into<PathBuf>,
     ) -> Self {
+        Self::new_with_group_maker(
+            local_candidates,
+            standalone_directory,
+            LegacyCString::default(),
+        )
+    }
+
+    pub(crate) fn new_with_group_maker(
+        local_candidates: &ClientBootstrapLocalCandidates,
+        standalone_directory: impl Into<PathBuf>,
+        group_maker: LegacyCString,
+    ) -> Self {
         Self {
             local_candidates: local_candidates.clone(),
             standalone_directory: standalone_directory.into(),
+            group_maker,
         }
     }
 
@@ -316,18 +331,29 @@ impl ClientBootstrapResolver {
             core,
             &self.local_candidates,
             &self.standalone_directory,
+            self.group_maker.as_bytes(),
         )
     }
 }
 
 impl ClientBootstrapPlanner {
+    #[cfg(test)]
     pub(crate) fn new(
         local_candidates: &ClientBootstrapLocalCandidates,
         standalone_directory: impl Into<PathBuf>,
     ) -> Self {
+        Self::new_with_group_maker(local_candidates, standalone_directory, b"")
+    }
+
+    pub(crate) fn new_with_group_maker(
+        local_candidates: &ClientBootstrapLocalCandidates,
+        standalone_directory: impl Into<PathBuf>,
+        group_maker: &[u8],
+    ) -> Self {
         Self {
             local_candidates: local_candidates.clone(),
             standalone_directory: standalone_directory.into(),
+            group_maker: group_maker.to_vec(),
             resources: Vec::new(),
             registered_resource_ids: BTreeSet::new(),
             initialized_game_resources: 0,
@@ -349,6 +375,7 @@ impl ClientBootstrapPlanner {
             core,
             &self.local_candidates,
             &self.standalone_directory,
+            &self.group_maker,
         )?;
         if !matches!(
             resource.source,
@@ -482,10 +509,27 @@ pub fn plan_client_bootstrap(
     local_candidates: &ClientBootstrapLocalCandidates,
     standalone_directory: impl AsRef<Path>,
 ) -> Result<ClientBootstrapPlan, ClientBootstrapPlanError> {
+    plan_client_bootstrap_with_group_maker(
+        join_data,
+        local_candidates,
+        standalone_directory,
+        b"",
+    )
+}
+
+/// Plans initial resources with the process-wide C4Group maker used when a
+/// local player candidate must be packed or optimized.
+pub fn plan_client_bootstrap_with_group_maker(
+    join_data: &JoinDataEnvelope,
+    local_candidates: &ClientBootstrapLocalCandidates,
+    standalone_directory: impl AsRef<Path>,
+    group_maker: &[u8],
+) -> Result<ClientBootstrapPlan, ClientBootstrapPlanError> {
     let mut join_data = join_data.clone();
-    let mut planner = ClientBootstrapPlanner::new(
+    let mut planner = ClientBootstrapPlanner::new_with_group_maker(
         local_candidates,
         standalone_directory.as_ref().to_path_buf(),
+        group_maker,
     );
     planner.plan_before_addresses(&mut join_data)?;
     planner.plan_after_addresses(&join_data)
@@ -496,28 +540,32 @@ fn plan_resource(
     core: &NetworkResourceCore,
     local_candidates: &ClientBootstrapLocalCandidates,
     standalone_directory: &Path,
+    group_maker: &[u8],
 ) -> Result<ClientBootstrapResourcePlan, ClientBootstrapPlanError> {
     let candidates = local_candidates.for_core(core, standalone_directory);
-    let source =
-        match resolve_local_resource(core, &candidates, standalone_directory).map_err(|source| {
-            ClientBootstrapPlanError::LocalResolution {
-                resource_id: core.id,
-                source,
-            }
-        })? {
-            LocalResourceResolution::Local(local) => ClientBootstrapResourceSource::Local(local),
-            LocalResourceResolution::LoadRemote => ClientBootstrapResourceSource::Download,
-            LocalResourceResolution::FatalNonLoadable(mismatch) if role.is_required() => {
-                return Err(ClientBootstrapPlanError::MissingRequiredNonLoadable {
-                    role,
-                    resource_id: mismatch.resource_id,
-                    filename: mismatch.filename,
-                });
-            }
-            LocalResourceResolution::FatalNonLoadable(mismatch) => {
-                ClientBootstrapResourceSource::UnavailableNonLoadable(mismatch)
-            }
-        };
+    let source = match resolve_local_resource_with_group_maker(
+        core,
+        &candidates,
+        standalone_directory,
+        group_maker,
+    )
+    .map_err(|source| ClientBootstrapPlanError::LocalResolution {
+        resource_id: core.id,
+        source,
+    })? {
+        LocalResourceResolution::Local(local) => ClientBootstrapResourceSource::Local(local),
+        LocalResourceResolution::LoadRemote => ClientBootstrapResourceSource::Download,
+        LocalResourceResolution::FatalNonLoadable(mismatch) if role.is_required() => {
+            return Err(ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                role,
+                resource_id: mismatch.resource_id,
+                filename: mismatch.filename,
+            });
+        }
+        LocalResourceResolution::FatalNonLoadable(mismatch) => {
+            ClientBootstrapResourceSource::UnavailableNonLoadable(mismatch)
+        }
+    };
     Ok(ClientBootstrapResourcePlan {
         role,
         core: core.clone(),

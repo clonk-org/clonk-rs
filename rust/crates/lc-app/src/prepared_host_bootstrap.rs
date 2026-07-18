@@ -1088,6 +1088,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         start_tick: 0,
         async_max_wait_frames: spec.config.async_max_wait,
         local_core,
+        group_maker: legacy_string(spec.group_maker),
         initial_status: NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: spec.config.control_mode,

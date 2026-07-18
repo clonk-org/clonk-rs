@@ -446,7 +446,7 @@ impl MutableGroup {
 
     pub fn pack(&self) -> Result<Vec<u8>, MutableGroupError> {
         let image = self.pack_raw()?;
-        compress_c4group(&image)
+        compress_c4group_image(&image)
     }
 
     pub fn entry_names(&self) -> Vec<&str> {
@@ -540,7 +540,9 @@ impl MutableGroup {
     }
 }
 
-fn compress_c4group(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
+/// Wraps an uncompressed nested-group image in the stock on-disk C4Group
+/// gzip envelope without rewriting its header or entries.
+pub fn compress_c4group_image(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
     let input_length =
         u32::try_from(image.len()).map_err(|_| MutableGroupError::GroupDataTooLarge)?;
     // zlib requires null allocator hooks on input and installs non-null defaults
@@ -618,7 +620,7 @@ impl Drop for DeflateEndGuard {
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn compress_c4group_for_test(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
-    compress_c4group(image)
+    compress_c4group_image(image)
 }
 
 struct PackedEntry {
