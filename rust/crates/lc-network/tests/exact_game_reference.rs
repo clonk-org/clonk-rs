@@ -137,6 +137,20 @@ fn cpp_reference_serializes_the_complete_game_parameters_snapshot_in_compile_ord
 }
 
 #[test]
+fn exact_host_reference_writes_clan_tag_as_raw_rct_all() {
+    let mut parameters = complete_parameters();
+    parameters.player_infos.clients[0].players[0].clan_tag = legacy(b"Cl\xe4n");
+    let reference =
+        HostGameReference::new(fixture_summary(), fixture_metadata(), parameters).unwrap();
+
+    let encoded = encode_host_game_reference_response(&reference).unwrap();
+
+    assert!(encoded
+        .windows(b"      ClanTag=Cl\xe4n\r\n".len())
+        .any(|window| window == b"      ClanTag=Cl\xe4n\r\n"));
+}
+
+#[test]
 fn replacing_control_mode_refreshes_the_reference_projection() {
     let reference =
         HostGameReference::new(fixture_summary(), fixture_metadata(), complete_parameters())

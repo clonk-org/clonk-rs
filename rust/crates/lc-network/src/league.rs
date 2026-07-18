@@ -1781,7 +1781,7 @@ mod tests {
         encode_league_report_disconnect_request, solve_league_checksum, LeagueAuthRequestHead,
         LeagueDisconnectReason, LeagueFbidRegistry, LeagueHostSession, LeagueHttpPostTransport,
         LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead,
-        LeagueResponseDecodeError, PlayerInfoListIniError,
+        LeagueIniTree, LeagueResponseDecodeError, PlayerInfoListIniError,
     };
     use crate::{ClientPlayerInfosSnapshot, LeagueRoundPlayerStatus};
     use lc_engine::{
@@ -2029,6 +2029,27 @@ AUID=\"auth-\\200\"\r\n\
 \x20\x20FileSHA=000102030405060708090a0b0c0d0e0f10111213\r\n\
 \x20\x20Filename=\"Players\\\\Alice.c4p\"\r\n\
 \x20\x20Author=\"Maker\\200\"\r\n"
+        );
+    }
+
+    #[test]
+    fn league_player_info_clan_tag_round_trips_through_rct_all() {
+        let player = ControlPlayerInfoEntry {
+            color: 0,
+            original_color: 0,
+            clan_tag: legacy(b"Cl\xe4n"),
+            ..Default::default()
+        };
+
+        let encoded =
+            encode_league_player_info_section(&player).expect("valid C++ player info");
+
+        assert_eq!(encoded, b"[PlrInfo]\r\nClanTag=Cl\xe4n\r\n");
+        let tree = LeagueIniTree::parse(&encoded);
+        let player_info = tree.first_root_section(b"PlrInfo");
+        assert_eq!(
+            tree.raw_value(player_info, b"ClanTag").as_bytes(),
+            b"Cl\xe4n"
         );
     }
 

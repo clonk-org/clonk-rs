@@ -689,7 +689,7 @@ pub(crate) fn append_player_info_fields(
         -1,
         indent,
     );
-    push_legacy_string(output, "ClanTag", &player.clan_tag, indent);
+    push_raw_legacy_string(output, "ClanTag", &player.clan_tag, indent);
     push_i32(
         output,
         "LeaguePerformance",
