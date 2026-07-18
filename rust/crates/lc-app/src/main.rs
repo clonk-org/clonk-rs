@@ -21700,11 +21700,23 @@ impl GameApp {
         {
             return;
         }
+        let Some(current_control_tick) = self
+            .network_control_clock
+            .map(NetworkControlClock::current_tick)
+        else {
+            tracing::error!("cannot acknowledge initial lobby status without a control clock");
+            return;
+        };
         let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
         match self
             .network
             .as_mut()
-            .map(|network| network.acknowledge_requested_status_at_frame(current_frame))
+            .map(|network| {
+                network.acknowledge_requested_status_at_frame(
+                    current_control_tick,
+                    current_frame,
+                )
+            })
         {
             Some(Ok(())) => self.initial_lobby_status_ack_pending = false,
             Some(Err(error)) => {
@@ -31848,13 +31860,33 @@ impl GameApp {
                         // has acknowledged this exact barrier
                         // (src/C4Network2.cpp:2017-2077,2091-2110).
                         self.mode = AppMode::Loading;
+                        let client_control_tick = if matches!(
+                            self.network_mode,
+                            Some(NetworkMode::Client(_))
+                        ) {
+                            self.network_control_clock
+                                .map(NetworkControlClock::current_tick)
+                        } else {
+                            None
+                        };
                         let reached = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
-                            let current_frame =
-                                i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-                            match self.client_start_barrier.local_initialized() {
-                                Some(_) => self.network.as_mut().map(|network| {
-                                    network.acknowledge_requested_status_at_frame(current_frame)
-                                }),
+                            match client_control_tick {
+                                Some(current_control_tick) => {
+                                    let current_frame = i32::try_from(self.engine.frame())
+                                        .unwrap_or(i32::MAX);
+                                    match self
+                                        .client_start_barrier
+                                        .local_initialized_at(current_control_tick)
+                                    {
+                                        Some(_) => self.network.as_mut().map(|network| {
+                                            network.acknowledge_requested_status_at_frame(
+                                                current_control_tick,
+                                                current_frame,
+                                            )
+                                        }),
+                                        None => None,
+                                    }
+                                }
                                 None => None,
                             }
                         } else {
@@ -31868,6 +31900,9 @@ impl GameApp {
                                     .and_then(|loading| loading.prepared_go.as_mut())
                                 {
                                     pending.local_reached = true;
+                                    if let Some(current_control_tick) = client_control_tick {
+                                        pending.status.target_tick = current_control_tick;
+                                    }
                                 }
                             }
                             Some(Err(error)) => {
@@ -70714,6 +70749,18 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("queue JoinData");
 
         app.process_network_events().expect("enter network lobby");
+
+        assert_eq!(
+            app.network_control_clock
+                .map(NetworkControlClock::current_tick),
+            Some(23),
+            "PID_StatusAck uses Game.Control.ControlTick"
+        );
+        assert_eq!(
+            app.engine.frame(),
+            3,
+            "the distinct Game.FrameCounter is reserved for ClientActReq"
+        );
 
         assert_eq!(
             commands.take_framed_status_acknowledgements(),

@@ -9253,6 +9253,154 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn higher_client_status_ack_retargets_real_tcp_barrier_before_commit() {
+        // CheckStatusReached replaces a client's requested target with its
+        // current control tick. HandleStatusAck must rebroadcast that higher
+        // target before the barrier can commit
+        // (src/C4Network2.cpp:1994-2012,2062-2077).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let client_id = client.client_id();
+        let initial_status = client.take_join_data().expect("client JoinData").status;
+        let mut client_events = client.take_event_receiver();
+
+        // Send the JoinData status acknowledgement first so the host advances
+        // this client from Chasing to Ready before opening a fresh barrier.
+        client
+            .submit_status_ack(initial_status)
+            .await
+            .expect("acknowledge JoinData status");
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host initial status ack wait")
+            {
+                Some(HostEvent::StatusAck {
+                    client_id: received_id,
+                    status,
+                }) if received_id == client_id && status == initial_status => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before initial status ack"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client initial status ack wait")
+            {
+                Some(ClientEvent::StatusAck(status)) if status == initial_status => break,
+                Some(_) => continue,
+                None => panic!("client event stream ended before initial status ack"),
+            }
+        }
+
+        let requested = NetworkStatus {
+            state: NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 41,
+        };
+        host.change_status(requested)
+            .await
+            .expect("broadcast requested Pause");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client requested Pause wait")
+            {
+                Some(ClientEvent::Status(status)) if status == requested => break,
+                Some(_) => continue,
+                None => panic!("client event stream ended before requested Pause"),
+            }
+        }
+
+        let retargeted = NetworkStatus {
+            target_tick: 44,
+            ..requested
+        };
+        client
+            .submit_status_ack(retargeted)
+            .await
+            .expect("submit retargeted Pause acknowledgement");
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host retargeted status ack wait")
+            {
+                Some(HostEvent::StatusAck {
+                    client_id: received_id,
+                    status,
+                }) if received_id == client_id && status == retargeted => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before retargeted status ack"),
+            }
+        }
+
+        match timeout(EVENT_WAIT, client_events.recv())
+            .await
+            .expect("client retargeted Pause wait")
+        {
+            Some(ClientEvent::Status(status)) => assert_eq!(status, retargeted),
+            other => panic!("expected retargeted Pause before final ack, got {other:?}"),
+        }
+        assert!(
+            timeout(Duration::from_millis(50), async {
+                loop {
+                    match client_events.recv().await {
+                        Some(ClientEvent::StatusAck(status)) => break Some(status),
+                        Some(_) => continue,
+                        None => break None,
+                    }
+                }
+            })
+            .await
+            .is_err(),
+            "retargeted barrier committed before the host reached tick 44"
+        );
+
+        host.status_reached()
+            .await
+            .expect("host reached retargeted Pause");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client final retargeted status ack wait")
+            {
+                Some(ClientEvent::StatusAck(status)) => {
+                    assert_eq!(status, retargeted);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before final retargeted status ack"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host retargeted status commit wait")
+            {
+                Some(HostEvent::StatusCommitted(status)) => {
+                    assert_eq!(status, retargeted);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before retargeted status commit"),
+            }
+        }
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn sync_controls_wait_for_status_barrier_and_keep_fifo_order() {
         // In running games, CDT_Sync packets accumulate in SyncControl and do
         // not execute until PID_ExecSyncCtrl is emitted after the status

@@ -164,27 +164,46 @@ fn same_client_status_barrier(left: NetworkStatus, right: NetworkStatus) -> bool
 }
 
 impl ClientStatusState {
-    fn receive_request(&mut self, status: NetworkStatus) {
-        self.requested = Some(status);
-        self.awaiting_commit = None;
-    }
-
-    fn acknowledge_requested(&mut self, expected: NetworkStatus) -> Option<NetworkStatus> {
-        let requested = self
-            .requested
-            .filter(|requested| same_client_status_barrier(*requested, expected))?;
-        self.requested = None;
-        self.awaiting_commit = Some(requested);
-        Some(requested)
-    }
-
-    fn restore_request(&mut self, status: NetworkStatus) {
+    fn receive_request(&mut self, status: NetworkStatus) -> bool {
+        // The host rebroadcasts the higher target supplied by this client's
+        // acknowledgement before it can commit. The client has already
+        // reached that exact barrier, so retain its awaiting-commit identity
+        // instead of reopening an unreached request.
         if self
             .awaiting_commit
             .is_some_and(|awaiting| same_client_status_barrier(awaiting, status))
         {
+            return false;
+        }
+        self.requested = Some(status);
+        self.awaiting_commit = None;
+        true
+    }
+
+    fn acknowledge_requested_at(
+        &mut self,
+        expected: NetworkStatus,
+        current_control_tick: i32,
+    ) -> Option<NetworkStatus> {
+        let requested = self
+            .requested
+            .filter(|requested| same_client_status_barrier(*requested, expected))?;
+        let acknowledgement = NetworkStatus {
+            target_tick: current_control_tick,
+            ..requested
+        };
+        self.requested = None;
+        self.awaiting_commit = Some(acknowledgement);
+        Some(acknowledgement)
+    }
+
+    fn restore_request(&mut self, requested: NetworkStatus, acknowledgement: NetworkStatus) {
+        if self
+            .awaiting_commit
+            .is_some_and(|awaiting| same_client_status_barrier(awaiting, acknowledgement))
+        {
             self.awaiting_commit = None;
-            self.requested = Some(status);
+            self.requested = Some(requested);
         }
     }
 
@@ -395,8 +414,13 @@ impl TestNetworkCommands {
                     order.push("player-info");
                     player_infos.push(request);
                 }
-                Ok(NetworkCommand::AcknowledgeRequestedStatus { status, .. }) => {
+                Ok(NetworkCommand::AcknowledgeRequestedStatus {
+                    mut status,
+                    current_control_tick,
+                    ..
+                }) => {
                     order.push("status-ack");
+                    status.target_tick = current_control_tick;
                     acknowledgements.push(status);
                     break;
                 }
@@ -714,7 +738,13 @@ impl TestNetworkCommands {
     pub(crate) fn take_status_acknowledgements(&mut self) -> Vec<NetworkStatus> {
         let mut acknowledgements = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
-            if let NetworkCommand::AcknowledgeRequestedStatus { status, .. } = command {
+            if let NetworkCommand::AcknowledgeRequestedStatus {
+                mut status,
+                current_control_tick,
+                ..
+            } = command
+            {
+                status.target_tick = current_control_tick;
                 acknowledgements.push(status);
             }
         }
@@ -725,10 +755,12 @@ impl TestNetworkCommands {
         let mut acknowledgements = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::AcknowledgeRequestedStatus {
-                status,
+                mut status,
+                current_control_tick,
                 current_frame,
             } = command
             {
+                status.target_tick = current_control_tick;
                 acknowledgements.push((status, current_frame));
             }
         }
@@ -903,6 +935,7 @@ enum NetworkCommand {
     StatusReached,
     AcknowledgeRequestedStatus {
         status: NetworkStatus,
+        current_control_tick: i32,
         current_frame: i32,
     },
     ClientUpdateExecuted(lc_engine::ClientUpdateControlData),
@@ -1517,6 +1550,7 @@ impl NetworkManager {
 
     pub fn acknowledge_requested_status_at_frame(
         &mut self,
+        current_control_tick: i32,
         current_frame: i32,
     ) -> std::result::Result<(), NetworkStatusCommandError> {
         if self.role != NetworkRole::Client {
@@ -1528,18 +1562,22 @@ impl NetworkManager {
             .client_status
             .requested
             .ok_or(NetworkStatusCommandError::NoRequestedStatus)?;
-        if self.client_status.acknowledge_requested(status).is_none() {
+        let Some(acknowledgement) = self
+            .client_status
+            .acknowledge_requested_at(status, current_control_tick)
+        else {
             return Err(NetworkStatusCommandError::NoRequestedStatus);
-        }
+        };
         if self
             .command_tx
             .blocking_send(NetworkCommand::AcknowledgeRequestedStatus {
                 status,
+                current_control_tick,
                 current_frame,
             })
             .is_err()
         {
-            self.client_status.restore_request(status);
+            self.client_status.restore_request(status, acknowledgement);
             return Err(NetworkStatusCommandError::WorkerUnavailable {
                 operation: "game-status acknowledgements",
             });
@@ -2181,8 +2219,9 @@ async fn run_client_worker(
             maybe_event = client_events.recv() => {
                 match maybe_event {
                     Some(ClientEvent::Status(status)) => {
-                        client_status.receive_request(status);
-                        client_activation.status_requested();
+                        if client_status.receive_request(status) {
+                            client_activation.status_requested();
+                        }
                         handle_client_event(
                             ClientEvent::Status(status),
                             local_owner,
@@ -2418,9 +2457,12 @@ async fn run_client_worker(
                     }
                     NetworkCommand::AcknowledgeRequestedStatus {
                         status: expected,
+                        current_control_tick,
                         current_frame,
                     } => {
-                        let Some(status) = client_status.acknowledge_requested(expected) else {
+                        let Some(status) = client_status
+                            .acknowledge_requested_at(expected, current_control_tick)
+                        else {
                             let _ = event_tx.send(NetworkEvent::Error(
                                 "requested game status changed before client acknowledgement"
                                     .to_string(),
@@ -2428,7 +2470,7 @@ async fn run_client_worker(
                             continue;
                         };
                         if let Err(err) = client.submit_status_ack(status).await {
-                            client_status.restore_request(status);
+                            client_status.restore_request(expected, status);
                             return Err(anyhow!("client status acknowledgement failed: {err}"));
                         }
                         client_activation.status_reached(current_frame);
@@ -3075,6 +3117,7 @@ mod tests {
         command_tx
             .send(NetworkCommand::AcknowledgeRequestedStatus {
                 status: expected_status,
+                current_control_tick: expected_status.target_tick.saturating_add(3),
                 current_frame: 41,
             })
             .await
@@ -3087,7 +3130,9 @@ mod tests {
                 .expect("initial client protocol timeout")
             {
                 Some(HostEvent::PlayerInfoUpdate { .. }) => protocol_order.push(("player-info", 0)),
-                Some(HostEvent::StatusAck { .. }) => protocol_order.push(("status-ack", 0)),
+                Some(HostEvent::StatusAck { status, .. }) => {
+                    protocol_order.push(("status-ack", status.target_tick));
+                }
                 Some(HostEvent::ActivationRequest { tick, .. }) => {
                     protocol_order.push(("activation", tick));
                 }
@@ -3097,7 +3142,11 @@ mod tests {
         }
         assert_eq!(
             protocol_order,
-            vec![("player-info", 0), ("status-ack", 0), ("activation", 41)]
+            vec![
+                ("player-info", 0),
+                ("status-ack", expected_status.target_tick.saturating_add(3)),
+                ("activation", 41),
+            ]
         );
 
         command_tx
@@ -3565,10 +3614,10 @@ mod tests {
     }
 
     #[test]
-    fn client_manager_acks_the_exact_prepared_status() {
-        // A client echoes the status it actually reached in PID_StatusAck;
-        // it does not synthesize a new state or control mode
-        // (src/C4Network2.cpp:2074-2084).
+    fn client_manager_acks_the_exact_prepared_status_at_the_same_tick() {
+        // CheckStatusReached replaces TargetCtrlTick with the client's current
+        // control tick. When that is still the requested tick, PID_StatusAck
+        // remains byte-for-byte identical (src/C4Network2.cpp:2074-2084).
         let (mut manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         let status = NetworkStatus {
@@ -3585,11 +3634,72 @@ mod tests {
         );
 
         manager
-            .acknowledge_requested_status_at_frame(0)
+            .acknowledge_requested_status_at_frame(41, 0)
             .expect("client queues the reached status acknowledgement");
 
         assert_eq!(commands.take_status_acknowledgements(), vec![status]);
         assert_eq!(manager.client_status.awaiting_commit, Some(status));
+    }
+
+    #[test]
+    fn client_manager_retargets_status_ack_to_current_control_tick() {
+        // A client may pass the requested barrier before it gets a chance to
+        // send PID_StatusAck. C4Network2::CheckStatusReached acknowledges the
+        // current ControlTick, while FrameCounter remains a separate value for
+        // a delayed activation request (src/C4Network2.cpp:2041-2058,2073-2084).
+        let (mut manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let requested = NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        let acknowledgement = NetworkStatus {
+            target_tick: 44,
+            ..requested
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(requested))
+            .expect("queue host status");
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::StatusRequested(requested)]
+        );
+
+        manager
+            .acknowledge_requested_status_at_frame(44, 123)
+            .expect("client queues retargeted status acknowledgement");
+
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(acknowledgement, 123)]
+        );
+        assert_eq!(manager.client_status.awaiting_commit, Some(acknowledgement));
+
+        event_tx
+            .send(NetworkEvent::StatusRequested(acknowledgement))
+            .expect("queue host's retargeted status broadcast");
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::StatusRequested(acknowledgement)]
+        );
+        assert_eq!(manager.client_status.requested, None);
+        assert_eq!(manager.client_status.awaiting_commit, Some(acknowledgement));
+
+        event_tx
+            .send(NetworkEvent::StatusCommitted(requested))
+            .expect("queue stale host acknowledgement");
+        assert!(manager.poll_events().is_empty());
+        assert_eq!(manager.client_status.awaiting_commit, Some(acknowledgement));
+
+        event_tx
+            .send(NetworkEvent::StatusCommitted(acknowledgement))
+            .expect("queue retargeted host acknowledgement");
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::StatusCommitted(acknowledgement)]
+        );
+        assert_eq!(manager.client_status.awaiting_commit, None);
     }
 
     #[test]
@@ -3810,7 +3920,7 @@ mod tests {
             .submit_player_info_update(request.clone())
             .expect("queue initial PlayerInfo");
         manager
-            .acknowledge_requested_status_at_frame(41)
+            .acknowledge_requested_status_at_frame(23, 41)
             .expect("queue framed status acknowledgement");
 
         assert!(matches!(
@@ -3821,6 +3931,7 @@ mod tests {
             commands.command_rx.blocking_recv(),
             Some(NetworkCommand::AcknowledgeRequestedStatus {
                 status: actual,
+                current_control_tick: 23,
                 current_frame: 41,
             }) if actual == status
         ));
@@ -3881,7 +3992,7 @@ mod tests {
         );
 
         manager
-            .acknowledge_requested_status_at_frame(0)
+            .acknowledge_requested_status_at_frame(23, 0)
             .expect("acknowledge initialized JoinData status");
 
         assert_eq!(
@@ -3903,7 +4014,7 @@ mod tests {
 
         assert_eq!(
             manager
-                .acknowledge_requested_status_at_frame(0)
+                .acknowledge_requested_status_at_frame(0, 0)
                 .expect_err("client has no host status to acknowledge"),
             NetworkStatusCommandError::NoRequestedStatus
         );
@@ -3927,7 +4038,7 @@ mod tests {
             .expect("queue host status");
         assert_eq!(manager.poll_events().len(), 1);
         manager
-            .acknowledge_requested_status_at_frame(0)
+            .acknowledge_requested_status_at_frame(41, 0)
             .expect("acknowledge exact host status");
 
         let stale = NetworkStatus {
@@ -3967,7 +4078,7 @@ mod tests {
             .expect("queue host status");
         assert_eq!(manager.poll_events().len(), 1);
         manager
-            .acknowledge_requested_status_at_frame(0)
+            .acknowledge_requested_status_at_frame(41, 0)
             .expect("acknowledge host status");
 
         let committed = NetworkStatus {
@@ -4015,7 +4126,7 @@ mod tests {
 
         let (mut host, _events) = NetworkManager::test_stub();
         assert_eq!(
-            host.acknowledge_requested_status_at_frame(0)
+            host.acknowledge_requested_status_at_frame(0, 0)
                 .expect_err("host cannot send a client acknowledgement"),
             NetworkStatusCommandError::ClientRoleRequired {
                 operation: "acknowledge a host game status",

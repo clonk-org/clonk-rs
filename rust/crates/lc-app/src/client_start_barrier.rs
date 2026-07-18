@@ -45,12 +45,17 @@ impl ClientStartBarrier {
 
     /// Reports local initialization only when an ordinary status request has
     /// opened a barrier.
-    pub fn local_initialized(&mut self) -> Option<NetworkStatus> {
+    pub fn local_initialized_at(&mut self, current_control_tick: i32) -> Option<NetworkStatus> {
         self.pending
             .as_mut()
             .filter(|pending| !pending.local_initialized)
             .map(|pending| {
                 pending.local_initialized = true;
+                // CheckStatusReached replaces the requested target with the
+                // control tick the client actually reached before sending
+                // PID_StatusAck (C4Network2.cpp:2041-2052). Keep the app-side
+                // exact commit barrier on that same retargeted status.
+                pending.status.target_tick = current_control_tick;
                 pending.status
             })
     }
@@ -95,7 +100,7 @@ mod tests {
             target_tick: -1,
         });
 
-        assert_eq!(barrier.local_initialized(), None);
+        assert_eq!(barrier.local_initialized_at(0), None);
         assert_eq!(
             barrier.status_committed(NetworkStatus {
                 state: NETWORK_STATE_GO,
@@ -131,8 +136,11 @@ mod tests {
         let requested = status(NETWORK_STATE_PAUSE, 2, 73);
         assert_eq!(barrier.status_requested(requested), Some(requested));
 
-        assert_eq!(barrier.local_initialized(), Some(requested));
-        assert_eq!(barrier.local_initialized(), None);
+        assert_eq!(
+            barrier.local_initialized_at(requested.target_tick),
+            Some(requested)
+        );
+        assert_eq!(barrier.local_initialized_at(requested.target_tick), None);
     }
 
     #[test]
@@ -147,7 +155,10 @@ mod tests {
         assert_eq!(barrier.status_requested(requested), Some(requested));
 
         assert_eq!(barrier.status_committed(requested), None);
-        assert_eq!(barrier.local_initialized(), Some(requested));
+        assert_eq!(
+            barrier.local_initialized_at(requested.target_tick),
+            Some(requested)
+        );
         assert_eq!(barrier.status_committed(requested), Some(requested));
     }
 
@@ -160,7 +171,10 @@ mod tests {
             super::ClientStartBarrier::from_join_data_status(status(NETWORK_STATE_LOBBY, 0, -1));
         let requested = status(NETWORK_STATE_GO, 2, 73);
         assert_eq!(barrier.status_requested(requested), Some(requested));
-        assert_eq!(barrier.local_initialized(), Some(requested));
+        assert_eq!(
+            barrier.local_initialized_at(requested.target_tick),
+            Some(requested)
+        );
 
         assert_eq!(
             barrier.status_committed(status(NETWORK_STATE_PAUSE, 2, 73)),
@@ -179,11 +193,14 @@ mod tests {
             super::ClientStartBarrier::from_join_data_status(status(NETWORK_STATE_LOBBY, 0, -1));
         let requested = status(NETWORK_STATE_GO, 2, 73);
         assert_eq!(barrier.status_requested(requested), Some(requested));
-        assert_eq!(barrier.local_initialized(), Some(requested));
+        assert_eq!(
+            barrier.local_initialized_at(requested.target_tick),
+            Some(requested)
+        );
 
         assert_eq!(barrier.status_committed(requested), Some(requested));
         assert_eq!(barrier.status_committed(requested), None);
-        assert_eq!(barrier.local_initialized(), None);
+        assert_eq!(barrier.local_initialized_at(0), None);
     }
 
     #[test]
@@ -198,7 +215,7 @@ mod tests {
             barrier.status_requested(status(NETWORK_STATE_GO, 2, -1)),
             None
         );
-        assert_eq!(barrier.local_initialized(), None);
+        assert_eq!(barrier.local_initialized_at(0), None);
     }
 
     #[test]
@@ -213,6 +230,22 @@ mod tests {
             barrier.status_requested(status(NETWORK_STATE_LOBBY, 2, 73)),
             None
         );
-        assert_eq!(barrier.local_initialized(), None);
+        assert_eq!(barrier.local_initialized_at(73), None);
+    }
+
+    #[test]
+    fn local_initialization_retargets_the_exact_commit_barrier() {
+        // A chasing client may have advanced beyond the host's requested
+        // target. C++ sends its actual ControlTick and subsequently accepts
+        // only a PID_StatusAck for that retargeted status.
+        let mut barrier =
+            super::ClientStartBarrier::from_join_data_status(status(NETWORK_STATE_LOBBY, 0, -1));
+        let requested = status(NETWORK_STATE_GO, 2, 41);
+        let reached = status(NETWORK_STATE_GO, 2, 44);
+        assert_eq!(barrier.status_requested(requested), Some(requested));
+
+        assert_eq!(barrier.local_initialized_at(44), Some(reached));
+        assert_eq!(barrier.status_committed(requested), None);
+        assert_eq!(barrier.status_committed(reached), Some(reached));
     }
 }
