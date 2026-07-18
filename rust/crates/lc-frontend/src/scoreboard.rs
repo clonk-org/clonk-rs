@@ -12,7 +12,9 @@ use lc_engine::ScoreboardState;
 use lc_graphics::clonk_font::{markup_blit_color, ClonkFont, GlyphCell, TextAlign};
 use lc_graphics::gamma::GammaChannel;
 use lc_graphics::Color;
-use lc_graphics::{GammaRamp, PixelFormat, Surface};
+#[cfg(test)]
+use lc_graphics::PixelFormat;
+use lc_graphics::{GammaRamp, Surface};
 
 use crate::classic_gui::{
     draw_3d_frame, draw_bar, draw_engine_box, draw_facet_stretch, IntRect,
@@ -322,6 +324,45 @@ pub fn render_scoreboard(
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
     let layout = scoreboard_layout(preferred, scoreboard, resources)?;
+    render_scoreboard_body_with_layout(surface, scoreboard, resources, &layout, gamma);
+    render_scoreboard_caption_with_layout(surface, scoreboard, resources, &layout, gamma)
+}
+
+/// Draw the dialog background/frame and spreadsheet cells, stopping before
+/// the caption child. Ordered presentation commits captured cell text here so
+/// the later caption chrome can cover it exactly as `C4GUI::Window::Draw` does.
+pub fn render_scoreboard_body(
+    surface: &mut Surface,
+    preferred: IntRect,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
+    let layout = scoreboard_layout(preferred, scoreboard, resources)?;
+    render_scoreboard_body_with_layout(surface, scoreboard, resources, &layout, gamma);
+    Ok(())
+}
+
+/// Draw the caption bar, icon, markup-aware title, and close button after
+/// [`render_scoreboard_body`].
+pub fn render_scoreboard_caption(
+    surface: &mut Surface,
+    preferred: IntRect,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
+    let layout = scoreboard_layout(preferred, scoreboard, resources)?;
+    render_scoreboard_caption_with_layout(surface, scoreboard, resources, &layout, gamma)
+}
+
+fn render_scoreboard_body_with_layout(
+    surface: &mut Surface,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    layout: &ScoreboardLayout,
+    gamma: Option<&GammaRamp>,
+) {
     draw_engine_box(
         surface,
         layout.bounds.x,
@@ -364,7 +405,15 @@ pub fn render_scoreboard(
             );
         }
     }
+}
 
+fn render_scoreboard_caption_with_layout(
+    surface: &mut Surface,
+    scoreboard: &ScoreboardState,
+    resources: &ScoreboardResources<'_>,
+    layout: &ScoreboardLayout,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
     if let (Some(caption), Some(title)) = (
         layout.caption,
         scoreboard.cell(0, 0).and_then(|cell| cell.text()),
@@ -384,14 +433,14 @@ pub fn render_scoreboard(
             h: caption.h + 1,
         };
         let text_y = caption.y + (caption.h - resources.fonts.text.line_height) / 2 - 1;
-        with_surface_clip(surface, text_clip, |caption_surface, dx, dy| {
+        with_surface_clip(surface, text_clip, |caption_surface| {
             // WoodenLabel stores fMarkup=false here, but its DrawElement
             // override omits that argument and therefore calls markup-enabled
             // TextOut. Preserve that C++ quirk for colors, italics and images.
             draw_scoreboard_text(
                 caption_surface,
-                caption.x + caption.h + 5 - dx,
-                text_y - dy,
+                caption.x + caption.h + 5,
+                text_y,
                 &title,
                 &resources.fonts.text,
                 resources.font_images(),
@@ -441,34 +490,33 @@ fn draw_icon_phase(
     Ok(())
 }
 
-fn with_surface_clip(
-    surface: &mut Surface,
-    clip: IntRect,
-    draw: impl FnOnce(&mut Surface, i32, i32),
-) {
-    let x0 = clip.x.max(0);
-    let y0 = clip.y.max(0);
-    let x1 = (clip.x + clip.w).min(surface.width() as i32);
-    let y1 = (clip.y + clip.h).min(surface.height() as i32);
-    if x0 >= x1 || y0 >= y1 {
-        return;
+fn with_surface_clip(surface: &mut Surface, clip: IntRect, draw: impl FnOnce(&mut Surface)) {
+    let previous = surface.clip();
+    let mut left = i64::from(clip.x).max(0);
+    let mut top = i64::from(clip.y).max(0);
+    let mut right = (i64::from(clip.x) + i64::from(clip.w.max(0)))
+        .min(i64::from(surface.width().min(i32::MAX as u32)));
+    let mut bottom = (i64::from(clip.y) + i64::from(clip.h.max(0)))
+        .min(i64::from(surface.height().min(i32::MAX as u32)));
+    if let Some(existing) = previous {
+        left = left.max(i64::from(existing.x));
+        top = top.max(i64::from(existing.y));
+        right = right.min(i64::from(existing.x) + i64::from(existing.width));
+        bottom = bottom.min(i64::from(existing.y) + i64::from(existing.height));
     }
-    let (width, height) = ((x1 - x0) as u32, (y1 - y0) as u32);
-    let mut scratch = Surface::new(width, height, PixelFormat::Rgba8888);
-    for y in 0..height {
-        for x in 0..width {
-            if let Some(pixel) = surface.get_pixel(x0 as u32 + x, y0 as u32 + y) {
-                let _ = scratch.set_pixel(x, y, pixel);
-            }
-        }
+    if left < right && top < bottom {
+        surface.set_clip(lc_graphics::Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ));
+        draw(surface);
     }
-    draw(&mut scratch, x0, y0);
-    for y in 0..height {
-        for x in 0..width {
-            if let Some(pixel) = scratch.get_pixel(x, y) {
-                let _ = surface.set_pixel(x0 as u32 + x, y0 as u32 + y, pixel);
-            }
-        }
+    if let Some(existing) = previous {
+        surface.set_clip(existing);
+    } else {
+        surface.clear_clip();
     }
 }
 
@@ -636,7 +684,9 @@ fn draw_scoreboard_text(
             let color = markup_rgba(&markup);
             if let Some(glyph) = font.glyph(character) {
                 let shear = markup_shear(&markup);
-                if shear == 0.0 && color[3] == 255 {
+                let native_capture =
+                    font.role().is_some() && surface.is_clonk_text_capture_active();
+                if native_capture || (shear == 0.0 && color[3] == 255) {
                     font.draw_with_gamma(
                         surface,
                         pen_x,
@@ -1589,6 +1639,87 @@ mod tests {
         assert!(changed(layout.bounds));
         assert!(changed(layout.title_icon.expect("player icon")));
         assert!(changed(layout.close_button.expect("close icon")));
+    }
+
+    #[test]
+    fn body_and_caption_form_distinct_native_capture_phases() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let resources =
+            ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
+        let board = scoreboard(serde_json::json!([
+            [{"text":"TITLE","value":-1},{"text":"","value":1}],
+            [{"text":"BODY","value":2},{"text":"","value":3}]
+        ]));
+
+        let mut captured = Surface::new(640, 480, PixelFormat::Rgba8888);
+        captured.begin_clonk_text_capture();
+        render_scoreboard_body(&mut captured, preferred(), &board, &resources, None).expect("body");
+        let body_commands = captured.take_clonk_text_capture();
+        let body_text = body_commands
+            .iter()
+            .map(|command| command.text.as_str())
+            .collect::<String>();
+        assert!(body_text.contains("BODY"));
+        assert!(!body_text.contains("TITLE"));
+
+        captured.begin_clonk_text_capture();
+        render_scoreboard_caption(&mut captured, preferred(), &board, &resources, None)
+            .expect("caption");
+        let caption_commands = captured.take_clonk_text_capture();
+        assert_eq!(
+            caption_commands
+                .iter()
+                .map(|command| command.text.as_str())
+                .collect::<String>(),
+            "TITLE"
+        );
+        let layout = scoreboard_layout(preferred(), &board, &resources).expect("layout");
+        let caption_bounds = layout.caption.expect("caption");
+        let expected_clip = lc_graphics::Rect::new(
+            caption_bounds.x + caption_bounds.h,
+            caption_bounds.y,
+            (caption_bounds.w - caption_bounds.h - CAPTION_RIGHT_INDENT + 1) as u32,
+            (caption_bounds.h + 1) as u32,
+        );
+        assert!(caption_commands
+            .iter()
+            .all(|command| command.clip == Some(expected_clip)));
+
+        let mut combined = Surface::new(640, 480, PixelFormat::Rgba8888);
+        let mut staged = Surface::new(640, 480, PixelFormat::Rgba8888);
+        render_scoreboard(&mut combined, preferred(), &board, &resources, None).expect("combined");
+        render_scoreboard_body(&mut staged, preferred(), &board, &resources, None)
+            .expect("staged body");
+        render_scoreboard_caption(&mut staged, preferred(), &board, &resources, None)
+            .expect("staged caption");
+        assert_eq!(combined.pixels(), staged.pixels());
+    }
+
+    #[test]
+    fn italic_translucent_scoreboard_glyphs_still_enter_native_capture() {
+        let fonts = endeavour_font_set();
+        let caption = load_graphics_png("GUICaption.png");
+        let icons = load_graphics_png("GUIIcons.png");
+        let resources =
+            ScoreboardResources::new(&caption, &icons, fonts.as_ref()).expect("resources");
+        let board = scoreboard(serde_json::json!([
+            [{"text":"TITLE","value":-1}],
+            [{"text":"<i><c 80ff0000>X</c></i>","value":1}]
+        ]));
+
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        render_scoreboard_body(&mut surface, preferred(), &board, &resources, None)
+            .expect("body");
+        let commands = surface.take_clonk_text_capture();
+        let glyph = commands
+            .iter()
+            .find(|command| command.text == "X")
+            .expect("resolved italic glyph remains a semantic native command");
+        assert_eq!(glyph.color, [254, 0, 0, 128]);
+        assert!(!glyph.markup);
     }
 
     #[test]

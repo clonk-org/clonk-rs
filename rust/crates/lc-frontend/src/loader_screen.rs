@@ -14,7 +14,7 @@ use crate::clonk_fonts::{NativeClonkFont, NativeClonkFontSet};
 use crate::{ClonkFontSet, ImageData};
 use anyhow::{ensure, Result};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
-use lc_graphics::{Color, GammaRamp, Surface};
+use lc_graphics::{ClipperProjection, Color, GammaRamp, Rect, Surface};
 use std::sync::Arc;
 
 /// `C4CFN_StartupBackgroundMain` (`src/C4Startup.h`).
@@ -45,13 +45,9 @@ pub enum LoaderSampling {
 }
 
 /// Application-scale and point-filtering inputs to C++'s blit decision.
-///
-/// Rust's two-pass path supports integer application scales only: chrome is
-/// rendered in logical pixels, upscaled by the app, and native text is drawn
-/// afterward. Fractional scales are rejected instead of filtering text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoaderRenderConfig {
-    application_scale: u32,
+    application_scale: f32,
     point_filtering: bool,
 }
 
@@ -61,24 +57,20 @@ impl LoaderRenderConfig {
             application_scale.is_finite() && application_scale > 0.0,
             "classic loader application scale must be finite and positive"
         );
-        ensure!(
-            application_scale.fract() == 0.0 && application_scale <= u32::MAX as f32,
-            "classic loader native text requires an integer application scale, got {application_scale}"
-        );
         Ok(Self {
-            application_scale: application_scale as u32,
+            application_scale,
             point_filtering,
         })
     }
 
     pub const fn scale_one(point_filtering: bool) -> Self {
         Self {
-            application_scale: 1,
+            application_scale: 1.0,
             point_filtering,
         }
     }
 
-    pub const fn application_scale(self) -> u32 {
+    pub const fn application_scale(self) -> f32 {
         self.application_scale
     }
 
@@ -87,13 +79,13 @@ impl LoaderRenderConfig {
     }
 
     pub const fn uses_scaling_correction(self) -> bool {
-        self.application_scale != 1
+        self.application_scale != 1.0
     }
 
     /// `exact_blit` is C++'s per-call `fExact`: no transform and identical
     /// source-facet/target dimensions after scaling correction.
     pub const fn sampling(self, exact_blit: bool) -> LoaderSampling {
-        if self.application_scale != 1 || (!exact_blit && !self.point_filtering) {
+        if self.application_scale != 1.0 || (!exact_blit && !self.point_filtering) {
             LoaderSampling::Linear
         } else {
             LoaderSampling::Nearest
@@ -107,6 +99,18 @@ impl Default for LoaderRenderConfig {
         // GL_LINEAR even at application scale one.
         Self::scale_one(false)
     }
+}
+
+fn logical_extent_for(physical_extent: u32, scale: f32) -> u32 {
+    ((physical_extent as f32) / scale).ceil() as u32
+}
+
+/// CStdGL::UpdateClipper uses `ceil(logical * application_scale)` for the
+/// nominal viewport. The real framebuffer may be smaller because
+/// C4Application first rounded its logical resolution up.
+fn native_viewport_extent(logical_extent: u32, scale: f32) -> Option<u32> {
+    let scaled = logical_extent as f32 * scale;
+    (scaled.is_finite() && scaled > 0.0 && scaled <= u32::MAX as f32).then(|| scaled.ceil() as u32)
 }
 
 /// Why the loader was selected.  Both cases use exactly the same renderer;
@@ -517,7 +521,7 @@ impl LoaderScreen {
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
         ensure!(
-            config.application_scale() == 1,
+            config.application_scale() == 1.0,
             "classic loader logical text may only be rendered at application scale one"
         );
         self.validate_render_text()?;
@@ -599,9 +603,10 @@ impl LoaderScreen {
     }
 
     /// Draws loader text directly into an already-upscaled, possibly clipped
-    /// physical surface using scale-native CStdFont atlases. `logical_width/height` are
-    /// explicit because each physical dimension must round up to the matching
-    /// logical dimension when divided by the application scale.
+    /// physical surface using scale-native CStdFont atlases.
+    /// `logical_width/height` are explicit because each physical dimension
+    /// must round up to the matching logical dimension when divided by the
+    /// application scale.
     pub fn render_native_text(
         &self,
         surface: &mut Surface,
@@ -619,25 +624,28 @@ impl LoaderScreen {
             logical_width <= i32::MAX as u32 && logical_height <= i32::MAX as u32,
             "classic loader logical dimensions exceed C++ integer geometry"
         );
-        let expected_width = logical_width
-            .checked_mul(fonts.scale())
+        let scale = fonts.scale();
+        let expected_width = native_viewport_extent(logical_width, scale)
             .ok_or_else(|| anyhow::anyhow!("classic loader physical width overflow"))?;
-        let expected_height = logical_height
-            .checked_mul(fonts.scale())
+        let expected_height = native_viewport_extent(logical_height, scale)
             .ok_or_else(|| anyhow::anyhow!("classic loader physical height overflow"))?;
-        let minimum_width = expected_width - (fonts.scale() - 1);
-        let minimum_height = expected_height - (fonts.scale() - 1);
+        let physical_width_matches = logical_extent_for(surface.width(), scale) == logical_width;
+        let physical_height_matches = logical_extent_for(surface.height(), scale) == logical_height;
         ensure!(
-            (minimum_width..=expected_width).contains(&surface.width())
-                && (minimum_height..=expected_height).contains(&surface.height()),
-            "classic loader native text expected a physical surface no larger than {expected_width}x{expected_height} whose dimensions round up to {logical_width}x{logical_height} logical pixels at scale {}, got {}x{}",
-            fonts.scale(),
+            surface.width() <= expected_width
+                && surface.height() <= expected_height
+                && physical_width_matches
+                && physical_height_matches,
+            "classic loader native text expected a physical surface within a {expected_width}x{expected_height} viewport whose dimensions round up to {logical_width}x{logical_height} logical pixels at scale {scale}, got {}x{}",
             surface.width(),
             surface.height()
         );
-        let clipped_top = i32::try_from(expected_height - surface.height())
-            .map_err(|_| anyhow::anyhow!("classic loader viewport offset exceeds C++ integers"))?;
-        let physical_offset = (0, -clipped_top);
+        let projection = ClipperProjection::new(
+            scale,
+            (logical_width, logical_height),
+            surface.height(),
+            Rect::new(0, 0, logical_width, logical_height),
+        );
 
         let layout = loader_layout(
             logical_width as i32,
@@ -646,7 +654,7 @@ impl LoaderScreen {
             fonts.text.logical_line_height(),
             self.state.progress,
         );
-        fonts.title.draw_string_to_physical_surface_with_offset(
+        fonts.title.draw_string_to_physical_surface_with_clipper(
             surface,
             layout.title_anchor.0,
             layout.title_anchor.1,
@@ -654,11 +662,11 @@ impl LoaderScreen {
             TITLE_COLOR,
             TextAlign::Right,
             true,
-            physical_offset,
+            projection,
             gamma,
         );
         let progress = self.state.progress;
-        fonts.text.draw_string_to_physical_surface_with_offset(
+        fonts.text.draw_string_to_physical_surface_with_clipper(
             surface,
             layout.progress_text_anchor.0,
             layout.progress_text_anchor.1,
@@ -666,7 +674,7 @@ impl LoaderScreen {
             WHITE,
             TextAlign::Center,
             true,
-            physical_offset,
+            projection,
             gamma,
         );
 
@@ -687,7 +695,7 @@ impl LoaderScreen {
                 continue;
             }
             let extent = fonts.mini.measure(line, true);
-            fonts.mini.draw_to_physical_surface_with_offset(
+            fonts.mini.draw_to_physical_surface_with_clipper(
                 surface,
                 x,
                 y,
@@ -695,7 +703,7 @@ impl LoaderScreen {
                 WHITE,
                 TextAlign::Left,
                 true,
-                physical_offset,
+                projection,
                 gamma,
             );
             y += extent.1;
@@ -708,7 +716,7 @@ impl LoaderScreen {
             x,
             y,
             last_extent,
-            physical_offset,
+            projection,
             gamma,
         )
     }
@@ -919,7 +927,7 @@ fn draw_native_process_suffix(
     mut x: i32,
     mut y: i32,
     last_extent: Option<(i32, i32)>,
-    physical_offset: (i32, i32),
+    projection: ClipperProjection,
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
     let Some(process) = process else {
@@ -930,7 +938,7 @@ fn draw_native_process_suffix(
     })?;
     y -= last_height;
     x += last_width;
-    font.draw_to_physical_surface_with_offset(
+    font.draw_to_physical_surface_with_clipper(
         surface,
         x,
         y,
@@ -938,7 +946,7 @@ fn draw_native_process_suffix(
         WHITE,
         TextAlign::Left,
         true,
-        physical_offset,
+        projection,
         gamma,
     );
     Ok(())
@@ -1610,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn sampling_config_matches_stdgl_and_rejects_fractional_text_scale() {
+    fn sampling_config_matches_stdgl_at_integer_and_fractional_scales() {
         assert_eq!(
             LoaderRenderConfig::new(1.0, true).unwrap().sampling(false),
             LoaderSampling::Nearest
@@ -1629,10 +1637,13 @@ mod tests {
             LoaderRenderConfig::new(1.0, false).unwrap().sampling(true),
             LoaderSampling::Nearest
         );
-        assert_eq!(
-            LoaderRenderConfig::new(1.5, false).unwrap_err().to_string(),
-            "classic loader native text requires an integer application scale, got 1.5"
-        );
+        let fractional = LoaderRenderConfig::new(1.5, true).expect("fractional scale");
+        assert_eq!(fractional.application_scale(), 1.5);
+        assert!(fractional.uses_scaling_correction());
+        assert_eq!(fractional.sampling(true), LoaderSampling::Linear);
+        for scale in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+            assert!(LoaderRenderConfig::new(scale, false).is_err());
+        }
     }
 
     #[test]
@@ -2188,7 +2199,7 @@ mod tests {
                 .render_native_text(&mut wrong_size, &native, 320, 240, None)
                 .unwrap_err()
                 .to_string(),
-            "classic loader native text expected a physical surface no larger than 640x480 whose dimensions round up to 320x240 logical pixels at scale 2, got 641x480"
+            "classic loader native text expected a physical surface within a 640x480 viewport whose dimensions round up to 320x240 logical pixels at scale 2, got 641x480"
         );
         let mut too_short = Surface::new(638, 480, PixelFormat::Rgba8888);
         assert_eq!(
@@ -2196,7 +2207,7 @@ mod tests {
                 .render_native_text(&mut too_short, &native, 320, 240, None)
                 .unwrap_err()
                 .to_string(),
-            "classic loader native text expected a physical surface no larger than 640x480 whose dimensions round up to 320x240 logical pixels at scale 2, got 638x480"
+            "classic loader native text expected a physical surface within a 640x480 viewport whose dimensions round up to 320x240 logical pixels at scale 2, got 638x480"
         );
     }
 
@@ -2216,6 +2227,32 @@ mod tests {
             .expect("the top two rows of the 3x viewport are clipped");
 
         assert_ne!(physical.pixels(), before.as_slice());
+    }
+
+    #[test]
+    fn fractional_native_text_uses_ceil_viewport_and_logical_resolution_rules() {
+        // 321 * 1.5 and 241 * 1.5 are fractional, so CStdGL installs a
+        // 482x362 viewport. A 481x361 framebuffer still maps back to the
+        // caller's 321x241 logical resolution and clips one top/right pixel.
+        assert_eq!(native_viewport_extent(321, 1.5), Some(482));
+        assert_eq!(native_viewport_extent(241, 1.5), Some(362));
+        assert_eq!(logical_extent_for(481, 1.5), 321);
+        assert_eq!(logical_extent_for(361, 1.5), 241);
+
+        let loader = synthetic_screen(LoaderState::initial("Loading..."), [40, 60, 80, 255]);
+        let native =
+            build_native_font_set(&endeavour_bytes(), 1.5_f32).expect("fractional native fonts");
+        let mut physical = Surface::new(481, 361, PixelFormat::Rgba8888);
+        let before = physical.pixels().to_vec();
+        loader
+            .render_native_text(&mut physical, &native, 321, 241, None)
+            .expect("fractional native loader text");
+        assert_ne!(physical.pixels(), before.as_slice());
+
+        let mut wrong_logical_width = Surface::new(480, 361, PixelFormat::Rgba8888);
+        assert!(loader
+            .render_native_text(&mut wrong_logical_width, &native, 321, 241, None)
+            .is_err());
     }
 
     #[test]

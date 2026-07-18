@@ -11,12 +11,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
 use lc_graphics::clonk_font::TextAlign;
-use lc_graphics::{GammaRamp, PixelFormat, Surface};
+#[cfg(test)]
+use lc_graphics::PixelFormat;
+use lc_graphics::{GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 
 use crate::classic_gui::{
-    blacken_transparent_pixels, draw_3d_frame, draw_clipped_text, draw_engine_box,
-    draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect, STANDARD_BACKGROUND_COLOR,
+    blacken_transparent_pixels, draw_3d_frame, draw_engine_box, draw_facet_stretch,
+    ClassicButtonState, ClassicGuiSkin, IntRect, STANDARD_BACKGROUND_COLOR,
 };
 use crate::context_menu::draw_classic_tooltip;
 use crate::game_option_buttons::{
@@ -3115,6 +3117,37 @@ impl GameLobby {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
+        self.render_without_tooltips(
+            surface,
+            resources,
+            option_buttons,
+            option_resources,
+            active,
+            gamma,
+        )?;
+        self.render_tooltips(
+            surface,
+            resources,
+            option_buttons,
+            option_resources,
+            active,
+            gamma,
+        )
+    }
+
+    /// Draw the complete lobby except its final option/lobby tooltip pass.
+    /// Ordered native-text presentation commits this phase before drawing a
+    /// tooltip so the tooltip chrome can occlude all earlier text like C++.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_without_tooltips(
+        &mut self,
+        surface: &mut Surface,
+        resources: &LobbyResources<'_>,
+        option_buttons: &GameOptionButtons,
+        option_resources: &GameOptionButtonResources<'_>,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
         let now = Instant::now();
         self.client_sound_status.retain(|_, (_, started)| {
             now.checked_duration_since(*started)
@@ -3269,8 +3302,40 @@ impl GameLobby {
             );
         }
         self.draw_ready(surface, &layout, resources, active, gamma);
+        Ok(())
+    }
+
+    /// Draw the final tooltip pass after [`Self::render_without_tooltips`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tooltips(
+        &mut self,
+        surface: &mut Surface,
+        resources: &LobbyResources<'_>,
+        option_buttons: &GameOptionButtons,
+        option_resources: &GameOptionButtonResources<'_>,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        resources.validate()?;
+        let layout = self.layout(
+            i32::try_from(surface.width()).unwrap_or(i32::MAX),
+            i32::try_from(surface.height()).unwrap_or(i32::MAX),
+            resources.fonts,
+        );
+        ensure!(
+            option_buttons.context() == self.role.game_option_context(),
+            "lobby game-option context does not match {:?}",
+            self.role
+        );
+        ensure!(
+            option_buttons.layout().bounds == layout.game_option_strip,
+            "lobby game-option strip must use exact bounds {:?}; got {:?}",
+            layout.game_option_strip,
+            option_buttons.layout().bounds
+        );
         option_buttons.render_tooltip(surface, option_resources, active, gamma)?;
         if active {
+            let roster = self.roster_layout(&layout, resources.fonts.text.line_height);
             if let Some(tooltip) =
                 self.tooltip_state_with_roster_at(Instant::now(), &roster, &resources.fonts.text)
             {
@@ -3839,6 +3904,21 @@ fn draw_edit(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn draw_clipped_text(
+    surface: &mut Surface,
+    font: &lc_graphics::clonk_font::ClonkFont,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: [u8; 4],
+    align: TextAlign,
+    gamma: Option<&GammaRamp>,
+    clip: IntRect,
+) {
+    draw_clipped_text_mode(surface, font, x, y, text, color, align, gamma, clip, true);
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_clipped_text_mode(
     surface: &mut Surface,
     font: &lc_graphics::clonk_font::ClonkFont,
@@ -3851,42 +3931,32 @@ fn draw_clipped_text_mode(
     clip: IntRect,
     markup: bool,
 ) {
-    if markup {
-        draw_clipped_text(surface, font, x, y, text, color, align, gamma, clip);
-        return;
+    let previous = surface.clip();
+    let mut left = i64::from(clip.x).max(0);
+    let mut top = i64::from(clip.y).max(0);
+    let mut right = (i64::from(clip.x) + i64::from(clip.w.max(0)))
+        .min(i64::from(surface.width().min(i32::MAX as u32)));
+    let mut bottom = (i64::from(clip.y) + i64::from(clip.h.max(0)))
+        .min(i64::from(surface.height().min(i32::MAX as u32)));
+    if let Some(existing) = previous {
+        left = left.max(i64::from(existing.x));
+        top = top.max(i64::from(existing.y));
+        right = right.min(i64::from(existing.x) + i64::from(existing.width));
+        bottom = bottom.min(i64::from(existing.y) + i64::from(existing.height));
     }
-    let left = clip.x.max(0);
-    let top = clip.y.max(0);
-    let right = (clip.x + clip.w).min(surface.width() as i32);
-    let bottom = (clip.y + clip.h).min(surface.height() as i32);
-    if left >= right || top >= bottom {
-        return;
+    if left < right && top < bottom {
+        surface.set_clip(lc_graphics::Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ));
+        font.draw_with_gamma(surface, x, y, text, color, align, markup, gamma);
     }
-    let (width, height) = ((right - left) as u32, (bottom - top) as u32);
-    let mut scratch = Surface::new(width, height, PixelFormat::Rgba8888);
-    for target_y in 0..height {
-        for target_x in 0..width {
-            if let Some(pixel) = surface.get_pixel(left as u32 + target_x, top as u32 + target_y) {
-                let _ = scratch.set_pixel(target_x, target_y, pixel);
-            }
-        }
-    }
-    font.draw_with_gamma(
-        &mut scratch,
-        x - left,
-        y - top,
-        text,
-        color,
-        align,
-        false,
-        gamma,
-    );
-    for target_y in 0..height {
-        for target_x in 0..width {
-            if let Some(pixel) = scratch.get_pixel(target_x, target_y) {
-                let _ = surface.set_pixel(left as u32 + target_x, top as u32 + target_y, pixel);
-            }
-        }
+    if let Some(existing) = previous {
+        surface.set_clip(existing);
+    } else {
+        surface.clear_clip();
     }
 }
 
@@ -4294,6 +4364,42 @@ mod tests {
             icon: LobbyRosterIcon::Standard(7),
             can_add_player,
         })
+    }
+
+    #[test]
+    fn clipped_lobby_text_capture_keeps_global_coordinates_and_effective_clip() {
+        let fonts = endeavour_font_set();
+        let mut surface = Surface::new(40, 30, PixelFormat::Rgba8888);
+        let outer = lc_graphics::Rect::new(5, 2, 20, 20);
+        surface.set_clip(outer);
+        surface.begin_clonk_text_capture();
+
+        draw_clipped_text_mode(
+            &mut surface,
+            &fonts.text,
+            7,
+            6,
+            "Lobby",
+            COLOR_WHITE,
+            TextAlign::Left,
+            None,
+            IntRect {
+                x: 2,
+                y: 4,
+                w: 10,
+                h: 10,
+            },
+            false,
+        );
+
+        assert_eq!(surface.clip(), Some(outer));
+        assert!(surface.pixels().iter().all(|byte| *byte == 0));
+        let commands = surface.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].x, 7);
+        assert_eq!(commands[0].y, 6);
+        assert!(!commands[0].markup);
+        assert_eq!(commands[0].clip, Some(lc_graphics::Rect::new(5, 4, 7, 10)));
     }
 
     #[test]

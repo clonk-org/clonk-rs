@@ -339,14 +339,30 @@ mod tests {
     }
 
     #[test]
-    fn loader_scale_validation_rejects_nonpositive_fractional_and_overflow() {
-        for percent in [0, -100, 150] {
+    fn loader_scale_validation_accepts_fractional_and_rejects_nonpositive_or_overflow() {
+        for percent in [0, -100] {
             let mut cfg = Config::new();
             cfg.set_in(Some("Graphics"), "Scale", percent.to_string());
             let mut options = DisplayOptions::default();
             options.apply_config(&cfg);
             assert!(options.checked_loader_actual_size().is_err());
         }
+
+        let mut fractional = Config::new();
+        fractional.set_in(Some("Graphics"), "ResolutionX", "320");
+        fractional.set_in(Some("Graphics"), "ResolutionY", "200");
+        fractional.set_in(Some("Graphics"), "Scale", "150");
+        let mut options = DisplayOptions::default();
+        options.apply_config(&fractional);
+        assert_eq!(options.checked_loader_actual_size(), Ok((480, 300)));
+
+        let mut tiny = Config::new();
+        tiny.set_in(Some("Graphics"), "ResolutionX", "1");
+        tiny.set_in(Some("Graphics"), "ResolutionY", "1");
+        tiny.set_in(Some("Graphics"), "Scale", "1");
+        let mut options = DisplayOptions::default();
+        options.apply_config(&tiny);
+        assert_eq!(options.checked_loader_actual_size(), Ok((1, 1)));
 
         let mut cfg = Config::new();
         cfg.set_in(Some("Graphics"), "ResolutionX", i32::MAX.to_string());
@@ -491,26 +507,27 @@ impl DisplayOptions {
                 self.scale_percent
             ));
         }
-        if self.scale_percent % 100 != 0 {
-            return Err(format!(
-                "classic loader requires an integer application scale, got {}%",
-                self.scale_percent
-            ));
-        }
-        let multiplier = u32::try_from(self.scale_percent / 100)
+        let percent = u64::try_from(self.scale_percent)
             .map_err(|_| "classic loader application scale is out of range".to_string())?;
-        let width = self.base_width.checked_mul(multiplier).ok_or_else(|| {
+        let scaled = |extent: u32, axis: &str| {
+            u64::from(extent)
+                .checked_mul(percent)
+                .map(|value| (value / 100).max(u64::from(MIN_RESOLUTION)))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "classic loader output {axis} overflows: {extent} * {}%",
+                        self.scale_percent
+                    )
+                })
+        };
+        let width = scaled(self.base_width, "width").map_err(|_| {
             format!(
-                "classic loader output width overflows: {} * {}",
-                self.base_width, multiplier
+                "classic loader output width overflows: {} * {}%",
+                self.base_width, self.scale_percent
             )
         })?;
-        let height = self.base_height.checked_mul(multiplier).ok_or_else(|| {
-            format!(
-                "classic loader output height overflows: {} * {}",
-                self.base_height, multiplier
-            )
-        })?;
+        let height = scaled(self.base_height, "height")?;
         Ok((width, height))
     }
 

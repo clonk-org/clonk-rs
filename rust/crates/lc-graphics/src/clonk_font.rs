@@ -16,7 +16,7 @@
 //!   semantics but render unsheared (no transform support).
 //! - FreeType rasterization: callers supply the 8-bit coverage bitmap.
 
-use crate::{Color, Surface};
+use crate::{Color, GammaRamp, Rect, Surface};
 use std::collections::HashMap;
 
 /// Line height in pixels for a vector font, mirroring `CStdFont::Init`:
@@ -220,6 +220,51 @@ pub enum TextAlign {
     Right,
 }
 
+/// Semantic identity of a classic font face used by native-text replay.
+///
+/// GUI and book roles remain distinct even when they share a nominal point
+/// size: C++ initializes the book faces without the ordinary GUI shadow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClonkFontRole {
+    GuiTitle,
+    GuiCaption,
+    GuiText,
+    GuiMainSmall,
+    GuiMini,
+    GuiTooltip,
+    BookTitle,
+    BookCaption,
+    BookText,
+    BookSmall,
+}
+
+/// One semantic CStdFont draw captured before logical glyph rasterization.
+///
+/// The command owns its text and gamma ramp so it may outlive the renderer's
+/// borrowed arguments and be replayed later against a scale-native atlas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedClonkText {
+    pub role: ClonkFontRole,
+    pub x: i32,
+    pub y: i32,
+    pub text: String,
+    pub color: [u8; 4],
+    pub align: TextAlign,
+    pub markup: bool,
+    pub clip: Option<Rect>,
+    pub gamma: Option<GammaRamp>,
+    pub images: Vec<CapturedFontImage>,
+}
+
+/// Owned inline image referenced by a captured `{{TextSpec}}` run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFontImage {
+    pub tag: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// A bitmap font equivalent to an initialized shadowed `CStdFont`
 /// (`CStdFont::Init`, `src/StdFont.cpp:319-358`, `fDoShadow = true`).
 #[derive(Debug, Clone)]
@@ -237,6 +282,9 @@ pub struct ClonkFont {
     /// the active charmap has no entry for a decoded scalar. C++ obtains this
     /// through `FT_Load_Char` in `GetUnicodeCharacterFacet`.
     missing_glyph: Option<GlyphCell>,
+    /// Replay identity for engine-wide scale-native text capture. Untagged
+    /// fonts retain the historical immediate-raster behavior.
+    role: Option<ClonkFontRole>,
 }
 
 impl ClonkFont {
@@ -249,7 +297,24 @@ impl ClonkFont {
             h_space: -1,
             cells: HashMap::new(),
             missing_glyph: None,
+            role: None,
         }
+    }
+
+    /// The semantic replay role, if this font participates in capture.
+    pub fn role(&self) -> Option<ClonkFontRole> {
+        self.role
+    }
+
+    /// Assign or clear this font's semantic replay role.
+    pub fn set_role(&mut self, role: Option<ClonkFontRole>) {
+        self.role = role;
+    }
+
+    /// Builder-style counterpart of [`Self::set_role`].
+    pub fn with_role(mut self, role: ClonkFontRole) -> Self {
+        self.role = Some(role);
+        self
     }
 
     /// Register the glyph cell for `ch` (mirrors the per-character facets
@@ -476,6 +541,49 @@ impl ClonkFont {
         gamma: Option<&crate::GammaRamp>,
         images: Option<&dyn FontImageProvider>,
     ) {
+        if let Some(role) = self.role {
+            let mut captured_images = Vec::new();
+            if let Some(provider) = images {
+                let mut rest = text;
+                while let Some(character) = rest.chars().next() {
+                    if let Some((tag, advance)) = inline_image_token(rest) {
+                        let lookup = font_image_lookup_tag(tag);
+                        if !captured_images
+                            .iter()
+                            .any(|image: &CapturedFontImage| image.tag == lookup)
+                        {
+                            if let Some(image) = provider.font_image(lookup) {
+                                captured_images.push(CapturedFontImage {
+                                    tag: lookup.to_owned(),
+                                    width: image.width,
+                                    height: image.height,
+                                    rgba: image.rgba.to_vec(),
+                                });
+                            }
+                        }
+                        rest = &rest[advance..];
+                    } else {
+                        rest = &rest[character.len_utf8()..];
+                    }
+                }
+            }
+            let command = CapturedClonkText {
+                role,
+                x,
+                y,
+                text: text.to_owned(),
+                color,
+                align,
+                markup,
+                clip: surface.clip(),
+                gamma: gamma.cloned(),
+                images: captured_images,
+            };
+            if surface.capture_clonk_text(command) {
+                return;
+            }
+        }
+
         let mut stack: Vec<MarkupTag> = Vec::new(); // src/StdDDraw2.cpp:1037
         let mut line_y = y;
         for line in text.split(|c: char| c == '\n' || (markup && c == '|')) {
@@ -1358,6 +1466,137 @@ mod tests {
         assert_eq!(px(&sfc, 8, 0).a, 0);
         assert_eq!(px(&sfc, 0, 3), Color::new(255, 255, 255, 255)); // cell row 3
         assert_eq!(px(&sfc, 0, 4).a, 0); // below cell_height
+    }
+
+    #[test]
+    fn semantic_role_does_not_change_font_metrics() {
+        let mut font = test_font();
+        let before = (
+            font.measure("AB", false),
+            font.line_height,
+            font.cell_height,
+            font.h_space,
+        );
+
+        font.set_role(Some(ClonkFontRole::GuiText));
+
+        assert_eq!(font.role(), Some(ClonkFontRole::GuiText));
+        assert_eq!(
+            (
+                font.measure("AB", false),
+                font.line_height,
+                font.cell_height,
+                font.h_space,
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn capture_suppresses_tagged_pixels_and_owns_draw_state() {
+        let font = test_font().with_role(ClonkFontRole::GuiText);
+        let gamma = crate::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let clip = Rect::new(1, 2, 7, 4);
+        let mut sfc = surface();
+        sfc.set_clip(clip);
+        sfc.begin_clonk_text_capture();
+
+        font.draw_with_gamma(
+            &mut sfc,
+            8,
+            3,
+            "<c ff0000>AB</c>",
+            [11, 22, 33, 44],
+            TextAlign::Center,
+            true,
+            Some(&gamma),
+        );
+
+        assert!(sfc.pixels().iter().all(|byte| *byte == 0));
+        let commands = sfc.take_clonk_text_capture();
+        assert_eq!(
+            commands,
+            vec![CapturedClonkText {
+                role: ClonkFontRole::GuiText,
+                x: 8,
+                y: 3,
+                text: "<c ff0000>AB</c>".to_string(),
+                color: [11, 22, 33, 44],
+                align: TextAlign::Center,
+                markup: true,
+                clip: Some(clip),
+                gamma: Some(gamma),
+                images: Vec::new(),
+            }]
+        );
+        assert!(!sfc.is_clonk_text_capture_active());
+    }
+
+    #[test]
+    fn capture_retains_draw_order() {
+        let text = test_font().with_role(ClonkFontRole::GuiText);
+        let caption = test_font().with_role(ClonkFontRole::GuiCaption);
+        let mut sfc = surface();
+        sfc.begin_clonk_text_capture();
+
+        text.draw(&mut sfc, 1, 2, "first", WHITE, TextAlign::Left, false);
+        caption.draw(&mut sfc, 3, 4, "second", WHITE, TextAlign::Right, false);
+
+        let commands = sfc.take_clonk_text_capture();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].role, ClonkFontRole::GuiText);
+        assert_eq!(commands[0].text, "first");
+        assert_eq!(commands[1].role, ClonkFontRole::GuiCaption);
+        assert_eq!(commands[1].text, "second");
+    }
+
+    #[test]
+    fn capture_owns_inline_images_for_later_native_replay() {
+        let font = test_font().with_role(ClonkFontRole::GuiText);
+        let images = TestImages {
+            tag: "FLAM",
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+        };
+        let mut sfc = surface();
+        sfc.begin_clonk_text_capture();
+        font.draw_with_images(
+            &mut sfc,
+            0,
+            0,
+            "{{FLAM}}A{{FLAM}}",
+            WHITE,
+            TextAlign::Left,
+            true,
+            &images,
+        );
+
+        let commands = sfc.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].images,
+            vec![CapturedFontImage {
+                tag: "FLAM".to_string(),
+                width: 2,
+                height: 1,
+                rgba: images.rgba,
+            }]
+        );
+    }
+
+    #[test]
+    fn untagged_font_still_draws_while_capture_is_active() {
+        let font = test_font();
+        let mut sfc = surface();
+        sfc.begin_clonk_text_capture();
+
+        font.draw(&mut sfc, 0, 0, "A", WHITE, TextAlign::Left, false);
+
+        assert_eq!(px(&sfc, 0, 0), Color::opaque(255, 255, 255));
+        assert!(sfc.take_clonk_text_capture().is_empty());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use lc_engine::{
 use lc_frontend::clonk_fonts::NativeClonkFont;
 use lc_frontend::ImageData;
 use lc_graphics::clonk_font::{ClonkFont, FontImageProvider, TextAlign};
-use lc_graphics::{GammaRamp, Rect, Surface};
+use lc_graphics::{ClipperProjection, GammaRamp, Rect, Surface};
 use lc_gui::Rect as GuiRect;
 
 const DRAW_MESSAGE_OFFSET: i32 = -35;
@@ -107,14 +107,13 @@ pub(crate) fn draw_global_message(
 /// Commit one complete scale-native message to the already-presented physical
 /// framebuffer. Keeping frame, portrait and glyphs in this one pass preserves
 /// C++ insertion order when messages overlap. Coordinates remain GUI logical;
-/// `physical_offset` represents rows clipped from the top of C++'s lower-left
-/// anchored GL viewport.
+/// each viewport uses C++'s independently rounded GL clipper projection.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_global_message_native(
     surface: &mut Surface,
     native_font: &NativeClonkFont,
-    scale: u32,
-    physical_offset: (i32, i32),
+    scale: f32,
+    logical_target_size: (u32, u32),
     viewport: Rect,
     message: &MessageSnapshot,
     decoration: Option<&ObjectMenuFrameDecoration>,
@@ -131,24 +130,23 @@ pub(crate) fn draw_global_message_native(
         images,
     )?;
     let previous_clip = surface.clip();
-    let viewport_clip = physical_rect(viewport, scale, physical_offset);
-    set_nested_clip(surface, previous_clip, viewport_clip);
+    let projection = ClipperProjection::new(scale, logical_target_size, surface.height(), viewport);
+    set_nested_clip(surface, previous_clip, projection.physical_clip());
     if let (Some(frame), Some(decoration)) = (layout.frame, decoration) {
         draw_native_decoration(
             surface,
             frame,
-            scale,
-            physical_offset,
+            projection,
             decoration,
             decoration_image,
             gamma,
         );
     }
     if let (Some(rect), Some(portrait)) = (layout.portrait.as_ref(), portrait) {
-        let rect = physical_gui_rect(rect, scale, physical_offset);
+        let rect = projected_gui_rect(rect, projection);
         lc_frontend::draw_image_bilinear(surface, &rect, portrait, gamma);
     }
-    native_font.draw_to_physical_surface_with_offset_and_images(
+    native_font.draw_to_physical_surface_with_clipper_and_images(
         surface,
         layout.text_x,
         layout.text_y,
@@ -156,7 +154,7 @@ pub(crate) fn draw_global_message_native(
         layout.color,
         layout.alignment,
         true,
-        physical_offset,
+        projection,
         gamma,
         images,
     );
@@ -363,23 +361,37 @@ fn restore_clip(surface: &mut Surface, previous: Option<Rect>) {
     }
 }
 
-fn physical_rect(rect: Rect, scale: u32, offset: (i32, i32)) -> Rect {
-    let scale_i32 = i32::try_from(scale).unwrap_or(i32::MAX);
+fn projected_rect(rect: Rect, projection: ClipperProjection) -> Rect {
+    let clamp = |value: f64| value.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    let (left, top) = projection.logical_to_physical(f64::from(rect.x), f64::from(rect.y));
+    let (right, bottom) = projection.logical_to_physical(
+        (i64::from(rect.x) + i64::from(rect.width)) as f64,
+        (i64::from(rect.y) + i64::from(rect.height)) as f64,
+    );
+    let left = clamp(left.floor());
+    let top = clamp(top.floor());
+    let right = clamp(right.ceil());
+    let bottom = clamp(bottom.ceil());
     Rect::new(
-        rect.x.saturating_mul(scale_i32).saturating_add(offset.0),
-        rect.y.saturating_mul(scale_i32).saturating_add(offset.1),
-        rect.width.saturating_mul(scale),
-        rect.height.saturating_mul(scale),
+        left,
+        top,
+        right.saturating_sub(left).max(0) as u32,
+        bottom.saturating_sub(top).max(0) as u32,
     )
 }
 
-fn physical_gui_rect(rect: &GuiRect, scale: u32, offset: (i32, i32)) -> GuiRect {
-    let scale = scale as f32;
+fn projected_gui_rect(rect: &GuiRect, projection: ClipperProjection) -> GuiRect {
+    let (left, top) =
+        projection.logical_to_physical(f64::from(rect.origin.x), f64::from(rect.origin.y));
+    let (right, bottom) = projection.logical_to_physical(
+        f64::from(rect.origin.x + rect.size.width),
+        f64::from(rect.origin.y + rect.size.height),
+    );
     GuiRect::new(
-        rect.origin.x * scale + offset.0 as f32,
-        rect.origin.y * scale + offset.1 as f32,
-        rect.size.width * scale,
-        rect.size.height * scale,
+        left as f32,
+        top as f32,
+        (right - left) as f32,
+        (bottom - top) as f32,
     )
 }
 
@@ -387,13 +399,12 @@ fn physical_gui_rect(rect: &GuiRect, scale: u32, offset: (i32, i32)) -> GuiRect 
 fn draw_native_decoration(
     surface: &mut Surface,
     bounds: Rect,
-    scale: u32,
-    physical_offset: (i32, i32),
+    projection: ClipperProjection,
     decoration: &ObjectMenuFrameDecoration,
     image: Option<&ImageData>,
     gamma: Option<&GammaRamp>,
 ) {
-    let physical_bounds = physical_rect(bounds, scale, physical_offset);
+    let physical_bounds = projected_rect(bounds, projection);
     if physical_bounds.width == 0 || physical_bounds.height == 0 {
         return;
     }
@@ -415,7 +426,6 @@ fn draw_native_decoration(
     let Some(image) = image else {
         return;
     };
-    let scale_i32 = i32::try_from(scale).unwrap_or(i32::MAX);
     let width = extent_i32(bounds.width);
     let height = extent_i32(bounds.height);
     let mut draw_facet = |facet: &lc_engine::DefinitionActionFacet,
@@ -426,12 +436,11 @@ fn draw_native_decoration(
         if draw_width <= 0 || draw_height <= 0 {
             return;
         }
-        let target_x = x
-            .saturating_mul(scale_i32)
-            .saturating_add(physical_offset.0);
-        let target_y = y
-            .saturating_mul(scale_i32)
-            .saturating_add(physical_offset.1);
+        let (target_x, target_y) = projection.logical_to_physical(f64::from(x), f64::from(y));
+        let (target_right, target_bottom) = projection.logical_to_physical(
+            f64::from(x.saturating_add(draw_width)),
+            f64::from(y.saturating_add(draw_height)),
+        );
         lc_frontend::classic_gui::draw_facet_stretch(
             surface,
             image,
@@ -444,8 +453,8 @@ fn draw_native_decoration(
             (
                 target_x as f32,
                 target_y as f32,
-                draw_width.saturating_mul(scale_i32) as f32,
-                draw_height.saturating_mul(scale_i32) as f32,
+                (target_right - target_x) as f32,
+                (target_bottom - target_y) as f32,
             ),
             gamma,
         );
@@ -614,7 +623,7 @@ mod tests {
             .expect("build scale-three FontRegular");
         assert_eq!(
             fonts.text.measure("Welcome to the world of Clonk.", true),
-            (196, 22)
+            (195, 22)
         );
         let decoration = ObjectMenuFrameDecoration {
             source_definition: "DECO".to_string(),
@@ -672,7 +681,7 @@ mod tests {
             &images,
         )
         .expect("layout Tutorial01 at the reported 1152x644 logical surface");
-        assert_eq!(reported_layout.frame, Some(Rect::new(576, 106, 280, 64)));
+        assert_eq!(reported_layout.frame, Some(Rect::new(576, 106, 279, 64)));
         assert_eq!((reported_layout.text_x, reported_layout.text_y), (650, 106));
         assert_eq!(reported_layout.text, "Welcome to the world of Clonk.");
     }

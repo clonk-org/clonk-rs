@@ -2619,7 +2619,9 @@ mod tests {
         }
         assert_eq!(
             (changed, bounds, hash),
-            (114, (545, 363, 550, 382), 0x3311_cf88_ae80_dc28)
+            // The dialog is rendered on transparent black here; ordered
+            // layers now retain source-over alpha instead of forcing A=255.
+            (114, (545, 363, 550, 382), 0xe279_9eba_5278_c371)
         );
     }
 

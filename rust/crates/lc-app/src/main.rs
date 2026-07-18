@@ -461,6 +461,7 @@ struct ScenarioLoadingState {
     scenario: FrontendScenario,
     refreshed_resources: Option<LoaderResources>,
     refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
+    refreshed_native_font_source: Option<ClassicNativeFontSource>,
     refreshed_global_gui_overrides: Option<HashMap<&'static str, String>>,
     refresh_requested: bool,
     receiver: Receiver<ScenarioLoadingEvent>,
@@ -479,6 +480,7 @@ impl ScenarioLoadingState {
         Self {
             refreshed_resources: Some(refreshed_resources),
             refreshed_tooltip_font: None,
+            refreshed_native_font_source: None,
             refreshed_global_gui_overrides: Some(refreshed_global_gui_overrides),
             refresh_requested: false,
             scenario,
@@ -507,6 +509,7 @@ impl ScenarioLoadingState {
             scenario,
             refreshed_resources: None,
             refreshed_tooltip_font: None,
+            refreshed_native_font_source: None,
             refreshed_global_gui_overrides: None,
             refresh_requested: false,
             receiver,
@@ -544,8 +547,10 @@ impl BootLoadingState {
 struct ClassicLoaderSetup {
     screen: LoaderScreen,
     initial_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
+    initial_native_font_source: Option<ClassicNativeFontSource>,
     refreshed_resources: LoaderResources,
     refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
+    refreshed_native_font_source: Option<ClassicNativeFontSource>,
     refreshed_global_gui_overrides: HashMap<&'static str, String>,
     scenario_title: Option<String>,
 }
@@ -1344,6 +1349,15 @@ fn decode_selected_loader(source: &SelectedLoaderSource) -> Result<ImageData> {
 struct ClassicFontBundle {
     fonts: Arc<lc_frontend::ClonkFontSet>,
     tooltip: Arc<lc_graphics::clonk_font::ClonkFont>,
+    /// One vector face that exactly matches the fixed role recipe supported by
+    /// `build_native_font_set`. Arbitrary FontDefs and bitmap mappings remain
+    /// logical-only until the native renderer accepts per-role recipes.
+    native_source: Option<ClassicNativeFontSource>,
+}
+
+#[derive(Clone)]
+struct ClassicNativeFontSource {
+    bytes: Arc<[u8]>,
 }
 
 fn classic_font_request(paths: &AppPaths, scenario_font: Option<&str>) -> Result<(String, i32)> {
@@ -1390,27 +1404,6 @@ fn load_classic_font_catalog(
     Ok(catalog)
 }
 
-fn classic_startup_font_is_canonical(paths: &AppPaths) -> bool {
-    let Ok((request, size)) = classic_font_request(paths, None) else {
-        return false;
-    };
-    if request != "Endeavour" || size != 14 {
-        return false;
-    }
-    let Ok(registrations) = startup_loader_registrations(paths) else {
-        return false;
-    };
-    if !registrations.is_empty() {
-        return false;
-    }
-    load_classic_font_catalog(paths, &registrations).is_ok_and(|catalog| {
-        !catalog
-            .definitions()
-            .iter()
-            .any(|font| font.name == request)
-    })
-}
-
 fn build_classic_font_spec(
     spec: ResolvedFontSpec,
     registrations: &[LoaderGroupRegistration],
@@ -1452,6 +1445,38 @@ fn build_classic_font_spec(
     }
 }
 
+fn matching_native_font_source(
+    title: &ResolvedFontSpec,
+    caption: &ResolvedFontSpec,
+    text: &ResolvedFontSpec,
+    main_small: Option<&ResolvedFontSpec>,
+    mini: &ResolvedFontSpec,
+    tooltip: &ResolvedFontSpec,
+) -> Option<ClassicNativeFontSource> {
+    let vector_bytes = |spec: &ResolvedFontSpec, expected_size: i32| match spec {
+        ResolvedFontSpec::Vector {
+            bytes: Some(bytes),
+            size,
+            weight,
+            ..
+        } if *size == expected_size && *weight == 400 => Some(bytes.clone()),
+        _ => None,
+    };
+    let sources = [
+        vector_bytes(title, 22)?,
+        vector_bytes(caption, 16)?,
+        vector_bytes(text, 14)?,
+        vector_bytes(main_small?, 13)?,
+        vector_bytes(mini, 12)?,
+        vector_bytes(tooltip, 14)?,
+    ];
+    let bytes = sources[0].clone();
+    sources
+        .iter()
+        .all(|candidate| candidate.as_ref() == bytes.as_ref())
+        .then_some(ClassicNativeFontSource { bytes })
+}
+
 fn resolve_classic_font_bundle(
     paths: &AppPaths,
     scenario_font: Option<&str>,
@@ -1461,8 +1486,8 @@ fn resolve_classic_font_bundle(
     let (request, base_size) = classic_font_request(paths, scenario_font)?;
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
-    let build = |role, apply_definition, shadow| {
-        let spec = catalog
+    let resolve = |role, apply_definition| {
+        catalog
             .resolve(&request, base_size, role, apply_definition)
             .with_context(|| {
                 format!(
@@ -1475,25 +1500,48 @@ fn resolve_classic_font_bundle(
                         FontRole::Title => "TitleFont",
                     }
                 )
-            })?;
-        build_classic_font_spec(spec, graphics_registrations, &graphics, shadow)
+            })
     };
-    let text = build(FontRole::Main, true, true)?;
+    let build = |spec: &ResolvedFontSpec, shadow| {
+        build_classic_font_spec(spec.clone(), graphics_registrations, &graphics, shadow)
+    };
+    let text_spec = resolve(FontRole::Main, true)?;
+    let title_spec = resolve(FontRole::Title, true)?;
+    let caption_spec = resolve(FontRole::Caption, true)?;
+    let mini_spec = resolve(FontRole::Log, true)?;
+    let tooltip_spec = resolve(FontRole::Main, false)?;
+    use lc_graphics::clonk_font::ClonkFontRole;
+    let text = build(&text_spec, true)?.with_role(ClonkFontRole::GuiText);
     // C4GraphicsResource never requests C4FT_MainSmall. Populate the Rust
     // compatibility slot at the derived raw size when possible, but never
     // make a valid logical FontDef alias depend on a same-named vector face.
-    let main_small = build(FontRole::MainSmall, false, true).unwrap_or_else(|_| text.clone());
+    let (main_small, main_small_spec) = match resolve(FontRole::MainSmall, false)
+        .and_then(|spec| build(&spec, true).map(|font| (font, Some(spec))))
+    {
+        Ok(pair) => pair,
+        Err(_) => (text.clone(), None),
+    };
+    let main_small = main_small.with_role(ClonkFontRole::GuiMainSmall);
+    let native_source = matching_native_font_source(
+        &title_spec,
+        &caption_spec,
+        &text_spec,
+        main_small_spec.as_ref(),
+        &mini_spec,
+        &tooltip_spec,
+    );
     let fonts = lc_frontend::ClonkFontSet {
-        title: build(FontRole::Title, true, true)?,
-        caption: build(FontRole::Caption, true, true)?,
+        title: build(&title_spec, true)?.with_role(ClonkFontRole::GuiTitle),
+        caption: build(&caption_spec, true)?.with_role(ClonkFontRole::GuiCaption),
         text,
         main_small,
-        mini: build(FontRole::Log, true, true)?,
+        mini: build(&mini_spec, true)?.with_role(ClonkFontRole::GuiMini),
     };
-    let tooltip = build(FontRole::Main, false, false)?;
+    let tooltip = build(&tooltip_spec, false)?.with_role(ClonkFontRole::GuiTooltip);
     Ok(ClassicFontBundle {
         fonts: Arc::new(fonts),
         tooltip: Arc::new(tooltip),
+        native_source,
     })
 }
 
@@ -2850,8 +2898,10 @@ fn build_startup_loader(paths: &AppPaths, assets: &FrontendAssets) -> Result<Cla
     Ok(ClassicLoaderSetup {
         screen,
         initial_tooltip_font: None,
+        initial_native_font_source: assets.startup_native_font_source.clone(),
         refreshed_resources: resources,
         refreshed_tooltip_font: None,
+        refreshed_native_font_source: assets.startup_native_font_source.clone(),
         refreshed_global_gui_overrides: HashMap::new(),
         scenario_title: None,
     })
@@ -2905,6 +2955,7 @@ fn build_scenario_loader(
         startup_resources.gui_progress().clone(),
     )?;
     let initial_tooltip_font = Some(initial_font_bundle.tooltip.clone());
+    let initial_native_font_source = initial_font_bundle.native_source.clone();
     let first_definition_order = registrations
         .iter()
         .map(|registration| registration.registration_order)
@@ -2951,6 +3002,9 @@ fn build_scenario_loader(
         )?,
         None => initial_resources.clone(),
     };
+    let refreshed_native_font_source = refreshed_font_bundle
+        .as_ref()
+        .and_then(|bundle| bundle.native_source.clone());
     let refreshed_tooltip_font = refreshed_font_bundle.map(|bundle| bundle.tooltip);
     let screen = LoaderScreen::new(
         selection,
@@ -2961,8 +3015,10 @@ fn build_scenario_loader(
     Ok(ClassicLoaderSetup {
         screen,
         initial_tooltip_font,
+        initial_native_font_source,
         refreshed_resources,
         refreshed_tooltip_font,
+        refreshed_native_font_source,
         refreshed_global_gui_overrides,
         scenario_title: Some(head.scenario_title().to_string()),
     })
@@ -3206,6 +3262,7 @@ struct FrontendAssets {
     /// CStdFont-faithful GUI fonts for pixel-parity startup text.
     clonk_fonts: Option<Arc<lc_frontend::ClonkFontSet>>,
     startup_clonk_fonts: Option<Arc<lc_frontend::ClonkFontSet>>,
+    startup_native_font_source: Option<ClassicNativeFontSource>,
     /// Independent process-global shadowless Main-14 `FontTooltip`.
     global_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     startup_global_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
@@ -3247,6 +3304,9 @@ impl FrontendAssets {
         let classic_fonts = Self::load_classic_fonts(paths);
         let clonk_fonts = classic_fonts.as_ref().map(|bundle| bundle.fonts.clone());
         let startup_clonk_fonts = clonk_fonts.clone();
+        let startup_native_font_source = classic_fonts
+            .as_ref()
+            .and_then(|bundle| bundle.native_source.clone());
         let global_tooltip_font = classic_fonts.as_ref().map(|bundle| bundle.tooltip.clone());
         let startup_global_tooltip_font = global_tooltip_font.clone();
         let book_fonts = Self::load_book_fonts(paths);
@@ -3424,6 +3484,7 @@ impl FrontendAssets {
             font,
             clonk_fonts,
             startup_clonk_fonts,
+            startup_native_font_source,
             global_tooltip_font,
             startup_global_tooltip_font,
             menu_background,
@@ -5201,23 +5262,29 @@ fn main() -> Result<()> {
                 *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
-                let defer_native_main_text =
-                    app.can_defer_native_main_menu_text(presenter.scale());
+                let ordered_native_text =
+                    app.can_present_ordered_native_text(presenter.scale());
+                let defer_native_main_text = !ordered_native_text
+                    && app.can_defer_native_main_menu_text(presenter.scale());
                 let defer_native_loader_text =
                     app.can_defer_native_loader_text(presenter.scale());
-                let defer_native_game_messages =
-                    app.can_defer_native_game_messages(presenter.scale());
+                let defer_native_game_messages = !ordered_native_text
+                    && app.can_defer_native_game_messages(presenter.scale());
                 let native_game_message_gamma = defer_native_game_messages.then(|| {
                     app.graphics
                         .active_gamma_ramp(&app.snapshot.environment.gamma)
                 });
                 let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
-                    app.render_for_presentation(
-                        frame,
-                        defer_native_main_text,
-                        defer_native_loader_text,
-                        defer_native_game_messages,
-                    )
+                    if ordered_native_text {
+                        app.render_ordered_native_base(frame)
+                    } else {
+                        app.render_for_presentation(
+                            frame,
+                            defer_native_main_text,
+                            defer_native_loader_text,
+                            defer_native_game_messages,
+                        )
+                    }
                 }) {
                     Ok(refreshed) => refreshed,
                     Err(err) => {
@@ -5226,7 +5293,14 @@ fn main() -> Result<()> {
                         return;
                     }
                 };
-                if refreshed && defer_native_loader_text {
+                if refreshed && ordered_native_text {
+                    let mut composer = presenter.ordered_composer(pixels.frame_mut());
+                    if let Err(err) = app.replay_pending_native_presentation(&mut composer) {
+                        tracing::error!(error = ?err, "ordered native text render failed");
+                        control_flow.set_exit();
+                        return;
+                    }
+                } else if refreshed && defer_native_loader_text {
                     let (width, height) = presenter.physical_size();
                     if let Err(err) =
                         app.render_native_loader_text(pixels.frame_mut(), width, height)
@@ -5245,7 +5319,7 @@ fn main() -> Result<()> {
                         return;
                     }
                 } else if refreshed && defer_native_game_messages {
-                    let (width, height) = presenter.physical_size();
+                    let geometry = presenter.presentation_geometry();
                     let Some(gamma) = native_game_message_gamma.as_ref() else {
                         tracing::error!("deferred game-message gamma was not captured");
                         control_flow.set_exit();
@@ -5253,8 +5327,7 @@ fn main() -> Result<()> {
                     };
                     if let Err(err) = app.render_native_game_messages(
                         pixels.frame_mut(),
-                        width,
-                        height,
+                        geometry,
                         gamma,
                     ) {
                         tracing::error!(error = ?err, "native game-message render failed");
@@ -7137,8 +7210,10 @@ struct StagedNetworkHostScenario {
     /// remains the transparent lobby's backdrop.
     loader_screen: Option<LoaderScreen>,
     loader_initial_tooltip_font: Arc<lc_graphics::clonk_font::ClonkFont>,
+    loader_initial_native_font_source: Option<ClassicNativeFontSource>,
     loader_refreshed_resources: LoaderResources,
     loader_refreshed_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
+    loader_refreshed_native_font_source: Option<ClassicNativeFontSource>,
     /// Retained until the unported lobby Start handoff reaches the real
     /// GraphicsResource refresh. The visible lobby still uses startup GUI.
     pending_global_gui_overrides: HashMap<&'static str, String>,
@@ -7926,6 +8001,11 @@ struct GameApp {
     /// fonts with Application.GetScale()
     /// (C4Fonts.cpp:158-173).
     native_startup_fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
+    /// Ordered logical chrome/native-text batches prepared during the current
+    /// logical render and consumed immediately after FramePresenter upscales
+    /// the base. Keeping later chrome in separate batches preserves C4GUI
+    /// z-order instead of replaying every glyph over the finished frame.
+    pending_native_presentation: Option<NativePresentationPlan>,
     /// Exact C4LoaderScreen selected for the currently active startup or
     /// scenario load. A missing screen is paired with `loader_error` and is
     /// always a logged typed boundary, never a generic pane.
@@ -10262,12 +10342,12 @@ impl NetworkLobbyState {
         }
     }
 
-    fn render_classic(
+    fn classic_render_state(
         &mut self,
-        surface: &mut Surface,
+        surface: &Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
-    ) -> Result<()> {
+    ) -> Result<(ClassicGameLobby, GameOptionButtons)> {
         let now = Instant::now();
         self.client_sound_status.retain(|_, (_, started)| {
             now.checked_duration_since(*started)
@@ -10333,8 +10413,6 @@ impl NetworkLobbyState {
                 lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(seconds),
             );
         }
-        let resources = assets.game_lobby_resources()?;
-        let option_resources = assets.game_option_resources()?;
         let fonts = assets
             .clonk_fonts
             .as_deref()
@@ -10352,7 +10430,52 @@ impl NetworkLobbyState {
             start_button: layout.run_button.map(as_gui_rect),
             menu_region_max_x: -1.0,
         });
-        controller.render(
+        Ok((controller, options))
+    }
+
+    fn render_classic(
+        &mut self,
+        surface: &mut Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+        include_tooltips: bool,
+    ) -> Result<()> {
+        let resources = assets.game_lobby_resources()?;
+        let option_resources = assets.game_option_resources()?;
+        let (mut controller, options) =
+            self.classic_render_state(surface, assets, scenario_game_options)?;
+        if include_tooltips {
+            controller.render(
+                surface,
+                &resources,
+                &options,
+                &option_resources,
+                true,
+                Some(startup_gamma()),
+            )
+        } else {
+            controller.render_without_tooltips(
+                surface,
+                &resources,
+                &options,
+                &option_resources,
+                true,
+                Some(startup_gamma()),
+            )
+        }
+    }
+
+    fn render_classic_tooltips(
+        &mut self,
+        surface: &mut Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<()> {
+        let resources = assets.game_lobby_resources()?;
+        let option_resources = assets.game_option_resources()?;
+        let (mut controller, options) =
+            self.classic_render_state(surface, assets, scenario_game_options)?;
+        controller.render_tooltips(
             surface,
             &resources,
             &options,
@@ -15505,6 +15628,7 @@ impl GameApp {
             assets: assets.clone(),
             active_global_gui_overrides: HashMap::new(),
             native_startup_fonts: None,
+            pending_native_presentation: None,
             loader_screen,
             loader_error,
             loader_render_config: Some(LoaderRenderConfig::scale_one(
@@ -15637,28 +15761,15 @@ impl GameApp {
                 self.loader_render_error = Some(error.to_string());
             }
         }
-        let rounded = scale.round();
-        if scale <= 1.0 || (scale - rounded).abs() > f32::EPSILON {
+        if scale <= 1.0 || !scale.is_finite() {
             self.native_startup_fonts = None;
             return;
         }
-        let Some(path) = self.app_paths.as_ref().map(AppPaths::system_group_path) else {
+        let Some(source) = self.assets.startup_native_font_source.clone() else {
             self.native_startup_fonts = None;
             return;
         };
-        if self
-            .app_paths
-            .as_ref()
-            .is_none_or(|paths| !classic_startup_font_is_canonical(paths))
-        {
-            self.native_startup_fonts = None;
-            return;
-        }
-        let fonts = (|| -> Result<_> {
-            let group = Group::open(path)?;
-            let resource = load_endeavour_font(&group)?;
-            lc_frontend::clonk_fonts::build_native_font_set(resource.bytes(), rounded as u32)
-        })();
+        let fonts = lc_frontend::clonk_fonts::build_native_font_set(&source.bytes, scale);
         match fonts {
             Ok(fonts) => {
                 self.native_startup_fonts = Some(Arc::new(fonts));
@@ -15667,6 +15778,24 @@ impl GameApp {
             Err(error) => {
                 tracing::warn!(%error, scale, "failed to build scale-native startup fonts");
                 self.native_startup_fonts = None;
+            }
+        }
+    }
+
+    fn native_font_cache_for_source(
+        &self,
+        source: Option<&ClassicNativeFontSource>,
+    ) -> Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>> {
+        let scale = self.loader_render_config?.application_scale();
+        if scale <= 1.0 || !scale.is_finite() {
+            return None;
+        }
+        let source = source?;
+        match lc_frontend::clonk_fonts::build_native_font_set(&source.bytes, scale) {
+            Ok(fonts) => Some(Arc::new(fonts)),
+            Err(error) => {
+                tracing::warn!(%error, scale, "failed to build scale-native active fonts");
+                None
             }
         }
     }
@@ -15680,7 +15809,7 @@ impl GameApp {
             && self
                 .native_startup_fonts
                 .as_ref()
-                .is_some_and(|fonts| (fonts.scale() as f32 - scale).abs() < f32::EPSILON)
+                .is_some_and(|fonts| (fonts.scale() - scale).abs() < f32::EPSILON)
     }
 
     fn can_defer_native_loader_text(&self, scale: f32) -> bool {
@@ -15688,11 +15817,11 @@ impl GameApp {
             && scale > 1.0
             && self
                 .loader_render_config
-                .is_some_and(|config| config.application_scale() as f32 == scale)
+                .is_some_and(|config| config.application_scale() == scale)
             && self
                 .native_startup_fonts
                 .as_ref()
-                .is_some_and(|fonts| fonts.scale() as f32 == scale)
+                .is_some_and(|fonts| fonts.scale() == scale)
     }
 
     fn can_defer_native_game_messages(&self, scale: f32) -> bool {
@@ -15714,7 +15843,163 @@ impl GameApp {
             && self
                 .native_startup_fonts
                 .as_ref()
-                .is_some_and(|fonts| fonts.scale() as f32 == scale)
+                .is_some_and(|fonts| fonts.scale() == scale)
+    }
+
+    fn can_present_ordered_native_text(&self, scale: f32) -> bool {
+        matches!(self.mode, AppMode::Menu | AppMode::Running)
+            && scale > 1.0
+            && scale.is_finite()
+            && self
+                .native_startup_fonts
+                .as_ref()
+                .is_some_and(|fonts| (fonts.scale() - scale).abs() < f32::EPSILON)
+    }
+
+    fn begin_native_text_capture(&mut self, clear_to_transparent: bool) {
+        let surface = self.graphics.surface_mut();
+        surface.clear_clip();
+        if clear_to_transparent {
+            surface.fill(Color::transparent());
+        }
+        surface.begin_clonk_text_capture();
+    }
+
+    fn finish_native_base_batch(&mut self, frame: &mut [u8], plan: &mut NativePresentationPlan) {
+        let surface = self.graphics.surface_mut();
+        let text = surface.take_clonk_text_capture();
+        if surface.pixels().len() == frame.len() {
+            frame.copy_from_slice(surface.pixels());
+        } else {
+            copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+        }
+        plan.batches.push(NativePresentationBatch {
+            logical_layer: None,
+            clip: None,
+            text,
+        });
+    }
+
+    fn finish_native_overlay_batch(&mut self, plan: &mut NativePresentationPlan) {
+        Self::capture_native_overlay_batch(self.graphics.surface_mut(), plan, None);
+    }
+
+    fn capture_native_overlay_batch(
+        surface: &mut Surface,
+        plan: &mut NativePresentationPlan,
+        isolated_clip: Option<Rect>,
+    ) {
+        let text = surface.take_clonk_text_capture();
+        // Additive passes can contribute RGB while preserving a transparent
+        // destination alpha. Retain those bytes for ordered replay too.
+        let has_raster = surface.pixels().iter().any(|byte| *byte != 0);
+        if has_raster || !text.is_empty() {
+            let clip = isolated_clip.filter(|clip| {
+                has_raster
+                    && !text.is_empty()
+                    && text
+                        .iter()
+                        .all(|command| command.clip == Some(*clip))
+            });
+            plan.batches.push(NativePresentationBatch {
+                logical_layer: has_raster.then(|| surface.pixels().to_vec()),
+                clip,
+                text,
+            });
+        }
+    }
+
+    fn commit_pending_native_base(&mut self, frame: &mut [u8]) {
+        let mut plan = self.pending_native_presentation.take().unwrap_or_default();
+        self.finish_native_base_batch(frame, &mut plan);
+        self.pending_native_presentation = Some(plan);
+    }
+
+    fn commit_pending_native_overlay(&mut self) {
+        let mut plan = self.pending_native_presentation.take().unwrap_or_default();
+        self.finish_native_overlay_batch(&mut plan);
+        self.pending_native_presentation = Some(plan);
+    }
+
+    fn next_native_overlay_parts(
+        graphics: &mut GraphicsSystem,
+        pending_native_presentation: &mut Option<NativePresentationPlan>,
+    ) {
+        Self::next_native_overlay_parts_with_clip(graphics, pending_native_presentation, None);
+    }
+
+    fn next_native_overlay_parts_with_clip(
+        graphics: &mut GraphicsSystem,
+        pending_native_presentation: &mut Option<NativePresentationPlan>,
+        isolated_clip: Option<Rect>,
+    ) {
+        let mut plan = pending_native_presentation.take().unwrap_or_default();
+        {
+            let surface = graphics.surface_mut();
+            Self::capture_native_overlay_batch(surface, &mut plan, isolated_clip);
+        }
+        *pending_native_presentation = Some(plan);
+        let surface = graphics.surface_mut();
+        surface.clear_clip();
+        surface.fill(Color::transparent());
+        surface.begin_clonk_text_capture();
+    }
+
+    fn next_pending_native_overlay(&mut self) {
+        Self::next_native_overlay_parts(
+            &mut self.graphics,
+            &mut self.pending_native_presentation,
+        );
+    }
+
+    fn next_pending_native_overlay_with_clip(&mut self, isolated_clip: Rect) {
+        Self::next_native_overlay_parts_with_clip(
+            &mut self.graphics,
+            &mut self.pending_native_presentation,
+            Some(isolated_clip),
+        );
+    }
+
+    fn replay_pending_native_presentation(
+        &mut self,
+        composer: &mut lc_scaling::OrderedFrameComposer<'_>,
+    ) -> Result<()> {
+        let Some(plan) = self.pending_native_presentation.take() else {
+            return Ok(());
+        };
+        let fonts = self
+            .native_startup_fonts
+            .as_deref()
+            .context("scale-native font bundle disappeared before presentation")?;
+        for batch in plan.batches {
+            if let Some(layer) = batch.logical_layer {
+                let target = composer.begin_layer();
+                anyhow::ensure!(
+                    layer.len() == target.len(),
+                    "native presentation layer has {} bytes, expected {}",
+                    layer.len(),
+                    target.len()
+                );
+                target.copy_from_slice(&layer);
+                if let Some(clip) = batch.clip {
+                    composer.composite_layer_with_clip(clip);
+                } else {
+                    composer.composite_layer();
+                }
+            }
+            if batch.text.is_empty() {
+                continue;
+            }
+            composer.draw_native(|physical, geometry| -> Result<()> {
+                let (width, height) = geometry.physical_size();
+                let mut surface =
+                    Surface::from_bytes(width, height, PixelFormat::Rgba8888, physical.to_vec())?;
+                fonts.draw_captured_text(&mut surface, &batch.text, geometry.logical_size());
+                physical.copy_from_slice(surface.pixels());
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     fn classic_loader_render_preconditions_ready(&self) -> bool {
@@ -15727,7 +16012,7 @@ impl GameApp {
         let Some(config) = self.loader_render_config else {
             return false;
         };
-        config.application_scale() == 1
+        config.application_scale() == 1.0
             || self
                 .native_startup_fonts
                 .as_ref()
@@ -25735,8 +26020,12 @@ impl GameApp {
                 .staged_network_host_scenario
                 .as_ref()
                 .map(|staged| staged.loader_initial_tooltip_font.clone());
+            let initial_native_source = self
+                .staged_network_host_scenario
+                .as_ref()
+                .and_then(|staged| staged.loader_initial_native_font_source.clone());
             if let (Some(fonts), Some(tooltip)) = (initial_fonts, initial_tooltip) {
-                self.install_active_classic_fonts(fonts, tooltip);
+                self.install_active_classic_fonts(fonts, Some(tooltip), initial_native_source);
             }
             // C4Game opens the scenario and installs its loader before
             // InitNetworkHost. Show that exact full loader while the socket
@@ -30843,6 +31132,7 @@ impl GameApp {
         };
         let resources = state.refreshed_resources.take();
         let tooltip_font = state.refreshed_tooltip_font.take();
+        let native_font_source = state.refreshed_native_font_source.take();
         let overrides = state
             .refreshed_global_gui_overrides
             .take()
@@ -30850,17 +31140,7 @@ impl GameApp {
         state.refresh_requested = false;
         if let Some(resources) = resources {
             let fonts = resources.fonts().clone();
-            let assets = Arc::make_mut(&mut self.assets);
-            assets.clonk_fonts = Some(fonts.clone());
-            if let Some(tooltip_font) = tooltip_font {
-                assets.global_tooltip_font = Some(tooltip_font);
-            }
-            self.graphics.set_clonk_fonts(Some(fonts.clone()));
-            self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
-            // The scale-native cache is built from the fixed Endeavour-14
-            // recipe. Never overlay those stale glyphs on a refreshed font.
-            self.native_startup_fonts = None;
-            self.mark_menu_dirty();
+            self.install_active_classic_fonts(fonts, tooltip_font, native_font_source);
             if let Some(loader) = self.loader_screen.as_mut() {
                 loader.replace_resources(resources);
             }
@@ -31923,12 +32203,18 @@ impl GameApp {
                 "classic message-dialog resources are unavailable; refusing generic fallback"
             );
         };
-        let surface = self.graphics.surface_mut();
         let last = self.message_dialogs.len() - 1;
-        for (index, dialog) in self.message_dialogs.iter().enumerate() {
-            dialog
-                .state
-                .render(surface, resources, index == last, gamma)?;
+        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        for index in 0..=last {
+            self.message_dialogs[index].state.render(
+                self.graphics.surface_mut(),
+                resources,
+                index == last,
+                gamma,
+            )?;
+            if ordered_native && index != last {
+                self.next_pending_native_overlay();
+            }
         }
         Ok(())
     }
@@ -31954,25 +32240,59 @@ impl GameApp {
         )
     }
 
+    fn render_ordered_context_menu(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
+        let panel_count = self
+            .context_menu
+            .as_ref()
+            .map_or(0, ClassicContextMenu::panel_count);
+        for index in 0..panel_count {
+            self.context_menu
+                .as_ref()
+                .expect("context menu panel count came from an installed menu")
+                .render_panel(self.graphics.surface_mut(), index, gamma)?;
+            self.next_pending_native_overlay();
+        }
+        if let Some(context_menu) = self.context_menu.as_ref() {
+            context_menu.render_tooltip(self.graphics.surface_mut(), gamma);
+        }
+        Ok(())
+    }
+
     fn render_game_option_input_dialog(
         &mut self,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> Result<()> {
-        let Some(dialog) = self.game_option_input_dialog.as_ref() else {
+        if self.game_option_input_dialog.is_none() {
             return Ok(());
-        };
+        }
         let assets = Arc::clone(&self.assets);
         let resources = assets
             .input_dialog_resources()
             .with_context(|| "classic Password/Comment input-dialog resources are unavailable")?;
         let active = self.context_menu.is_none() && self.message_dialogs.is_empty();
-        dialog
+        self.game_option_input_dialog
+            .as_ref()
+            .expect("checked above")
             .controller
             .render(self.graphics.surface_mut(), &resources, active, gamma)?;
-        if let Some(context_menu) = self.context_menu.as_ref() {
+        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        if ordered_native {
+            self.next_pending_native_overlay();
+        }
+        if ordered_native {
+            self.render_ordered_context_menu(gamma)?;
+            if self.context_menu.is_some() {
+                self.next_pending_native_overlay();
+            }
+        } else if let Some(context_menu) = self.context_menu.as_ref() {
             context_menu.render(self.graphics.surface_mut(), gamma)?;
         }
-        dialog
+        self.game_option_input_dialog
+            .as_ref()
+            .expect("checked above")
             .controller
             .render_tooltip(self.graphics.surface_mut(), &resources, active, gamma)
     }
@@ -31982,6 +32302,53 @@ impl GameApp {
         game_option_input_open: bool,
     ) -> Option<&ClassicContextMenu<AppContextMenuCommand>> {
         context_menu.filter(|_| !game_option_input_open)
+    }
+
+    fn render_ordered_startup_tooltips(&mut self) -> Result<()> {
+        match self.startup_view {
+            StartupView::MainMenu if self.context_menu.is_none() => {
+                if let Some(pointer) = self.main_menu_state.participants_tooltip_pointer() {
+                    let tooltip_font = self
+                        .assets
+                        .global_tooltip_font
+                        .as_deref()
+                        .context("classic shadowless tooltip font is unavailable")?;
+                    lc_frontend::context_menu::draw_classic_tooltip(
+                        self.graphics.surface_mut(),
+                        tooltip_font,
+                        pointer,
+                        lc_frontend::PARTICIPANTS_TOOLTIP,
+                        Some(startup_gamma()),
+                    );
+                }
+            }
+            StartupView::ScenarioBrowser => {
+                let assets = Arc::clone(&self.assets);
+                let resources = assets.game_option_resources().with_context(
+                    || "classic scenario game-option tooltip resources are unavailable",
+                )?;
+                self.scenario_game_options.render_tooltip(
+                    self.graphics.surface_mut(),
+                    &resources,
+                    self.context_menu.is_none()
+                        && self.definition_selector.is_none()
+                        && self.game_option_input_dialog.is_none(),
+                    Some(startup_gamma()),
+                )?;
+            }
+            StartupView::NetworkLobby if self.classic_host_lobby.is_none() => {
+                let assets = Arc::clone(&self.assets);
+                if let Some(lobby) = self.network_lobby.as_mut() {
+                    lobby.render_classic_tooltips(
+                        self.graphics.surface_mut(),
+                        assets.as_ref(),
+                        &self.scenario_game_options,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn render_classic_host_lobby(&mut self) -> Result<()> {
@@ -32022,15 +32389,57 @@ impl GameApp {
             && self.game_option_input_dialog.is_none()
             && self.message_dialogs.is_empty();
         let gamma = self.loader_gamma.as_ref();
+        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         let surface = self.graphics.surface_mut();
         loader.render_background(surface, config, gamma);
-        lobby.controller.render(
-            surface,
+        if ordered_native {
+            lobby.controller.render_without_tooltips(
+                surface,
+                &lobby_resources,
+                &self.scenario_game_options,
+                &option_resources,
+                active,
+                gamma,
+            )
+        } else {
+            lobby.controller.render(
+                surface,
+                &lobby_resources,
+                &self.scenario_game_options,
+                &option_resources,
+                active,
+                gamma,
+            )
+        }
+    }
+
+    fn render_classic_host_lobby_tooltips(&mut self) -> Result<()> {
+        let assets = Arc::clone(&self.assets);
+        let lobby_resources = assets.game_lobby_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        let option_resources = assets.game_option_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        let lobby = self.classic_host_lobby.as_mut().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: "exact host lobby state is absent".to_string(),
+            })
+        })?;
+        let active = self.context_menu.is_none()
+            && self.game_option_input_dialog.is_none()
+            && self.message_dialogs.is_empty();
+        lobby.controller.render_tooltips(
+            self.graphics.surface_mut(),
             &lobby_resources,
             &self.scenario_game_options,
             &option_resources,
             active,
-            gamma,
+            self.loader_gamma.as_ref(),
         )
     }
 
@@ -32039,6 +32448,24 @@ impl GameApp {
     /// any output post-processing).
     fn render(&mut self, frame: &mut [u8]) -> Result<bool> {
         self.render_for_presentation(frame, false, false, false)
+    }
+
+    fn render_ordered_native_base(&mut self, frame: &mut [u8]) -> Result<bool> {
+        self.pending_native_presentation = Some(NativePresentationPlan::default());
+        self.begin_native_text_capture(false);
+        self.render_for_presentation(frame, false, false, false)?;
+        if self.graphics.surface().is_clonk_text_capture_active() {
+            let has_base = self
+                .pending_native_presentation
+                .as_ref()
+                .is_some_and(|plan| !plan.batches.is_empty());
+            if has_base {
+                self.commit_pending_native_overlay();
+            } else {
+                self.commit_pending_native_base(frame);
+            }
+        }
+        Ok(true)
     }
 
     fn render_for_presentation(
@@ -32050,6 +32477,7 @@ impl GameApp {
     ) -> Result<bool> {
         match self.mode {
             AppMode::Menu => {
+                let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
                 if self.startup_view == StartupView::Options {
@@ -32068,18 +32496,34 @@ impl GameApp {
                 {
                     self.menu_frame_cache = None;
                     self.render_classic_host_lobby()?;
+                    if ordered_native {
+                        self.commit_pending_native_base(frame);
+                        self.begin_native_text_capture(true);
+                        self.render_classic_host_lobby_tooltips()?;
+                        self.next_pending_native_overlay();
+                    }
                     let gamma = self.loader_gamma.clone();
                     if self.game_option_input_dialog.is_some() {
                         self.render_game_option_input_dialog(gamma.as_ref())?;
+                        if ordered_native {
+                            self.next_pending_native_overlay();
+                        }
                     }
                     if !self.message_dialogs.is_empty() {
                         self.render_message_dialogs(gamma.as_ref())?;
                     }
-                    let surface = self.graphics.surface();
-                    if surface.pixels().len() == frame.len() {
-                        frame.copy_from_slice(surface.pixels());
-                    } else {
-                        copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+                    if !ordered_native {
+                        let surface = self.graphics.surface();
+                        if surface.pixels().len() == frame.len() {
+                            frame.copy_from_slice(surface.pixels());
+                        } else {
+                            copy_surface(
+                                surface.pixels(),
+                                surface.width(),
+                                surface.height(),
+                                frame,
+                            );
+                        }
                     }
                     return Ok(true);
                 }
@@ -32089,7 +32533,8 @@ impl GameApp {
                 };
                 let participants_tooltip_pending = self.startup_view == StartupView::MainMenu
                     && self.main_menu_state.participants_tooltip_pending();
-                let cache_eligible = self.context_menu.is_none()
+                let cache_eligible = !ordered_native
+                    && self.context_menu.is_none()
                     && self.game_option_input_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
@@ -32111,7 +32556,16 @@ impl GameApp {
                 let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
                 let game_option_input_open = self.game_option_input_dialog.is_some();
+                let context_menu_open = self.context_menu.is_some();
                 let options_draw_focus = self.startup_options_dialog_is_active();
+                let base_context_menu = if ordered_native {
+                    None
+                } else {
+                    Self::startup_base_context_menu(
+                        self.context_menu.as_ref(),
+                        game_option_input_open,
+                    )
+                };
                 let network_lobby = self.network_lobby.as_mut();
                 render_startup_frame(
                     &mut self.graphics,
@@ -32121,10 +32575,8 @@ impl GameApp {
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
                     &self.startup_player_models,
-                    Self::startup_base_context_menu(
-                        self.context_menu.as_ref(),
-                        game_option_input_open,
-                    ),
+                    base_context_menu,
+                    context_menu_open,
                     definition_selector_open,
                     game_option_input_open,
                     &self.scenario_game_options,
@@ -32139,18 +32591,35 @@ impl GameApp {
                     defer_native_main_text,
                     frame,
                 )?;
+                if ordered_native {
+                    self.commit_pending_native_base(frame);
+                    self.begin_native_text_capture(true);
+                    self.render_ordered_startup_tooltips()?;
+                    self.next_pending_native_overlay();
+                }
                 if definition_selector_open {
                     self.render_definition_selector(Some(startup_gamma()))?;
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
                 }
                 if game_option_input_open {
                     self.render_game_option_input_dialog(Some(startup_gamma()))?;
+                    if ordered_native {
+                        self.next_pending_native_overlay();
+                    }
                 }
                 if !self.message_dialogs.is_empty() {
                     self.render_message_dialogs(Some(startup_gamma()))?;
                 }
-                if definition_selector_open
-                    || game_option_input_open
-                    || !self.message_dialogs.is_empty()
+                if ordered_native && !game_option_input_open && self.context_menu.is_some() {
+                    self.next_pending_native_overlay();
+                    self.render_ordered_context_menu(Some(startup_gamma()))?;
+                }
+                if !ordered_native
+                    && (definition_selector_open
+                        || game_option_input_open
+                        || !self.message_dialogs.is_empty())
                 {
                     let surface = self.graphics.surface();
                     if surface.pixels().len() == frame.len() {
@@ -32212,13 +32681,9 @@ impl GameApp {
             return Ok(());
         };
         let logical = self.graphics.surface();
-        let viewport_width = logical
-            .width()
-            .checked_mul(fonts.scale())
+        let viewport_width = scaled_viewport_extent(logical.width(), fonts.scale())
             .context("native main-menu viewport width overflow")?;
-        let viewport_height = logical
-            .height()
-            .checked_mul(fonts.scale())
+        let viewport_height = scaled_viewport_extent(logical.height(), fonts.scale())
             .context("native main-menu viewport height overflow")?;
         if frame_width > viewport_width || frame_height > viewport_height {
             anyhow::bail!(
@@ -32378,13 +32843,13 @@ impl GameApp {
 
     fn reject_classic_startup_bootstrap(&self) -> Result<()> {
         let mut issues = self.assets.classic_startup_bootstrap_issues();
-        let integer_scale = self
+        let scaled_output = self
             .loader_render_config
             .as_ref()
             .map(|config| (*config).application_scale())
-            .filter(|scale| *scale > 1);
+            .filter(|scale| *scale > 1.0);
         if self.startup_view == StartupView::MainMenu {
-            if let Some(scale) = integer_scale {
+            if let Some(scale) = scaled_output {
                 match self.native_startup_fonts.as_deref() {
                     None => issues.push(ClassicStartupBootstrapIssue::missing(
                         "ScaleNativeStartupFonts",
@@ -32392,7 +32857,7 @@ impl GameApp {
                     Some(fonts) if fonts.scale() != scale => {
                         issues.push(ClassicStartupBootstrapIssue::malformed(
                             "ScaleNativeStartupFonts",
-                            "a font atlas matching the integer application scale",
+                            "a font atlas matching the application scale",
                             format!("font scale {} for application scale {scale}", fonts.scale()),
                         ));
                     }
@@ -32569,9 +33034,9 @@ impl GameApp {
         let config = self
             .loader_render_config
             .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
-        if config.application_scale() > 1 && !defer_native_text {
+        if config.application_scale() > 1.0 && !defer_native_text {
             return Err(self.loader_boundary(
-                "scale-native loader fonts are unavailable for the configured integer scale",
+                "scale-native loader fonts are unavailable for the configured scale",
             ));
         }
         let loader = self
@@ -32663,8 +33128,7 @@ impl GameApp {
     fn render_native_game_messages(
         &self,
         frame: &mut [u8],
-        frame_width: u32,
-        frame_height: u32,
+        geometry: lc_scaling::PresentationGeometry,
         gamma: &lc_graphics::GammaRamp,
     ) -> Result<()> {
         if self.mode != AppMode::Running || self.snapshot.hud.messages.is_empty() {
@@ -32674,6 +33138,7 @@ impl GameApp {
             .native_startup_fonts
             .as_deref()
             .context("scale-native C4GameMessage fonts are unavailable")?;
+        let (frame_width, frame_height) = geometry.physical_size();
         let expected_len = (frame_width as usize)
             .checked_mul(frame_height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
@@ -32684,21 +33149,13 @@ impl GameApp {
             frame.len()
         );
         let logical = self.graphics.surface();
-        let viewport_width = logical
-            .width()
-            .checked_mul(fonts.scale())
-            .context("native C4GameMessage viewport width overflow")?;
-        let viewport_height = logical
-            .height()
-            .checked_mul(fonts.scale())
-            .context("native C4GameMessage viewport height overflow")?;
         anyhow::ensure!(
-            frame_width <= viewport_width && frame_height <= viewport_height,
-            "native C4GameMessage framebuffer {frame_width}x{frame_height} exceeds its {viewport_width}x{viewport_height} scaled viewport"
+            geometry.logical_size() == (logical.width(), logical.height()),
+            "native C4GameMessage geometry {:?} does not match its {}x{} logical target",
+            geometry.logical_size(),
+            logical.width(),
+            logical.height(),
         );
-        let clipped_top = i32::try_from(viewport_height - frame_height)
-            .context("native C4GameMessage viewport offset exceeds C++ integers")?;
-        let physical_offset = (0, -clipped_top);
         let mut surface = Surface::from_bytes(
             frame_width,
             frame_height,
@@ -32736,7 +33193,7 @@ impl GameApp {
                     &mut surface,
                     &fonts.text,
                     fonts.scale(),
-                    physical_offset,
+                    geometry.logical_size(),
                     viewport.rect,
                     message,
                     message.frame_decoration.as_ref(),
@@ -32759,6 +33216,7 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
+        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         self.apply_show_commands_enable_request();
         self.sync_film_view_presentation();
         self.reject_classic_global_gui_bootstrap()?;
@@ -32898,7 +33356,43 @@ impl GameApp {
                 show_command_keys: self.display_flags.show_command_keys,
             };
             self.graphics.update_overlay(&overlay);
-            self.graphics.render_frame(&self.snapshot, &viewports);
+        }
+        if ordered_native {
+            let pending_hud = self.graphics.render_frame_base(&self.snapshot, &viewports);
+            let surface = self.graphics.surface_mut();
+            let text = surface.take_clonk_text_capture();
+            if surface.pixels().len() == frame.len() {
+                frame.copy_from_slice(surface.pixels());
+            } else {
+                copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+            }
+            self.pending_native_presentation
+                .as_mut()
+                .expect("ordered presentation plan is active")
+                .batches
+                .push(NativePresentationBatch {
+                    logical_layer: None,
+                    clip: None,
+                    text,
+                });
+            surface.clear_clip();
+            surface.fill(Color::transparent());
+            surface.begin_clonk_text_capture();
+            self.graphics.render_frame_foreground(&pending_hud);
+            Self::next_native_overlay_parts(
+                &mut self.graphics,
+                &mut self.pending_native_presentation,
+            );
+            let pending_chrome = self.graphics.render_frame_hud_players(pending_hud);
+            Self::next_native_overlay_parts(
+                &mut self.graphics,
+                &mut self.pending_native_presentation,
+            );
+            self.graphics.render_frame_hud_chrome(pending_chrome);
+            Self::next_native_overlay_parts(
+                &mut self.graphics,
+                &mut self.pending_native_presentation,
+            );
         } else {
             self.graphics.render_frame(&self.snapshot, &viewports);
         }
@@ -33109,6 +33603,9 @@ impl GameApp {
                 );
             }
         }
+        if ordered_native && script_menu.is_some() {
+            self.next_pending_native_overlay();
+        }
 
         if self.ingame_menu.is_some() {
             let fonts = self.assets.clonk_fonts.clone();
@@ -33140,6 +33637,9 @@ impl GameApp {
                     Some(&frame_gamma),
                 );
             }
+        }
+        if ordered_native && self.ingame_menu.is_some() {
+            self.next_pending_native_overlay();
         }
 
         let message_viewports = self.graphics.active_viewport_projections();
@@ -33193,6 +33693,9 @@ impl GameApp {
                 Some(&frame_gamma),
             );
         }
+        if ordered_native {
+            self.next_pending_native_overlay();
+        }
 
         if let Some(columns) = runtime_help_columns.as_ref() {
             let fonts = self
@@ -33209,6 +33712,9 @@ impl GameApp {
                 &columns.right,
                 Some(&frame_gamma),
             );
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
         }
 
         if let Some(message) = runtime_flash_message.as_ref() {
@@ -33224,27 +33730,56 @@ impl GameApp {
                 message.y,
                 Some(&frame_gamma),
             );
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
         }
 
         if let Some(font_images) = scoreboard_font_images.as_ref() {
             let trigger = ClassicScoreboardTrigger::ScriptVisibility;
-            let resources = self
-                .assets
+            let assets = Arc::clone(&self.assets);
+            let resources = assets
                 .scoreboard_resources(font_images)
                 .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
             let preferred = scoreboard_preferred_rect(
                 self.graphics
                     .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
             );
-            let render_result = lc_frontend::scoreboard::render_scoreboard(
-                self.graphics.surface_mut(),
-                preferred,
-                &self.snapshot.hud.scoreboard,
-                &resources,
-                Some(&frame_gamma),
-            );
-            if let Err(error) = render_result {
-                return Err(self.scoreboard_presentation_error(trigger, error));
+            let scoreboard = self.snapshot.hud.scoreboard.clone();
+            if ordered_native {
+                let render_result = lc_frontend::scoreboard::render_scoreboard_body(
+                    self.graphics.surface_mut(),
+                    preferred,
+                    &scoreboard,
+                    &resources,
+                    Some(&frame_gamma),
+                );
+                if let Err(error) = render_result {
+                    return Err(self.scoreboard_presentation_error(trigger, error));
+                }
+                self.next_pending_native_overlay();
+                let render_result = lc_frontend::scoreboard::render_scoreboard_caption(
+                    self.graphics.surface_mut(),
+                    preferred,
+                    &scoreboard,
+                    &resources,
+                    Some(&frame_gamma),
+                );
+                if let Err(error) = render_result {
+                    return Err(self.scoreboard_presentation_error(trigger, error));
+                }
+                self.next_pending_native_overlay();
+            } else {
+                let render_result = lc_frontend::scoreboard::render_scoreboard(
+                    self.graphics.surface_mut(),
+                    preferred,
+                    &scoreboard,
+                    &resources,
+                    Some(&frame_gamma),
+                );
+                if let Err(error) = render_result {
+                    return Err(self.scoreboard_presentation_error(trigger, error));
+                }
             }
         }
 
@@ -33261,22 +33796,34 @@ impl GameApp {
                 Some(classic),
                 Some(&frame_gamma),
             );
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
         }
 
         self.render_message_dialogs(Some(&frame_gamma))?;
-        if let Some(context_menu) = self.context_menu.as_ref() {
+        if ordered_native && !self.message_dialogs.is_empty() {
+            self.next_pending_native_overlay();
+        }
+        if self.context_menu.is_some() {
             // C4GUI::Screen draws its recursively owned context chain after
             // every dialog, so it stays above viewport menus, F1 help,
             // scoreboard, evaluation and message dialogs.
-            context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
+            if ordered_native {
+                self.render_ordered_context_menu(Some(&frame_gamma))?;
+            } else if let Some(context_menu) = self.context_menu.as_ref() {
+                context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
+            }
         }
 
-        let surface = self.graphics.surface();
-        let pixels = surface.pixels();
-        if pixels.len() == frame.len() {
-            frame.copy_from_slice(pixels);
-        } else {
-            copy_surface(pixels, surface.width(), surface.height(), frame);
+        if !ordered_native {
+            let surface = self.graphics.surface();
+            let pixels = surface.pixels();
+            if pixels.len() == frame.len() {
+                frame.copy_from_slice(pixels);
+            } else {
+                copy_surface(pixels, surface.width(), surface.height(), frame);
+            }
         }
         if runtime_flash_message.is_some() {
             self.finish_runtime_flash_draw();
@@ -33444,6 +33991,7 @@ impl GameApp {
             }
         }
         let viewports = self.graphics.active_viewport_projections();
+        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         for viewport in viewports {
             for message in &messages {
                 let owned = match message.kind {
@@ -33482,6 +34030,9 @@ impl GameApp {
                     Some(gamma),
                 )
                 .map_err(|detail| anyhow!("classic C4GameMessage render failed: {detail}"))?;
+                if ordered_native {
+                    self.next_pending_native_overlay_with_clip(viewport.rect);
+                }
             }
         }
         Ok(())
@@ -34042,16 +34593,18 @@ impl GameApp {
     fn install_active_classic_fonts(
         &mut self,
         fonts: Arc<lc_frontend::ClonkFontSet>,
-        tooltip: Arc<lc_graphics::clonk_font::ClonkFont>,
+        tooltip: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
+        native_source: Option<ClassicNativeFontSource>,
     ) {
+        let native_fonts = self.native_font_cache_for_source(native_source.as_ref());
         let assets = Arc::make_mut(&mut self.assets);
         assets.clonk_fonts = Some(fonts.clone());
-        assets.global_tooltip_font = Some(tooltip);
+        if let Some(tooltip) = tooltip {
+            assets.global_tooltip_font = Some(tooltip);
+        }
         self.graphics.set_clonk_fonts(Some(fonts.clone()));
         self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
-        // The scale-native cache is tied to the startup/configured bundle;
-        // a scenario Head.Font may select an entirely different face.
-        self.native_startup_fonts = None;
+        self.native_startup_fonts = native_fonts;
         self.mark_menu_dirty();
     }
 
@@ -34068,7 +34621,7 @@ impl GameApp {
         self.native_startup_fonts = None;
         if let Some(config) = self.loader_render_config {
             self.configure_native_startup_fonts(
-                config.application_scale() as f32,
+                config.application_scale(),
                 config.point_filtering(),
             );
         }
@@ -34369,10 +34922,14 @@ impl GameApp {
                 detail: "loader render configuration is unavailable".to_string(),
             })
         })?;
-        if loader_render_config.application_scale() != 1 {
+        if loader_render_config.application_scale() > 1.0
+            && self.native_startup_fonts.as_ref().is_none_or(|fonts| {
+                (fonts.scale() - loader_render_config.application_scale()).abs() >= f32::EPSILON
+            })
+        {
             return Err(classic_game_lobby_error(
                 ClassicGameLobbyBoundary::Resources {
-                    detail: "scale-native classic lobby text is not implemented".to_string(),
+                    detail: "scale-native classic lobby fonts are unavailable".to_string(),
                 },
             ));
         }
@@ -34491,8 +35048,10 @@ impl GameApp {
             scenario,
             loader_screen: Some(loader_setup.screen),
             loader_initial_tooltip_font,
+            loader_initial_native_font_source: loader_setup.initial_native_font_source,
             loader_refreshed_resources: loader_setup.refreshed_resources,
             loader_refreshed_tooltip_font: loader_setup.refreshed_tooltip_font,
+            loader_refreshed_native_font_source: loader_setup.refreshed_native_font_source,
             pending_global_gui_overrides: loader_setup.refreshed_global_gui_overrides,
             options,
             lobby,
@@ -34577,7 +35136,11 @@ impl GameApp {
             .initial_tooltip_font
             .clone()
             .expect("scenario loader resolves a pre-definition tooltip font");
-        self.install_active_classic_fonts(initial_fonts, initial_tooltip_font);
+        self.install_active_classic_fonts(
+            initial_fonts,
+            Some(initial_tooltip_font),
+            loader_setup.initial_native_font_source.clone(),
+        );
         self.loader_screen = Some(loader_setup.screen);
         self.loader_error = None;
 
@@ -34666,6 +35229,7 @@ impl GameApp {
             receiver,
         );
         loading_state.refreshed_tooltip_font = loader_setup.refreshed_tooltip_font;
+        loading_state.refreshed_native_font_source = loader_setup.refreshed_native_font_source;
         loading_state.offline_startup_players = offline_startup_players;
         self.loading_state = Some(loading_state);
         self.mode = AppMode::Loading;
@@ -35525,15 +36089,11 @@ impl GameApp {
             .map_err(anyhow::Error::new)?;
         self.active_global_gui_overrides = loaded_overrides;
         if let Some(bundle) = loaded_fonts {
-            let assets = Arc::make_mut(&mut self.assets);
-            assets.clonk_fonts = Some(bundle.fonts.clone());
-            assets.global_tooltip_font = Some(bundle.tooltip);
-            self.graphics.set_clonk_fonts(Some(bundle.fonts.clone()));
-            self.main_menu_state
-                .menu
-                .set_clonk_fonts(Some(bundle.fonts));
-            self.native_startup_fonts = None;
-            self.mark_menu_dirty();
+            self.install_active_classic_fonts(
+                bundle.fonts,
+                Some(bundle.tooltip),
+                bundle.native_source,
+            );
         }
 
         // C4Player runtime objects are recreated from their linked
@@ -36236,6 +36796,22 @@ impl GameApp {
     }
 }
 
+#[derive(Clone, Default)]
+struct NativePresentationPlan {
+    batches: Vec<NativePresentationBatch>,
+}
+
+#[derive(Clone)]
+struct NativePresentationBatch {
+    /// `None` for text attached directly to FramePresenter's already-scaled
+    /// base; subsequent batches own a premultiplied logical chrome layer.
+    logical_layer: Option<Vec<u8>>,
+    /// Set only for a raster layer explicitly isolated to one primary clipper.
+    /// Mixed and otherwise unproven layers retain full-frame composition.
+    clip: Option<Rect>,
+    text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
+}
+
 /// Config-driven bits the startup parity renderers display.
 #[derive(Clone, Copy, Debug, Default)]
 struct StartupViewFlags {
@@ -36616,6 +37192,7 @@ fn render_startup_frame(
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
+    context_menu_open: bool,
     definition_selector_open: bool,
     game_option_input_open: bool,
     scenario_game_options: &GameOptionButtons,
@@ -36630,6 +37207,7 @@ fn render_startup_frame(
     defer_native_main_text: bool,
     frame: &mut [u8],
 ) -> Result<()> {
+    let ordered_native = graphics.surface().is_clonk_text_capture_active();
     if view == StartupView::MainMenu {
         assets
             .require_classic_startup_main_resources()
@@ -36696,9 +37274,7 @@ fn render_startup_frame(
                         fonts,
                         book_fonts,
                         startup_gamma(),
-                        context_menu.is_none()
-                            && !definition_selector_open
-                            && !game_option_input_open,
+                        !context_menu_open && !definition_selector_open && !game_option_input_open,
                     )?;
                     let resources = assets.game_option_resources().with_context(
                         || "classic scenario game-option resources are unavailable",
@@ -36706,9 +37282,7 @@ fn render_startup_frame(
                     scenario_game_options.render(
                         surface,
                         &resources,
-                        context_menu.is_none()
-                            && !definition_selector_open
-                            && !game_option_input_open,
+                        !context_menu_open && !definition_selector_open && !game_option_input_open,
                         Some(startup_gamma()),
                     )?;
                     true
@@ -36738,7 +37312,12 @@ fn render_startup_frame(
                     if assets.game_lobby_resources().is_ok()
                         && assets.game_option_resources().is_ok() =>
                 {
-                    lobby.render_classic(surface, assets, scenario_game_options)?;
+                    lobby.render_classic(
+                        surface,
+                        assets,
+                        scenario_game_options,
+                        !ordered_native,
+                    )?;
                     true
                 }
                 _ => false,
@@ -36777,7 +37356,7 @@ fn render_startup_frame(
                         book.as_ref(),
                         player_models,
                         dialog,
-                        context_menu.is_none(),
+                        !context_menu_open,
                         Some(startup_gamma()),
                     );
                     true
@@ -36790,14 +37369,14 @@ fn render_startup_frame(
             if let Some(context_menu) = context_menu {
                 context_menu.render(surface, Some(startup_gamma()))?;
             }
-            if view == StartupView::ScenarioBrowser {
+            if !ordered_native && view == StartupView::ScenarioBrowser {
                 let resources = assets.game_option_resources().with_context(
                     || "classic scenario game-option tooltip resources are unavailable",
                 )?;
                 scenario_game_options.render_tooltip(
                     surface,
                     &resources,
-                    context_menu.is_none() && !definition_selector_open && !game_option_input_open,
+                    !context_menu_open && !definition_selector_open && !game_option_input_open,
                     Some(startup_gamma()),
                 )?;
             }
@@ -36853,7 +37432,7 @@ fn render_startup_frame(
                 if defer_native_main_text {
                     main_menu.render_chrome(surface);
                 } else {
-                    main_menu.render(surface, context_menu.is_none());
+                    main_menu.render(surface, !context_menu_open);
                 }
                 // Logo + version line per C4StartupMainDlg::DrawElement
                 // (C4StartupMainDlg.cpp:111-122), in C++ integer math.
@@ -36915,7 +37494,7 @@ fn render_startup_frame(
             StartupView::NetworkLobby => scenario_menu.menu().render(surface),
             StartupView::Options | StartupView::About => {}
         }
-        if view == StartupView::MainMenu && context_menu.is_none() {
+        if !ordered_native && view == StartupView::MainMenu && !context_menu_open {
             if let Some(pointer) = main_menu.participants_tooltip_pointer() {
                 let tooltip_font = assets
                     .global_tooltip_font
@@ -36967,6 +37546,11 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
             dest[dest_offset..dest_offset + stride].copy_from_slice(&src[src_offset..end]);
         }
     }
+}
+
+fn scaled_viewport_extent(logical_extent: u32, scale: f32) -> Option<u32> {
+    let scaled = logical_extent as f32 * scale;
+    (scaled.is_finite() && scaled > 0.0 && scaled <= u32::MAX as f32).then(|| scaled.ceil() as u32)
 }
 
 fn collect_viewport_inputs<'a>(
@@ -46821,6 +47405,175 @@ func Award()
         );
     }
 
+    fn install_native_test_fonts(app: &mut GameApp, scale: f32) {
+        let font_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/System.c4g/Endeavour.ttf");
+        let bytes = fs::read(font_path).expect("read Endeavour.ttf");
+        app.native_startup_fonts = Some(Arc::new(
+            lc_frontend::clonk_fonts::build_native_font_set(&bytes, scale)
+                .expect("build scale-native test fonts"),
+        ));
+    }
+
+    fn render_ordered_test_frame(
+        app: &mut GameApp,
+        scale: f32,
+        physical_width: u32,
+        physical_height: u32,
+    ) -> (Vec<u8>, Vec<u8>, NativePresentationPlan) {
+        assert!(app.can_present_ordered_native_text(scale));
+        let mut presenter = lc_scaling::FramePresenter::new(scale, physical_width, physical_height);
+        let mut output = vec![0_u8; physical_width as usize * physical_height as usize * 4];
+        assert!(presenter
+            .present(&mut output, |logical| app
+                .render_ordered_native_base(logical))
+            .expect("render ordered logical base"));
+        let base = output.clone();
+        let plan = app
+            .pending_native_presentation
+            .as_ref()
+            .expect("ordered renderer prepared a presentation plan")
+            .clone();
+
+        let mut chrome_only = base.clone();
+        {
+            let mut composer = presenter.ordered_composer(&mut chrome_only);
+            for batch in &plan.batches {
+                if let Some(layer) = batch.logical_layer.as_ref() {
+                    composer.begin_layer().copy_from_slice(layer);
+                    if let Some(clip) = batch.clip {
+                        composer.composite_layer_with_clip(clip);
+                    } else {
+                        composer.composite_layer();
+                    }
+                }
+            }
+        }
+        {
+            let mut composer = presenter.ordered_composer(&mut output);
+            app.replay_pending_native_presentation(&mut composer)
+                .expect("replay ordered native text");
+        }
+        (chrome_only, output, plan)
+    }
+
+    fn assert_one_pixel_native_edge(
+        chrome: &[u8],
+        rendered: &[u8],
+        frame_width: u32,
+        frame_height: u32,
+        command: &lc_graphics::clonk_font::CapturedClonkText,
+        scale: f32,
+    ) {
+        let anchor_x = (command.x as f32 * scale).round() as i32;
+        let anchor_y = (command.y as f32 * scale).round() as i32;
+        let (left, right) = match command.align {
+            lc_graphics::clonk_font::TextAlign::Left => (anchor_x - 4, anchor_x + 100),
+            lc_graphics::clonk_font::TextAlign::Center => (anchor_x - 60, anchor_x + 60),
+            lc_graphics::clonk_font::TextAlign::Right => (anchor_x - 100, anchor_x + 4),
+        };
+        let top = anchor_y - 4;
+        let bottom = anchor_y + 120;
+        let delta = |x: i32, y: i32| -> u8 {
+            if x < 0 || y < 0 || x >= frame_width as i32 || y >= frame_height as i32 {
+                return 0;
+            }
+            let index = (y as usize * frame_width as usize + x as usize) * 4;
+            (0..3)
+                .map(|channel| rendered[index + channel].abs_diff(chrome[index + channel]))
+                .max()
+                .unwrap_or(0)
+        };
+
+        let mut transition_widths = Vec::new();
+        for y in top..bottom {
+            let samples = (left..right).map(|x| delta(x, y)).collect::<Vec<_>>();
+            let Some(first_solid) = samples.iter().position(|value| *value >= 160) else {
+                continue;
+            };
+            let mut start = first_solid;
+            while start > 0 && (4..160).contains(&samples[start - 1]) {
+                start -= 1;
+            }
+            transition_widths.push(first_solid - start);
+        }
+        assert!(
+            !transition_widths.is_empty(),
+            "captured {:?} glyph `{}` contributed no solid foreground pixels",
+            command.role,
+            command.text
+        );
+        transition_widths.sort_unstable();
+        let median = transition_widths[transition_widths.len() / 2];
+        assert!(
+            median <= 1,
+            "native `{}` edge spans {median} intermediate physical pixels: {transition_widths:?}",
+            command.text
+        );
+    }
+
+    #[test]
+    fn ordered_overlay_retains_additive_rgb_with_zero_alpha() {
+        let mut app = new_running_sandbox_app();
+        app.pending_native_presentation = Some(NativePresentationPlan::default());
+        app.begin_native_text_capture(true);
+        app.graphics.surface_mut().pixels_mut()[..4].copy_from_slice(&[37, 11, 5, 0]);
+
+        app.commit_pending_native_overlay();
+
+        let plan = app
+            .pending_native_presentation
+            .as_ref()
+            .expect("ordered presentation plan");
+        let layer = plan
+            .batches
+            .first()
+            .and_then(|batch| batch.logical_layer.as_ref())
+            .expect("additive RGB contribution is retained as raster");
+        assert_eq!(&layer[..4], &[37, 11, 5, 0]);
+    }
+
+    #[test]
+    fn ordered_overlay_does_not_infer_clipper_from_shared_text_clip() {
+        let mut app = new_running_sandbox_app();
+        let fonts = app
+            .assets
+            .clonk_fonts
+            .clone()
+            .expect("classic test fonts");
+        let clip = Rect::new(7, 11, 101, 79);
+        app.pending_native_presentation = Some(NativePresentationPlan::default());
+        app.begin_native_text_capture(true);
+        {
+            let surface = app.graphics.surface_mut();
+            surface.set_clip(clip);
+            surface.pixels_mut()[..4].copy_from_slice(&[9, 17, 25, 255]);
+            fonts.text.draw(
+                surface,
+                12,
+                16,
+                "Shared clip",
+                [255, 255, 255, 255],
+                lc_graphics::clonk_font::TextAlign::Left,
+                false,
+            );
+        }
+
+        app.commit_pending_native_overlay();
+
+        let batch = app
+            .pending_native_presentation
+            .as_ref()
+            .and_then(|plan| plan.batches.first())
+            .expect("ordinary overlay batch");
+        assert!(batch.logical_layer.is_some());
+        assert!(batch.text.iter().all(|command| command.clip == Some(clip)));
+        assert_eq!(
+            batch.clip, None,
+            "shared text clipping alone cannot prove the raster layer is isolated"
+        );
+    }
+
     #[test]
     fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base() {
         // FontRegular is rebuilt with Application.GetScale(), but its public
@@ -46849,7 +47602,7 @@ func Award()
         assert!(refreshed);
         let filtered_base = output.clone();
 
-        app.render_native_game_messages(&mut output, 960, 598, &gamma)
+        app.render_native_game_messages(&mut output, presenter.presentation_geometry(), &gamma)
             .expect("render native Tutorial01 message text");
         assert_ne!(
             output, filtered_base,
@@ -46902,9 +47655,13 @@ func Award()
             .cycle()
             .take(960 * 598 * 4)
             .collect::<Vec<_>>();
-        app.render_native_game_messages(&mut nominal, 960, 600, &gamma)
+        let nominal_geometry =
+            lc_scaling::FramePresenter::new(3.0, 960, 600).presentation_geometry();
+        let clipped_geometry =
+            lc_scaling::FramePresenter::new(3.0, 960, 598).presentation_geometry();
+        app.render_native_game_messages(&mut nominal, nominal_geometry, &gamma)
             .expect("render nominal native-message probe");
-        app.render_native_game_messages(&mut clipped, 960, 598, &gamma)
+        app.render_native_game_messages(&mut clipped, clipped_geometry, &gamma)
             .expect("render clipped native-message probe");
         for y in 0..598_usize {
             let clipped_row = &clipped[y * 960 * 4..(y + 1) * 960 * 4];
@@ -46916,6 +47673,130 @@ func Award()
                 y + 2
             );
         }
+    }
+
+    #[test]
+    fn scale_three_hud_caption_uses_one_pixel_native_edge() {
+        let mut app = new_running_sandbox_app();
+        let assets = Arc::make_mut(&mut app.assets);
+        let mut hud = (*assets.hud_graphics).clone();
+        hud.upper_board = Some(ImageData::new(1, 1, vec![24, 32, 40, 255]));
+        hud.logo = None;
+        assets.hud_graphics = Arc::new(hud);
+        app.configure_running_state("H".to_string(), DEFAULT_GROUND_HEIGHT);
+        install_native_test_fonts(&mut app, 3.0);
+
+        let (chrome, rendered, plan) = render_ordered_test_frame(&mut app, 3.0, 960, 600);
+        let (batch_index, command) = plan
+            .batches
+            .iter()
+            .enumerate()
+            .flat_map(|(batch, batch_data)| {
+                batch_data.text.iter().map(move |command| (batch, command))
+            })
+            .find(|(_, command)| command.text == "H")
+            .expect("HUD scenario caption was captured");
+        assert!(batch_index > 0, "HUD text follows the world/base batch");
+        assert!(
+            plan.batches[batch_index].logical_layer.is_some(),
+            "HUD chrome is committed immediately before its native text"
+        );
+        assert_eq!(
+            command.role,
+            lc_graphics::clonk_font::ClonkFontRole::GuiText
+        );
+        assert_one_pixel_native_edge(&chrome, &rendered, 960, 600, command, 3.0);
+    }
+
+    #[test]
+    fn scale_one_point_five_hud_uses_fractional_native_font_bundle() {
+        let mut app = new_running_sandbox_app();
+        app.configure_running_state("H".to_string(), DEFAULT_GROUND_HEIGHT);
+        install_native_test_fonts(&mut app, 1.5);
+        let fonts = app.native_startup_fonts.as_deref().expect("native fonts");
+        assert_eq!(fonts.text.raster_height(), 21);
+        assert_eq!(fonts.main_small.raster_height(), 19);
+
+        let (chrome, rendered, plan) = render_ordered_test_frame(&mut app, 1.5, 480, 300);
+        assert!(plan
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.text)
+            .any(|command| command.text == "H"));
+        assert_ne!(rendered, chrome, "fractional native HUD glyphs must draw");
+    }
+
+    #[test]
+    fn scale_one_point_five_message_batch_carries_its_isolated_clipper() {
+        let mut app = new_running_sandbox_app();
+        let decoration = lc_engine::ObjectMenuFrameDecoration {
+            source_definition: "TEST".to_string(),
+            background_color: 0x8032_3232,
+            border_top: 0,
+            border_left: 0,
+            border_right: 0,
+            border_bottom: 0,
+            top: None,
+            top_right: None,
+            right: None,
+            bottom_right: None,
+            bottom: None,
+            bottom_left: None,
+            left: None,
+            top_left: None,
+        };
+        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::GlobalPlayer,
+            lines: vec!["Fractional clip".to_string()],
+            target: None,
+            player: Some(app.local_owner),
+            offset: Vector2::new(1, 1),
+            color: 0xffff_ffff,
+            flags: FLAG_LEFT | FLAG_TOP,
+            width: Some(120),
+            decoration: Some("TEST".to_string()),
+            frame_decoration: Some(decoration),
+            // Requesting a portrait selects the framed message layout. The
+            // missing test definition is harmless; the frame still supplies
+            // an isolated raster layer next to the captured text.
+            portrait: Some("Portrait:TEST::000000::1".to_string()),
+        }];
+        install_native_test_fonts(&mut app, 1.5);
+
+        let (_, _, plan) = render_ordered_test_frame(&mut app, 1.5, 480, 300);
+        let viewport = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == app.local_owner)
+            .expect("local message viewport")
+            .rect;
+        let batch = plan
+            .batches
+            .iter()
+            .find(|batch| {
+                batch
+                    .text
+                    .iter()
+                    .any(|command| command.text == "Fractional clip")
+            })
+            .expect("isolated game-message batch");
+
+        assert!(batch.logical_layer.is_some(), "message frame is rasterized");
+        assert_eq!(batch.clip, Some(viewport));
+        assert!(batch
+            .text
+            .iter()
+            .all(|command| command.clip == Some(viewport)));
+        assert_eq!(
+            plan.batches
+                .iter()
+                .filter(|candidate| candidate.clip.is_some())
+                .count(),
+            1,
+            "unproven HUD and scoreboard batches keep full-frame composition"
+        );
     }
 
     #[test]
@@ -56061,6 +56942,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn integer_scale_main_requires_matching_native_fonts_before_cache_selection() {
         let mut app = new_classic_menu_app(320, 200);
+        Arc::make_mut(&mut app.assets).startup_native_font_source = None;
         let cached = vec![0x42; 320 * 200 * 4];
         app.menu_frame_cache = Some(MenuFrameCache {
             view: StartupView::MainMenu,
@@ -57567,6 +58449,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(bundle.fonts.title.line_height, 39); // 16*22/14 = 25px
         assert_eq!(bundle.tooltip.line_height, 25);
         assert_eq!(bundle.tooltip.h_space, 0);
+        assert!(
+            bundle.native_source.is_none(),
+            "the fixed native builder must not impersonate a size-16 role map"
+        );
     }
 
     #[test]
@@ -57629,6 +58515,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("pre-definition tooltip font");
         assert_eq!(tooltip.line_height, 31);
         assert_eq!(tooltip.h_space, 0);
+        assert!(setup.initial_native_font_source.is_none());
+        assert!(setup.refreshed_native_font_source.is_none());
 
         // A definition root is not registered until the later full resource
         // refresh. It cannot rescue a face missing during InitLoaderScreen.
@@ -57708,7 +58596,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn unsupported_fractional_loader_scale_cannot_be_bypassed_by_fast_boot() {
+    fn fractional_loader_scale_reaches_native_text() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -57734,17 +58622,19 @@ public func Grant(password) { return GainMissionAccess(password); }
         )
         .expect("app");
         app.configure_native_startup_fonts(1.5, false);
-        for _ in 0..480 {
-            app.update().expect("poll boot worker");
-            if app.boot_loading.is_none() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
         assert_eq!(app.mode, AppMode::Loading);
-        let mut frame = vec![0_u8; 320 * 200 * 4];
-        let error = app.render(&mut frame).expect_err("fractional loader scale");
-        assert!(error.to_string().contains("integer application scale"));
+        assert!(app.can_defer_native_loader_text(1.5));
+        let mut presenter = lc_scaling::FramePresenter::new(1.5, 480, 300);
+        let mut frame = vec![0_u8; 480 * 300 * 4];
+        let refreshed = presenter
+            .present(&mut frame, |logical| {
+                app.render_for_presentation(logical, false, true, false)
+            })
+            .expect("render fractional loader chrome");
+        assert!(refreshed);
+        app.render_native_loader_text(&mut frame, 480, 300)
+            .expect("render fractional native loader text");
+        assert!(frame.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 
     #[test]
@@ -58489,7 +59379,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         config
             .save(paths.config_file())
             .expect("explicit loader language config");
-        let app = GameApp::new(
+        let mut app = GameApp::new(
             320,
             200,
             AudioOptions::default(),
@@ -58528,6 +59418,30 @@ public func Grant(password) { return GainMissionAccess(password); }
             .selection()
             .selected_filename()
             .starts_with("LoaderFantasy"));
+
+        let initial_source = setup
+            .initial_native_font_source
+            .clone()
+            .expect("shipped loader font has a validated native source");
+        let refreshed_source = setup
+            .refreshed_native_font_source
+            .clone()
+            .expect("shipped running font has a validated native source");
+        app.configure_native_startup_fonts(1.5, false);
+        app.install_active_classic_fonts(
+            setup.screen.resources().fonts().clone(),
+            setup.initial_tooltip_font.clone(),
+            Some(initial_source),
+        );
+        assert!(app.can_defer_native_loader_text(1.5));
+
+        app.install_active_classic_fonts(
+            setup.refreshed_resources.fonts().clone(),
+            setup.refreshed_tooltip_font.clone(),
+            Some(refreshed_source),
+        );
+        app.mode = AppMode::Running;
+        assert!(app.can_present_ordered_native_text(1.5));
     }
 
     #[test]
@@ -58704,6 +59618,59 @@ public func Grant(password) { return GainMissionAccess(password); }
             "cached menu must not request another alpha overlay"
         );
         assert_eq!(output, with_native_text);
+    }
+
+    #[test]
+    fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
+        let mut app = new_classic_menu_app(640, 480);
+        install_native_test_fonts(&mut app, 3.0);
+        for label in ["LOWER", "H"] {
+            app.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    label,
+                    label,
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push ordered startup dialog");
+        }
+
+        let (chrome, rendered, plan) = render_ordered_test_frame(&mut app, 3.0, 1920, 1440);
+        assert!(
+            plan.batches
+                .first()
+                .is_some_and(|batch| !batch.text.is_empty()
+                    && batch
+                        .text
+                        .iter()
+                        .all(|command| command.text != "LOWER" && command.text != "H")),
+            "main-menu captions remain in the native base batch while dialogs are open"
+        );
+        let command_batch = |needle: &str| {
+            plan.batches
+                .iter()
+                .enumerate()
+                .find_map(|(index, batch)| {
+                    batch
+                        .text
+                        .iter()
+                        .find(|command| command.text == needle)
+                        .map(|command| (index, command))
+                })
+                .unwrap_or_else(|| panic!("captured startup dialog text `{needle}`"))
+        };
+        let (lower_batch, _) = command_batch("LOWER");
+        let (upper_batch, upper) = command_batch("H");
+        assert!(
+            lower_batch > 0 && upper_batch > lower_batch,
+            "stacked dialogs must alternate chrome/text in ownership order: lower={lower_batch}, upper={upper_batch}"
+        );
+        assert!(
+            plan.batches[upper_batch].logical_layer.is_some(),
+            "the upper dialog chrome is composited after lower native text"
+        );
+        assert_one_pixel_native_edge(&chrome, &rendered, 1920, 1440, upper, 3.0);
     }
 
     #[test]
@@ -68774,6 +69741,7 @@ protected func InputCallback(string answer, int player)
             scenario: FrontendScenario::fallback(),
             refreshed_resources: None,
             refreshed_tooltip_font: None,
+            refreshed_native_font_source: None,
             refreshed_global_gui_overrides: None,
             refresh_requested: false,
             receiver,

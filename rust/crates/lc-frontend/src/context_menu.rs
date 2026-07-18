@@ -395,6 +395,18 @@ impl<A: Clone> ContextPanel<A> {
         }
     }
 
+    fn count(&self) -> usize {
+        1 + self.submenu.as_deref().map_or(0, Self::count)
+    }
+
+    fn at_depth(&self, depth: usize) -> Option<&Self> {
+        if depth == 0 {
+            Some(self)
+        } else {
+            self.submenu.as_deref()?.at_depth(depth - 1)
+        }
+    }
+
     fn deepest(&self) -> &Self {
         self.submenu.as_deref().map_or(self, Self::deepest)
     }
@@ -667,11 +679,39 @@ impl<A: Clone> ClassicContextMenu<A> {
         outcome
     }
 
-    pub fn render(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) -> Result<()> {
-        if !self.open {
-            return Ok(());
+    /// Number of currently visible panels, ordered from root to deepest
+    /// submenu. Each panel is a distinct C++ ownership layer.
+    pub fn panel_count(&self) -> usize {
+        if self.open {
+            self.root.count()
+        } else {
+            0
         }
-        render_panel(surface, &self.root, &self.resources, gamma)?;
+    }
+
+    /// Draw exactly one visible panel by root-to-leaf index, without drawing
+    /// child panels or the final tooltip. Ordered native presentation commits
+    /// after each call so a child panel's chrome can cover its parent text.
+    pub fn render_panel(
+        &self,
+        surface: &mut Surface,
+        index: usize,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        ensure!(
+            self.open,
+            "cannot render a panel from a closed context menu"
+        );
+        let panel = self
+            .root
+            .at_depth(index)
+            .ok_or_else(|| anyhow::anyhow!("context-menu panel index {index} is out of range"))?;
+        render_panel_only(surface, panel, &self.resources, gamma)
+    }
+
+    /// Draw only the delayed tooltip belonging to the current pointer hover.
+    /// This is the final context-menu layer and intentionally excludes panels.
+    pub fn render_tooltip(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) {
         if let Some(tooltip) = self.hovered_tooltip() {
             draw_classic_tooltip(
                 surface,
@@ -681,6 +721,16 @@ impl<A: Clone> ClassicContextMenu<A> {
                 gamma,
             );
         }
+    }
+
+    pub fn render(&self, surface: &mut Surface, gamma: Option<&GammaRamp>) -> Result<()> {
+        if !self.open {
+            return Ok(());
+        }
+        for index in 0..self.panel_count() {
+            self.render_panel(surface, index, gamma)?;
+        }
+        self.render_tooltip(surface, gamma);
         Ok(())
     }
 
@@ -997,7 +1047,7 @@ fn action_at_point<A: Clone>(panel: &ContextPanel<A>, point: GuiPoint) -> Option
     panel.entries.get(index)?.action.clone()
 }
 
-fn render_panel<A: Clone>(
+fn render_panel_only<A: Clone>(
     surface: &mut Surface,
     panel: &ContextPanel<A>,
     resources: &ContextMenuResources,
@@ -1091,9 +1141,6 @@ fn render_panel<A: Clone>(
             );
         }
     }
-    if let Some(submenu) = panel.submenu.as_deref() {
-        render_panel(surface, submenu, resources, gamma)?;
-    }
     Ok(())
 }
 
@@ -1172,6 +1219,15 @@ mod tests {
         let icons = ImageData::new(240, 40, vec![255; 240 * 40 * 4]);
         let arrow = ImageData::new(8, 16, vec![255; 8 * 16 * 4]);
         ContextMenuResources::new(&font, &font, &icons, &arrow).expect("resources")
+    }
+
+    fn capturing_resources() -> ContextMenuResources {
+        let fonts = crate::test_support::endeavour_font_set();
+        let mut tooltip = fonts.text.clone();
+        tooltip.set_role(Some(lc_graphics::clonk_font::ClonkFontRole::GuiTooltip));
+        let icons = ImageData::new(240, 40, vec![255; 240 * 40 * 4]);
+        let arrow = ImageData::new(8, 16, vec![255; 8 * 16 * 4]);
+        ContextMenuResources::new(&fonts.text, &tooltip, &icons, &arrow).expect("resources")
     }
 
     fn screen() -> IntRect {
@@ -1401,6 +1457,89 @@ mod tests {
         assert_eq!(menu.hovered_tooltip(), Some("Parent tip"));
         menu.handle_gamepad_direction(ContextMenuDirection::Down);
         assert_eq!(menu.hovered_tooltip(), None);
+    }
+
+    #[test]
+    fn staged_panels_and_tooltip_keep_distinct_capture_and_z_order() {
+        let entries = vec![ContextMenuEntry::new("Parent")
+            .with_tooltip("Parent tip")
+            .with_submenu(vec![ContextMenuEntry::new("Child")
+                .with_tooltip("Child tip")
+                .with_action(Action::Child)])];
+        let (mut menu, _) = ClassicContextMenu::open(
+            entries,
+            GuiPoint::new(20.0, 30.0),
+            screen(),
+            capturing_resources(),
+        );
+        let parent_row = menu.layout().panels[0].rows[0].rect;
+        menu.handle_pointer_move(GuiPoint::new(
+            (parent_row.x + 1) as f32,
+            (parent_row.y + 1) as f32,
+        ));
+        let child_row = menu.layout().panels[1].rows[0].rect;
+        menu.handle_pointer_move(GuiPoint::new(
+            (child_row.x + 1) as f32,
+            (child_row.y + 1) as f32,
+        ));
+        menu.last_pointer_activity = Instant::now() - Duration::from_secs(1);
+        assert_eq!(menu.panel_count(), 2);
+
+        let mut surface = Surface::new(320, 200, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        menu.render_panel(&mut surface, 0, None)
+            .expect("root panel");
+        let parent_commands = surface.take_clonk_text_capture();
+        assert_eq!(parent_commands.len(), 1);
+        assert_eq!(parent_commands[0].text, "Parent");
+
+        let layout = menu.layout();
+        let parent = layout.panels[0].bounds;
+        let child = layout.panels[1].bounds;
+        let overlap_left = parent.x.max(child.x);
+        let overlap_top = parent.y.max(child.y);
+        let overlap_right = (parent.x + parent.w).min(child.x + child.w);
+        let overlap_bottom = (parent.y + parent.h).min(child.y + child.h);
+        assert!(overlap_left < overlap_right && overlap_top < overlap_bottom);
+        let parent_overlap = (overlap_top..overlap_bottom)
+            .flat_map(|y| (overlap_left..overlap_right).map(move |x| (x, y)))
+            .map(|(x, y)| surface.get_pixel(x as u32, y as u32).unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        surface.begin_clonk_text_capture();
+        menu.render_panel(&mut surface, 1, None)
+            .expect("child panel");
+        let child_commands = surface.take_clonk_text_capture();
+        assert_eq!(child_commands.len(), 1);
+        assert_eq!(child_commands[0].text, "Child");
+        let child_overlap = (overlap_top..overlap_bottom)
+            .flat_map(|y| (overlap_left..overlap_right).map(move |x| (x, y)))
+            .map(|(x, y)| surface.get_pixel(x as u32, y as u32).unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_ne!(
+            parent_overlap, child_overlap,
+            "child chrome is a later layer"
+        );
+
+        surface.begin_clonk_text_capture();
+        menu.render_tooltip(&mut surface, None);
+        let tooltip_commands = surface.take_clonk_text_capture();
+        assert_eq!(tooltip_commands.len(), 1);
+        assert_eq!(tooltip_commands[0].text, "Child tip");
+        assert_eq!(
+            tooltip_commands[0].role,
+            lc_graphics::clonk_font::ClonkFontRole::GuiTooltip
+        );
+
+        let mut combined = Surface::new(320, 200, PixelFormat::Rgba8888);
+        let mut staged = Surface::new(320, 200, PixelFormat::Rgba8888);
+        menu.render(&mut combined, None).expect("combined render");
+        for index in 0..menu.panel_count() {
+            menu.render_panel(&mut staged, index, None)
+                .expect("staged panel");
+        }
+        menu.render_tooltip(&mut staged, None);
+        assert_eq!(combined.pixels(), staged.pixels());
     }
 
     #[test]

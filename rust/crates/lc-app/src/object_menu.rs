@@ -5028,11 +5028,15 @@ mod tests {
             Some(Color::opaque(255, 0, 0)),
             "negative corner targets intentionally protrude outside bounds"
         );
-        assert_eq!(surface.get_pixel(7, 7), Some(Color::opaque(31, 31, 0)));
+        assert_eq!(
+            surface.get_pixel(7, 7),
+            Some(Color::new(31, 31, 0, 127)),
+            "the half-opaque background stays premultiplied on a transparent layer"
+        );
         assert_eq!(surface.get_pixel(11, 5), Some(Color::opaque(0, 255, 0)));
         assert_eq!(
             surface.get_pixel(12, 5),
-            Some(Color::opaque(31, 31, 0)),
+            Some(Color::new(31, 31, 0, 127)),
             "the final top tile is truncated before the right border"
         );
 

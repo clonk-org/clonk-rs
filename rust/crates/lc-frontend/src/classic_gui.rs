@@ -449,7 +449,7 @@ pub fn draw_facet_stretch(
                             blend(sample[0], destination.r),
                             blend(sample[1], destination.g),
                             blend(sample[2], destination.b),
-                            255,
+                            alpha_over_alpha(alpha, destination.a),
                         ),
                     );
                 }
@@ -512,6 +512,16 @@ fn encode_filtered_channel(gamma: Option<&GammaRamp>, channel: f32) -> f32 {
         .unwrap_or_else(|| channel.round().clamp(0.0, 255.0))
 }
 
+/// Alpha-channel counterpart of the live source-over framebuffer blend.
+/// Keeping the destination alpha matters for transparent ordered layers:
+/// their RGB is already premultiplied by the same opacity and must not turn
+/// into an opaque replacement when the layer is presented later.
+fn alpha_over_alpha(source_opacity: f32, destination_alpha: u8) -> u8 {
+    (255.0 * source_opacity + f32::from(destination_alpha) * (1.0 - source_opacity))
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
 /// `CStdDDraw::DrawBoxDw`: inclusive coordinates and engine AARRGGBB color
 /// with inverted alpha (`StdDDraw2.cpp:1401-1404`, `StdGL.cpp:846-891`).
 #[allow(clippy::too_many_arguments)]
@@ -548,7 +558,7 @@ pub fn draw_engine_box(
                     blend(red, destination.r),
                     blend(green, destination.g),
                     blend(blue, destination.b),
-                    255,
+                    alpha_over_alpha(opacity, destination.a),
                 ),
             );
         }
@@ -646,6 +656,22 @@ pub fn draw_clipped_text_with_markup(
         return;
     }
     let (width, height) = ((cx1 - cx0) as u32, (cy1 - cy0) as u32);
+    if surface.is_clonk_text_capture_active() {
+        // A private scratch Surface cannot share the semantic capture sink.
+        // During native presentation, draw against the original surface with
+        // the equivalent primary clipper so the recorded command retains its
+        // absolute coordinates and clip rectangle. Tagged fonts suppress the
+        // logical glyph pixels; untagged fonts still rasterize through the
+        // ordinary clipped Surface operations.
+        let saved_clip = surface.clip();
+        surface.set_clip(lc_graphics::Rect::new(cx0, cy0, width, height));
+        font.draw_with_gamma(surface, x, y, text, color, align, markup, gamma);
+        match saved_clip {
+            Some(clip) => surface.set_clip(clip),
+            None => surface.clear_clip(),
+        }
+        return;
+    }
     let mut scratch = Surface::new(width, height, PixelFormat::Rgba8888);
     for target_y in 0..height {
         for target_x in 0..width {
@@ -823,6 +849,13 @@ mod tests {
     }
 
     #[test]
+    fn engine_box_keeps_transparent_layer_premultiplied() {
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        draw_engine_box(&mut surface, 0, 0, 0, 0, 0x7f00_ff00, None);
+        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(0, 128, 0, 128)));
+    }
+
+    #[test]
     fn engine_frame_blends_each_corner_exactly_once() {
         let background = Color::opaque(200, 100, 0);
         let mut surface = Surface::new(5, 5, PixelFormat::Rgba8888);
@@ -911,6 +944,39 @@ mod tests {
         };
         assert!(!continuation_has_ink(&literal));
         assert!(continuation_has_ink(&markup));
+    }
+
+    #[test]
+    fn clipped_text_capture_keeps_absolute_coordinates_and_clipper() {
+        let fonts = endeavour_font_set();
+        let mut surface = Surface::new(80, 48, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        draw_clipped_text_with_markup(
+            &mut surface,
+            &fonts.text,
+            17,
+            19,
+            "capture",
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            None,
+            IntRect {
+                x: 11,
+                y: 13,
+                w: 31,
+                h: 23,
+            },
+            true,
+        );
+
+        let commands = surface.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!((commands[0].x, commands[0].y), (17, 19));
+        assert_eq!(
+            commands[0].clip,
+            Some(lc_graphics::Rect::new(11, 13, 31, 23))
+        );
+        assert!(surface.pixels().chunks_exact(4).all(|pixel| pixel[3] == 0));
     }
 
     // Structural equivalence guard for the extracted `Button::DrawElement`

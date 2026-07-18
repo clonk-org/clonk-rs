@@ -13,7 +13,7 @@ use crate::{GuiPoint, ImageData, KeyCode};
 use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
-use lc_graphics::clonk_font::{line_height_for, ClonkFont, GlyphCell, TextAlign};
+use lc_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
 use lc_graphics::{Color, GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 
@@ -310,8 +310,8 @@ pub fn build_book_font_set(ttf_bytes: &[u8]) -> Result<BookFontSet> {
         .new_memory_face(ttf_bytes.to_vec(), 0)
         .context("failed to load font face")?;
     Ok(BookFontSet {
-        caption: build_book_font(&face, 16)?,
-        text: build_book_font(&face, 14)?,
+        caption: build_book_font(&face, 16)?.with_role(ClonkFontRole::BookCaption),
+        text: build_book_font(&face, 14)?.with_role(ClonkFontRole::BookText),
     })
 }
 
@@ -403,10 +403,21 @@ fn draw_box_dw(surface: &mut Surface, x1: i32, y1: i32, x2: i32, y2: i32, clr: u
             let _ = surface.set_pixel(
                 x as u32,
                 y as u32,
-                Color::new(blend(rgb[0], dst.r), blend(rgb[1], dst.g), blend(rgb[2], dst.b), 255),
+                Color::new(
+                    blend(rgb[0], dst.r),
+                    blend(rgb[1], dst.g),
+                    blend(rgb[2], dst.b),
+                    blend_surface_alpha(opacity, dst.a),
+                ),
             );
         }
     }
+}
+
+fn blend_surface_alpha(opacity: f32, destination: u8) -> u8 {
+    (255.0 * opacity + f32::from(destination) * (1.0 - opacity))
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 /// `C4Surface::ReadPNG` (C4Surface.cpp:972,982): every fully transparent
@@ -530,7 +541,7 @@ fn draw_image_strip_modulated(
                     blend(rgba[0], mod_rgb[0], dst.r),
                     blend(rgba[1], mod_rgb[1], dst.g),
                     blend(rgba[2], mod_rgb[2], dst.b),
-                    255,
+                    blend_surface_alpha(af, dst.a),
                 ),
             );
         }
@@ -659,7 +670,7 @@ fn draw_image_bilinear_modulated(
                             blend(s[0], mod_rgbf[0], dst.r),
                             blend(s[1], mod_rgbf[1], dst.g),
                             blend(s[2], mod_rgbf[2], dst.b),
-                            255,
+                            blend_surface_alpha(af, dst.a),
                         ),
                     );
                 }
@@ -2054,6 +2065,16 @@ mod tests {
             glyph.width + 1,
             shadowed.text.glyph('T').expect("shadowed T").width
         );
+        assert_eq!(book.caption.role(), Some(ClonkFontRole::BookCaption));
+        assert_eq!(book.text.role(), Some(ClonkFontRole::BookText));
+    }
+
+    #[test]
+    fn transparent_player_selection_box_keeps_layer_alpha() {
+        use lc_graphics::PixelFormat;
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        draw_box_dw(&mut surface, 0, 0, 0, 0, CLR_LIST_BOX_SEL, None);
+        assert_eq!(surface.get_pixel(0, 0).map(|pixel| pixel.a), Some(80));
     }
 
     // DrawBoxDw → DrawQuadDw (StdGL.cpp:846-894): inverted-alpha color,

@@ -9,10 +9,13 @@ use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::{Library, Matrix, Vector};
 use lc_graphics::clonk_font::{
-    compose_glyph_cell, line_height_for, scaled_font_image_width, ClonkFont, FontImageProvider,
-    FontImageRef, GlyphCell, TextAlign,
+    compose_glyph_cell, font_image_lookup_tag, inline_image_token, line_height_for,
+    markup_blit_color, scaled_font_image_width, skip_markup_tag, CapturedClonkText,
+    CapturedFontImage, ClonkFont, ClonkFontRole, FontImageProvider, FontImageRef, GlyphCell,
+    TextAlign,
 };
-use lc_graphics::{Color, GammaRamp, Surface};
+use lc_graphics::{ClipperProjection, Color, GammaRamp, Surface};
+use lc_gui::{ImageData, Rect as GuiRect};
 use std::collections::BTreeSet;
 
 /// The five GUI fonts the startup menus draw with.
@@ -29,7 +32,7 @@ pub struct ClonkFontSet {
     pub mini: ClonkFont,
 }
 
-/// One CStdFont rasterized at the application's integer output scale.
+/// One CStdFont rasterized at the application's output scale.
 ///
 /// C++ keeps the glyph atlas in physical pixels while all public metrics and
 /// draw coordinates remain in GUI units (`StdFont.cpp:319-352,571-638,841-842,
@@ -37,16 +40,72 @@ pub struct ClonkFontSet {
 /// the ordinary [`ClonkFontSet`] remains the scale-1 logical renderer.
 pub struct NativeClonkFont {
     raster: ClonkFont,
-    scale: u32,
+    application_scale: f32,
+    effective_scale: f32,
+    logical_height: u32,
+    raster_height: u32,
+    logical_h_space: i32,
+}
+
+#[derive(Clone, Copy)]
+struct NativeDrawProjection {
+    scale_x: f64,
+    scale_y: f64,
+    offset_x: f64,
+    offset_y: f64,
+}
+
+impl NativeDrawProjection {
+    fn application(scale: f32, offset: (i32, i32)) -> Self {
+        Self {
+            scale_x: f64::from(scale),
+            scale_y: f64::from(scale),
+            offset_x: f64::from(offset.0),
+            offset_y: f64::from(offset.1),
+        }
+    }
+
+    fn clipper(projection: ClipperProjection) -> Self {
+        let (scale_x, scale_y) = projection.scale();
+        let (offset_x, offset_y) = projection.logical_to_physical(0.0, 0.0);
+        Self {
+            scale_x,
+            scale_y,
+            offset_x,
+            offset_y,
+        }
+    }
+
+    fn project(self, x: i32, y: i32) -> (f64, f64) {
+        (
+            f64::from(x) * self.scale_x + self.offset_x,
+            f64::from(y) * self.scale_y + self.offset_y,
+        )
+    }
+
+    fn requires_resampling(self, effective_scale: f32) -> bool {
+        let effective_scale = f64::from(effective_scale);
+        let differs = |left: f64, right: f64| (left - right).abs() > 1.0e-6;
+        differs(self.scale_x, effective_scale)
+            || differs(self.scale_y, effective_scale)
+            || differs(self.scale_x, self.scale_x.round())
+            || differs(self.scale_y, self.scale_y.round())
+            || differs(self.offset_x, self.offset_x.round())
+            || differs(self.offset_y, self.offset_y.round())
+    }
 }
 
 impl NativeClonkFont {
-    /// Integer denominator used by CStdFont's scale-native GUI metrics.
+    /// Exact rational denominator used by CStdFont's scale-native GUI metrics.
+    ///
+    /// A glyph facet of width `W` occupies `W * logical_height` of these units;
+    /// dividing by `raster_height` is exactly `W / effective_scale` without
+    /// losing precision to an early floating-point conversion.
     pub(crate) fn message_width_units_per_gui_pixel(&self) -> i32 {
-        self.scale as i32
+        i32::try_from(self.raster_height).unwrap_or(i32::MAX)
     }
 
-    /// One `BreakMessage` character advance in physical numerator units.
+    /// One `BreakMessage` character advance in exact raster-height units.
     /// C++ accumulates `facet.Wdt / scale + iHSpace`, where the shadowed
     /// font's `iHSpace` remains -1 GUI pixel (`StdFont.cpp:640-760`). Keeping
     /// the numerator avoids losing the fractional width before the wrap test.
@@ -54,14 +113,41 @@ impl NativeClonkFont {
         if character < ' ' {
             return 0;
         }
-        self.raster
-            .measure(&character.to_string(), false)
-            .0
-            .saturating_add(self.raster.h_space)
+        let raster_width = self
+            .raster
+            .rendered_glyph(character)
+            .map_or(0, |glyph| glyph.width);
+        let logical_height = i32::try_from(self.logical_height).unwrap_or(i32::MAX);
+        let raster_height = self.message_width_units_per_gui_pixel();
+        raster_width
+            .saturating_mul(logical_height)
+            .saturating_add(self.logical_h_space.saturating_mul(raster_height))
     }
 
     pub(crate) fn message_image_advance_units(&self, image: FontImageRef<'_>) -> i32 {
         scaled_font_image_width(self.raster.cell_height, image)
+            .saturating_mul(i32::try_from(self.logical_height).unwrap_or(i32::MAX))
+    }
+
+    /// Configured application scale passed to `CStdFont::Init`.
+    pub fn application_scale(&self) -> f32 {
+        self.application_scale
+    }
+
+    /// Scale C++ stores after truncating the requested raster height:
+    /// `floor(logical_height * application_scale) / logical_height`.
+    pub fn effective_scale(&self) -> f32 {
+        self.effective_scale
+    }
+
+    /// Logical FreeType height requested by the C4 font role.
+    pub fn logical_height(&self) -> u32 {
+        self.logical_height
+    }
+
+    /// FreeType pixel height after C++'s positive float-to-integer truncation.
+    pub fn raster_height(&self) -> u32 {
+        self.raster_height
     }
 
     /// CStdFont's internal `iLineHgt`, in physical atlas pixels.
@@ -74,18 +160,19 @@ impl NativeClonkFont {
         self.raster.cell_height
     }
 
-    /// `CStdFont::GetLineHeight`: internal height divided by application scale.
+    /// `CStdFont::GetLineHeight`: internal height divided by effective scale.
     pub fn logical_line_height(&self) -> i32 {
-        self.raster.line_height / self.scale as i32
+        (self.raster.line_height as f32 / self.effective_scale) as i32
     }
 
     pub fn glyph(&self, ch: char) -> Option<&GlyphCell> {
         self.raster.glyph(ch)
     }
 
-    /// `CStdFont::GetTextExtent` in GUI units. Physical glyph widths include
-    /// the scaled shadow and physical spacing; one final integer division is
-    /// equivalent to C++'s per-glyph float division for an integer scale.
+    /// `CStdFont::GetTextExtent` in GUI units. Each physical glyph width is
+    /// divided by this font's effective scale while `iHSpace` remains one
+    /// logical pixel, including when height truncation makes the two scales
+    /// differ.
     pub fn measure(&self, text: &str, markup: bool) -> (i32, i32) {
         self.measure_impl(text, markup, None)
     }
@@ -105,20 +192,61 @@ impl NativeClonkFont {
         markup: bool,
         images: Option<&dyn FontImageProvider>,
     ) -> (i32, i32) {
-        let (width, height) = images.map_or_else(
-            || self.raster.measure(text, markup),
-            |images| self.raster.measure_with_images(text, markup, images),
-        );
-        let scale = self.scale as i32;
-        let lines = if self.raster.line_height > 0 {
-            height / self.raster.line_height
-        } else {
-            0
-        };
-        (
-            width / scale,
-            lines.saturating_mul(self.raster.line_height.saturating_add(scale - 1) / scale),
-        )
+        let line_step_height =
+            (self.raster.line_height as f32 / self.effective_scale).ceil() as i32;
+        let mut rest = text;
+        let mut row_width = 0.0_f32;
+        let mut width = 0.0_f32;
+        let mut height = line_step_height;
+        loop {
+            if markup {
+                while let Some(advance) = skip_markup_tag(rest) {
+                    rest = &rest[advance..];
+                }
+            }
+            if rest.is_empty() {
+                break;
+            }
+            if markup {
+                if let Some((tag, advance)) = inline_image_token(rest) {
+                    let image_width = images
+                        .and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
+                        .map_or(0, |image| {
+                            scaled_font_image_width(self.raster.cell_height, image)
+                        });
+                    row_width += image_width as f32 / self.effective_scale;
+                    rest = &rest[advance..];
+                    if !rest.is_empty() {
+                        row_width += self.logical_h_space as f32;
+                    }
+                    width = width.max(row_width);
+                    continue;
+                }
+            }
+            let mut characters = rest.chars();
+            let Some(character) = characters.next() else {
+                break;
+            };
+            rest = characters.as_str();
+            if character == '\n' || (markup && character == '|') {
+                row_width = 0.0;
+                height = height.saturating_add(line_step_height);
+                continue;
+            }
+            if character < ' ' {
+                continue;
+            }
+            row_width += self
+                .raster
+                .rendered_glyph(character)
+                .map_or(0, |glyph| glyph.width) as f32
+                / self.effective_scale;
+            if !rest.is_empty() {
+                row_width += self.logical_h_space as f32;
+            }
+            width = width.max(row_width);
+        }
+        (width as i32, height)
     }
 
     /// Draw a native-resolution glyph run onto a physical surface while
@@ -163,7 +291,7 @@ impl NativeClonkFont {
         physical_offset: (i32, i32),
         gamma: Option<&GammaRamp>,
     ) {
-        self.draw_to_physical_surface_with_offset_impl(
+        self.draw_to_physical_surface_with_projection_impl(
             surface,
             x,
             y,
@@ -171,7 +299,7 @@ impl NativeClonkFont {
             color,
             align,
             markup,
-            physical_offset,
+            NativeDrawProjection::application(self.application_scale, physical_offset),
             gamma,
             None,
         );
@@ -192,7 +320,7 @@ impl NativeClonkFont {
         gamma: Option<&GammaRamp>,
         images: &dyn FontImageProvider,
     ) {
-        self.draw_to_physical_surface_with_offset_impl(
+        self.draw_to_physical_surface_with_projection_impl(
             surface,
             x,
             y,
@@ -200,14 +328,16 @@ impl NativeClonkFont {
             color,
             align,
             markup,
-            physical_offset,
+            NativeDrawProjection::application(self.application_scale, physical_offset),
             gamma,
             Some(images),
         );
     }
 
+    /// Draw through the exact rounded viewport and orthographic projection of
+    /// CStdGL's active primary clipper (`StdGL.cpp:402-407`).
     #[allow(clippy::too_many_arguments)]
-    fn draw_to_physical_surface_with_offset_impl(
+    pub fn draw_to_physical_surface_with_clipper(
         &self,
         surface: &mut Surface,
         x: i32,
@@ -216,11 +346,66 @@ impl NativeClonkFont {
         color: [u8; 4],
         align: TextAlign,
         markup: bool,
-        physical_offset: (i32, i32),
+        projection: ClipperProjection,
+        gamma: Option<&GammaRamp>,
+    ) {
+        self.draw_to_physical_surface_with_projection_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            NativeDrawProjection::clipper(projection),
+            gamma,
+            None,
+        );
+    }
+
+    /// [`Self::draw_to_physical_surface_with_clipper`] with custom images.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_to_physical_surface_with_clipper_and_images(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        projection: ClipperProjection,
+        gamma: Option<&GammaRamp>,
+        images: &dyn FontImageProvider,
+    ) {
+        self.draw_to_physical_surface_with_projection_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            NativeDrawProjection::clipper(projection),
+            gamma,
+            Some(images),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_to_physical_surface_with_projection_impl(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        projection: NativeDrawProjection,
         gamma: Option<&GammaRamp>,
         images: Option<&dyn FontImageProvider>,
     ) {
-        let scale = self.scale as i32;
         let line_height = self.logical_line_height();
         let origins = text
             .split(|character: char| character == '\n' || (markup && character == '|'))
@@ -234,15 +419,25 @@ impl NativeClonkFont {
                 });
                 let line_index = i32::try_from(line_index).unwrap_or(i32::MAX);
                 let logical_y = y.saturating_add(line_index.saturating_mul(line_height));
-                (
-                    logical_left
-                        .saturating_mul(scale)
-                        .saturating_add(physical_offset.0),
-                    logical_y
-                        .saturating_mul(scale)
-                        .saturating_add(physical_offset.1),
-                )
+                projection.project(logical_left, logical_y)
             })
+            .collect::<Vec<_>>();
+        if projection.requires_resampling(self.effective_scale) {
+            self.draw_fractional_lines_at_origins(
+                surface,
+                &origins,
+                text,
+                color,
+                markup,
+                gamma,
+                images,
+                projection,
+            );
+            return;
+        }
+        let origins = origins
+            .into_iter()
+            .map(|(x, y)| (physical_integer(x), physical_integer(y)))
             .collect::<Vec<_>>();
         if let Some(images) = images {
             self.raster.draw_lines_at_origins_with_gamma_and_images(
@@ -299,20 +494,95 @@ impl NativeClonkFont {
         physical_offset: (i32, i32),
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_string_to_physical_surface_with_projection_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            NativeDrawProjection::application(self.application_scale, physical_offset),
+            gamma,
+        );
+    }
+
+    /// StringOut through CStdGL's rounded clipper viewport and orthographic
+    /// projection. This is required at fractional application scales, where
+    /// the full viewport extent may not equal `logical * scale` exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_string_to_physical_surface_with_clipper(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        projection: ClipperProjection,
+        gamma: Option<&GammaRamp>,
+    ) {
+        self.draw_string_to_physical_surface_with_projection_impl(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            align,
+            markup,
+            NativeDrawProjection::clipper(projection),
+            gamma,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_string_to_physical_surface_with_projection_impl(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        projection: NativeDrawProjection,
+        gamma: Option<&GammaRamp>,
+    ) {
         let (logical_width, _) = self.measure(text, markup);
         let logical_left = x.saturating_sub(match align {
             TextAlign::Left => 0,
             TextAlign::Center => logical_width / 2,
             TextAlign::Right => logical_width,
         });
-        let scale = self.scale as i32;
+        let physical_origin = projection.project(logical_left, y);
+        if projection.requires_resampling(self.effective_scale) {
+            // StringOut invokes one CStdFont::DrawText call. Newlines are
+            // ignored by DrawText and markup-enabled pipes remain ordinary
+            // glyphs; only GetTextExtent treats them as virtual line breaks.
+            let transformed = text
+                .chars()
+                .filter(|character| *character != '\n')
+                .collect::<String>();
+            self.draw_fractional_line(
+                surface,
+                physical_origin.0,
+                physical_origin.1,
+                &transformed,
+                color,
+                markup,
+                gamma,
+                None,
+                &mut Vec::new(),
+                projection,
+            );
+            return;
+        }
         if !text.contains('\n') && (!markup || !text.contains('|')) {
             self.raster.draw_with_gamma(
                 surface,
-                logical_left
-                    .saturating_mul(scale)
-                    .saturating_add(physical_offset.0),
-                y.saturating_mul(scale).saturating_add(physical_offset.1),
+                physical_integer(physical_origin.0),
+                physical_integer(physical_origin.1),
                 text,
                 color,
                 TextAlign::Left,
@@ -339,10 +609,8 @@ impl NativeClonkFont {
             .collect();
         raster.draw_with_gamma(
             surface,
-            logical_left
-                .saturating_mul(scale)
-                .saturating_add(physical_offset.0),
-            y.saturating_mul(scale).saturating_add(physical_offset.1),
+            physical_integer(physical_origin.0),
+            physical_integer(physical_origin.1),
             &transformed,
             color,
             TextAlign::Left,
@@ -350,6 +618,352 @@ impl NativeClonkFont {
             gamma,
         );
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_fractional_lines_at_origins(
+        &self,
+        surface: &mut Surface,
+        origins: &[(f64, f64)],
+        text: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&GammaRamp>,
+        images: Option<&dyn FontImageProvider>,
+        projection: NativeDrawProjection,
+    ) {
+        let mut stack = Vec::new();
+        for ((x, y), line) in origins
+            .iter()
+            .copied()
+            .zip(text.split(|character: char| character == '\n' || (markup && character == '|')))
+        {
+            self.draw_fractional_line(
+                surface,
+                x,
+                y,
+                line,
+                color,
+                markup,
+                gamma,
+                images,
+                &mut stack,
+                projection,
+            );
+        }
+    }
+
+    /// Draw one CStdFont line after the application transform. C++ divides
+    /// each source facet by the font's truncated effective scale and then the
+    /// global graphics transform multiplies it by Application.GetScale().
+    /// Those factors cancel at integer/exact scales, but not for e.g.
+    /// FontMainSmall's `floor(13 * 1.5) / 13` effective scale.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_fractional_line(
+        &self,
+        surface: &mut Surface,
+        x: f64,
+        y: f64,
+        line: &str,
+        color: [u8; 4],
+        markup: bool,
+        gamma: Option<&GammaRamp>,
+        images: Option<&dyn FontImageProvider>,
+        stack: &mut Vec<NativeMarkupTag>,
+        projection: NativeDrawProjection,
+    ) {
+        let quad_scale_x = projection.scale_x / f64::from(self.effective_scale);
+        let quad_scale_y = projection.scale_y / f64::from(self.effective_scale);
+        let physical_spacing = f64::from(self.logical_h_space) * projection.scale_x;
+        let mut pen_x = x;
+        let pen_y = y;
+        let mut rest = line;
+
+        while let Some(character) = rest.chars().next() {
+            let after = &rest[character.len_utf8()..];
+            if character < ' ' {
+                rest = after;
+                continue;
+            }
+            if markup && character == '<' {
+                if let Some(advance) = read_native_markup_tag(rest, stack) {
+                    rest = &rest[advance..];
+                    continue;
+                }
+            }
+            if markup && character == '{' {
+                if let Some((tag, advance)) = inline_image_token(rest) {
+                    rest = &rest[advance..];
+                    let Some(image) =
+                        images.and_then(|provider| provider.font_image(font_image_lookup_tag(tag)))
+                    else {
+                        continue;
+                    };
+                    if image.height == 0 {
+                        continue;
+                    }
+                    let raw_height = self.raster.cell_height.max(0);
+                    let raw_width =
+                        f64::from(image.width) * f64::from(raw_height) / f64::from(image.height);
+                    if raw_width > 0.0 && raw_height > 0 {
+                        blit_scaled_native_image(
+                            surface,
+                            image,
+                            pen_x,
+                            pen_y,
+                            raw_width * quad_scale_x,
+                            f64::from(raw_height) * quad_scale_y,
+                            native_image_modulation_rgb(stack, color),
+                            color[3],
+                            gamma,
+                        );
+                    }
+                    pen_x += raw_width * quad_scale_x + physical_spacing;
+                    continue;
+                }
+            }
+
+            rest = after;
+            let cell = self.raster.rendered_glyph(character);
+            let raw_width = cell.map_or(0, |glyph| glyph.width).max(0);
+            let raw_height = self.raster.cell_height.max(0);
+            if let Some(cell) = cell.filter(|_| raw_width > 0 && raw_height > 0) {
+                blit_scaled_native_glyph(
+                    surface,
+                    cell,
+                    raw_height,
+                    pen_x,
+                    pen_y,
+                    f64::from(raw_width) * quad_scale_x,
+                    f64::from(raw_height) * quad_scale_y,
+                    native_modulation_rgb(stack, color),
+                    color[3],
+                    gamma,
+                );
+            }
+            pen_x += f64::from(raw_width) * quad_scale_x + physical_spacing;
+        }
+    }
+}
+
+fn physical_integer(value: f64) -> i32 {
+    value
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeMarkupTag {
+    Italic,
+    TextColor(u32),
+}
+
+impl NativeMarkupTag {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Italic => "i",
+            Self::TextColor(_) => "c",
+        }
+    }
+}
+
+/// Draw-mode counterpart of `CMarkup::Read`. The scale-native renderer needs
+/// the live color stack because it submits each resized glyph/image quad
+/// separately instead of delegating one unscaled line to `ClonkFont`.
+fn read_native_markup_tag(text: &str, stack: &mut Vec<NativeMarkupTag>) -> Option<usize> {
+    let inner = text.strip_prefix('<')?;
+    let close = inner.find('>')?;
+    let full = &inner[..close];
+    let mut tag_len = full.len().min(49);
+    while !full.is_char_boundary(tag_len) {
+        tag_len -= 1;
+    }
+    let tag = &full[..tag_len];
+    let mut advance = (tag_len + 2).min(text.len());
+    while !text.is_char_boundary(advance) {
+        advance += 1;
+    }
+    let (name, parameters) = match tag.find(' ') {
+        Some(index) => (&tag[..index], Some(&tag[index + 1..])),
+        None => (tag, None),
+    };
+    let valid = if let Some(closing) = name.strip_prefix('/') {
+        parameters.is_none()
+            && match stack.last() {
+                Some(tag) if tag.name() == closing => {
+                    stack.pop();
+                    true
+                }
+                _ => false,
+            }
+    } else if name == "i" {
+        parameters.is_none() && {
+            stack.push(NativeMarkupTag::Italic);
+            true
+        }
+    } else if name == "c" {
+        parameters
+            .filter(|parameters| parameters.len() <= 8)
+            .and_then(parse_native_color_tag)
+            .map(|color| stack.push(NativeMarkupTag::TextColor(color)))
+            .is_some()
+    } else {
+        false
+    };
+    valid.then_some(advance)
+}
+
+fn parse_native_color_tag(parameters: &str) -> Option<u32> {
+    let len = parameters.len();
+    parameters
+        .bytes()
+        .enumerate()
+        .try_fold(0_u32, |color, (index, byte)| {
+            let digit = match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => return None,
+            };
+            Some(color | (u32::from(digit) << ((len - index - 1) * 4)))
+        })
+        .map(|color| {
+            let color = if len <= 6 { color | 0xff00_0000 } else { color };
+            (color & 0x00ff_ffff) | ((255 - (color >> 24)) << 24)
+        })
+}
+
+fn native_modulation_rgb(stack: &[NativeMarkupTag], color: [u8; 4]) -> [u8; 3] {
+    let base = (u32::from(255 - color[3]) << 24)
+        | (u32::from(color[0]) << 16)
+        | (u32::from(color[1]) << 8)
+        | u32::from(color[2]);
+    stack
+        .iter()
+        .rev()
+        .find_map(|tag| match tag {
+            NativeMarkupTag::TextColor(color) => Some(*color),
+            NativeMarkupTag::Italic => None,
+        })
+        .filter(|tag_color| *tag_color != base)
+        .map(|tag_color| {
+            markup_blit_color([
+                (tag_color >> 16) as u8,
+                (tag_color >> 8) as u8,
+                tag_color as u8,
+            ])
+        })
+        .unwrap_or([color[0], color[1], color[2]])
+}
+
+fn native_image_modulation_rgb(stack: &[NativeMarkupTag], color: [u8; 4]) -> [u8; 3] {
+    if stack
+        .iter()
+        .any(|tag| matches!(tag, NativeMarkupTag::TextColor(_)))
+    {
+        native_modulation_rgb(stack, color)
+    } else {
+        [255, 255, 255]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_scaled_native_glyph(
+    surface: &mut Surface,
+    cell: &GlyphCell,
+    source_height: i32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    modulation: [u8; 3],
+    color_alpha: u8,
+    gamma: Option<&GammaRamp>,
+) {
+    let source_width = cell.width.max(0) as u32;
+    let source_height = source_height.max(0) as u32;
+    let pixels = cell
+        .pixels
+        .iter()
+        .flat_map(|pixel| {
+            modulated_native_pixel(
+                [pixel.r, pixel.g, pixel.b, pixel.a],
+                modulation,
+                color_alpha,
+            )
+        })
+        .collect();
+    draw_scaled_native_image(
+        surface,
+        ImageData::new(source_width, source_height, pixels),
+        x,
+        y,
+        width,
+        height,
+        gamma,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_scaled_native_image(
+    surface: &mut Surface,
+    image: FontImageRef<'_>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    modulation: [u8; 3],
+    color_alpha: u8,
+    gamma: Option<&GammaRamp>,
+) {
+    let pixels = image
+        .rgba
+        .chunks_exact(4)
+        .flat_map(|pixel| {
+            modulated_native_pixel(
+                [pixel[0], pixel[1], pixel[2], pixel[3]],
+                modulation,
+                color_alpha,
+            )
+        })
+        .collect();
+    draw_scaled_native_image(
+        surface,
+        ImageData::new(image.width, image.height, pixels),
+        x,
+        y,
+        width,
+        height,
+        gamma,
+    );
+}
+
+fn modulated_native_pixel(pixel: [u8; 4], modulation: [u8; 3], color_alpha: u8) -> [u8; 4] {
+    let modulate = |value: u8, modulation: u8| {
+        (f32::from(value) * f32::from(modulation) / 255.0).round() as u8
+    };
+    [
+        modulate(pixel[0], modulation[0]),
+        modulate(pixel[1], modulation[1]),
+        modulate(pixel[2], modulation[2]),
+        modulate(pixel[3], color_alpha),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_scaled_native_image(
+    surface: &mut Surface,
+    image: ImageData,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    gamma: Option<&GammaRamp>,
+) {
+    crate::draw_image_bilinear(
+        surface,
+        &GuiRect::new(x as f32, y as f32, width as f32, height as f32),
+        &image,
+        gamma,
+    );
 }
 
 /// The five GUI fonts rasterized at the application's physical output scale.
@@ -359,11 +973,15 @@ pub struct NativeClonkFontSet {
     pub text: NativeClonkFont,
     pub main_small: NativeClonkFont,
     pub mini: NativeClonkFont,
-    scale: u32,
+    book_title: NativeClonkFont,
+    book_caption: NativeClonkFont,
+    book_text: NativeClonkFont,
+    book_small: NativeClonkFont,
+    scale: f32,
 }
 
 impl NativeClonkFontSet {
-    pub fn scale(&self) -> u32 {
+    pub fn scale(&self) -> f32 {
         self.scale
     }
 
@@ -378,6 +996,95 @@ impl NativeClonkFontSet {
         } else {
             &self.text
         }
+    }
+
+    fn font_for_role(&self, role: ClonkFontRole) -> &NativeClonkFont {
+        match role {
+            ClonkFontRole::GuiTitle => &self.title,
+            ClonkFontRole::GuiCaption => &self.caption,
+            ClonkFontRole::GuiText => &self.text,
+            ClonkFontRole::GuiMainSmall => &self.main_small,
+            ClonkFontRole::GuiMini => &self.mini,
+            ClonkFontRole::GuiTooltip | ClonkFontRole::BookText => &self.book_text,
+            ClonkFontRole::BookTitle => &self.book_title,
+            ClonkFontRole::BookCaption => &self.book_caption,
+            ClonkFontRole::BookSmall => &self.book_small,
+        }
+    }
+
+    /// Replay one ordered logical text batch with scale-native atlases.
+    /// Each captured logical clipper installs the same independently rounded
+    /// viewport and clip-relative glyph projection as CStdGL.
+    pub fn draw_captured_text(
+        &self,
+        surface: &mut Surface,
+        commands: &[CapturedClonkText],
+        logical_target_size: (u32, u32),
+    ) {
+        let saved_clip = surface.clip();
+        for command in commands {
+            let logical_clip = command.clip.unwrap_or_else(|| {
+                lc_graphics::Rect::new(0, 0, logical_target_size.0, logical_target_size.1)
+            });
+            let projection = ClipperProjection::new(
+                self.scale,
+                logical_target_size,
+                surface.height(),
+                logical_clip,
+            );
+            if command.clip.is_some() {
+                surface.set_clip(projection.physical_clip());
+            } else {
+                surface.clear_clip();
+            }
+            let font = self.font_for_role(command.role);
+            if command.images.is_empty() {
+                font.draw_to_physical_surface_with_clipper(
+                    surface,
+                    command.x,
+                    command.y,
+                    &command.text,
+                    command.color,
+                    command.align,
+                    command.markup,
+                    projection,
+                    command.gamma.as_ref(),
+                );
+            } else {
+                let images = CapturedImageProvider(&command.images);
+                font.draw_to_physical_surface_with_clipper_and_images(
+                    surface,
+                    command.x,
+                    command.y,
+                    &command.text,
+                    command.color,
+                    command.align,
+                    command.markup,
+                    projection,
+                    command.gamma.as_ref(),
+                    &images,
+                );
+            }
+        }
+        match saved_clip {
+            Some(clip) => surface.set_clip(clip),
+            None => surface.clear_clip(),
+        }
+    }
+}
+
+struct CapturedImageProvider<'a>(&'a [CapturedFontImage]);
+
+impl FontImageProvider for CapturedImageProvider<'_> {
+    fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+        self.0
+            .iter()
+            .find(|image| image.tag == tag)
+            .map(|image| FontImageRef {
+                width: image.width,
+                height: image.height,
+                rgba: &image.rgba,
+            })
     }
 }
 
@@ -675,7 +1382,7 @@ fn loaded_native_glyph_cell(
     face: &freetype::Face,
     cell_height: usize,
     ascent_px: i64,
-    scale: u32,
+    shadow_size: u32,
 ) -> Option<GlyphCell> {
     let slot = face.glyph();
     let bitmap = slot.bitmap();
@@ -693,7 +1400,7 @@ fn loaded_native_glyph_cell(
         .collect();
     let advance_px = (slot.advance().x >> 6) as i32;
     let bearing = slot.bitmap_left().max(0);
-    let cell_width = (advance_px.max(bearing + cov_w as i32) + scale as i32).max(1) as usize;
+    let cell_width = (advance_px.max(bearing + cov_w as i32) + shadow_size as i32).max(1) as usize;
     let at_x = bearing as usize;
     let at_y = (ascent_px - i64::from(slot.bitmap_top())).max(0) as usize;
     let pixels = compose_scaled_glyph_cell(
@@ -704,7 +1411,7 @@ fn loaded_native_glyph_cell(
         cell_height,
         at_x,
         at_y,
-        scale as usize,
+        shadow_size as usize,
     );
     Some(GlyphCell {
         width: cell_width as i32,
@@ -715,11 +1422,22 @@ fn loaded_native_glyph_cell(
 fn build_native_font(
     face: &freetype::Face,
     logical_height: u32,
-    scale: u32,
+    application_scale: f32,
+    shadow: bool,
 ) -> Result<NativeClonkFont> {
-    let raster_height = logical_height
-        .checked_mul(scale)
-        .context("scaled font height overflow")?;
+    let scaled_height = logical_height as f32 * application_scale;
+    anyhow::ensure!(
+        scaled_height.is_finite() && scaled_height <= i32::MAX as f32,
+        "scaled font height overflow"
+    );
+    let raster_height = scaled_height as u32;
+    anyhow::ensure!(raster_height > 0, "scaled font height truncates to zero");
+    let effective_scale = raster_height as f32 / logical_height as f32;
+    let shadow_size = if shadow {
+        application_scale.round() as u32
+    } else {
+        0
+    };
     face.set_pixel_sizes(raster_height, raster_height)
         .context("FT_Set_Pixel_Sizes failed")?;
 
@@ -727,15 +1445,22 @@ fn build_native_font(
     let units_per_em = i32::from(raw.units_per_EM);
     let (ascender, descender) = (i32::from(raw.ascender), i32::from(raw.descender));
     let line_height = line_height_for(ascender, descender, units_per_em, raster_height);
-    // C++ deliberately adds one atlas row here, even when shadowSize is 3
-    // (`StdFont.cpp:351-352`); AddRenderedChar clips its wider shadow loop.
-    let cell_height = (line_height + 1) as usize;
+    // C++ deliberately adds one atlas row for a shadowed font even when
+    // shadowSize is 3; shadowless book/tooltip fonts add none.
+    let cell_height = (line_height + i32::from(shadow)) as usize;
     let ascent_px = i64::from(raster_height) * i64::from(ascender) / i64::from(units_per_em);
 
     let mut font = ClonkFont::new(line_height);
-    // iHSpace remains -1 GUI unit in C++; this renderer advances in physical
-    // pixels, so the equivalent native spacing is -scale.
-    font.h_space = -(scale as i32);
+    // iHSpace remains -1 GUI unit in C++. The existing physical-run blitter
+    // accepts integer pen positions, so retain exact integer-scale behavior
+    // and use the nearest physical spacing at fractional scales. Logical
+    // measurement above uses the exact unscaled -1 independently.
+    font.cell_height = cell_height as i32;
+    font.h_space = if shadow {
+        -(application_scale.round() as i32)
+    } else {
+        0
+    };
     for ch in classic_font_characters(face) {
         if face
             .load_char(ch as usize, LoadFlag::RENDER | LoadFlag::NO_HINTING)
@@ -743,20 +1468,24 @@ fn build_native_font(
         {
             continue;
         }
-        if let Some(cell) = loaded_native_glyph_cell(face, cell_height, ascent_px, scale) {
+        if let Some(cell) = loaded_native_glyph_cell(face, cell_height, ascent_px, shadow_size) {
             font.add_glyph(ch, cell);
         }
     }
     let missing_glyph = face
         .load_glyph(0, LoadFlag::RENDER | LoadFlag::NO_HINTING)
         .ok()
-        .and_then(|_| loaded_native_glyph_cell(face, cell_height, ascent_px, scale));
+        .and_then(|_| loaded_native_glyph_cell(face, cell_height, ascent_px, shadow_size));
     if let Some(cell) = missing_glyph {
         font.set_missing_glyph(cell);
     }
     Ok(NativeClonkFont {
         raster: font,
-        scale,
+        application_scale,
+        effective_scale,
+        logical_height,
+        raster_height,
+        logical_h_space: if shadow { -1 } else { 0 },
     })
 }
 
@@ -782,11 +1511,15 @@ pub fn build_font_set_at_size(ttf_bytes: &[u8], base_size: u32) -> Result<ClonkF
         .new_memory_face(ttf_bytes.to_vec(), 0)
         .context("failed to load font face")?;
     Ok(ClonkFontSet {
-        title: build_font(&face, base_size.saturating_mul(22) / 14, 400, true)?,
-        caption: build_font(&face, base_size.saturating_mul(16) / 14, 400, true)?,
-        text: build_font(&face, base_size, 400, true)?,
-        main_small: build_font(&face, base_size.saturating_mul(13) / 14, 400, true)?,
-        mini: build_font(&face, base_size.saturating_mul(12) / 14, 400, true)?,
+        title: build_font(&face, base_size.saturating_mul(22) / 14, 400, true)?
+            .with_role(ClonkFontRole::GuiTitle),
+        caption: build_font(&face, base_size.saturating_mul(16) / 14, 400, true)?
+            .with_role(ClonkFontRole::GuiCaption),
+        text: build_font(&face, base_size, 400, true)?.with_role(ClonkFontRole::GuiText),
+        main_small: build_font(&face, base_size.saturating_mul(13) / 14, 400, true)?
+            .with_role(ClonkFontRole::GuiMainSmall),
+        mini: build_font(&face, base_size.saturating_mul(12) / 14, 400, true)?
+            .with_role(ClonkFontRole::GuiMini),
     })
 }
 
@@ -801,6 +1534,7 @@ pub fn build_font_set(ttf_bytes: &[u8]) -> Result<ClonkFontSet> {
 /// the process-global GUI resource owns a separate `CStdFont` instance.
 pub fn build_tooltip_font(ttf_bytes: &[u8]) -> Result<ClonkFont> {
     build_vector_font(ttf_bytes, 14, 400, false)
+        .map(|font| font.with_role(ClonkFontRole::GuiTooltip))
 }
 
 /// Builds a prerendered byte-slot font from a decoded PNG/BMP surface.
@@ -892,21 +1626,36 @@ pub fn build_prerendered_font(
     Ok(font)
 }
 
-/// Build the five GUI fonts the way C++ does when `Graphics.Scale` is an
-/// integer greater than one: native physical raster data with logical GUI
-/// metrics (`C4Fonts.cpp:158-173`; `StdFont.cpp:319-352,571-638,938`).
-pub fn build_native_font_set(ttf_bytes: &[u8], scale: u32) -> Result<NativeClonkFontSet> {
-    anyhow::ensure!(scale > 0, "font scale must be positive");
+/// Build the five GUI fonts the way C++ does at `Graphics.Scale`: native
+/// physical raster data with logical GUI metrics. C++ truncates each scaled
+/// FreeType height independently, then stores that font's effective scale as
+/// `raster_height / logical_height` (`C4Fonts.cpp:158-173`;
+/// `StdFont.cpp:319-352,436-439,571-638,938`).
+pub fn build_native_font_set(
+    ttf_bytes: &[u8],
+    scale: impl Into<f64>,
+) -> Result<NativeClonkFontSet> {
+    let scale = scale.into();
+    anyhow::ensure!(
+        scale.is_finite() && scale > 0.0,
+        "font scale must be finite and positive"
+    );
+    let scale = scale as f32;
+    anyhow::ensure!(scale.is_finite(), "font scale exceeds f32 geometry");
     let library = Library::init().context("FreeType init failed")?;
     let face = library
         .new_memory_face(ttf_bytes.to_vec(), 0)
         .context("failed to load font face")?;
     Ok(NativeClonkFontSet {
-        title: build_native_font(&face, 22, scale)?,
-        caption: build_native_font(&face, 16, scale)?,
-        text: build_native_font(&face, 14, scale)?,
-        main_small: build_native_font(&face, 13, scale)?,
-        mini: build_native_font(&face, 12, scale)?,
+        title: build_native_font(&face, 22, scale, true)?,
+        caption: build_native_font(&face, 16, scale, true)?,
+        text: build_native_font(&face, 14, scale, true)?,
+        main_small: build_native_font(&face, 13, scale, true)?,
+        mini: build_native_font(&face, 12, scale, true)?,
+        book_title: build_native_font(&face, 22, scale, false)?,
+        book_caption: build_native_font(&face, 16, scale, false)?,
+        book_text: build_native_font(&face, 14, scale, false)?,
+        book_small: build_native_font(&face, 13, scale, false)?,
         scale,
     })
 }
@@ -929,7 +1678,7 @@ mod tests {
         // (StdFont.cpp:184,319-352,571-638,938).
         let fonts = build_native_font_set(&endeavour_bytes(), 3).expect("build 3x fonts");
 
-        assert_eq!(fonts.scale(), 3);
+        assert_eq!(fonts.scale(), 3.0);
         assert_eq!(fonts.title.raster_line_height(), 103);
         assert_eq!(fonts.title.raster_cell_height(), 104);
         assert_eq!(fonts.title.logical_line_height(), 34);
@@ -960,6 +1709,192 @@ mod tests {
             lc_graphics::Color::new(0, 0, 0, 127),
             "round(scale)=3 places the C++ shadow three physical pixels away"
         );
+    }
+
+    #[test]
+    fn fractional_native_fonts_truncate_each_raster_height_and_keep_effective_metrics() {
+        let fonts =
+            build_native_font_set(&endeavour_bytes(), 1.5_f32).expect("build scale-1.5 fonts");
+
+        assert_eq!(fonts.scale(), 1.5);
+        assert_eq!(fonts.text.raster_height(), 21);
+        assert_eq!(fonts.text.effective_scale(), 1.5);
+        assert_eq!(fonts.main_small.logical_height(), 13);
+        assert_eq!(fonts.main_small.raster_height(), 19);
+        assert_eq!(fonts.main_small.application_scale(), 1.5);
+        assert_eq!(fonts.main_small.effective_scale(), 19.0 / 13.0);
+        assert_ne!(
+            fonts.main_small.effective_scale(),
+            fonts.main_small.application_scale(),
+            "13 * 1.5 truncates before CStdFont stores its effective scale"
+        );
+
+        let main_small = &fonts.main_small;
+        let glyph_width = main_small.glyph('A').expect("native A").width as f32;
+        assert_eq!(
+            main_small.measure("A", false),
+            (
+                (glyph_width / main_small.effective_scale()) as i32,
+                (main_small.raster_line_height() as f32 / main_small.effective_scale()).ceil()
+                    as i32,
+            )
+        );
+        assert_eq!(main_small.logical_line_height(), 19);
+        assert_eq!(main_small.measure("A\nA", false).1, 40);
+    }
+
+    #[test]
+    fn fractional_main_small_resamples_glyph_and_image_quads_to_application_scale() {
+        struct SolidImage([u8; 4]);
+
+        impl FontImageProvider for SolidImage {
+            fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+                (tag == "icon").then_some(FontImageRef {
+                    width: 1,
+                    height: 1,
+                    rgba: &self.0,
+                })
+            }
+        }
+
+        // MainSmall at 1.5x truncates its 13px FreeType request to a 19px
+        // atlas. C++ draws each 19px facet at 19 / (19/13) logical pixels,
+        // then applies the 1.5x application transform: 19.5 physical pixels.
+        let mut raster = ClonkFont::new(19);
+        raster.cell_height = 19;
+        raster.h_space = -2;
+        raster.add_glyph(
+            'A',
+            GlyphCell {
+                width: 19,
+                pixels: vec![Color::opaque(255, 255, 255); 19 * 19],
+            },
+        );
+        let font = NativeClonkFont {
+            raster,
+            application_scale: 1.5,
+            effective_scale: 19.0 / 13.0,
+            logical_height: 13,
+            raster_height: 19,
+            logical_h_space: -1,
+        };
+        let mut surface = Surface::new(64, 40, lc_graphics::PixelFormat::Rgba8888);
+        font.draw_to_physical_surface_with_offset_and_images(
+            &mut surface,
+            2,
+            2,
+            "A{{icon}}A",
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            true,
+            (0, 0),
+            None,
+            &SolidImage([0, 255, 0, 255]),
+        );
+
+        let occupied_x = (0..surface.width())
+            .filter(|x| {
+                (0..surface.height())
+                    .any(|y| surface.get_pixel(*x, y).is_some_and(|pixel| pixel.a != 0))
+            })
+            .collect::<Vec<_>>();
+        let quad_scale = font.application_scale / font.effective_scale;
+        let expected_right = 3.0 + 3.0 * 19.0 * quad_scale - 2.0 * 1.5;
+        let expected_end = (expected_right - 0.5).ceil() as u32;
+        assert_eq!(occupied_x.first(), Some(&3));
+        assert_eq!(occupied_x.last(), Some(&(expected_end - 1)));
+        assert_eq!(occupied_x.len(), (expected_end - 3) as usize);
+        assert!(
+            occupied_x.len() > 53,
+            "the old raw-atlas blit covered only 53 physical columns"
+        );
+        assert!(surface
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[1] > pixel[0] && pixel[1] > pixel[2]));
+    }
+
+    fn solid_fractional_native_font() -> NativeClonkFont {
+        let mut raster = ClonkFont::new(1);
+        raster.cell_height = 1;
+        raster.h_space = 0;
+        raster.add_glyph(
+            'A',
+            GlyphCell {
+                width: 1,
+                pixels: vec![Color::opaque(255, 255, 255)],
+            },
+        );
+        NativeClonkFont {
+            raster,
+            application_scale: 1.5,
+            effective_scale: 1.5,
+            logical_height: 2,
+            raster_height: 3,
+            logical_h_space: 0,
+        }
+    }
+
+    #[test]
+    fn captured_fractional_glyph_anchor_is_relative_to_the_rounded_clipper() {
+        let fonts = NativeClonkFontSet {
+            title: solid_fractional_native_font(),
+            caption: solid_fractional_native_font(),
+            text: solid_fractional_native_font(),
+            main_small: solid_fractional_native_font(),
+            mini: solid_fractional_native_font(),
+            book_title: solid_fractional_native_font(),
+            book_caption: solid_fractional_native_font(),
+            book_text: solid_fractional_native_font(),
+            book_small: solid_fractional_native_font(),
+            scale: 1.5,
+        };
+        let command = CapturedClonkText {
+            role: ClonkFontRole::GuiText,
+            x: 1,
+            y: 1,
+            text: "A".to_string(),
+            color: [255, 255, 255, 255],
+            align: TextAlign::Left,
+            markup: false,
+            clip: Some(lc_graphics::Rect::new(1, 1, 2, 2)),
+            gamma: None,
+            images: Vec::new(),
+        };
+        let mut surface = Surface::new(6, 6, lc_graphics::PixelFormat::Rgba8888);
+
+        fonts.draw_captured_text(&mut surface, &[command], (4, 4));
+
+        assert_eq!(
+            surface.get_pixel(1, 2),
+            Some(Color::opaque(255, 255, 255)),
+            "logical clip-left x=1 projects to physical x=1, not round(1*1.5)=2",
+        );
+        assert_eq!(surface.get_pixel(2, 2), Some(Color::transparent()));
+    }
+
+    #[test]
+    fn scale_one_native_font_preserves_the_existing_raster_and_metrics() {
+        let native = build_native_font_set(&endeavour_bytes(), 1.0_f32)
+            .expect("build scale-one native fonts");
+        let logical = build_font_set(&endeavour_bytes()).expect("build logical fonts");
+
+        assert_eq!(native.text.raster_height(), 14);
+        assert_eq!(native.text.effective_scale(), 1.0);
+        assert_eq!(native.text.raster_line_height(), logical.text.line_height);
+        assert_eq!(native.text.raster_cell_height(), logical.text.cell_height);
+        assert_eq!(native.text.glyph('A'), logical.text.glyph('A'));
+        assert_eq!(
+            native.text.measure("A A", false),
+            logical.text.measure("A A", false)
+        );
+    }
+
+    #[test]
+    fn native_font_scale_must_be_finite_and_positive() {
+        for scale in [0.0_f32, -1.0, f32::INFINITY, f32::NAN] {
+            assert!(build_native_font_set(&endeavour_bytes(), scale).is_err());
+        }
     }
 
     #[test]

@@ -39,7 +39,7 @@ use crate::{
 use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
-use lc_graphics::clonk_font::{ClonkFont, GlyphCell, TextAlign};
+use lc_graphics::clonk_font::{ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
 use lc_graphics::{Color, GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 use lc_resources::LanguageInfo;
@@ -94,8 +94,8 @@ pub fn build_book_fonts(ttf_bytes: &[u8]) -> Result<BookFonts> {
         .new_memory_face(ttf_bytes.to_vec(), 0)
         .context("failed to load font face")?;
     Ok(BookFonts {
-        book: build_shadowless_font(&face, 14)?,
-        book_small: build_shadowless_font(&face, 13)?,
+        book: build_shadowless_font(&face, 14)?.with_role(ClonkFontRole::BookText),
+        book_small: build_shadowless_font(&face, 13)?.with_role(ClonkFontRole::BookSmall),
     })
 }
 
@@ -2841,6 +2841,13 @@ mod tests {
         assert_eq!(fonts.book_small.line_height, 20);
         assert_eq!(fonts.book_small.cell_height, 20);
         assert_eq!(fonts.book_small.h_space, 0);
+    }
+
+    #[test]
+    fn book_fonts_have_semantic_roles() {
+        let fonts = book_fonts();
+        assert_eq!(fonts.book.role(), Some(ClonkFontRole::BookText));
+        assert_eq!(fonts.book_small.role(), Some(ClonkFontRole::BookSmall));
     }
 
     // Shadowless atlas pixels are pure white with alpha = coverage

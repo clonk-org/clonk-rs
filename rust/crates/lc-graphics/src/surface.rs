@@ -1,3 +1,4 @@
+use crate::clonk_font::CapturedClonkText;
 use crate::color::Color;
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
 use thiserror::Error;
@@ -129,6 +130,10 @@ pub struct Surface {
     /// Active clipping rectangle (C++ `SetPrimaryClipper`); `None` = full surface.
     /// All draws are restricted to `clip ∩ bounds`.
     clip: Option<Rect>,
+    /// Active semantic font capture. Ordinary Surface operations remain
+    /// unchanged; role-tagged ClonkFont draws append here and suppress their
+    /// logical glyph pixels until the command list is taken.
+    clonk_text_capture: Option<Vec<CapturedClonkText>>,
 }
 
 impl Surface {
@@ -142,6 +147,7 @@ impl Surface {
             stride,
             data,
             clip: None,
+            clonk_text_capture: None,
         }
     }
 
@@ -166,7 +172,70 @@ impl Surface {
             stride,
             data,
             clip: None,
+            clonk_text_capture: None,
         })
+    }
+
+    /// Begin a fresh semantic ClonkFont capture, discarding any untaken
+    /// commands from an earlier capture on this surface.
+    pub fn begin_clonk_text_capture(&mut self) {
+        self.clonk_text_capture = Some(Vec::new());
+    }
+
+    /// End semantic ClonkFont capture and return commands in draw order.
+    /// Returns an empty vector when capture was not active.
+    pub fn take_clonk_text_capture(&mut self) -> Vec<CapturedClonkText> {
+        self.clonk_text_capture.take().unwrap_or_default()
+    }
+
+    /// Take commands captured on a temporary child surface, restrict them to
+    /// that child's bounds, and translate their anchors and clippers into this
+    /// surface's coordinate system.
+    ///
+    /// A child with no explicit clip still clips drawing to its own bounds.
+    /// Making that implicit clip explicit here prevents scale-native replay
+    /// from escaping a viewport or scratch surface after translation.
+    /// Returns `false` when semantic capture is not active on the destination.
+    pub fn extend_clonk_text_capture_from(&mut self, child: &mut Surface, offset: Point) -> bool {
+        if self.clonk_text_capture.is_none() {
+            return false;
+        }
+        let child_bounds = child.bounds();
+        let mut commands = child.take_clonk_text_capture();
+        for command in &mut commands {
+            command.x = command.x.saturating_add(offset.x);
+            command.y = command.y.saturating_add(offset.y);
+            let mut clip = match command.clip {
+                Some(clip) => clip
+                    .intersection(child_bounds)
+                    .unwrap_or(Rect::new(child_bounds.x, child_bounds.y, 0, 0)),
+                None => child_bounds,
+            };
+            clip.x = clip.x.saturating_add(offset.x);
+            clip.y = clip.y.saturating_add(offset.y);
+            command.clip = Some(clip);
+        }
+        let destination = self
+            .clonk_text_capture
+            .as_mut()
+            .expect("capture presence checked above");
+        destination.extend(commands);
+        true
+    }
+
+    /// Whether role-tagged ClonkFont draws are currently being captured.
+    pub fn is_clonk_text_capture_active(&self) -> bool {
+        self.clonk_text_capture.is_some()
+    }
+
+    /// Append a command when capture is active. The boolean tells ClonkFont
+    /// whether logical rasterization must be suppressed.
+    pub(crate) fn capture_clonk_text(&mut self, command: CapturedClonkText) -> bool {
+        let Some(commands) = self.clonk_text_capture.as_mut() else {
+            return false;
+        };
+        commands.push(command);
+        true
     }
 
     /// Set the clipping rectangle (C++ `SetPrimaryClipper`); subsequent draws are
@@ -750,8 +819,66 @@ impl Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clonk_font::{ClonkFontRole, TextAlign};
     use crate::color::Color;
     use rand::{rngs::SmallRng, Rng, SeedableRng};
+
+    fn captured_text(clip: Option<Rect>) -> CapturedClonkText {
+        CapturedClonkText {
+            role: ClonkFontRole::GuiText,
+            x: 2,
+            y: 3,
+            text: "child".to_owned(),
+            color: [255, 255, 255, 255],
+            align: TextAlign::Left,
+            markup: false,
+            clip,
+            gamma: None,
+            images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn child_text_capture_makes_implicit_bounds_explicit_before_translation() {
+        let mut child = Surface::new(6, 4, PixelFormat::Rgba8888);
+        child.begin_clonk_text_capture();
+        assert!(child.capture_clonk_text(captured_text(None)));
+
+        let mut destination = Surface::new(30, 30, PixelFormat::Rgba8888);
+        destination.begin_clonk_text_capture();
+        assert!(destination.extend_clonk_text_capture_from(
+            &mut child,
+            Point::new(10, 7),
+        ));
+
+        let commands = destination.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!((commands[0].x, commands[0].y), (12, 10));
+        assert_eq!(commands[0].clip, Some(Rect::new(10, 7, 6, 4)));
+        assert!(!child.is_clonk_text_capture_active());
+    }
+
+    #[test]
+    fn child_text_capture_intersects_existing_clip_before_translation() {
+        let mut child = Surface::new(6, 4, PixelFormat::Rgba8888);
+        child.begin_clonk_text_capture();
+        assert!(child.capture_clonk_text(captured_text(Some(Rect::new(-2, 1, 5, 8)))));
+
+        let mut destination = Surface::new(30, 30, PixelFormat::Rgba8888);
+        destination.begin_clonk_text_capture();
+        assert!(destination.extend_clonk_text_capture_from(
+            &mut child,
+            Point::new(10, 7),
+        ));
+
+        let commands = destination.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].clip,
+            Some(Rect::new(10, 8, 3, 3)),
+            "the local clip is intersected with 6x4 child bounds, then translated"
+        );
+    }
 
     #[test]
     fn fill_sets_all_pixels() {

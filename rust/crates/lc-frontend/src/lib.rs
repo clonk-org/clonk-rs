@@ -2198,6 +2198,29 @@ struct LandscapeRenderCache {
     pixels: Vec<u8>,
 }
 
+/// Opaque continuation for the ordered HUD half of one [`GraphicsSystem`]
+/// frame. It owns the snapshot and gamma state captured when the world phase
+/// began, so later layers cannot accidentally use a newer frame.
+#[must_use = "a base frame must be completed with GraphicsSystem::render_frame_hud"]
+pub struct PendingHudFrame<'snapshot> {
+    snapshot: &'snapshot SimulationSnapshot,
+    frame: u64,
+    gamma: lc_graphics::GammaRamp,
+    pending_gamma_control_points: [u32; 3],
+    graphics_system_identity: Arc<()>,
+    generation: u64,
+}
+
+/// Continuation after per-viewport HUD controls and before the fullscreen
+/// message/upper-board chrome.
+#[must_use = "HUD player overlays must be completed with GraphicsSystem::render_frame_hud_chrome"]
+pub struct PendingHudChromeFrame<'snapshot>(PendingHudFrame<'snapshot>);
+
+struct PendingViewportForeground {
+    surface: Surface,
+    destination: SurfacePoint,
+}
+
 pub struct GraphicsSystem {
     surface: Surface,
     font: Arc<dyn TextFont>,
@@ -2235,6 +2258,9 @@ pub struct GraphicsSystem {
     /// them only after drawing that render pass; a fresh graphics system has
     /// already received InitGame's explicit ApplyGamma.
     active_gamma_control_points: Option<[u32; 3]>,
+    render_phase_identity: Arc<()>,
+    render_phase_generation: u64,
+    pending_viewport_foregrounds: Vec<PendingViewportForeground>,
     /// C4ConfigGeneral::ScrollSmooth. Config plumbing lives above the
     /// frontend; retain the exact C++ default and clamp at use meanwhile.
     scroll_smooth: i32,
@@ -2305,6 +2331,9 @@ impl GraphicsSystem {
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
             active_gamma_control_points: None,
+            render_phase_identity: Arc::new(()),
+            render_phase_generation: 0,
+            pending_viewport_foregrounds: Vec::new(),
             scroll_smooth: DEFAULT_SCROLL_SMOOTH,
             sky: None,
             material_textures: Arc::new(HashMap::new()),
@@ -2967,14 +2996,85 @@ impl GraphicsSystem {
         snapshot: &SimulationSnapshot,
         viewports: &[ViewportInput<'_>],
     ) -> Vec<EngineSurfaceSnapshot> {
+        let pending = self.render_frame_base(snapshot, viewports);
+        self.render_frame_foreground(&pending);
+        let pending = self.render_frame_hud_players(pending);
+        self.render_frame_hud_chrome(pending)
+    }
+
+    /// Render the back buffer and viewports through world cursor labels. In
+    /// native-capture mode, foreground-parallax objects are retained for the
+    /// next ordered layer so they can still occlude those labels.
+    pub fn render_frame_base<'snapshot>(
+        &mut self,
+        snapshot: &'snapshot SimulationSnapshot,
+        viewports: &[ViewportInput<'_>],
+    ) -> PendingHudFrame<'snapshot> {
         let pending = snapshot.environment.gamma.combined_control_points();
         // C4Game::Init applies the initialization controls before the first
         // render (C4Game.cpp:490). Later SetGamma calls set fSetGamma during
         // simulation and C4GraphicsSystem::Execute applies them only after it
         // has drawn the current pass (C4GraphicsSystem.cpp:195-199).
         let gamma = self.active_gamma_ramp(&snapshot.environment.gamma);
-        let snapshots = self.render_frame_with_gamma(snapshot, viewports, Some(&gamma));
-        self.active_gamma_control_points = Some(pending);
+        self.render_frame_base_with_gamma(snapshot, viewports, Some(&gamma));
+        self.render_phase_generation = self.render_phase_generation.wrapping_add(1);
+        PendingHudFrame {
+            snapshot,
+            frame: snapshot.frame,
+            gamma,
+            pending_gamma_control_points: pending,
+            graphics_system_identity: Arc::clone(&self.render_phase_identity),
+            generation: self.render_phase_generation,
+        }
+    }
+
+    fn assert_pending_frame(&self, pending: &PendingHudFrame<'_>) {
+        assert!(
+            Arc::ptr_eq(
+                &self.render_phase_identity,
+                &pending.graphics_system_identity
+            ),
+            "pending frame belongs to a different graphics system"
+        );
+        assert_eq!(
+            self.render_phase_generation, pending.generation,
+            "pending frame was superseded by a newer base phase"
+        );
+    }
+
+    /// Draw foreground-parallax objects retained by [`Self::render_frame_base`]
+    /// onto the caller's current (normally transparent) logical layer.
+    pub fn render_frame_foreground(&mut self, pending: &PendingHudFrame<'_>) {
+        self.assert_pending_frame(pending);
+        self.draw_pending_viewport_foregrounds();
+    }
+
+    /// Draw per-viewport HUD controls, leaving the later fullscreen boards for
+    /// a separate ordered layer.
+    pub fn render_frame_hud_players<'snapshot>(
+        &mut self,
+        pending: PendingHudFrame<'snapshot>,
+    ) -> PendingHudChromeFrame<'snapshot> {
+        self.assert_pending_frame(&pending);
+        assert!(
+            self.pending_viewport_foregrounds.is_empty(),
+            "foreground phase must be rendered before HUD players"
+        );
+        self.draw_hud_players(pending.frame, Some(&pending.gamma));
+        PendingHudChromeFrame(pending)
+    }
+
+    /// Draw message/upper-board chrome and complete the frame's gamma/atlas
+    /// lifecycle.
+    pub fn render_frame_hud_chrome(
+        &mut self,
+        pending: PendingHudChromeFrame<'_>,
+    ) -> Vec<EngineSurfaceSnapshot> {
+        let pending = pending.0;
+        self.assert_pending_frame(&pending);
+        self.draw_hud_chrome(Some(&pending.gamma));
+        let snapshots = self.collect_sprite_atlas(pending.snapshot);
+        self.active_gamma_control_points = Some(pending.pending_gamma_control_points);
         snapshots
     }
 
@@ -3072,6 +3172,13 @@ impl GraphicsSystem {
         Some(rendered)
     }
 
+    /// Compatibility completion for callers that do not need ordered seams.
+    pub fn render_frame_hud(&mut self, pending: PendingHudFrame<'_>) -> Vec<EngineSurfaceSnapshot> {
+        self.render_frame_foreground(&pending);
+        let pending = self.render_frame_hud_players(pending);
+        self.render_frame_hud_chrome(pending)
+    }
+
     /// Internal seam for C++ per-fragment gamma rendering and exact isolated
     /// fragment tests. Public rendering drives its active/pending lifecycle.
     fn render_frame_with_gamma(
@@ -3080,7 +3187,21 @@ impl GraphicsSystem {
         viewports: &[ViewportInput<'_>],
         gamma: Option<&lc_graphics::GammaRamp>,
     ) -> Vec<EngineSurfaceSnapshot> {
+        self.render_frame_base_with_gamma(snapshot, viewports, gamma);
+        self.draw_pending_viewport_foregrounds();
+        self.draw_hud_players(snapshot.frame, gamma);
+        self.draw_hud_chrome(gamma);
+        self.collect_sprite_atlas(snapshot)
+    }
+
+    fn render_frame_base_with_gamma(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ViewportInput<'_>],
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
         self.active_viewports.clear();
+        self.pending_viewport_foregrounds.clear();
         if let Some(background) = self.hud_graphics.background.as_ref() {
             tile_image_on_surface(&mut self.surface, background, 0, 0, gamma);
         } else {
@@ -3089,10 +3210,20 @@ impl GraphicsSystem {
 
         let owner_colors = Self::collect_owner_colors(snapshot);
         self.render_viewports(snapshot, viewports, &owner_colors, gamma);
+    }
 
-        self.draw_hud(snapshot.frame, gamma);
-
-        self.collect_sprite_atlas(snapshot)
+    fn draw_pending_viewport_foregrounds(&mut self) {
+        for mut pending in self.pending_viewport_foregrounds.drain(..) {
+            blit_surface(
+                &mut self.surface,
+                &pending.surface,
+                pending.destination.x,
+                pending.destination.y,
+            );
+            let _ = self
+                .surface
+                .extend_clonk_text_capture_from(&mut pending.surface, pending.destination);
+        }
     }
 
     fn render_viewports(
@@ -3251,7 +3382,11 @@ impl GraphicsSystem {
         self.surface_width = content_width;
         self.surface_height = content_height;
 
-        let content_surface = Surface::new(content_width.max(1), content_height.max(1), format);
+        let capture_native_text = self.surface.is_clonk_text_capture_active();
+        let mut content_surface = Surface::new(content_width.max(1), content_height.max(1), format);
+        if capture_native_text {
+            content_surface.begin_clonk_text_capture();
+        }
         let main_surface = std::mem::replace(&mut self.surface, content_surface);
 
         let fog_map = build_fog_modulation_map(
@@ -3386,20 +3521,44 @@ impl GraphicsSystem {
         // C4Viewport disables ClrModMap after world cursors and before the
         // custom parallax GUI/overlay pass.
         self.active_fog_map = None;
-        self.draw_objects_at_frame(
-            snapshot.frame,
-            &snapshot.objects,
-            &snapshot.render_order,
-            &snapshot.definition_lines,
-            &snapshot.players,
-            input.owner,
-            lighting,
-            owner_colors,
-            ObjectRenderPass::ForegroundParallax,
-            gamma,
-        );
+        let pending_foreground = if capture_native_text {
+            let mut foreground = Surface::new(content_width.max(1), content_height.max(1), format);
+            foreground.begin_clonk_text_capture();
+            let base_surface = std::mem::replace(&mut self.surface, foreground);
+            self.draw_objects_at_frame(
+                snapshot.frame,
+                &snapshot.objects,
+                &snapshot.render_order,
+                &snapshot.definition_lines,
+                &snapshot.players,
+                input.owner,
+                lighting,
+                owner_colors,
+                ObjectRenderPass::ForegroundParallax,
+                gamma,
+            );
+            let foreground = std::mem::replace(&mut self.surface, base_surface);
+            Some(PendingViewportForeground {
+                surface: foreground,
+                destination: SurfacePoint::new(rect.x + offset_x, rect.y + offset_y),
+            })
+        } else {
+            self.draw_objects_at_frame(
+                snapshot.frame,
+                &snapshot.objects,
+                &snapshot.render_order,
+                &snapshot.definition_lines,
+                &snapshot.players,
+                input.owner,
+                lighting,
+                owner_colors,
+                ObjectRenderPass::ForegroundParallax,
+                gamma,
+            );
+            None
+        };
 
-        let content_surface = std::mem::replace(&mut self.surface, main_surface);
+        let mut content_surface = std::mem::replace(&mut self.surface, main_surface);
 
         self.surface_width = saved_surface_width;
         self.surface_height = saved_surface_height;
@@ -3411,6 +3570,15 @@ impl GraphicsSystem {
 
         blit_surface(&mut viewport_surface, &content_surface, offset_x, offset_y);
         blit_surface(&mut self.surface, &viewport_surface, rect.x, rect.y);
+        if capture_native_text {
+            let _ = self.surface.extend_clonk_text_capture_from(
+                &mut content_surface,
+                SurfacePoint::new(rect.x + offset_x, rect.y + offset_y),
+            );
+        }
+        if let Some(foreground) = pending_foreground {
+            self.pending_viewport_foregrounds.push(foreground);
+        }
 
         self.active_viewports.push(ActiveViewport {
             owner: input.owner,
@@ -6848,10 +7016,9 @@ impl GraphicsSystem {
             .unwrap_or(hud::UPPER_BOARD_HEIGHT)
     }
 
-    /// The fullscreen overlay in the C4GraphicsSystem::Execute order:
-    /// per-viewport player HUD, then message board, then upper board
-    /// (src/C4GraphicsSystem.cpp:352-365).
-    fn draw_hud(&mut self, frame: u64, gamma: Option<&lc_graphics::GammaRamp>) {
+    /// Per-viewport player HUD, which precedes the fullscreen boards in
+    /// C4GraphicsSystem::Execute (src/C4GraphicsSystem.cpp:352-365).
+    fn draw_hud_players(&mut self, frame: u64, gamma: Option<&lc_graphics::GammaRamp>) {
         // Per-viewport player info (C4Viewport::DrawOverlay,
         // src/C4Viewport.cpp:835-848).
         let viewports = self.active_viewports.clone();
@@ -7016,7 +7183,11 @@ impl GraphicsSystem {
                 );
             }
         }
+    }
 
+    /// Message board, upper board and optional debug text. Keeping this phase
+    /// separate lets its raster chrome occlude earlier scale-native HUD text.
+    fn draw_hud_chrome(&mut self, gamma: Option<&lc_graphics::GammaRamp>) {
         let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
         if self.hud_chrome_active() {
             hud::draw_message_board_with_gamma(
@@ -9228,7 +9399,7 @@ pub fn draw_image_strip(
                         rgba[2],
                         dst.b,
                     ),
-                    255,
+                    blend_color_over(Color::new(0, 0, 0, rgba[3]), dst).a,
                 )
             };
             let _ = surface.set_pixel(tx as u32, ty as u32, blended);
@@ -9374,7 +9545,7 @@ fn draw_image_bilinear_impl(
                                 blend(lc_graphics::gamma::GammaChannel::Red, s[0], dst.r),
                                 blend(lc_graphics::gamma::GammaChannel::Green, s[1], dst.g),
                                 blend(lc_graphics::gamma::GammaChannel::Blue, s[2], dst.b),
-                                255,
+                                store_channel(s[3] + f32::from(dst.a) * (1.0 - af)),
                             )
                         }
                         BilinearBlend::Additive => {
@@ -12434,6 +12605,106 @@ mod tests {
         assert_eq!(before_apply, standard_render.surface().pixels());
         assert_eq!(after_apply, changed_render.surface().pixels());
         assert_ne!(before_apply, after_apply);
+    }
+
+    #[test]
+    fn ordered_frame_phases_match_the_single_call_frame_and_atlas() {
+        let snapshot = make_snapshot();
+        let viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        let board_color = Color::opaque(36, 72, 144);
+        let board = ImageData::new(
+            4,
+            50,
+            (0..4 * 50)
+                .flat_map(|_| [board_color.r, board_color.g, board_color.b, board_color.a])
+                .collect(),
+        );
+        let make_graphics = || {
+            GraphicsSystem::new(
+                128,
+                120,
+                120,
+                "Split frame",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                Arc::new(HudGraphics {
+                    upper_board: Some(board.clone()),
+                    ..HudGraphics::default()
+                }),
+            )
+        };
+
+        let mut single = make_graphics();
+        let single_atlas = single.render_frame(&snapshot, &viewports);
+        let single_pixels = single.surface().pixels().to_vec();
+
+        let mut split = make_graphics();
+        let pending = split.render_frame_base(&snapshot, &viewports);
+        split.render_frame_foreground(&pending);
+        let pending = split.render_frame_hud_players(pending);
+        let split_atlas = split.render_frame_hud_chrome(pending);
+
+        assert_eq!(split.surface().pixels(), single_pixels);
+        assert_eq!(split_atlas, single_atlas);
+        assert_eq!(
+            split.active_gamma_control_points,
+            single.active_gamma_control_points
+        );
+    }
+
+    #[test]
+    fn hud_chrome_phase_keeps_captured_gamma_after_transparent_seams() {
+        let snapshot = make_snapshot();
+        let mut changed = snapshot.clone();
+        changed
+            .environment
+            .gamma
+            .set_ramp(0, [0x102030, 0x405060, 0x708090]);
+        let board_color = Color::opaque(48, 96, 192);
+        let board = ImageData::new(
+            4,
+            50,
+            (0..4 * 50)
+                .flat_map(|_| [board_color.r, board_color.g, board_color.b, board_color.a])
+                .collect(),
+        );
+        let mut graphics = GraphicsSystem::new(
+            128,
+            120,
+            120,
+            "Transparent HUD",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            Arc::new(HudGraphics {
+                upper_board: Some(board),
+                ..HudGraphics::default()
+            }),
+        );
+        let initial_viewports = [ViewportInput::from_focus(&snapshot.objects[0])];
+        graphics.render_frame(&snapshot, &initial_viewports);
+        let installed_before = snapshot.environment.gamma.combined_control_points();
+
+        let changed_viewports = [ViewportInput::from_focus(&changed.objects[0])];
+        let pending = graphics.render_frame_base(&changed, &changed_viewports);
+        assert_eq!(graphics.active_gamma_control_points, Some(installed_before));
+        graphics.surface_mut().fill(Color::transparent());
+        graphics.render_frame_foreground(&pending);
+        graphics.surface_mut().fill(Color::transparent());
+        let pending = graphics.render_frame_hud_players(pending);
+        graphics.surface_mut().fill(Color::transparent());
+        let atlas = graphics.render_frame_hud_chrome(pending);
+
+        assert!(!atlas.is_empty());
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(standard_gamma_color(board_color))
+        );
+        assert_eq!(
+            graphics.active_gamma_control_points,
+            Some(changed.environment.gamma.combined_control_points())
+        );
     }
 
     #[test]

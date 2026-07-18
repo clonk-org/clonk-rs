@@ -12,7 +12,7 @@ use crate::{draw_image_bilinear, draw_image_strip, ImageData};
 use anyhow::{ensure, Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
-use lc_graphics::clonk_font::{line_height_for, ClonkFont, GlyphCell, TextAlign};
+use lc_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
 use lc_graphics::{Color, GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 
@@ -194,9 +194,9 @@ pub fn build_book_font_set(ttf_bytes: &[u8]) -> Result<BookFontSet> {
         .new_memory_face(ttf_bytes.to_vec(), 0)
         .context("failed to load font face")?;
     Ok(BookFontSet {
-        title: build_shadowless_font(&face, 22)?,
-        caption: build_shadowless_font(&face, 16)?,
-        text: build_shadowless_font(&face, 14)?,
+        title: build_shadowless_font(&face, 22)?.with_role(ClonkFontRole::BookTitle),
+        caption: build_shadowless_font(&face, 16)?.with_role(ClonkFontRole::BookCaption),
+        text: build_shadowless_font(&face, 14)?.with_role(ClonkFontRole::BookText),
     })
 }
 
@@ -660,7 +660,12 @@ fn draw_facet_stretch(
                             .round()
                             .clamp(0.0, 255.0) as u8
                     };
-                    let out = Color::new(blend(s[0], dst.r), blend(s[1], dst.g), blend(s[2], dst.b), 255);
+                    let out = Color::new(
+                        blend(s[0], dst.r),
+                        blend(s[1], dst.g),
+                        blend(s[2], dst.b),
+                        blend_surface_alpha(af, dst.a),
+                    );
                     let _ = surface.set_pixel(px as u32, py as u32, out);
                 }
             }
@@ -702,7 +707,7 @@ fn draw_box_dw(
                 blend(src[0], dst.r),
                 blend(src[1], dst.g),
                 blend(src[2], dst.b),
-                255,
+                blend_surface_alpha(opacity, dst.a),
             );
             let _ = surface.set_pixel(x as u32, y as u32, out);
         }
@@ -730,6 +735,47 @@ fn draw_line_dw(
     } else {
         debug_assert_eq!(y1, y2);
         draw_box_dw(surface, x1.min(x2), y1, x1.max(x2) - 1, y1, clr, gamma);
+    }
+}
+
+fn blend_surface_alpha(opacity: f32, destination: u8) -> u8 {
+    (255.0 * opacity + f32::from(destination) * (1.0 - opacity))
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+fn with_surface_clip(
+    surface: &mut Surface,
+    requested: (i64, i64, i64, i64),
+    draw: impl FnOnce(&mut Surface),
+) {
+    let previous = surface.clip();
+    let mut left = requested.0.max(0);
+    let mut top = requested.1.max(0);
+    let mut right = requested
+        .2
+        .min(i64::from(surface.width().min(i32::MAX as u32)));
+    let mut bottom = requested
+        .3
+        .min(i64::from(surface.height().min(i32::MAX as u32)));
+    if let Some(clip) = previous {
+        left = left.max(i64::from(clip.x));
+        top = top.max(i64::from(clip.y));
+        right = right.min(i64::from(clip.x) + i64::from(clip.width));
+        bottom = bottom.min(i64::from(clip.y) + i64::from(clip.height));
+    }
+    if left < right && top < bottom {
+        surface.set_clip(lc_graphics::Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ));
+        draw(surface);
+    }
+    match previous {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
     }
 }
 
@@ -823,8 +869,7 @@ fn draw_caption_bar(
 
 /// Draws text through a primary-clipper rectangle (inclusive bounds, like
 /// `CStdDDraw::SetPrimaryClipper`, StdDDraw2.cpp:566-599): the text is
-/// rendered to a scratch copy and only the pixels inside the clip rect are
-/// committed.
+/// rendered under the requested primary clipper.
 #[allow(clippy::too_many_arguments)]
 fn draw_text_clipped(
     surface: &mut Surface,
@@ -838,16 +883,20 @@ fn draw_text_clipped(
     gamma: Option<&GammaRamp>,
     clip: (i32, i32, i32, i32),
 ) {
-    let mut scratch = surface.clone();
-    font.draw_with_gamma(&mut scratch, x, y, text, color, align, markup, gamma);
     let (cx1, cy1, cx2, cy2) = clip;
-    for py in cy1.max(0)..=cy2.min(surface.height() as i32 - 1) {
-        for px in cx1.max(0)..=cx2.min(surface.width() as i32 - 1) {
-            if let Some(c) = scratch.get_pixel(px as u32, py as u32) {
-                let _ = surface.set_pixel(px as u32, py as u32, c);
-            }
-        }
+    if cx2 < cx1 || cy2 < cy1 {
+        return;
     }
+    with_surface_clip(
+        surface,
+        (
+            i64::from(cx1),
+            i64::from(cy1),
+            i64::from(cx2) + 1,
+            i64::from(cy2) + 1,
+        ),
+        |surface| font.draw_with_gamma(surface, x, y, text, color, align, markup, gamma),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,71 +1604,62 @@ pub fn draw_selection_info_scrolled(
     let (client, content_w) = selection_info_client(layout);
     let metrics = selection_info_scroll_metrics(layout, book_fonts, info);
     let scroll_y = metrics.clamp_offset(scroll_y);
-    let mut scratch = surface.clone();
     let mut y = client.y - scroll_y;
-    // Title picture: 220x170 incl. the 10px overlay margin (TextWindow ctor
-    // with C4StartupScenSel_TitlePictureWdt/Hgt + 2*TitleOverlayMargin,
-    // C4StartupScenSelDlg.cpp:1361-1362; C4GuiLabels.cpp:469-483).
-    if let Some(picture) = info.picture {
-        let pic_w = 220.min(content_w);
-        let pic_h = 170 * pic_w / 220;
-        let pic_x = client.x + (content_w / 2 - 220 / 2).max(0);
-        // OverlayPicture (C4GuiLabels.cpp:405-423): inner picture inset by
-        // border * rc / overlay-size, stretched without aspect; the overlay
-        // frame over the full rect.
-        let overlay = &assets.title_overlay;
-        let inset_x = 10 * pic_w / overlay.width().max(1) as i32;
-        let inset_y = 10 * pic_h / overlay.height().max(1) as i32;
-        draw_facet_stretch(
-            &mut scratch,
-            picture,
-            (0.0, 0.0, picture.width() as f32, picture.height() as f32),
-            (
-                (pic_x + inset_x) as f32,
-                (y + inset_y) as f32,
-                (pic_w - 2 * inset_x) as f32,
-                (pic_h - 2 * inset_y) as f32,
-            ),
-            gamma,
-        );
-        draw_facet_stretch(
-            &mut scratch,
-            overlay,
-            (0.0, 0.0, overlay.width() as f32, overlay.height() as f32),
-            (pic_x as f32, y as f32, pic_w as f32, pic_h as f32),
-            gamma,
-        );
-        y += pic_h + 10; // C4StartupScenSel_TitlePicturePadding
-    }
-
-    // Word-wrap (CStdFont::BreakMessage semantics: greedy break at spaces).
-    // The whole child window is drawn shifted and then clipped, preserving
-    // partially visible picture/text rows at both viewport edges.
-    for (text, font, color) in selection_info_lines(info, book_fonts) {
-        for wrapped in wrap_line(&text, font, content_w) {
-            font.draw_with_gamma(
-                &mut scratch,
-                client.x,
-                y,
-                &wrapped,
-                color,
-                TextAlign::Left,
-                false,
-                gamma,
-            );
-            y += font.line_height;
-        }
-    }
-
-    let clip_right = client.x + content_w - 1;
-    let clip_bottom = client.y + client.h - 1;
-    for py in client.y.max(0)..=clip_bottom.min(surface.height() as i32 - 1) {
-        for px in client.x.max(0)..=clip_right.min(surface.width() as i32 - 1) {
-            if let Some(color) = scratch.get_pixel(px as u32, py as u32) {
-                let _ = surface.set_pixel(px as u32, py as u32, color);
+    with_surface_clip(
+        surface,
+        (
+            i64::from(client.x),
+            i64::from(client.y),
+            i64::from(client.x) + i64::from(content_w),
+            i64::from(client.y) + i64::from(client.h),
+        ),
+        |surface| {
+            if let Some(picture) = info.picture {
+                let pic_w = 220.min(content_w);
+                let pic_h = 170 * pic_w / 220;
+                let pic_x = client.x + (content_w / 2 - 220 / 2).max(0);
+                let overlay = &assets.title_overlay;
+                let inset_x = 10 * pic_w / overlay.width().max(1) as i32;
+                let inset_y = 10 * pic_h / overlay.height().max(1) as i32;
+                draw_facet_stretch(
+                    surface,
+                    picture,
+                    (0.0, 0.0, picture.width() as f32, picture.height() as f32),
+                    (
+                        (pic_x + inset_x) as f32,
+                        (y + inset_y) as f32,
+                        (pic_w - 2 * inset_x) as f32,
+                        (pic_h - 2 * inset_y) as f32,
+                    ),
+                    gamma,
+                );
+                draw_facet_stretch(
+                    surface,
+                    overlay,
+                    (0.0, 0.0, overlay.width() as f32, overlay.height() as f32),
+                    (pic_x as f32, y as f32, pic_w as f32, pic_h as f32),
+                    gamma,
+                );
+                y += pic_h + 10;
             }
-        }
-    }
+
+            for (text, font, color) in selection_info_lines(info, book_fonts) {
+                for wrapped in wrap_line(&text, font, content_w) {
+                    font.draw_with_gamma(
+                        surface,
+                        client.x,
+                        y,
+                        &wrapped,
+                        color,
+                        TextAlign::Left,
+                        false,
+                        gamma,
+                    );
+                    y += font.line_height;
+                }
+            }
+        },
+    );
 
     // Book scrollbar track + fixed 16px pin on overflow
     // (C4GuiContainers.cpp:343-368,446-473).
@@ -1721,6 +1761,46 @@ mod tests {
             .iter()
             .all(|px| px.a == 0 || (px.r, px.g, px.b) == (255, 255, 255)));
         assert!(glyph.pixels.iter().any(|px| px.a == 255), "solid coverage");
+        assert_eq!(fonts.title.role(), Some(ClonkFontRole::BookTitle));
+        assert_eq!(fonts.caption.role(), Some(ClonkFontRole::BookCaption));
+        assert_eq!(fonts.text.role(), Some(ClonkFontRole::BookText));
+    }
+
+    #[test]
+    fn transparent_startup_primitives_preserve_source_over_alpha() {
+        let mut surface = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+        draw_box_dw(&mut surface, 0, 0, 0, 0, 0x7f80_4020, None);
+        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(64, 32, 16, 128)));
+    }
+
+    #[test]
+    fn clipped_book_text_capture_keeps_global_coordinates_and_clip() {
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
+        let fonts = build_book_font_set(&ttf).expect("book fonts");
+        let mut surface = Surface::new(40, 30, lc_graphics::PixelFormat::Rgba8888);
+        let outer = lc_graphics::Rect::new(5, 2, 20, 20);
+        surface.set_clip(outer);
+        surface.begin_clonk_text_capture();
+        draw_text_clipped(
+            &mut surface,
+            &fonts.text,
+            7,
+            6,
+            "Book",
+            [0, 0, 0, 255],
+            TextAlign::Left,
+            true,
+            None,
+            (2, 4, 11, 13),
+        );
+
+        assert_eq!(surface.clip(), Some(outer));
+        let commands = surface.take_clonk_text_capture();
+        assert_eq!(commands.len(), 1);
+        assert_eq!((commands[0].x, commands[0].y), (7, 6));
+        assert_eq!(commands[0].clip, Some(lc_graphics::Rect::new(5, 4, 7, 10)));
     }
 
     // Pixel-exact geometry at 1280x720, derived from
