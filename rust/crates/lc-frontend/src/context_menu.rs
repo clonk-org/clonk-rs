@@ -304,8 +304,10 @@ impl<A: Clone> ContextPanel<A> {
         anchor: GuiPoint,
         screen: IntRect,
         resources: &ContextMenuResources,
+        minimum_width: i32,
     ) -> Self {
         let (width, height, rows) = panel_dimensions(&entries, resources);
+        let width = width.max(minimum_width);
         let (x, y) = flip_root(anchor.x as i32, anchor.y as i32, width, height, screen);
         Self::at(entries, x, y, width, height, rows)
     }
@@ -441,7 +443,20 @@ impl<A: Clone> ClassicContextMenu<A> {
         screen: IntRect,
         resources: ContextMenuResources,
     ) -> (Self, ContextMenuOutcome<A>) {
-        let root = ContextPanel::new_root(entries, anchor, screen, &resources);
+        Self::open_with_minimum_width(entries, anchor, screen, resources, 0)
+    }
+
+    /// Open a root menu whose outer bounds are at least `minimum_width`.
+    /// C4GUI::ComboBox uses its control width here before Screen::DoContext
+    /// applies the ordinary edge-flip placement.
+    pub fn open_with_minimum_width(
+        entries: Vec<ContextMenuEntry<A>>,
+        anchor: GuiPoint,
+        screen: IntRect,
+        resources: ContextMenuResources,
+        minimum_width: i32,
+    ) -> (Self, ContextMenuOutcome<A>) {
+        let root = ContextPanel::new_root(entries, anchor, screen, &resources, minimum_width);
         let mut outcome = ContextMenuOutcome::new(true);
         outcome
             .events
@@ -1268,6 +1283,23 @@ mod tests {
         let bounds = menu.layout().panels[0].bounds;
         assert_eq!(bounds.x + bounds.w, 319);
         assert_eq!(bounds.y + bounds.h, 199);
+    }
+
+    #[test]
+    fn combo_root_honors_control_width_before_edge_flip() {
+        let entries = vec![ContextMenuEntry::new("A").with_action(Action::One)];
+        let (menu, _) = ClassicContextMenu::open_with_minimum_width(
+            entries,
+            GuiPoint::new(280.0, 30.0),
+            screen(),
+            resources(),
+            180,
+        );
+        let bounds = menu.layout().panels[0].bounds;
+        assert_eq!(bounds.w, 180);
+        assert_eq!(bounds.x + bounds.w, 280);
+        assert_eq!(bounds.y, 30);
+        assert_eq!(menu.layout().panels[0].rows[0].rect.w, 170);
     }
 
     #[test]

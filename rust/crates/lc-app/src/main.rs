@@ -8042,6 +8042,7 @@ enum AppContextMenuCommand {
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
     OptionsLanguage(String),
+    LobbyTeam { player_id: i32, team_id: i32 },
     ScenarioSearch(ScenselSearchContextCommand),
     InputDialog(InputDialogContextCommand),
 }
@@ -8974,6 +8975,13 @@ struct GameApp {
     /// tree. The first caller is a startup player row; the chassis is shared
     /// by every later context-menu producer.
     context_menu: Option<ClassicContextMenu<AppContextMenuCommand>>,
+    /// Player row whose C4GUI::ComboBox owns the shared context menu. This
+    /// keeps the simple combo's arrow/highlight in its open phase.
+    context_menu_lobby_team_player: Option<i32>,
+    /// C4GUI::ComboBox remembers the last menu index after Screen closes an
+    /// outside-clicked menu. Retain that owner for the remainder of the same
+    /// pointer-down so clicking the open combo closes instead of reopening it.
+    context_menu_pointer_dismissed_lobby_team_player: Option<i32>,
     /// A context action may close on pointer-down. Retain that button until
     /// release so the underlying screen cannot receive a synthetic click.
     context_menu_pointer_capture: Option<ContextMenuPointerButton>,
@@ -9731,7 +9739,6 @@ enum ClassicGameLobbyChild {
     RosterContext(LobbyRosterId),
     AddPlayer(i32),
     AddScriptPlayer,
-    TeamSelection(i32),
     Chat,
     ExternalIrcChat,
     GameOptionSideEffect(&'static str),
@@ -16889,6 +16896,8 @@ impl GameApp {
             pending_definition_selection: None,
             game_option_input_dialog: None,
             context_menu: None,
+            context_menu_lobby_team_player: None,
+            context_menu_pointer_dismissed_lobby_team_player: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
             definition_selector_consumed_keys: HashSet::new(),
@@ -19781,6 +19790,7 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.guard_runtime_key_dispatch(key)?;
         if self.running_chat.is_some() {
             let modifiers = self.keyboard_modifiers
@@ -26841,6 +26851,7 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
@@ -27258,6 +27269,7 @@ impl GameApp {
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.context_menu_pointer_dismissed_lobby_team_player = None;
         if self.startup_network_transition_active() {
             return Ok(());
         }
@@ -29174,6 +29186,37 @@ impl GameApp {
         entries: Vec<ContextMenuEntry<AppContextMenuCommand>>,
         anchor: GuiPoint,
     ) -> Result<bool, EngineError> {
+        self.open_context_menu_at_with_minimum_width(entries, anchor, 0, None)
+    }
+
+    fn set_context_menu_lobby_team_player(&mut self, player_id: Option<i32>) {
+        self.context_menu_lobby_team_player = player_id;
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_open_team_combo_player(player_id);
+        }
+    }
+
+    fn close_stale_classic_lobby_team_combo(&mut self) {
+        let Some(player_id) = self.context_menu_lobby_team_player else {
+            return;
+        };
+        let retained = self
+            .classic_host_lobby
+            .as_ref()
+            .and_then(|lobby| lobby.controller.open_team_combo_player());
+        if retained != Some(player_id) {
+            // ComboBox::SetReadOnly aborts its menu without a DoorClose sound.
+            self.close_context_menu_silently();
+        }
+    }
+
+    fn open_context_menu_at_with_minimum_width(
+        &mut self,
+        entries: Vec<ContextMenuEntry<AppContextMenuCommand>>,
+        anchor: GuiPoint,
+        minimum_width: i32,
+        lobby_team_player: Option<i32>,
+    ) -> Result<bool, EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         let resources = self
             .assets
@@ -29186,8 +29229,15 @@ impl GameApp {
             w: surface.width() as i32,
             h: surface.height() as i32,
         };
-        let (menu, outcome) = ClassicContextMenu::open(entries, anchor, screen, resources);
+        let (menu, outcome) = ClassicContextMenu::open_with_minimum_width(
+            entries,
+            anchor,
+            screen,
+            resources,
+            minimum_width,
+        );
         self.context_menu = Some(menu);
+        self.set_context_menu_lobby_team_player(lobby_team_player);
         self.process_context_menu_outcome(outcome)?;
         Ok(true)
     }
@@ -29218,6 +29268,203 @@ impl GameApp {
             return Ok(false);
         };
         self.open_context_menu_at(entries, anchor)
+    }
+
+    fn open_classic_lobby_team_combo(
+        &mut self,
+        player_id: i32,
+    ) -> Result<bool, EngineError> {
+        let dismissed_player = self
+            .context_menu_pointer_dismissed_lobby_team_player
+            .take();
+        if dismissed_player == Some(player_id) {
+            // Screen::MouseInput already aborted this combo's menu on the
+            // same left-down. ComboBox::MouseInput rechecks the last menu ID
+            // and deliberately does not reopen it.
+            return Ok(false);
+        }
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::NetworkLobby
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+
+        let (_, roster) = self.classic_host_lobby_layouts()?;
+        let Some((client_id, current_team, anchor, minimum_width)) = self
+            .classic_host_lobby
+            .as_ref()
+            .and_then(|lobby| {
+                if lobby.controller.countdown().is_locked() {
+                    return None;
+                }
+                let (index, player) = lobby
+                    .controller
+                    .rows()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, row)| match row {
+                        LobbyRosterRow::Player(player) if player.id == player_id => {
+                            Some((index, player))
+                        }
+                        _ => None,
+                    })?;
+                let team = player.team.as_ref().filter(|team| team.selectable)?;
+                let team_rect = roster
+                    .rows
+                    .iter()
+                    .find(|row| row.index == index)?
+                    .team?;
+                Some((
+                    player.client_id,
+                    team.id,
+                    GuiPoint::new(team_rect.x as f32, (team_rect.y + team_rect.h) as f32),
+                    team_rect.w,
+                ))
+            })
+        else {
+            return Ok(false);
+        };
+        if !self.classic_lobby_team_change_is_allowed(player_id, client_id) {
+            return Ok(false);
+        }
+
+        let select_template = load_runtime_language_table(self.app_paths.as_ref())
+            .ok()
+            .and_then(|table| table.entries.get("IDS_MSG_SELECT").cloned());
+        let entries = self
+            .network_team_assignment
+            .as_ref()
+            .into_iter()
+            .flat_map(|assignment| assignment.teams().teams.iter())
+            .filter(|team| {
+                team.id == current_team
+                    || team.max_players == 0
+                    || i32::try_from(team.player_ids.len()).unwrap_or(i32::MAX)
+                        < team.max_players
+            })
+            .map(|team| {
+                let name = legacy_presentation_text(team.name.as_bytes());
+                let tooltip = select_template
+                    .as_deref()
+                    .map(|template| template.replacen("%s", &name, 1))
+                    .unwrap_or_else(|| format!("Select {name}"));
+                ContextMenuEntry::new(name)
+                    .with_tooltip(tooltip)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::LobbyTeam {
+                        player_id,
+                        team_id: team.id,
+                    })
+            })
+            .collect();
+        self.open_context_menu_at_with_minimum_width(
+            entries,
+            anchor,
+            minimum_width,
+            Some(player_id),
+        )
+    }
+
+    fn classic_lobby_team_change_is_allowed(&self, player_id: i32, client_id: i32) -> bool {
+        let player_is_eligible = self
+            .control_player_infos
+            .client_update_request(client_id)
+            .and_then(|request| {
+                request
+                    .players
+                    .into_iter()
+                    .find(|player| player.id == player_id)
+            })
+            .is_some_and(|player| !player.is_joined() && player.savegame_player == 0);
+        if !player_is_eligible {
+            return false;
+        }
+        let Some(metadata) = self
+            .network_team_assignment
+            .as_ref()
+            .map(NetworkTeamAssignmentState::teams)
+        else {
+            return false;
+        };
+        if !metadata.active
+            || !matches!(
+                metadata.team_distribution,
+                lc_engine::InitialNetworkTeamDistribution::Free
+                    | lc_engine::InitialNetworkTeamDistribution::Host
+            )
+        {
+            return false;
+        }
+        if metadata.auto_generate_teams {
+            return true;
+        }
+        let current_team = metadata
+            .teams
+            .iter()
+            .find(|team| team.player_ids.contains(&player_id))
+            .map(|team| team.id);
+        metadata.teams.iter().any(|team| {
+            Some(team.id) != current_team
+                && (team.max_players == 0
+                    || i32::try_from(team.player_ids.len()).unwrap_or(i32::MAX)
+                        < team.max_players)
+        })
+    }
+
+    fn submit_classic_lobby_team_selection(&mut self, player_id: i32, team_id: i32) {
+        let Some(client_id) = self.classic_host_lobby.as_ref().and_then(|lobby| {
+            if lobby.controller.countdown().is_locked() {
+                return None;
+            }
+            lobby.controller.rows().iter().find_map(|row| match row {
+                LobbyRosterRow::Player(player)
+                    if player.id == player_id
+                        && player.team.as_ref().is_some_and(|team| team.selectable) =>
+                {
+                    Some(player.client_id)
+                }
+                _ => None,
+            })
+        }) else {
+            return;
+        };
+        if !self.classic_lobby_team_change_is_allowed(player_id, client_id) {
+            return;
+        }
+        if !self
+            .network_team_assignment
+            .as_ref()
+            .is_some_and(|assignment| {
+                assignment
+                    .teams()
+                    .teams
+                    .iter()
+                    .any(|team| team.id == team_id)
+            })
+        {
+            return;
+        }
+        let Some(mut request) = self.control_player_infos.client_update_request(client_id) else {
+            return;
+        };
+        let Some(player) = request
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_id)
+        else {
+            return;
+        };
+        player.team = team_id;
+        let Some(network) = self.network.as_ref() else {
+            tracing::error!(player_id, team_id, "lobby team selection has no network session");
+            return;
+        };
+        if let Err(error) = network.submit_player_info_update(request) {
+            tracing::error!(%error, player_id, team_id, "failed to submit lobby team selection");
+        }
     }
 
     fn open_startup_player_context_menu(&mut self) -> Result<bool, EngineError> {
@@ -29376,6 +29623,7 @@ impl GameApp {
                 }),
                 ContextMenuEvent::Closed => {
                     self.context_menu = None;
+                    self.set_context_menu_lobby_team_player(None);
                 }
                 ContextMenuEvent::Activated(command) => match command {
                     AppContextMenuCommand::StartupPlayer(
@@ -29440,6 +29688,9 @@ impl GameApp {
                                 self.open_options_menu();
                             }
                         }
+                    }
+                    AppContextMenuCommand::LobbyTeam { player_id, team_id } => {
+                        self.submit_classic_lobby_team_selection(player_id, team_id);
                     }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
@@ -29652,11 +29903,23 @@ impl GameApp {
             ElementState::Pressed => menu.handle_pointer_down(point, button),
             ElementState::Released => menu.handle_pointer_up(point, button),
         };
+        let dismissed_lobby_team_player = (state == ElementState::Pressed
+            && button == ContextMenuPointerButton::Left
+            && outcome.pass_through
+            && outcome
+                .events
+                .iter()
+                .any(|event| matches!(event, ContextMenuEvent::Closed)))
+        .then_some(self.context_menu_lobby_team_player)
+        .flatten();
         let captured = outcome.captured && !outcome.pass_through;
         if state == ElementState::Pressed && captured {
             self.context_menu_pointer_capture = Some(button);
         }
         self.process_context_menu_outcome(outcome)?;
+        if let Some(player_id) = dismissed_lobby_team_player {
+            self.context_menu_pointer_dismissed_lobby_team_player = Some(player_id);
+        }
         Ok(captured || retained_release)
     }
 
@@ -29734,9 +29997,13 @@ impl GameApp {
 
     fn close_context_menu_silently(&mut self) {
         let Some(mut menu) = self.context_menu.take() else {
+            self.set_context_menu_lobby_team_player(None);
+            self.context_menu_pointer_dismissed_lobby_team_player = None;
             return;
         };
         let _ = menu.dismiss(false);
+        self.set_context_menu_lobby_team_player(None);
+        self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_capture = None;
         self.mark_menu_dirty();
     }
@@ -30710,6 +30977,7 @@ impl GameApp {
         &mut self,
         actions: Vec<ClassicLobbyAction>,
     ) -> Result<(), EngineError> {
+        self.close_stale_classic_lobby_team_combo();
         self.guard_classic_global_gui_bootstrap()?;
         if actions
             .iter()
@@ -30789,9 +31057,7 @@ impl GameApp {
                     ));
                 }
                 ClassicLobbyAction::TeamSelectionRequested { player_id } => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::TeamSelection(player_id),
-                    ));
+                    self.open_classic_lobby_team_combo(player_id)?;
                 }
                 ClassicLobbyAction::Chat(request) => {
                     self.process_classic_lobby_chat_request(request)?;
@@ -31062,7 +31328,28 @@ impl GameApp {
                 return self.process_classic_lobby_actions(chat_actions);
             }
         }
-        let actions = if state == ElementState::Pressed && self.keyboard_modifiers.alt() {
+        let alt_combo_open = state == ElementState::Pressed
+            && self.keyboard_modifiers.alt()
+            && matches!(key, VirtualKeyCode::Down | VirtualKeyCode::Space)
+            && self
+                .classic_host_lobby
+                .as_ref()
+                .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::RosterTeam);
+        let actions = if alt_combo_open {
+            map_key_code(key)
+                .and_then(|key| {
+                    self.classic_host_lobby.as_mut().map(|lobby| {
+                        lobby.controller.key_down(
+                            key,
+                            self.keyboard_modifiers.shift(),
+                            &layout,
+                            &roster,
+                            Instant::now(),
+                        )
+                    })
+                })
+                .unwrap_or_default()
+        } else if state == ElementState::Pressed && self.keyboard_modifiers.alt() {
             context_menu_hotkey(key)
                 .and_then(|hotkey| {
                     self.classic_host_lobby
@@ -35296,6 +35583,7 @@ impl GameApp {
     }
 
     fn render_classic_host_lobby(&mut self) -> Result<()> {
+        self.close_stale_classic_lobby_team_combo();
         let config = self.loader_render_config.ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
                 detail: "loader render configuration is unavailable".to_string(),
@@ -57394,6 +57682,121 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.sync_scenario_game_option_bounds();
     }
 
+    fn install_test_classic_host_team_lobby(
+        app: &mut GameApp,
+    ) -> (
+        lc_engine::ControlPlayerInfoEntry,
+        lc_engine::ControlPlayerInfoEntry,
+    ) {
+        install_test_classic_host_lobby(app);
+        let client = app
+            .classic_host_lobby
+            .as_ref()
+            .expect("test lobby")
+            .controller
+            .rows()[0]
+            .clone();
+        let player = LobbyRosterRow::Player(lc_frontend::game_lobby::LobbyPlayerRow {
+            id: 7,
+            client_id: 0,
+            name: "Chooser".to_string(),
+            color: [255, 255, 255, 255],
+            icon: lc_frontend::game_lobby::LobbyRosterIcon::Standard(7),
+            team: Some(lc_frontend::game_lobby::LobbyTeamValue {
+                id: 1,
+                name: "Full current".to_string(),
+                selectable: true,
+            }),
+            league_score: None,
+            league_rank: None,
+        });
+        let controller = ClassicGameLobby::new(
+            LobbyRole::Host,
+            "Probe",
+            1,
+            4,
+            true,
+            false,
+            true,
+            false,
+            5,
+            vec![client, player],
+        );
+        app.classic_host_lobby
+            .as_mut()
+            .expect("test lobby")
+            .controller = controller;
+        let teams = vec![
+            lc_engine::TeamInfo::new(1, "Full current", 0x00f4_0000)
+                .with_player_ids(vec![7])
+                .with_max_players(1),
+            lc_engine::TeamInfo::new(2, "Open", 0x0000_c800),
+            lc_engine::TeamInfo::new(3, "Full other", 0x0020_20ff)
+                .with_player_ids(vec![8])
+                .with_max_players(1),
+            lc_engine::TeamInfo::new(4, "Malformed negative maximum", 0x00ff_ffff)
+                .with_max_players(-1),
+        ];
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            lc_engine::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 4,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Free,
+                team_colors: false,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 0,
+                teams: teams.iter().map(initial_team_from_runtime).collect(),
+            },
+        ));
+        assert!(
+            app.engine.teams().is_empty(),
+            "the host lobby must use its retained pregame C4TeamList"
+        );
+        let chooser = lc_engine::ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Chooser".to_vec()).expect("valid name"),
+            id: 7,
+            team: 1,
+            color: 0x0012_3456,
+            original_color: 0x0012_3456,
+            ..lc_engine::ControlPlayerInfoEntry::default()
+        };
+        let companion = lc_engine::ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Companion".to_vec()).expect("valid name"),
+            id: 8,
+            team: 3,
+            color: 0x0065_4321,
+            original_color: 0x0065_4321,
+            ..lc_engine::ControlPlayerInfoEntry::default()
+        };
+        app.control_player_infos.replace_snapshot(
+            8,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![chooser.clone(), companion.clone()],
+                by_client: 0,
+            }],
+        );
+        (chooser, companion)
+    }
+
+    fn test_lobby_team_rect(app: &mut GameApp) -> lc_frontend::classic_gui::IntRect {
+        let (_, roster) = app
+            .classic_host_lobby_layouts()
+            .expect("team lobby layout");
+        roster
+            .rows
+            .iter()
+            .find(|row| row.index == 1)
+            .and_then(|row| row.team)
+            .expect("expanded team control")
+    }
+
     #[test]
     fn staged_host_completion_enters_exact_lobby_over_loader_background() {
         let _lock = env_lock().lock();
@@ -57851,10 +58254,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 "AddScriptPlayer",
             ),
             (
-                ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
-                "TeamSelection",
-            ),
-            (
                 ClassicLobbyAction::GameOptions(LobbyGameOptionInput::Hotkey('P')),
                 "Password/Comment dialog",
             ),
@@ -57876,6 +58275,244 @@ public func Grant(password) { return GainMissionAccess(password); }
             LobbySheet::Players,
         )])
         .expect("already-visible Players sheet is a safe no-op");
+    }
+
+    #[test]
+    fn classic_lobby_team_combo_filters_teams_and_submits_the_full_player_packet() {
+        let mut app = new_menu_app(640, 480);
+        let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+        let team_rect = test_lobby_team_rect(&mut app);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+        ])
+        .expect("team combo opens without crossing a parity fence");
+
+        let menu = app.context_menu.as_ref().expect("open team context menu");
+        let panel = &menu.layout().panels[0];
+        assert_eq!(panel.bounds.x, team_rect.x);
+        assert_eq!(panel.bounds.y, team_rect.y + team_rect.h);
+        assert!(panel.bounds.w >= team_rect.w);
+        assert_eq!(
+            panel.rows.len(),
+            2,
+            "the full current team stays visible; full and negative-limit alternatives are filtered"
+        );
+        assert_eq!(app.context_menu_lobby_team_player, Some(7));
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby")
+                .controller
+                .open_team_combo_player(),
+            Some(7)
+        );
+
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+                .expect("select first team row")
+        );
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::Down, ElementState::Pressed)
+                .expect("select second team row")
+        );
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::Return, ElementState::Pressed)
+                .expect("activate selected team")
+        );
+
+        let updates = commands.take_player_info_updates();
+        assert_eq!(updates.len(), 1);
+        let mut changed = chooser;
+        changed.team = 2;
+        assert_eq!(
+            updates[0],
+            lc_network::PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![changed, companion],
+            },
+            "OnTeamComboSelChange clones the complete client packet and mutates only Team"
+        );
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.context_menu_lobby_team_player, None);
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby")
+                .controller
+                .rows()
+                .iter()
+                .find_map(|row| match row {
+                    LobbyRosterRow::Player(player) if player.id == 7 => {
+                        player.team.as_ref().map(|team| team.id)
+                    }
+                    _ => None,
+                }),
+            Some(1),
+            "the combo text waits for the authoritative player-info echo"
+        );
+    }
+
+    #[test]
+    fn clicking_an_open_lobby_team_combo_closes_without_reopening() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_team_lobby(&mut app);
+        let team_rect = test_lobby_team_rect(&mut app);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+        ])
+        .expect("open team combo");
+
+        let point = PhysicalPosition::new(
+            f64::from(team_rect.x + 2),
+            f64::from(team_rect.y + 2),
+        );
+        app.handle_cursor_moved(point)
+            .expect("move from menu back onto owning combo");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("same-combo down closes the menu");
+
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.context_menu_lobby_team_player, None);
+        assert_eq!(app.context_menu_pointer_dismissed_lobby_team_player, None);
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby")
+                .controller
+                .open_team_combo_player(),
+            None
+        );
+        assert!(commands.take_player_info_updates().is_empty());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release stays with the closed combo gesture");
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn classic_lobby_team_combo_rechecks_cpp_team_permissions_before_opening() {
+        let mut app = new_menu_app(640, 480);
+        let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+        let metadata = app
+            .network_team_assignment
+            .as_mut()
+            .expect("team assignment")
+            .teams_mut();
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::Random;
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+        ])
+        .expect("random distribution is an inert combo request");
+        assert!(app.context_menu.is_none());
+
+        let metadata = app
+            .network_team_assignment
+            .as_mut()
+            .expect("team assignment")
+            .teams_mut();
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::Free;
+        metadata.teams.retain(|team| team.id == 1);
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+        ])
+        .expect("no alternative team is an inert combo request");
+        assert!(app.context_menu.is_none());
+
+        app.network_team_assignment
+            .as_mut()
+            .expect("team assignment")
+            .teams_mut()
+            .auto_generate_teams = true;
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+        ])
+        .expect("auto-generated teams permit opening without an alternative");
+        assert!(app.context_menu.is_some());
+        app.close_context_menu_silently();
+
+        chooser.savegame_player = 99;
+        app.control_player_infos.replace_snapshot(
+            8,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![chooser, companion],
+                by_client: 0,
+            }],
+        );
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+        ])
+        .expect("savegame-associated players remain read-only");
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn focused_lobby_team_combo_opens_from_cpp_keyboard_bindings_and_escape_closes() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_team_lobby(&mut app);
+        let (_, roster) = app
+            .classic_host_lobby_layouts()
+            .expect("team lobby layout");
+        let player_row = roster
+            .rows
+            .iter()
+            .find(|row| row.index == 1)
+            .expect("player row")
+            .rect;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(player_row.x + player_row.w / 2),
+            f64::from(player_row.y + 2),
+        ))
+        .expect("hover player row");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("select player row");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("finish row selection");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby")
+                .controller
+                .focus(),
+            LobbyControl::Roster
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus team combo");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby")
+                .controller
+                .focus(),
+            LobbyControl::RosterTeam
+        );
+
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("Down opens combo");
+        assert!(app.context_menu.is_some());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape aborts combo");
+        assert!(app.context_menu.is_none());
+
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Space opens combo");
+        assert!(app.context_menu.is_some());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close Space-opened combo");
+
+        app.keyboard_modifiers = ModifiersState::ALT;
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("Alt+Down opens combo");
+        assert!(app.context_menu.is_some());
+        app.keyboard_modifiers = ModifiersState::empty();
     }
 
     #[test]

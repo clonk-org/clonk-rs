@@ -1108,6 +1108,7 @@ pub struct GameLobby {
     key_pressed: Option<(LobbyControl, KeyCode)>,
     selected_row: Option<usize>,
     selected_roster_id: Option<LobbyRosterId>,
+    open_team_combo_player: Option<i32>,
     roster_scroll: i32,
     roster_max_scroll: i32,
     roster_scroll_pin: i32,
@@ -1162,6 +1163,7 @@ impl GameLobby {
             key_pressed: None,
             selected_row: None,
             selected_roster_id: None,
+            open_team_combo_player: None,
             roster_scroll: 0,
             roster_max_scroll: 0,
             roster_scroll_pin: 0,
@@ -1213,6 +1215,26 @@ impl GameLobby {
         self.selected_roster_id.as_ref()
     }
 
+    /// Mirrors the per-row C4GUI::ComboBox `iOpenMenu` presentation state.
+    /// Menu ownership remains app-side because the shared context-menu tree
+    /// is rendered above the lobby.
+    pub fn set_open_team_combo_player(&mut self, player_id: Option<i32>) {
+        self.open_team_combo_player = player_id.filter(|player_id| {
+            self.rows.iter().any(|row| {
+                matches!(
+                    row,
+                    LobbyRosterRow::Player(player)
+                        if player.id == *player_id
+                            && player.team.as_ref().is_some_and(|team| team.selectable)
+                )
+            })
+        });
+    }
+
+    pub const fn open_team_combo_player(&self) -> Option<i32> {
+        self.open_team_combo_player
+    }
+
     pub const fn chat_scroll(&self) -> i32 {
         self.chat_scroll
     }
@@ -1242,6 +1264,7 @@ impl GameLobby {
             .selected_row
             .and_then(|index| self.rows.get(index))
             .map(LobbyRosterRow::id);
+        self.set_open_team_combo_player(self.open_team_combo_player);
         let selected = self.selected_row.and_then(|index| self.rows.get(index));
         let child_focus_valid = match self.focus {
             LobbyControl::RosterTeam => matches!(
@@ -2483,6 +2506,9 @@ impl GameLobby {
             }
         }
         self.countdown = next;
+        if next.is_locked() {
+            self.open_team_combo_player = None;
+        }
 
         let mut actions = vec![LobbyAction::CountdownChanged(next)];
         if next.is_locked() && self.focus == LobbyControl::RosterTeam {
@@ -3601,11 +3627,12 @@ impl GameLobby {
                 .unwrap_or_default();
             let selectable =
                 team.is_some_and(|team| team.selectable) && !self.countdown.is_locked();
+            let combo_open = self.open_team_combo_player == Some(player.id);
             if selectable {
                 draw_source_clipped(
                     surface,
                     resources.context,
-                    (0, 0, 16, 16),
+                    (u32::from(combo_open) * 16, 0, 16, 16),
                     IntRect {
                         w: 16,
                         h: 16,
@@ -3628,7 +3655,8 @@ impl GameLobby {
             );
             if active
                 && selectable
-                && (self.hovered == HitTarget::Team(row.index)
+                && (combo_open
+                    || self.hovered == HitTarget::Team(row.index)
                     || self.focus == LobbyControl::RosterTeam
                         && self.selected_row == Some(row.index))
             {
@@ -5322,13 +5350,16 @@ mod tests {
         let roster = lobby.roster_layout(&layout, 22);
         let combo = roster.rows[0].team.expect("team combo");
         let point = GuiPoint::new((combo.x + 1) as f32, (combo.y + 1) as f32);
+        lobby.set_open_team_combo_player(Some(2));
 
         let _ = lobby.apply_countdown_packet(LobbyCountdownPacket::Seconds(11));
+        assert_eq!(lobby.open_team_combo_player(), Some(2));
         assert!(lobby
             .pointer_down(point, &layout, &roster)
             .contains(&LobbyAction::TeamSelectionRequested { player_id: 2 }));
         lobby.focus = LobbyControl::RosterTeam;
         let actions = lobby.apply_countdown_packet(LobbyCountdownPacket::Seconds(10));
+        assert_eq!(lobby.open_team_combo_player(), None);
         assert!(actions.contains(&LobbyAction::FocusChanged(LobbyControl::Roster)));
         assert!(!lobby.focus_order().contains(&LobbyControl::RosterTeam));
         assert!(!lobby

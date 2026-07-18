@@ -2448,6 +2448,21 @@ impl ControlPlayerInfoRegistry {
             })
     }
 
+    /// Clone one retained `C4ClientPlayerInfos` exactly for a client-authored
+    /// update request. Unlike [`Self::client_packet`], this preserves every
+    /// stored flag because lobby ComboBox callbacks copy the complete value
+    /// before changing one player's team (`C4PlayerInfoListBox.cpp:627-643`).
+    pub fn client_update_request(&self, client_id: i32) -> Option<PlayerInfoUpdateRequest> {
+        self.clients
+            .iter()
+            .find(|client| client.client_id == client_id)
+            .map(|client| PlayerInfoUpdateRequest {
+                client_id,
+                flags: client.flags,
+                players: client.players.clone(),
+            })
+    }
+
     /// Empty Initial packets are semantically present in C++ and mark a
     /// client as having completed its first player-info exchange.
     pub fn contains_client(&self, client_id: i32) -> bool {
