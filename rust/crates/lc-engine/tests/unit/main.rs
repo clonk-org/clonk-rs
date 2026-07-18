@@ -58504,8 +58504,8 @@ func ProbeGraphicsBounds() {
             .expect("HUD portrait exposed");
         assert_eq!(
             raw_portrait.pixels().as_ref(),
-            [10_u8, 20, 30, 0].repeat(4).as_slice(),
-            "structural color-mask retention does not alter existing HUD pixels"
+            [0_u8, 0, 0, 0].repeat(4).as_slice(),
+            "C4Surface loading canonicalizes fully-transparent portrait pixels"
         );
         let portrait = engine
             .definition_portrait_graphics_image("CRWT")

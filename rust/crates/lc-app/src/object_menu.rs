@@ -6148,14 +6148,16 @@ mod tests {
             surface.pixels_mut().copy_from_slice(picture.pixels());
             surface.snapshot().to_string()
         };
+        // Snapshot hashes include transparent texels; C4Surface loads those
+        // as transparent black before the definition picture is cropped.
         assert_eq!(
             ["WIPF", "MONS", "CLNK", "KNIG", "MAGE"].map(picture_snapshot),
             [
-                "64x64#0f36f937",
-                "64x64#63682839",
-                "32x40#18bfbe70",
-                "32x40#48394885",
-                "32x40#7c20b47c",
+                "64x64#90fd40b3",
+                "64x64#9fc301d8",
+                "32x40#8a109ab3",
+                "32x40#10658227",
+                "32x40#b3333430",
             ]
         );
 
@@ -6256,10 +6258,16 @@ mod tests {
         assert_eq!(difficulty_89.snapshot(), difficulty_1.snapshot());
         assert_eq!(difficulty_90.snapshot().to_string(), "640x480#8e8c2f59");
         assert_eq!(
-            character_knight_1.snapshot().to_string(),
-            "640x480#030eec81"
+            [
+                character_knight_1.snapshot().to_string(),
+                character_mage_1.snapshot().to_string(),
+                character_mage_90.snapshot().to_string(),
+            ],
+            [
+                "640x480#c90bac1a",
+                "640x480#787b9170",
+                "640x480#35e9f542",
+            ]
         );
-        assert_eq!(character_mage_1.snapshot().to_string(), "640x480#46d7873c");
-        assert_eq!(character_mage_90.snapshot().to_string(), "640x480#d7b88dd2");
     }
 }

@@ -1327,7 +1327,9 @@ fn decode_selected_loader(source: &SelectedLoaderSource) -> Result<ImageData> {
     })?;
     let rgba = image.into_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(ImageData::new(width, height, rgba.into_raw()))
+    let image = GraphicsImage::new(width, height, rgba.into_raw());
+    let (width, height, pixels) = image.into_parts();
+    Ok(ImageData::from_arc(width, height, pixels))
 }
 
 #[derive(Clone)]
@@ -3034,8 +3036,8 @@ struct FrontendAssets {
     /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
     /// (C4GraphicsResource.cpp:1089-1093, C4GuiButton.cpp:94-98).
     button_highlight: Option<ImageData>,
-    /// GUIButtonHighlight with transparent RGB cleared once for bilinear
-    /// classic in-game dialogs; raw startup consumers retain their asset.
+    /// Consumer-side transparent-RGB normalization retained for bilinear
+    /// classic in-game dialogs and raw/test-injected `ImageData`.
     game_over_button_highlight: Option<ImageData>,
     /// Graphics.c4g images used by the startup dialog parity renderers,
     /// keyed by file name (the eager bootstrap plus supplemental GUI images).
@@ -39419,6 +39421,40 @@ mod tests {
     }
 
     #[test]
+    fn hud_graphics_receive_canonical_transparent_pixels_from_the_shared_loader() {
+        let directory = tempdir().expect("graphics directory");
+        let graphics_dir = directory.path().join("Graphics.c4g");
+        fs::create_dir(&graphics_dir).expect("create Graphics.c4g");
+        let source = image::RgbaImage::from_raw(
+            2,
+            1,
+            vec![255, 127, 63, 0, 200, 100, 50, 1],
+        )
+        .expect("rgba image");
+        for name in ["Player.png", "Crew.png", "Rank.png", "Menu.png", "Energy.png"] {
+            source
+                .save(graphics_dir.join(name))
+                .unwrap_or_else(|error| panic!("write {name}: {error}"));
+        }
+
+        let graphics = GraphicsResource::open(&graphics_dir).expect("graphics resource");
+        let hud = FrontendAssets::load_hud_graphics(&graphics);
+        for (name, image) in [
+            ("Player.png", hud.player.as_ref()),
+            ("Crew.png", hud.crew.as_ref()),
+            ("Rank.png", hud.rank.as_ref()),
+            ("Menu.png", hud.menu.as_ref()),
+            ("Energy.png", hud.energy.as_ref()),
+        ] {
+            assert_eq!(
+                image.unwrap_or_else(|| panic!("{name} loaded")).pixels(),
+                &[0, 0, 0, 0, 200, 100, 50, 1],
+                "{name} reaches HudGraphics with only exact alpha-zero RGB cleared"
+            );
+        }
+    }
+
+    #[test]
     fn mouse_drag_starts_only_after_cpp_five_pixel_sensitivity() {
         // DragNone uses `Abs(delta) > C4MC_DragSensitivity` with sensitivity
         // 5, so exactly five pixels remains a click and six starts dragging
@@ -56736,6 +56772,26 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(
             decode_selected_loader(&selected).is_err(),
             "C4Surface dispatches to JPEG for a .jpg entry and rejects PNG bytes"
+        );
+    }
+
+    #[test]
+    fn selected_loader_decoder_uses_the_same_transparent_pixel_invariant() {
+        let directory = tempdir().expect("loader image");
+        image::RgbaImage::from_raw(2, 1, vec![17, 34, 51, 0, 68, 85, 102, 1])
+            .expect("rgba image")
+            .save(directory.path().join("Loader.png"))
+            .expect("write loader png");
+        let selected = SelectedLoaderSource {
+            group: Group::open(directory.path()).expect("loader group"),
+            filename: PathBuf::from("Loader.png"),
+        };
+
+        assert_eq!(
+            decode_selected_loader(&selected)
+                .expect("decode loader")
+                .pixels(),
+            &[0, 0, 0, 0, 68, 85, 102, 1]
         );
     }
 

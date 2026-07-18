@@ -3015,6 +3015,33 @@ mod tests {
     }
 
     #[test]
+    fn scaled_portrait_edge_blends_toward_black_not_hidden_white() {
+        // C4Surface clears RGB under exact transparency before GL_LINEAR
+        // samples a scaled portrait. At the 25%-opaque tap, transparent
+        // black produces 191 over white; hidden white would produce 239.
+        let canonical = ImageData::new(2, 1, vec![0, 0, 0, 255, 0, 0, 0, 0]);
+        let hidden_white =
+            ImageData::new(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 0]);
+        let mut canonical_target = surface(4, 2);
+        canonical_target.fill(Color::opaque(255, 255, 255));
+        let mut dirty_target = surface(4, 2);
+        dirty_target.fill(Color::opaque(255, 255, 255));
+
+        let rect = SurfaceRect::new(0, 0, 4, 2);
+        draw_image_aspect(&mut canonical_target, &canonical, rect, None);
+        draw_image_aspect(&mut dirty_target, &hidden_white, rect, None);
+
+        assert_eq!(
+            canonical_target.get_pixel(2, 0),
+            Some(Color::opaque(191, 191, 191))
+        );
+        assert_eq!(
+            dirty_target.get_pixel(2, 0),
+            Some(Color::opaque(239, 239, 239))
+        );
+    }
+
+    #[test]
     fn message_board_fills_bottom_strip_with_background_tile() {
         // C4MessageBoard::Draw background blit (src/C4MessageBoard.cpp:258).
         let mut target = surface(64, 64);

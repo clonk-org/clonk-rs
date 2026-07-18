@@ -1,5 +1,6 @@
 use crate::{
-    bitmap::IndexedBitmap, decode_legacy_script_text, language::component_language_string,
+    bitmap::IndexedBitmap, decode_legacy_script_text,
+    graphics::blacken_fully_transparent_rgba, language::component_language_string,
     ComponentGroups, GraphicsImage, Group, GroupError, LoadedComponent,
 };
 use std::collections::{HashMap, HashSet};
@@ -2750,6 +2751,9 @@ fn load_graphics_entry(
     if width == 0 || height == 0 {
         return Ok(None);
     }
+    // C4Surface::ReadPNG/SetPixDw canonicalizes the decoded surface before
+    // C4DefGraphics derives a ColorByOwner surface from its blue shades.
+    blacken_fully_transparent_rgba(image.as_mut());
 
     let mask = if color_by_owner {
         load_or_generate_color_by_owner_mask(group, path, &mut image)?
@@ -2849,7 +2853,9 @@ fn load_color_by_owner_overlay(
                 reason: error.to_string(),
             }
         })?;
-    Ok(Some((candidate, overlay.into_rgba8())))
+    let mut overlay = overlay.into_rgba8();
+    blacken_fully_transparent_rgba(overlay.as_mut());
+    Ok(Some((candidate, overlay)))
 }
 
 /// Returns the single overlay name passed to C++ `LoadGraphics` for this
@@ -3631,6 +3637,61 @@ Entrance=1,2,,4
         tempfile::Builder::new().prefix("lc-test-").tempdir()
     }
 
+    #[test]
+    fn definition_images_blacken_transparent_rgb_before_owner_mask_generation() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Crew.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=CRWB\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+        let decoded_pixels = vec![0, 0, 255, 0, 17, 17, 17, 1];
+        let save_surface = |name: &str| {
+            image::RgbaImage::from_raw(2, 1, decoded_pixels.clone())
+                .expect("rgba image")
+                .save(def_dir.join(name))
+                .expect("write image");
+        };
+        save_surface("Graphics.png");
+        save_surface("Portrait1.png");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("load definition");
+        let expected = [0, 0, 0, 0, 17, 17, 17, 1];
+
+        assert_eq!(
+            definition
+                .graphics_image
+                .as_ref()
+                .expect("definition graphics")
+                .pixels(),
+            expected
+        );
+        assert!(
+            definition.color_by_owner_mask.is_none(),
+            "hidden blue RGB is cleared before C4's owner-color shade scan"
+        );
+        assert_eq!(
+            definition
+                .portrait_image
+                .as_ref()
+                .expect("plain portrait")
+                .pixels(),
+            expected
+        );
+        assert_eq!(
+            definition
+                .portrait_graphics_image
+                .as_ref()
+                .expect("color-aware portrait")
+                .pixels(),
+            expected
+        );
+        assert!(definition.portrait_color_by_owner_mask.is_none());
+    }
+
     fn cpp_color_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
         const HLSMAX: i32 = 255;
         const RGBMAX: i32 = 255;
@@ -4006,13 +4067,15 @@ Entrance=1,2,,4
         )
         .expect("decode shield graphics")
         .into_rgba8();
-        let overlay = image::load_from_memory(
+        let mut overlay = image::load_from_memory(
             &group
                 .read_file("OverlayShield.png")
                 .expect("read shield overlay"),
         )
         .expect("decode shield overlay")
         .into_rgba8();
+        blacken_fully_transparent_rgba(expected_image.as_mut());
+        blacken_fully_transparent_rgba(overlay.as_mut());
         let expected_mask = extract_mask_from_overlay(&overlay, &mut expected_image)
             .expect("shield overlay contains an owner-color mask");
 

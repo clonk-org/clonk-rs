@@ -27,7 +27,8 @@ pub struct GraphicsImage {
 }
 
 impl GraphicsImage {
-    pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+    pub fn new(width: u32, height: u32, mut pixels: Vec<u8>) -> Self {
+        blacken_fully_transparent_rgba(&mut pixels);
         Self {
             width,
             height,
@@ -53,6 +54,18 @@ impl GraphicsImage {
 
     pub fn into_parts(self) -> (u32, u32, Arc<[u8]>) {
         (self.width, self.height, self.pixels)
+    }
+}
+
+/// `C4Surface` canonicalizes fully-transparent pixels to transparent black
+/// while loading them (`C4Surface.cpp:733,972,982`). Rust RGBA uses opacity
+/// rather than C4's inverted transparency byte, so C4 alpha `0xff` is alpha
+/// zero here. Partial-alpha and opaque pixels retain their original RGB.
+pub(crate) fn blacken_fully_transparent_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            pixel[..3].fill(0);
+        }
     }
 }
 
@@ -187,5 +200,38 @@ mod tests {
         assert_eq!(image.width(), 224);
         assert_eq!(image.height(), 40);
         assert_eq!(image.pixels().len(), 224 * 40 * 4);
+    }
+
+    #[test]
+    fn loaded_images_blacken_only_fully_transparent_rgb() {
+        let dir = tempdir().expect("tempdir");
+        let graphics_dir = dir.path().join("Graphics.c4g");
+        fs::create_dir_all(&graphics_dir).expect("create dir");
+        let image_path = graphics_dir.join("Transparent.png");
+        image::RgbaImage::from_raw(
+            3,
+            1,
+            vec![255, 127, 63, 0, 200, 100, 50, 1, 10, 20, 30, 255],
+        )
+        .expect("rgba image")
+        .save(&image_path)
+        .expect("write png");
+
+        let group = Group::open(&graphics_dir).expect("group");
+        let resource = GraphicsResource::from_group(group).expect("resource");
+        let image = resource.load_image("Transparent.png").expect("image");
+
+        assert_eq!(
+            image.pixels(),
+            &[0, 0, 0, 0, 200, 100, 50, 1, 10, 20, 30, 255]
+        );
+        assert_eq!(
+            resource
+                .load_image("transparent.png")
+                .expect("cached image")
+                .pixels(),
+            image.pixels(),
+            "cache hits retain the canonical loaded surface"
+        );
     }
 }
