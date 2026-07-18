@@ -22943,7 +22943,7 @@ impl GameApp {
                         }
                     }
                     NetworkEvent::ScheduledSync { tick, controls } => {
-                        let expected_tick = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                        let expected_tick = self.expected_network_control_tick();
                         self.network_sync.queue(expected_tick, tick, controls);
                     }
                     NetworkEvent::DirectControl(control) => match control {
@@ -73689,12 +73689,12 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn client_reports_host_update_only_after_synchronized_execution() {
-        // Receipt of PID_ExecSyncCtrl only schedules the control. The local
-        // activation retry clears after C4ControlClientUpdate::Execute applies
-        // the host-authored update (pristine 9ffa0a5d
-        // src/C4GameControlNetwork.cpp:279-297,558-588;
-        // src/C4Control.cpp:578-606).
+    fn control_rate_two_client_executes_scheduled_activation_at_the_control_tick() {
+        // PID_ExecSyncCtrl carries Game.Control.ControlTick, not
+        // Game.FrameCounter. At ControlRate 2 the client must retain a sync
+        // control queued at tick 3 while FrameCounter is already 5, then
+        // execute it on the next cadence frame (src/C4GameControlNetwork.cpp:
+        // 279-297,558-588,786-830; src/C4Control.cpp:578-606).
         let mut app = new_running_sandbox_app();
         let (manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(3);
@@ -73704,7 +73704,26 @@ protected func InputCallback(string answer, int player)
             "Client",
         )));
         app.control_clients.register(3, false, false);
-        let tick = u32::try_from(app.engine.frame()).expect("test frame fits tick");
+        app.network_control_clock = Some(NetworkControlClock::new(0, 2));
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(0, 2).expect("valid network timing"),
+        );
+
+        for tick in 0..3 {
+            event_tx
+                .send(NetworkEvent::ReadyTick {
+                    tick,
+                    controls: Vec::new(),
+                })
+                .expect("queue prerequisite control tick");
+            app.update().expect("execute prerequisite control tick");
+            if tick < 2 {
+                app.update().expect("execute non-control frame");
+            }
+        }
+        assert_eq!(app.engine.frame(), 5);
+        assert_eq!(app.expected_network_control_tick(), 3);
+
         let update = lc_engine::ClientUpdateControlData {
             update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
             client_id: 3,
@@ -73713,17 +73732,28 @@ protected func InputCallback(string answer, int player)
         };
         event_tx
             .send(NetworkEvent::ScheduledSync {
-                tick,
+                tick: 3,
                 controls: vec![NetworkControl::ClientUpdate(update.clone())],
             })
             .expect("queue synchronized activation");
 
-        app.process_network_events().expect("schedule activation");
+        app.update()
+            .expect("retain activation across the non-control frame");
+        assert_eq!(app.engine.frame(), 6);
+        assert!(!app.control_clients.is_activated(3));
         assert!(commands.take_executed_client_updates().is_empty());
 
-        let controls = app.network_sync.take_exact(tick);
-        app.apply_ready_controls(tick, controls)
-            .expect("execute synchronized activation");
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 3,
+                controls: Vec::new(),
+            })
+            .expect("queue activation control tick");
+        app.update()
+            .expect("execute activation at control tick 3");
+
+        assert_eq!(app.engine.frame(), 7);
+        assert!(app.control_clients.is_activated(3));
         assert_eq!(commands.take_executed_client_updates(), vec![update]);
     }
 
@@ -74105,10 +74135,20 @@ protected func InputCallback(string answer, int player)
     #[test]
     fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
         // CheckStatusAck executes pending sync controls before
-        // OnStatusGoReached scans every active client, then starts control
-        // (src/C4Network2.cpp:2062-2110;
+        // OnStatusGoReached scans every active client, then starts control.
+        // PID_ExecSyncCtrl tick 3 must remain valid when ControlRate 2 has
+        // already advanced FrameCounter to 6 (src/C4Network2.cpp:2062-2110;
         // src/C4Network2Players.cpp:465-482).
         let mut app = new_running_sandbox_app();
+        app.network_control_clock = Some(NetworkControlClock::new(3, 2));
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(0, 2).expect("valid network timing"),
+        );
+        for _ in 0..6 {
+            app.engine.tick().expect("advance to frame 6");
+        }
+        assert_eq!(app.engine.frame(), 6);
+        assert_eq!(app.expected_network_control_tick(), 3);
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -74142,7 +74182,7 @@ protected func InputCallback(string answer, int player)
 
         event_tx
             .send(NetworkEvent::ScheduledSync {
-                tick: 0,
+                tick: 3,
                 controls: vec![
                     NetworkControl::ClientUpdate(lc_engine::ClientUpdateControlData {
                         update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
@@ -74162,7 +74202,7 @@ protected func InputCallback(string answer, int player)
             .send(NetworkEvent::StatusCommitted(lc_network::NetworkStatus {
                 state: lc_network::NETWORK_STATE_GO,
                 control_mode: 1,
-                target_tick: 0,
+                target_tick: 3,
             }))
             .expect("queue final Go commit");
 
@@ -74173,6 +74213,7 @@ protected func InputCallback(string answer, int player)
         assert!(app.control_player_infos.get(41).is_none());
         let joins = commands.take_submitted_join_players();
         assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].0, 3);
         assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 31));
         assert!(app.network_control_running);
     }
