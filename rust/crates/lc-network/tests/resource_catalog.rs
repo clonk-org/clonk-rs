@@ -109,6 +109,49 @@ fn cpp_registration_reuses_an_existing_resource_id() {
 }
 
 #[test]
+fn cpp_non_binary_complete_registration_keeps_chunk_data_cleared() {
+    // A contents-only SetByCore match keeps the official core, but a failed
+    // GetStandalone leaves C4Network2Res::Chunks in its cleared zero-count
+    // state (src/C4Network2Res.cpp:441-458,668-697).
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register(ResourceRegistration {
+        resource_id: 7,
+        chunk_count: 3,
+        binary_compatible: false,
+        loading: false,
+    }));
+
+    assert_eq!(catalog.local_chunks(7), Some(&ChunkSet::incomplete(0)));
+}
+
+#[test]
+fn cpp_real_resource_discards_zero_chunk_logical_status() {
+    // OnStatus rejects a sender's cleared logical-only ChunkCnt=0 against the
+    // real resource's complete N-chunk state before recording that sender as
+    // a source (src/C4Network2Res.cpp:886-909).
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register(ResourceRegistration {
+        resource_id: 7,
+        chunk_count: 3,
+        binary_compatible: true,
+        loading: false,
+    }));
+    let status = ResourceStatusPacket {
+        resource_id: 7,
+        chunks: ResourceChunkAvailability {
+            chunk_count: 0,
+            ranges: Vec::new(),
+        },
+    };
+
+    assert_eq!(
+        catalog.record_peer_status(31, &status),
+        PeerStatusOutcome::ChunkCountMismatch
+    );
+    assert!(catalog.peer_ids(7).is_empty());
+}
+
+#[test]
 fn cpp_client_removal_marks_its_resource_namespace_removed() {
     // C4Network2ResList::RemoveAtClient marks every resource whose high-word
     // owner matches the departing client (src/C4Network2Res.cpp:1519-1525).

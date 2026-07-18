@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lc_engine::{LegacyCString, NetworkResourceCore};
 use lc_network::{
-    resolve_local_resource, LocalResourceResolution, ResourceDiscoverPacket, ResourceFileOwnership,
-    ResourcePacket, ResourceTransferBackend,
+    encode_resource_packet, resolve_local_resource, LocalResourceResolution, ResourceCatalogAction,
+    ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket, ResourceTransferBackend,
+    ResourceTransferEvent, PID_NET_RES_STATUS,
 };
 use lc_resources::{c4group_file_crc, MutableGroup};
 
@@ -300,7 +301,8 @@ fn cpp_logical_match_remains_local_when_standalone_is_not_binary_compatible() {
     let directory = TestDirectory::new();
     let candidate = directory.path().join("Local.c4d");
     fs::write(&candidate, b"local").unwrap();
-    let core = core(b"Local.c4d", 5, 0xdead_beef, 0x8bd6_88e8, true);
+    let mut core = core(b"Local.c4d", 5, 0xdead_beef, 0x8bd6_88e8, true);
+    core.chunk_size = 2;
 
     let resolution = resolve_local_resource(&core, [&candidate], directory.path()).unwrap();
 
@@ -315,6 +317,25 @@ fn cpp_logical_match_remains_local_when_standalone_is_not_binary_compatible() {
     local.register(&mut backend).unwrap();
     assert_eq!(backend.core(core.id), Some(&core));
     assert_eq!(backend.path(core.id), Some(candidate.as_path()));
+    let events = backend.on_timer(0, &mut |_| 0).unwrap();
+    let status = events
+        .iter()
+        .find_map(|event| match event {
+            ResourceTransferEvent::Transport(ResourceCatalogAction::Broadcast {
+                packet: ResourcePacket::Status(status),
+            }) => Some(status),
+            _ => None,
+        })
+        .expect("the dirty logical resource broadcasts its empty status");
+    assert_eq!(status.chunks.chunk_count, 0);
+    assert!(status.chunks.ranges.is_empty());
+    let mut expected = vec![PID_NET_RES_STATUS];
+    expected.extend_from_slice(&core.id.to_ne_bytes());
+    expected.extend_from_slice(&[0, 0]);
+    assert_eq!(
+        encode_resource_packet(&ResourcePacket::Status(status.clone())).unwrap(),
+        expected
+    );
     assert!(backend
         .on_packet(
             2,

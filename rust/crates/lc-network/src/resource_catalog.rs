@@ -270,8 +270,13 @@ impl ResourceCatalog {
         }
         let local_chunks = if registration.loading {
             ChunkSet::incomplete(registration.chunk_count)
-        } else {
+        } else if registration.binary_compatible {
             ChunkSet::complete(registration.chunk_count)
+        } else {
+            // A contents-identical local resource whose standalone differs
+            // keeps its logical core, but C++ leaves Chunks cleared when
+            // GetStandalone fails the size/CRC check.
+            ChunkSet::incomplete(0)
         };
         self.resources.insert(
             0,
