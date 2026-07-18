@@ -55936,6 +55936,62 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn music_catalog_returns_to_global_for_the_next_preinit_generation() {
+        // QuitGame enters C4AS_PreInit, whose unconditional
+        // MusicSystem.emplace() destroys the local catalog and constructs a
+        // fresh one from Music.c4g before startup or the next full scenario
+        // (C4Application.cpp:373-400,232-293). Local replacement therefore
+        // never survives into a later frontend or music-less game.
+        let dir = tempdir().expect("music lifecycle fixture");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("Frontend.ogg"), b"frontend").expect("write frontend track");
+        fs::write(global.join("Global Theme.ogg"), b"global").expect("write global track");
+
+        let local_scenario = dir.path().join("Fantasy.c4f/Local.c4s");
+        let local_music = dir.path().join("Fantasy.c4f/Music.c4g");
+        fs::create_dir_all(&local_scenario).expect("create local-music scenario");
+        fs::create_dir_all(&local_music).expect("create local music group");
+        fs::write(local_music.join("Local Theme.ogg"), b"local")
+            .expect("write local track");
+        let musicless_scenario = dir.path().join("Tutorial.c4f/Musicless.c4s");
+        fs::create_dir_all(&musicless_scenario).expect("create music-less scenario");
+
+        let mut resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        resolver
+            .configure_scenario(Some(&local_scenario))
+            .expect("configure local-music scenario");
+        assert!(resolver.resolve("Frontend").is_none());
+        assert!(resolver.resolve("Local Theme").is_some());
+
+        resolver
+            .configure_scenario(None)
+            .expect("enter the next frontend generation");
+        resolver.set_playlist(Some("Frontend.*".to_string()));
+        assert_eq!(
+            resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Frontend.ogg")
+        );
+        assert!(resolver.resolve("Local Theme").is_none());
+
+        resolver
+            .configure_scenario(Some(&musicless_scenario))
+            .expect("configure later music-less scenario");
+        assert_eq!(
+            resolver
+                .first_default()
+                .map(|asset| asset.file_name.as_str()),
+            Some("Global Theme.ogg")
+        );
+        assert!(resolver.resolve("Local Theme").is_none());
+    }
+
+    #[test]
     fn definition_pack_music_is_enumerated_in_groupset_order_and_replaces_global_music() {
         let dir = tempdir().expect("definition music fixture");
         let global = dir.path().join("Music.c4g");
