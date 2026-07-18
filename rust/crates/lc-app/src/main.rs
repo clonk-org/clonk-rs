@@ -5262,6 +5262,16 @@ fn main() -> Result<()> {
                         return;
                     }
                 }
+                while !app.pending_screenshots.is_empty() {
+                    let (width, height) = presenter.physical_size();
+                    let result = app.save_next_screenshot(
+                        pixels.frame_mut(),
+                        width,
+                        height,
+                        presenter.scale(),
+                    );
+                    report_screenshot_result(result);
+                }
                 if let Err(err) = pixels.render() {
                     tracing::error!(error = ?err, "present failed");
                     control_flow.set_exit();
@@ -5381,6 +5391,9 @@ fn handle_window_event(
             }
             app.handle_key(keycode, state)
                 .context("failed to process key input")?;
+            if !app.pending_screenshots.is_empty() {
+                window.request_redraw();
+            }
         }
         WindowEvent::ReceivedCharacter(character) => {
             app.handle_text_input(character)
@@ -7779,6 +7792,18 @@ impl PlayerIngameMenus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScreenshotKind {
+    PresentedFrame,
+    FullLandscape,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ScreenshotRequest {
+    kind: ScreenshotKind,
+    gamma: lc_graphics::GammaRamp,
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -7823,6 +7848,7 @@ struct GameApp {
     /// held key can cross into or out of a PRIO_PlrControl binding.
     scoreboard_tab_raw_pressed: bool,
     keyboard_modifiers: ModifiersState,
+    pending_screenshots: VecDeque<ScreenshotRequest>,
     gamepads: GamepadManager,
     gamepad_gui_control: bool,
     snapshot: SimulationSnapshot,
@@ -13140,6 +13166,125 @@ fn encode_surface_to_png(surface: &Surface) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
+fn screenshot_directories(paths: Option<&AppPaths>) -> (PathBuf, PathBuf) {
+    let root = paths
+        .map(|paths| paths.install_root().to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let folder = paths
+        .and_then(|paths| Config::load(&paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("General"), "ScreenshotFolder")
+                .map(str::trim)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "Screenshots".to_string());
+    (root.join(folder), root)
+}
+
+fn next_screenshot_path(directory: &Path) -> PathBuf {
+    let mut index = 1_u64;
+    loop {
+        let candidate = directory.join(format!("Screenshot{index:03}.png"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index = index.saturating_add(1);
+    }
+}
+
+fn encode_screenshot_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("screenshot dimensions overflow")?;
+    anyhow::ensure!(
+        rgba.len() == expected,
+        "screenshot frame has {} bytes, expected {expected}",
+        rgba.len()
+    );
+    let mut rgb = Vec::with_capacity(expected / 4 * 3);
+    for pixel in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+
+    let mut buffer = Vec::new();
+    {
+        let mut encoder = Encoder::new(&mut buffer, width, height);
+        encoder.set_color(ColorType::Rgb);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .context("failed to initialise screenshot PNG encoder")?;
+        writer
+            .write_image_data(&rgb)
+            .context("failed to encode screenshot PNG")?;
+        writer
+            .finish()
+            .context("failed to finish screenshot PNG")?;
+    }
+    Ok(buffer)
+}
+
+fn write_numbered_screenshot(
+    paths: Option<&AppPaths>,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<PathBuf> {
+    let (preferred, fallback) = screenshot_directories(paths);
+    let directory = match fs::create_dir_all(&preferred) {
+        Ok(()) => preferred,
+        Err(error) if preferred != fallback => {
+            tracing::warn!(
+                path = %preferred.display(),
+                %error,
+                "failed to create screenshot folder; falling back to install root"
+            );
+            fs::create_dir_all(&fallback).with_context(|| {
+                format!("failed to create screenshot fallback at {}", fallback.display())
+            })?;
+            fallback
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to create screenshot folder at {}", preferred.display())
+            });
+        }
+    };
+    let path = next_screenshot_path(&directory);
+    let png = encode_screenshot_png(width, height, rgba)?;
+    let mut file = File::create(&path)
+        .with_context(|| format!("failed to create screenshot at {}", path.display()))?;
+    file.write_all(&png)
+        .with_context(|| format!("failed to write screenshot at {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush screenshot at {}", path.display()))?;
+    Ok(path)
+}
+
+fn scaled_screenshot_extent(extent: u32, scale: f32) -> Result<u32> {
+    anyhow::ensure!(scale.is_finite() && scale > 0.0, "invalid screenshot scale {scale}");
+    let scaled = (f64::from(extent) * f64::from(scale)).ceil();
+    anyhow::ensure!(
+        scaled >= 1.0 && scaled <= f64::from(u32::MAX),
+        "scaled screenshot extent is out of range"
+    );
+    Ok(scaled as u32)
+}
+
+fn report_screenshot_result(result: Result<Option<PathBuf>>) {
+    match result {
+        Ok(Some(path)) => tracing::info!(path = %path.display(), "screenshot saved"),
+        Ok(None) => {}
+        Err(error) => {
+            // C4GraphicsSystem::SaveScreenshot reports a failed write without
+            // terminating the game.
+            tracing::error!(%error, "failed to save screenshot");
+        }
+    }
+}
+
 fn load_save_entry(path: &Path) -> Result<SaveEntry> {
     let file =
         File::open(path).with_context(|| format!("failed to open save file {}", path.display()))?;
@@ -15217,6 +15362,7 @@ impl GameApp {
             pressed_engine_keys: HashSet::new(),
             scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
+            pending_screenshots: VecDeque::new(),
             gamepads: GamepadManager::new(),
             gamepad_gui_control: load_gamepad_gui_control(paths),
             snapshot,
@@ -17764,6 +17910,23 @@ impl GameApp {
             };
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if key == VirtualKeyCode::F9
+            && (c4_modifiers.is_empty() || c4_modifiers == ModifiersState::CTRL)
+        {
+            if state == ElementState::Pressed {
+                let kind = if c4_modifiers == ModifiersState::CTRL {
+                    ScreenshotKind::FullLandscape
+                } else {
+                    ScreenshotKind::PresentedFrame
+                };
+                let gamma = self
+                    .graphics
+                    .active_gamma_ramp(&self.snapshot.environment.gamma);
+                self.pending_screenshots
+                    .push_back(ScreenshotRequest { kind, gamma });
+            }
+            return Ok(RuntimeGlobalKeyOutcome::Handled);
+        }
         if c4_modifiers == ModifiersState::SHIFT
             && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down)
         {
@@ -17917,7 +18080,9 @@ impl GameApp {
         if self.running_chat.is_some() {
             let modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-            if modifiers.ctrl() {
+            if modifiers.ctrl()
+                && !(key == VirtualKeyCode::F9 && modifiers == ModifiersState::CTRL)
+            {
                 self.handle_engine_key(key, state)?;
                 return Ok(());
             }
@@ -18035,11 +18200,6 @@ impl GameApp {
                 VirtualKeyCode::F5 if matches!(self.mode, AppMode::Running) => {
                     return Err(classic_parity_engine_error(report_classic_parity_boundary(
                         ClassicParityBoundary::RunningShortcut { key: "F5" },
-                    )));
-                }
-                VirtualKeyCode::F9 if matches!(self.mode, AppMode::Running) => {
-                    return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::RunningShortcut { key: "F9" },
                     )));
                 }
                 VirtualKeyCode::F6 if matches!(self.mode, AppMode::Running) => {
@@ -20366,6 +20526,55 @@ impl GameApp {
         file.flush()
             .context("failed to flush save thumbnail to disk")?;
         Ok(())
+    }
+
+    fn save_next_screenshot(
+        &mut self,
+        presented_frame: &[u8],
+        physical_width: u32,
+        physical_height: u32,
+        scale: f32,
+    ) -> Result<Option<PathBuf>> {
+        let Some(request) = self.pending_screenshots.pop_front() else {
+            return Ok(None);
+        };
+
+        let path = match request.kind {
+            ScreenshotKind::PresentedFrame => write_numbered_screenshot(
+                self.app_paths.as_ref(),
+                physical_width,
+                physical_height,
+                presented_frame,
+            )?,
+            ScreenshotKind::FullLandscape => {
+                let surface = self
+                    .graphics
+                    .render_full_landscape_with_gamma(&self.snapshot, &request.gamma)
+                    .context("full-landscape screenshot requires an active viewport")?;
+                let width = scaled_screenshot_extent(surface.width(), scale)?;
+                let height = scaled_screenshot_extent(surface.height(), scale)?;
+                let frame_len = (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|pixels| pixels.checked_mul(4))
+                    .context("full-landscape screenshot dimensions overflow")?;
+                let mut frame = vec![0_u8; frame_len];
+                lc_scaling::upscale_frame(
+                    surface.pixels(),
+                    surface.width(),
+                    surface.height(),
+                    &mut frame,
+                    width,
+                    height,
+                );
+                write_numbered_screenshot(self.app_paths.as_ref(), width, height, &frame)?
+            }
+        };
+
+        // Both Rust paths already contain the gamma used for presentation:
+        // F9 copies the physical frame and the full-map world pass encodes
+        // fragments with the request-time installed ramp. Applying it again
+        // would double it.
+        Ok(Some(path))
     }
 
     fn load_saved_game_from_path(&mut self, path: &Path) -> Result<()> {
@@ -56180,7 +56389,6 @@ public func Grant(password) { return GainMissionAccess(password); }
             (VirtualKeyCode::F5, "F5"),
             (VirtualKeyCode::F6, "F6"),
             (VirtualKeyCode::F7, "F7"),
-            (VirtualKeyCode::F9, "F9"),
         ] {
             let error = app
                 .handle_key(key, ElementState::Pressed)
@@ -56188,6 +56396,148 @@ public func Grant(password) { return GainMissionAccess(password); }
             assert!(error.to_string().contains(label));
             assert!(app.save_browser.is_none());
         }
+    }
+
+    fn decode_rgb_screenshot(path: &Path) -> (u32, u32, Vec<u8>) {
+        let file = File::open(path).expect("open screenshot");
+        let decoder = Decoder::new(file);
+        let mut reader = decoder.read_info().expect("read screenshot header");
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buffer).expect("decode screenshot");
+        assert_eq!(info.color_type, ColorType::Rgb);
+        assert_eq!(info.bit_depth, BitDepth::Eight);
+        buffer.truncate(info.buffer_size());
+        (info.width, info.height, buffer)
+    }
+
+    #[test]
+    fn screenshot_path_reuses_the_first_numbered_gap() {
+        let directory = tempdir().expect("screenshot directory");
+        fs::write(directory.path().join("Screenshot001.png"), b"one")
+            .expect("occupy first screenshot path");
+        fs::write(directory.path().join("Screenshot003.png"), b"three")
+            .expect("occupy third screenshot path");
+
+        assert_eq!(
+            next_screenshot_path(directory.path()),
+            directory.path().join("Screenshot002.png")
+        );
+    }
+
+    #[test]
+    fn running_f9_saves_presented_rgb_and_ctrl_f9_saves_full_landscape() {
+        let install = tempdir().expect("screenshot install root");
+        let user_data = tempdir().expect("screenshot user data");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System group");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+
+        let mut app = new_running_sandbox_app();
+        app.app_paths = Some(paths);
+        let presented = vec![
+            1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120,
+            130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240,
+            250, 249, 248, 247,
+        ];
+
+        app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+            .expect("running F9 is implemented");
+        assert_eq!(
+            app.pending_screenshots.front().map(|request| request.kind),
+            Some(ScreenshotKind::PresentedFrame)
+        );
+        let first = app
+            .save_next_screenshot(&presented, 4, 2, 2.0)
+            .expect("save presented screenshot")
+            .expect("screenshot request was pending");
+        assert_eq!(
+            first,
+            install.path().join("Screenshots/Screenshot001.png")
+        );
+        let (width, height, rgb) = decode_rgb_screenshot(&first);
+        assert_eq!((width, height), (4, 2));
+        assert_eq!(
+            rgb,
+            presented
+                .chunks_exact(4)
+                .flat_map(|pixel| pixel[..3].iter().copied())
+                .collect::<Vec<_>>(),
+            "the already-presented gamma-encoded bytes are not transformed again"
+        );
+
+        let mut logical_frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut logical_frame)
+            .expect("establish the first active viewport");
+        let landscape = app.snapshot.landscape.as_ref().expect("sandbox landscape");
+        let expected_width = scaled_screenshot_extent(landscape.width(), 1.5)
+            .expect("scaled landscape width");
+        let expected_height = scaled_screenshot_extent(
+            u32::try_from(landscape.estimated_height()).expect("positive landscape height"),
+            1.5,
+        )
+        .expect("scaled landscape height");
+        let installed_gamma = app
+            .graphics
+            .active_gamma_ramp(&app.snapshot.environment.gamma);
+        app.snapshot
+            .environment
+            .gamma
+            .set_ramp(0, [0x102030, 0x405060, 0x708090]);
+
+        app.start_running_chat(RunningChatMode::All);
+        app.keyboard_modifiers = ModifiersState::CTRL;
+        app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+            .expect("running Ctrl+F9 is implemented");
+        assert_eq!(
+            app.pending_screenshots.front().map(|request| request.kind),
+            Some(ScreenshotKind::FullLandscape)
+        );
+        assert_eq!(
+            app.pending_screenshots
+                .front()
+                .map(|request| &request.gamma),
+            Some(&installed_gamma),
+            "queued capture retains the ramp installed at keydown"
+        );
+        assert!(
+            app.running_chat.is_some(),
+            "the global screenshot binding works above an open chat dialog"
+        );
+        app.graphics
+            .apply_gamma_now(&app.snapshot.environment.gamma);
+        let second = app
+            .save_next_screenshot(&presented, 4, 2, 1.5)
+            .expect("save full-landscape screenshot")
+            .expect("full screenshot request was pending");
+        assert_eq!(
+            second,
+            install.path().join("Screenshots/Screenshot002.png")
+        );
+        let (width, height, _) = decode_rgb_screenshot(&second);
+        assert_eq!((width, height), (expected_width, expected_height));
+        assert_eq!(app.mode, AppMode::Running, "screenshots do not end the game");
+
+        app.running_chat = None;
+        app.keyboard_modifiers = ModifiersState::empty();
+        app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+            .expect("first repeated screenshot keydown");
+        app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
+            .expect("second repeated screenshot keydown");
+        assert_eq!(
+            app.pending_screenshots
+                .iter()
+                .map(|request| request.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                ScreenshotKind::PresentedFrame,
+                ScreenshotKind::PresentedFrame,
+            ],
+            "repeated keydown events queue distinct native screenshots"
+        );
     }
 
     fn loader_origin_fixture_paths(root: &Path) -> (EnvGuard, AppPaths, PathBuf) {

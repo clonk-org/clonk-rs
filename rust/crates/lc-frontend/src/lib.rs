@@ -2973,6 +2973,100 @@ impl GraphicsSystem {
         snapshots
     }
 
+    /// Render the complete landscape through the first active viewport's
+    /// world pass, matching `C4GraphicsSystem::DoSaveScreenshot(true)`.
+    /// Borders and HUD/menu overlays are deliberately omitted; cursor marks
+    /// and parallax foreground objects remain part of `C4Viewport::Draw`.
+    pub fn render_full_landscape(&mut self, snapshot: &SimulationSnapshot) -> Option<Surface> {
+        let gamma = self.active_gamma_ramp(&snapshot.environment.gamma);
+        self.render_full_landscape_with_gamma(snapshot, &gamma)
+    }
+
+    /// Full-landscape capture with the gamma ramp installed when the request
+    /// was made. Queued screenshots must not observe a later SetGamma latch.
+    pub fn render_full_landscape_with_gamma(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        gamma: &lc_graphics::GammaRamp,
+    ) -> Option<Surface> {
+        let landscape = snapshot.landscape.as_ref()?;
+        let active = self.active_viewports.first()?.clone();
+        let world_width = i32::try_from(landscape.width()).ok()?.max(1);
+        let world_height = landscape.estimated_height().max(1);
+
+        // Native full-map capture temporarily clears sky parallax and retargets
+        // the first physical viewport to NO_OWNER. Clone the COW snapshot so
+        // the live simulation state is not mutated; like C++, the extra draw
+        // may still advance presentation-only randomness and caches.
+        let mut capture = snapshot.clone();
+        if let Some(sky) = capture.sky.as_mut() {
+            sky.settings.parallax_x = 10;
+            sky.settings.parallax_y = 10;
+        }
+        let focus = capture.object(active.focus)?;
+        let camera_key = CameraKey {
+            owner: OWNER_NONE,
+            slot: usize::MAX,
+        };
+        let input = ViewportInput {
+            owner: OWNER_NONE,
+            center: Vector2::new(world_width / 2, world_height / 2),
+            offset: Vector2::ZERO,
+            zoom: 1.0,
+            focus,
+            camera_identity: Some(camera_key),
+            // C++ changes Player on the existing viewport without changing
+            // its fIsNoOwnerViewport classification.
+            is_no_owner_viewport: false,
+        };
+        let owner_colors = Self::collect_owner_colors(&capture);
+
+        let saved_surface = std::mem::replace(
+            &mut self.surface,
+            Surface::new(
+                world_width as u32,
+                world_height as u32,
+                PixelFormat::Rgba8888,
+            ),
+        );
+        let saved_surface_width = self.surface_width;
+        let saved_surface_height = self.surface_height;
+        let saved_world_width = self.world_width;
+        let saved_world_height = self.world_height;
+        let saved_viewports = std::mem::take(&mut self.active_viewports);
+        let saved_camera = self.camera_states.remove(&camera_key);
+        let saved_fog_map = self.active_fog_map.take();
+        let saved_fog_suppression_depth = self.fog_suppression_depth;
+
+        self.surface_width = world_width as u32;
+        self.surface_height = world_height as u32;
+        self.world_width = world_width;
+        self.world_height = world_height;
+        self.render_viewport(
+            &capture,
+            &input,
+            usize::MAX,
+            SurfaceRect::new(0, 0, world_width as u32, world_height as u32),
+            &owner_colors,
+            Some(gamma),
+        );
+        let rendered = std::mem::replace(&mut self.surface, saved_surface);
+
+        self.surface_width = saved_surface_width;
+        self.surface_height = saved_surface_height;
+        self.world_width = saved_world_width;
+        self.world_height = saved_world_height;
+        self.active_viewports = saved_viewports;
+        self.camera_states.remove(&camera_key);
+        if let Some(camera) = saved_camera {
+            self.camera_states.insert(camera_key, camera);
+        }
+        self.active_fog_map = saved_fog_map;
+        self.fog_suppression_depth = saved_fog_suppression_depth;
+
+        Some(rendered)
+    }
+
     /// Internal seam for C++ per-fragment gamma rendering and exact isolated
     /// fragment tests. Public rendering drives its active/pending lifecycle.
     fn render_frame_with_gamma(
@@ -3257,17 +3351,33 @@ impl GraphicsSystem {
         );
         // NeedEnergy bolts are emitted inside each object's base pass so
         // background/foreground category layering matches C4Object::Draw.
-        let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
-        self.draw_selection_marks(
-            snapshot,
-            &highlight_ids,
-            input.owner,
-            origin_x,
-            origin_y,
-            zoom,
-            gamma,
-        );
-        self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
+        if input.owner != OWNER_NONE {
+            let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
+            self.draw_selection_marks(
+                snapshot,
+                &highlight_ids,
+                input.owner,
+                origin_x,
+                origin_y,
+                zoom,
+                gamma,
+            );
+            self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
+        } else {
+            // C4Game::DrawCursors(NO_OWNER) emits every player's active
+            // cursor flash, while C4Object::DrawSelectMark requires a valid
+            // `iByPlayer` and therefore emits no per-object select marks.
+            for player in &snapshot.players {
+                self.draw_player_cursors(
+                    snapshot,
+                    player.id,
+                    origin_x,
+                    origin_y,
+                    zoom,
+                    gamma,
+                );
+            }
+        }
         // C4Viewport disables ClrModMap after world cursors and before the
         // custom parallax GUI/overlay pass.
         self.active_fog_map = None;
@@ -11344,6 +11454,89 @@ mod tests {
             menu_requests: Vec::new(),
             audio: Vec::new(),
         }
+    }
+
+    #[test]
+    fn full_landscape_capture_uses_ownerless_world_pass_and_restores_viewport() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(100, 60);
+        snapshot.players = vec![PlayerState {
+            id: 0,
+            fog_of_war: true,
+            ..PlayerState::default()
+        }];
+        snapshot.environment.fow_color = 0x00ff_0000;
+        let focus = &snapshot.objects[0];
+        let mut graphics = GraphicsSystem::new(
+            64,
+            40,
+            120,
+            "Full landscape capture",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(0, focus.position, 1.0, focus)],
+        );
+        let screen_before = graphics.surface().pixels().to_vec();
+        let viewport_before = graphics.active_viewport_projections();
+
+        let capture = graphics
+            .render_full_landscape(&snapshot)
+            .expect("active viewport and landscape produce a full capture");
+
+        assert_eq!((capture.width(), capture.height()), (256, 120));
+        assert_ne!(
+            capture.get_pixel(0, 0),
+            Some(Color::opaque(255, 0, 0)),
+            "temporary NO_OWNER projection disables the player's red fog"
+        );
+        assert_eq!(graphics.surface().pixels(), screen_before);
+        assert_eq!(graphics.active_viewport_projections(), viewport_before);
+    }
+
+    #[test]
+    fn full_landscape_capture_uses_installed_not_pending_gamma() {
+        let snapshot = make_snapshot();
+        let mut changed = snapshot.clone();
+        changed
+            .environment
+            .gamma
+            .set_ramp(0, [0x102030, 0x405060, 0x708090]);
+        let mut graphics = GraphicsSystem::new(
+            64,
+            40,
+            120,
+            "Full landscape gamma",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::from_focus(&snapshot.objects[0])],
+        );
+
+        let before_latch = graphics
+            .render_full_landscape(&changed)
+            .expect("full capture before pending gamma is latched");
+        graphics.render_frame(
+            &changed,
+            &[ViewportInput::from_focus(&changed.objects[0])],
+        );
+        let after_latch = graphics
+            .render_full_landscape(&changed)
+            .expect("full capture after pending gamma is latched");
+
+        assert_ne!(
+            before_latch.pixels(),
+            after_latch.pixels(),
+            "full capture reads CStdDDraw's installed ramp, not pending controls"
+        );
     }
 
     #[test]
