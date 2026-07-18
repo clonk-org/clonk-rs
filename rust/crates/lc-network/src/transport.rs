@@ -405,10 +405,7 @@ where
         Ok(Some(packet))
     }
 
-    /// Sends one message as a single contiguous frame, mirroring
-    /// `C4NetIOTCP::PackPacket` (src/C4NetIO.cpp:1286) which writes prefix,
-    /// size and payload into one output buffer.
-    pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
+    fn encode_message_frame(message: ControlMessage) -> Result<Vec<u8>, TransportError> {
         let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
             ControlMessage::Ping(packet) => {
@@ -525,10 +522,41 @@ where
             }
         }
 
-        self.outbound_packet_log
-            .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
         let size = (frame.len() - FRAME_HEADER_LEN) as u32;
         frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_ne_bytes());
+        Ok(frame)
+    }
+
+    /// Retains an already-accepted logical send for rerouting after this
+    /// transport fails before its per-route queue can write it.
+    pub(crate) fn retain_unsent_message(
+        &mut self,
+        message: ControlMessage,
+    ) -> Result<(), TransportError> {
+        let frame = Self::encode_message_frame(message)?;
+        self.outbound_packet_log
+            .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
+        Ok(())
+    }
+
+    pub(crate) fn retain_unsent_complete_packet(
+        &mut self,
+        packet: Vec<u8>,
+    ) -> Result<(), TransportError> {
+        if packet.len() > MAX_PACKET_SIZE {
+            return Err(TransportError::Malformed("packet exceeds allowed size"));
+        }
+        self.outbound_packet_log.record_outbound(packet);
+        Ok(())
+    }
+
+    /// Sends one message as a single contiguous frame, mirroring
+    /// `C4NetIOTCP::PackPacket` (src/C4NetIO.cpp:1286) which writes prefix,
+    /// size and payload into one output buffer.
+    pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
+        let frame = Self::encode_message_frame(message)?;
+        self.outbound_packet_log
+            .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
         self.stream.write_all(&frame).await?;
         self.stream.flush().await?;
         Ok(())

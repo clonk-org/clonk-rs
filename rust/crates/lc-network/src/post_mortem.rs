@@ -75,6 +75,17 @@ impl ClosedConnectionRouter {
         self.connections.contains_key(&local_connection_id)
     }
 
+    pub fn client_id(&self, local_connection_id: u32) -> Option<ClientId> {
+        self.connections
+            .get(&local_connection_id)
+            .map(|connection| connection.client_id)
+    }
+
+    pub fn remove_client(&mut self, client_id: ClientId) {
+        self.connections
+            .retain(|_, connection| connection.client_id != client_id);
+    }
+
     pub fn recover(&mut self, packet: &PostMortemPacket) -> Option<PostMortemReplay> {
         self.connections
             .remove(&packet.connection_id)
@@ -258,5 +269,19 @@ mod tests {
         assert!(!router.contains(7));
         assert!(router.contains(8));
         assert_eq!(router.recover(&recovery), None);
+    }
+
+    #[test]
+    fn recovery_router_removes_every_connection_for_a_removed_client() {
+        let mut router = ClosedConnectionRouter::default();
+        router.retain(7, 3, 5);
+        router.retain(8, 4, 0);
+        router.retain(9, 3, 2);
+
+        router.remove_client(3);
+
+        assert!(!router.contains(7));
+        assert!(router.contains(8));
+        assert!(!router.contains(9));
     }
 }

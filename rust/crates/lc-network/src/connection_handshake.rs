@@ -40,6 +40,18 @@ pub struct ClientConnectionHandshake {
     pub liveness: ConnectionLivenessState,
 }
 
+/// One additional accepted transport route for an already joined logical
+/// client. Unlike [`ClientConnectionHandshake`], this exchange deliberately
+/// stops after `PID_Conn`/`PID_ConnRe`: a host does not send another JoinData
+/// when it recognizes the client's canonical core on a second connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClientRouteHandshake {
+    pub local_connection_id: u32,
+    pub remote_connection_id: u32,
+    pub peer_core: ClientCoreControlData,
+    pub liveness: ConnectionLivenessState,
+}
+
 /// A peer request handed from an I/O task to the serialized host state.
 ///
 /// The receiver applies any `AdmissionDecision::Accept::before_reply` effects
@@ -368,6 +380,73 @@ where
         ConnectionLivenessState::new_system(),
     )
     .await
+}
+
+/// Runs the client half of admission for a second transport route belonging
+/// to an already joined client. The peer must still be the host established by
+/// the primary route, and no second JoinData packet is consumed or expected.
+pub(crate) async fn run_client_route_handshake<S>(
+    transport: &mut ControlTransport<S>,
+    local_request: ConnectionRequest,
+    expected_peer_core: &ClientCoreControlData,
+) -> Result<ClientRouteHandshake, ConnectionHandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let local_connection_id = local_request.connection_id;
+    let mut connection = LegacyConnection::new(local_request);
+    let mut liveness = ConnectionLivenessState::new_system();
+    send_initial_request(transport, &mut connection).await?;
+
+    let mut registered_host = None;
+    let peer_core = loop {
+        let message = read_handshake_message(transport, &mut liveness).await?;
+        match message {
+            ControlMessage::Ping(packet) => {
+                transport.send_message(ControlMessage::Pong(packet)).await?;
+            }
+            ControlMessage::Pong(packet) => {
+                record_admitted_pong(&connection, &mut liveness, packet);
+            }
+            ControlMessage::ConnectionRequest(request) => {
+                handle_peer_request(transport, &mut connection, &mut registered_host, request)
+                    .await?;
+                if connection.status() == ConnectionStatus::HalfAccepted {
+                    liveness.mark_half_accepted();
+                }
+            }
+            ControlMessage::ConnectionReply(reply) => {
+                if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
+                    liveness.mark_accepted();
+                    break peer_core;
+                }
+            }
+            _ => continue,
+        }
+    };
+
+    if registered_host.as_ref() != Some(&peer_core) {
+        return Err(ConnectionHandshakeError::ReducerInvariant(
+            "accepted secondary-route peer was not provisionally registered",
+        ));
+    }
+    if &peer_core != expected_peer_core {
+        return Err(ConnectionHandshakeError::ReducerInvariant(
+            "secondary route connected to a different host core",
+        ));
+    }
+    let remote_connection_id =
+        connection
+            .remote_connection_id()
+            .ok_or(ConnectionHandshakeError::ReducerInvariant(
+                "accepted secondary route has no peer connection ID",
+            ))?;
+    Ok(ClientRouteHandshake {
+        local_connection_id,
+        remote_connection_id,
+        peer_core,
+        liveness,
+    })
 }
 
 pub(crate) async fn run_client_connection_handshake_with_liveness<S>(

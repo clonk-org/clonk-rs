@@ -581,8 +581,20 @@ pub struct ReliableUdpSocketDriver {
     last_send_peer: Option<SocketAddr>,
 }
 
+pub(crate) enum ReliableUdpPollReady {
+    Datagram(usize, SocketAddr),
+    Timer,
+    SocketError(io::Error),
+}
+
 impl ReliableUdpSocketDriver {
     pub fn bind(bind_address: SocketAddr) -> io::Result<Self> {
+        tokio::runtime::Handle::try_current().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "reliable-UDP driver requires an entered Tokio runtime",
+            )
+        })?;
         let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_only_v6(false)?;
         socket.set_nonblocking(true)?;
@@ -620,31 +632,38 @@ impl ReliableUdpSocketDriver {
         Ok(self.flush_step(step).await?)
     }
 
-    pub async fn poll(&mut self) -> io::Result<Vec<ReliableUdpEvent>> {
+    /// Waits without mutating protocol state. This half of `poll` is safe to
+    /// cancel from an outer `select!`: Tokio's UDP receive leaves the datagram
+    /// queued unless it completes and this future returns it to the caller.
+    pub(crate) async fn wait_ready(&mut self) -> ReliableUdpPollReady {
         let deadline = self.started_at + self.core.next_deadline();
-        enum PollReady {
-            Datagram(usize, SocketAddr),
-            Timer,
-            SocketError(io::Error),
-        }
-        let ready = tokio::select! {
+        tokio::select! {
             result = self.socket.recv_from(&mut self.receive_buffer) => {
                 match result {
-                    Ok((length, source)) => PollReady::Datagram(length, source),
-                    Err(error) => PollReady::SocketError(error),
+                    Ok((length, source)) => ReliableUdpPollReady::Datagram(length, source),
+                    Err(error) => ReliableUdpPollReady::SocketError(error),
                 }
             }
-            _ = tokio::time::sleep_until(deadline) => PollReady::Timer,
-        };
+            _ = tokio::time::sleep_until(deadline) => ReliableUdpPollReady::Timer,
+        }
+    }
+
+    /// Applies one readiness transition and flushes every datagram/event it
+    /// generated. Callers must not cancel this half after protocol state has
+    /// advanced.
+    pub(crate) async fn process_ready(
+        &mut self,
+        ready: ReliableUdpPollReady,
+    ) -> io::Result<Vec<ReliableUdpEvent>> {
         let now = self.elapsed();
-        let received_datagram = matches!(ready, PollReady::Datagram(_, _));
+        let received_datagram = matches!(ready, ReliableUdpPollReady::Datagram(_, _));
         let mut step = match ready {
-            PollReady::Datagram(length, source) => {
+            ReliableUdpPollReady::Datagram(length, source) => {
                 self.core
                     .receive_at(source, &self.receive_buffer[..length], now)
             }
-            PollReady::Timer => self.core.timer_at(now),
-            PollReady::SocketError(error) => {
+            ReliableUdpPollReady::Timer => self.core.timer_at(now),
+            ReliableUdpPollReady::SocketError(error) => {
                 if reliable_udp_unreachable_error(&error) {
                     if let Some(peer) = self.last_send_peer {
                         let step = self.core.report_unreachable(peer);
@@ -660,6 +679,11 @@ impl ReliableUdpSocketDriver {
             step.append(self.core.timer_at(now));
         }
         self.flush_step(step).await
+    }
+
+    pub async fn poll(&mut self) -> io::Result<Vec<ReliableUdpEvent>> {
+        let ready = self.wait_ready().await;
+        self.process_ready(ready).await
     }
 
     pub async fn report_unreachable(

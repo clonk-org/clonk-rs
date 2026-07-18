@@ -35,6 +35,7 @@ mod status;
 mod transport;
 mod udp;
 mod udp_runtime;
+mod udp_session;
 
 pub use address_packet::{
     append_received_address, decode_address_packet_payload, encode_address_packet_payload,
@@ -180,9 +181,9 @@ pub use search::{
     DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS, REFERENCE_QUERY_TIMEOUT,
 };
 pub use session::{
-    connect_client, start_host, ClientCommand, ClientConfig, ClientError, ClientEvent,
-    ClientHandle, HostCommand, HostConfig, HostError, HostEvent, HostHandle, HostJoinSnapshot,
-    HostedResourceFile, BROADCAST_CLIENT_ID,
+    connect_client, connect_dual_client, connect_udp_client, start_host, ClientCommand,
+    ClientConfig, ClientError, ClientEvent, ClientHandle, HostCommand, HostConfig, HostError,
+    HostEvent, HostHandle, HostJoinSnapshot, HostedResourceFile, BROADCAST_CLIENT_ID,
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{
@@ -209,6 +210,9 @@ pub use udp_runtime::{
     ReliableUdpPeerStatus, ReliableUdpRuntimeError, ReliableUdpSocketDriver, ReliableUdpStep,
     RELIABLE_UDP_CHECK_INTERVAL, RELIABLE_UDP_CONNECT_RETRIES, RELIABLE_UDP_CONNECT_TIMEOUT,
     RELIABLE_UDP_OUTGOING_PACKET_CAPACITY,
+};
+pub use udp_session::{
+    ReliableUdpOwnedPeerStream, ReliableUdpPeerStream, ReliableUdpSessionHub,
 };
 
 pub type ClientId = u32;

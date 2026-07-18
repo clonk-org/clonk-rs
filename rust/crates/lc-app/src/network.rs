@@ -17,7 +17,7 @@ use lc_engine::{
     COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use lc_network::{
-    connect_client, decode_control_entry_payload, decode_control_packet,
+    connect_dual_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
     ClientHandle, ClientId, ClientPlayerResourceRequest, ControlDelivery, ControlPacket,
     HostConfig, HostEvent, HostHandle, HostJoinSnapshot, LegacyControlFrame, LegacyControlSet,
@@ -1893,7 +1893,7 @@ async fn run_host_worker(
 ) -> Result<()> {
     let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
         .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
-    let host_config = match settings.prepared.as_ref() {
+    let mut host_config = match settings.prepared.as_ref() {
         Some(prepared) => match prepared.claim_host_config() {
             Ok(config) => config,
             Err(error) => {
@@ -1944,6 +1944,7 @@ async fn run_host_worker(
             return Err(anyhow!(message));
         }
     };
+    host_config.udp_bind_address = Some(bound_addr);
     let mut host = match start_host(listener, host_config).await {
         Ok(host) => host,
         Err(err) => {
@@ -1952,13 +1953,13 @@ async fn run_host_worker(
             return Err(anyhow!(message));
         }
     };
+    let mut local_addresses = vec![NetworkAddress::new(NetworkProtocol::Tcp, bound_addr)];
+    if let Some(udp_addr) = host.udp_local_addr() {
+        local_addresses.push(NetworkAddress::new(NetworkProtocol::Udp, udp_addr));
+    }
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: HOST_CLIENT_ID,
-        // The current transport has one TCP listener. C++ appends UDP and
-        // per-interface endpoints after its wildcard TCP address; those
-        // require the corresponding live transports first
-        // (src/C4Network2Client.cpp:281-317).
-        local_addresses: vec![NetworkAddress::new(NetworkProtocol::Tcp, bound_addr)],
+        local_addresses,
     }));
     let _ = event_tx.send(NetworkEvent::PeerConnected {
         client_id: HOST_CLIENT_ID,
@@ -2322,7 +2323,13 @@ async fn run_client_worker(
     if let Some(system_path) = settings.local_system_path {
         client_config = client_config.with_local_system_path(system_path);
     }
-    let mut client = match connect_client(settings.server_addr, client_config).await {
+    let mut client = match connect_dual_client(
+        settings.server_addr,
+        settings.server_addr,
+        client_config,
+    )
+    .await
+    {
         Ok(client) => client,
         Err(err) => {
             let message = format!("failed to connect to host: {err}");
@@ -3096,6 +3103,138 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_worker_binds_and_advertises_tcp_and_udp_on_one_endpoint() {
+        let settings = HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        };
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+            )
+            .await
+        });
+
+        let ready = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect("host worker readiness");
+        assert_eq!(ready.local_client_id, HOST_CLIENT_ID);
+        assert_eq!(ready.local_addresses.len(), 2);
+        assert_eq!(ready.local_addresses[0].protocol, NetworkProtocol::Tcp);
+        assert_eq!(ready.local_addresses[1].protocol, NetworkProtocol::Udp);
+        assert_eq!(
+            ready.local_addresses[0].endpoint,
+            ready.local_addresses[1].endpoint
+        );
+        assert_ne!(ready.local_addresses[0].endpoint.port(), 0);
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop host worker");
+        worker
+            .await
+            .expect("join host worker")
+            .expect("host worker exits cleanly");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_worker_adds_udp_route_on_the_configured_server_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let address = listener.local_addr().expect("host address");
+        let udp_proxy = tokio::net::UdpSocket::bind(address)
+            .await
+            .expect("bind UDP proxy on the configured server endpoint");
+        let host = start_host(
+            listener,
+            HostConfig {
+                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .expect("start dual-transport host");
+        let host_udp_addr = host.udp_local_addr().expect("host UDP address");
+        let (udp_seen_tx, mut udp_seen_rx) = tokio_mpsc::unbounded_channel();
+        let udp_proxy_task = tokio::spawn(async move {
+            let mut client_addr = None;
+            let mut buffer = vec![0_u8; 65_536];
+            loop {
+                let (length, source) = udp_proxy
+                    .recv_from(&mut buffer)
+                    .await
+                    .expect("receive proxied UDP datagram");
+                if source == host_udp_addr {
+                    if let Some(client_addr) = client_addr {
+                        udp_proxy
+                            .send_to(&buffer[..length], client_addr)
+                            .await
+                            .expect("forward host UDP datagram");
+                    }
+                } else {
+                    client_addr = Some(source);
+                    let _ = udp_seen_tx.send(());
+                    udp_proxy
+                        .send_to(&buffer[..length], host_udp_addr)
+                        .await
+                        .expect("forward client UDP datagram");
+                }
+            }
+        });
+        let temporary = tempfile::tempdir().expect("temporary client resource directory");
+        let mut settings = ClientSettings::new(address, "Alice");
+        settings.resource_directory = temporary.path().join("Network");
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_client_worker(
+                settings,
+                0,
+                &mut command_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+            )
+            .await
+        });
+
+        local_id_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("client worker readiness timeout")
+            .expect("client worker readiness");
+        tokio::time::timeout(Duration::from_secs(4), udp_seen_rx.recv())
+            .await
+            .expect("client worker UDP contact timeout")
+            .expect("client worker contacted UDP on the configured server endpoint");
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop client worker");
+        worker
+            .await
+            .expect("join client worker")
+            .expect("client worker exits cleanly");
+        host.shutdown().await.expect("host shutdown");
+        udp_proxy_task.abort();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn connected_client_emits_exact_join_data_before_peer_events() {
         // HandleJoinData applies the complete packet during client bootstrap,
@@ -3113,10 +3252,12 @@ mod tests {
             .clone()
             .expect("default host publishes JoinData");
         let host = start_host(listener, host_config).await.expect("start host");
-        let mut client =
-            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
-                .await
-                .expect("connect client");
+        let mut client = lc_network::connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("connect client");
         let client_id = client.client_id();
         let wire_client_id = i32::try_from(client_id).expect("client ID fits wire field");
         let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec())
@@ -3198,7 +3339,10 @@ mod tests {
             .await
             .expect("bind host listener");
         let address = listener.local_addr().expect("host address");
-        let host_config = HostConfig::default();
+        let host_config = HostConfig {
+            udp_bind_address: Some(address),
+            ..HostConfig::default()
+        };
         let expected_status = NetworkStatus {
             target_tick: host_config
                 .initial_join_snapshot

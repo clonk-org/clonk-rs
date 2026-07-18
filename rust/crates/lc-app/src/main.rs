@@ -64558,11 +64558,16 @@ public func Grant(password) { return GainMissionAccess(password); }
             .as_ref()
             .expect("live prepared host")
             .local_addresses();
-        assert_eq!(local_addresses.len(), 1);
+        assert_eq!(local_addresses.len(), 2);
         assert_eq!(
             local_addresses[0].protocol,
             lc_network::NetworkProtocol::Tcp
         );
+        assert_eq!(
+            local_addresses[1].protocol,
+            lc_network::NetworkProtocol::Udp
+        );
+        assert_eq!(local_addresses[0].endpoint, local_addresses[1].endpoint);
         assert_ne!(local_addresses[0].endpoint.port(), 0);
         let advertised = app
             .advertised_game_reference
