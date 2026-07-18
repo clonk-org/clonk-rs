@@ -9805,6 +9805,52 @@ mod tests {
         task.await.unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn established_host_link_ignores_cpp_tcp_sim_open_frame() {
+        let (client_stream, mut host_stream) = duplex(512);
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        // C++ body: packed client 7, TCP, [2001:db8::7]:11112.
+        let payload = [
+            0x14, 0x07, 0x01, b'[', b'2', b'0', b'0', b'1', b':', b'd', b'b', b'8', b':', b':',
+            b'7', b']', b':', b'1', b'1', b'1', b'1', b'2', 0x00,
+        ];
+        host_stream.write_all(&tcp_frame(&payload)).await.unwrap();
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_PAUSE,
+            control_mode: 3,
+            target_tick: 17,
+        };
+        let mut host = crate::ControlTransport::new(host_stream);
+        host.send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::UnhandledPacket { packet_type: 0x14 }))
+        ));
+        match timeout(EVENT_WAIT, event_rx.recv()).await {
+            Ok(Some(ClientEvent::Status(received))) => assert_eq!(received, status),
+            Ok(Some(ClientEvent::Disconnected { reason })) => {
+                panic!("PID_TCPSimOpen disconnected the established host link: {reason:?}")
+            }
+            other => panic!("status after PID_TCPSimOpen was not delivered: {other:?}"),
+        }
+
+        shutdown_tx.send(()).unwrap();
+        drop(command_tx);
+        task.await.unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn accepted_host_connection_continues_the_cpp_ping_timer() {
         // The host's accepted connection remains on the same C4Network2IO
