@@ -143,9 +143,10 @@ pub use local_resource_resolution::{
 };
 pub use post_mortem::{PostMortemPacket, RecoverablePacketLog};
 pub use puncher::{
-    decode_netpuncher_packet, encode_netpuncher_packet, reduce_puncher_connect,
-    NetpuncherAddressFamily, NetpuncherGameIds, NetpuncherPacket, NetpuncherPacketDecodeError,
-    NetpuncherRole, NetpuncherRuntimeState, NETPUNCHER_PROTOCOL_VERSION,
+    decode_netpuncher_packet, encode_netpuncher_packet, encode_netpuncher_punch,
+    reduce_puncher_connect, NetpuncherAddressFamily, NetpuncherGameIds, NetpuncherIoEvent,
+    NetpuncherPacket, NetpuncherPacketDecodeError, NetpuncherRole, NetpuncherRuntimeState,
+    NETPUNCHER_PROTOCOL_VERSION,
 };
 pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
@@ -214,7 +215,8 @@ pub use udp_runtime::{
     RELIABLE_UDP_OUTGOING_PACKET_CAPACITY,
 };
 pub use udp_session::{
-    ReliableUdpOwnedPeerStream, ReliableUdpPeerStream, ReliableUdpSessionHub,
+    ReliableUdpOwnedPeerStream, ReliableUdpPeerStream, ReliableUdpSessionHandle,
+    ReliableUdpSessionHub,
 };
 
 pub type ClientId = u32;

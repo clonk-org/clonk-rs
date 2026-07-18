@@ -11,6 +11,10 @@ use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 use tokio::{net::UdpSocket, time::Instant};
 
+use crate::puncher::{
+    decode_netpuncher_packet, encode_netpuncher_packet, encode_netpuncher_punch,
+    NetpuncherAddressFamily, NetpuncherIoEvent, NetpuncherPacket, NetpuncherRole,
+};
 use crate::udp::{
     decode_reliable_udp_add_address, decode_reliable_udp_check, decode_reliable_udp_close,
     decode_reliable_udp_connect, decode_reliable_udp_connect_ok,
@@ -78,6 +82,7 @@ pub enum ReliableUdpEvent {
         peer: SocketAddr,
         reason: ReliableUdpDisconnectReason,
     },
+    Puncher(NetpuncherIoEvent),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -665,9 +670,65 @@ pub fn reliable_udp_send_address(address: SocketAddr) -> SocketAddr {
 pub struct ReliableUdpSocketDriver {
     socket: UdpSocket,
     core: ReliableUdpEndpointCore,
+    punchers: ReliableUdpPuncherRoutes,
     started_at: Instant,
     receive_buffer: Vec<u8>,
     last_send: Option<ReliableUdpLastSend>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReliableUdpPuncherRoute {
+    address: SocketAddr,
+    role: NetpuncherRole,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReliableUdpPuncherRoutes {
+    ipv4: Option<ReliableUdpPuncherRoute>,
+    ipv6: Option<ReliableUdpPuncherRoute>,
+}
+
+impl ReliableUdpPuncherRoutes {
+    fn route(self, family: NetpuncherAddressFamily) -> Option<ReliableUdpPuncherRoute> {
+        match family {
+            NetpuncherAddressFamily::Ipv4 => self.ipv4,
+            NetpuncherAddressFamily::Ipv6 => self.ipv6,
+        }
+    }
+
+    fn set(&mut self, family: NetpuncherAddressFamily, route: ReliableUdpPuncherRoute) {
+        match family {
+            NetpuncherAddressFamily::Ipv4 => self.ipv4 = Some(route),
+            NetpuncherAddressFamily::Ipv6 => self.ipv6 = Some(route),
+        }
+    }
+
+    fn find(
+        self,
+        address: SocketAddr,
+    ) -> Option<(NetpuncherAddressFamily, ReliableUdpPuncherRoute)> {
+        let address = canonical_reliable_udp_peer_address(address);
+        [
+            (NetpuncherAddressFamily::Ipv4, self.ipv4),
+            (NetpuncherAddressFamily::Ipv6, self.ipv6),
+        ]
+        .into_iter()
+        .find_map(|(family, route)| {
+            route
+                .filter(|route| route.address == address)
+                .map(|route| (family, route))
+        })
+    }
+
+    fn clear_if(&mut self, family: NetpuncherAddressFamily, address: SocketAddr) {
+        let slot = match family {
+            NetpuncherAddressFamily::Ipv4 => &mut self.ipv4,
+            NetpuncherAddressFamily::Ipv6 => &mut self.ipv6,
+        };
+        if slot.is_some_and(|route| route.address == address) {
+            *slot = None;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -699,6 +760,7 @@ impl ReliableUdpSocketDriver {
         Ok(Self {
             socket,
             core: ReliableUdpEndpointCore::new_at(Duration::ZERO),
+            punchers: ReliableUdpPuncherRoutes::default(),
             started_at,
             receive_buffer: vec![0; u16::MAX as usize + 1],
             last_send: None,
@@ -713,9 +775,89 @@ impl ReliableUdpSocketDriver {
         &self.core
     }
 
+    pub fn puncher_address(&self, family: NetpuncherAddressFamily) -> Option<SocketAddr> {
+        self.punchers.route(family).map(|route| route.address)
+    }
+
+    /// Stores one puncher endpoint per address family before starting the
+    /// reliable-UDP association, matching C4Network2IO::InitPuncher.
+    pub async fn init_puncher(
+        &mut self,
+        puncher_address: SocketAddr,
+        role: NetpuncherRole,
+    ) -> io::Result<Vec<ReliableUdpEvent>> {
+        let puncher_address = canonical_reliable_udp_peer_address(puncher_address);
+        let family = match puncher_address {
+            SocketAddr::V4(_) => NetpuncherAddressFamily::Ipv4,
+            SocketAddr::V6(_) => NetpuncherAddressFamily::Ipv6,
+        };
+        if self
+            .punchers
+            .route(family)
+            .is_some_and(|route| route.address != puncher_address || route.role != role)
+            || (self.core.peer_status(puncher_address).is_some()
+                && self.punchers.find(puncher_address).is_none())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("reliable-UDP endpoint {puncher_address} is already in use"),
+            ));
+        }
+        self.punchers.set(
+            family,
+            ReliableUdpPuncherRoute {
+                address: puncher_address,
+                role,
+            },
+        );
+        let step = self.core.connect_at(puncher_address, self.elapsed());
+        self.finish_step(step).await
+    }
+
+    /// Sends one netpuncher control packet through the configured family's
+    /// reliable route. A missing route is a no-op, as in C4Network2IO.
+    pub async fn send_puncher_packet(
+        &mut self,
+        family: NetpuncherAddressFamily,
+        packet: &NetpuncherPacket,
+    ) -> Result<Vec<ReliableUdpEvent>, ReliableUdpDriverError> {
+        let Some(route) = self.punchers.route(family) else {
+            return Ok(Vec::new());
+        };
+        let wire = encode_netpuncher_packet(packet);
+        let step = self.core.send_packet(route.address, &wire)?;
+        Ok(self.finish_step(step).await?)
+    }
+
+    /// Closes one exact reserved puncher route after a higher layer rejects a
+    /// valid-but-inapplicable packet. Ordinary peers are never affected.
+    pub async fn close_puncher(
+        &mut self,
+        puncher_address: SocketAddr,
+    ) -> io::Result<Vec<ReliableUdpEvent>> {
+        let puncher_address = canonical_reliable_udp_peer_address(puncher_address);
+        let Some((_, route)) = self.punchers.find(puncher_address) else {
+            return Ok(Vec::new());
+        };
+        let step = self.core.close_peer(route.address);
+        self.finish_step(step).await
+    }
+
+    /// Sends C4Network2IO::Punch's raw application-level Pong without adding
+    /// a reliable-UDP peer or data envelope.
+    pub async fn punch(&mut self, punchee_address: SocketAddr) -> io::Result<()> {
+        let sent_at_ms = self.elapsed().as_millis() as u32;
+        let wire = encode_netpuncher_punch(sent_at_ms);
+        self.last_send = Some(ReliableUdpLastSend::BestEffort);
+        self.socket
+            .send_to(&wire, reliable_udp_send_address(punchee_address))
+            .await
+            .map(|_| ())
+    }
+
     pub async fn connect(&mut self, peer: SocketAddr) -> io::Result<Vec<ReliableUdpEvent>> {
         let step = self.core.connect_at(peer, self.elapsed());
-        self.flush_step(step).await
+        self.finish_step(step).await
     }
 
     pub async fn send_packet(
@@ -724,7 +866,7 @@ impl ReliableUdpSocketDriver {
         payload: &[u8],
     ) -> Result<Vec<ReliableUdpEvent>, ReliableUdpDriverError> {
         let step = self.core.send_packet(peer, payload)?;
-        Ok(self.flush_step(step).await?)
+        Ok(self.finish_step(step).await?)
     }
 
     /// Waits without mutating protocol state. This half of `poll` is safe to
@@ -764,7 +906,7 @@ impl ReliableUdpSocketDriver {
                         Some(ReliableUdpLastSend::Peer(peer)) => {
                             let step = self.core.report_unreachable(peer);
                             if !step.events.is_empty() {
-                                return self.flush_step(step).await;
+                                return self.finish_step(step).await;
                             }
                         }
                         // C++ ignores failure to send Ping replies and the
@@ -780,7 +922,7 @@ impl ReliableUdpSocketDriver {
         if received_datagram {
             step.append(self.core.timer_at(now));
         }
-        self.flush_step(step).await
+        self.finish_step(step).await
     }
 
     pub async fn poll(&mut self) -> io::Result<Vec<ReliableUdpEvent>> {
@@ -793,17 +935,105 @@ impl ReliableUdpSocketDriver {
         peer: SocketAddr,
     ) -> io::Result<Vec<ReliableUdpEvent>> {
         let step = self.core.report_unreachable(peer);
-        self.flush_step(step).await
+        self.finish_step(step).await
     }
 
     /// Sends one best-effort Close datagram before reporting local teardown.
     pub async fn close_peer(&mut self, peer: SocketAddr) -> io::Result<Vec<ReliableUdpEvent>> {
         let step = self.core.close_peer(peer);
-        self.flush_step(step).await
+        self.finish_step(step).await
     }
 
     fn elapsed(&self) -> Duration {
         Instant::now().saturating_duration_since(self.started_at)
+    }
+
+    async fn finish_step(
+        &mut self,
+        step: ReliableUdpStep,
+    ) -> io::Result<Vec<ReliableUdpEvent>> {
+        let events = self.flush_step(step).await?;
+        self.route_puncher_events(events).await
+    }
+
+    async fn route_puncher_events(
+        &mut self,
+        events: Vec<ReliableUdpEvent>,
+    ) -> io::Result<Vec<ReliableUdpEvent>> {
+        let mut pending = VecDeque::from(events);
+        let mut routed = Vec::new();
+        while let Some(event) = pending.pop_front() {
+            match event {
+                ReliableUdpEvent::Connected {
+                    peer,
+                    observed_address,
+                } => {
+                    let Some((_route_family, route)) = self.punchers.find(peer) else {
+                        routed.push(ReliableUdpEvent::Connected {
+                            peer,
+                            observed_address,
+                        });
+                        continue;
+                    };
+                    if let Some(observed_address) = observed_address {
+                        let observed_address =
+                            canonical_reliable_udp_peer_address(observed_address);
+                        // OnPuncherConnect derives request-family policy from
+                        // the normalized observed address. Later AssID packets
+                        // remain tagged by their source puncher route.
+                        let observed_family = match observed_address {
+                            SocketAddr::V4(_) => NetpuncherAddressFamily::Ipv4,
+                            SocketAddr::V6(_) => NetpuncherAddressFamily::Ipv6,
+                        };
+                        routed.push(ReliableUdpEvent::Puncher(NetpuncherIoEvent::Connected {
+                            family: observed_family,
+                            puncher_address: route.address,
+                            observed_address,
+                        }));
+                    }
+                }
+                ReliableUdpEvent::Packet { peer, payload } => {
+                    let Some((family, route)) = self.punchers.find(peer) else {
+                        routed.push(ReliableUdpEvent::Packet { peer, payload });
+                        continue;
+                    };
+                    match decode_netpuncher_packet(&payload) {
+                        Ok(NetpuncherPacket::ClientRequest { address })
+                            if route.role == NetpuncherRole::Host =>
+                        {
+                            // Punch is deliberately best effort. Its ICMP
+                            // result must not tear down the puncher or a game
+                            // peer which happens to use the same endpoint.
+                            let _ = self.punch(address).await;
+                        }
+                        Ok(packet) => routed.push(ReliableUdpEvent::Puncher(
+                            NetpuncherIoEvent::Packet {
+                                family,
+                                puncher_address: route.address,
+                                packet,
+                            },
+                        )),
+                        Err(_) => {
+                            // Construct failure makes HandlePuncherPacket
+                            // close exactly this reliable address.
+                            let close = self.core.close_peer(route.address);
+                            pending.extend(self.flush_step(close).await?);
+                        }
+                    }
+                }
+                ReliableUdpEvent::Disconnected { peer, reason } => {
+                    let Some((family, route)) = self.punchers.find(peer) else {
+                        routed.push(ReliableUdpEvent::Disconnected { peer, reason });
+                        continue;
+                    };
+                    self.punchers.clear_if(family, route.address);
+                }
+                ReliableUdpEvent::Puncher(event) => {
+                    routed.push(ReliableUdpEvent::Puncher(event));
+                }
+            }
+        }
+        Ok(routed)
     }
 
     async fn flush_step(&mut self, mut step: ReliableUdpStep) -> io::Result<Vec<ReliableUdpEvent>> {
@@ -878,6 +1108,7 @@ fn reliable_udp_send_is_best_effort(payload: &[u8]) -> bool {
         reliable_udp_packet_kind(payload),
         Some(
             ReliableUdpPacketKind::Ping
+                | ReliableUdpPacketKind::Test
                 | ReliableUdpPacketKind::Close
                 | ReliableUdpPacketKind::AddAddress
         )
@@ -899,6 +1130,36 @@ mod tests {
 
     fn address(last: u8, port: u16) -> SocketAddr {
         SocketAddr::new(Ipv4Addr::new(192, 0, 2, last).into(), port)
+    }
+
+    #[test]
+    fn puncher_routes_keep_ipv4_and_ipv6_slots_independent() {
+        let ipv4 = ReliableUdpPuncherRoute {
+            address: address(1, 11_115),
+            role: NetpuncherRole::Host,
+        };
+        let ipv6 = ReliableUdpPuncherRoute {
+            address: SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 11_115, 0, 0)),
+            role: NetpuncherRole::Client,
+        };
+        let mut routes = ReliableUdpPuncherRoutes::default();
+        routes.set(NetpuncherAddressFamily::Ipv4, ipv4);
+        routes.set(NetpuncherAddressFamily::Ipv6, ipv6);
+
+        assert_eq!(
+            routes.route(NetpuncherAddressFamily::Ipv4).unwrap().address,
+            ipv4.address
+        );
+        assert_eq!(
+            routes.route(NetpuncherAddressFamily::Ipv6).unwrap().address,
+            ipv6.address
+        );
+        routes.clear_if(NetpuncherAddressFamily::Ipv4, ipv4.address);
+        assert!(routes.route(NetpuncherAddressFamily::Ipv4).is_none());
+        assert_eq!(
+            routes.route(NetpuncherAddressFamily::Ipv6).unwrap().address,
+            ipv6.address
+        );
     }
 
     fn handshake_pair() -> (

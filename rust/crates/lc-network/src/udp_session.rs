@@ -28,8 +28,9 @@ use tokio::{
 };
 
 use crate::{
-    canonical_reliable_udp_peer_address, ReliableUdpDisconnectReason, ReliableUdpEvent,
-    ReliableUdpSocketDriver,
+    canonical_reliable_udp_peer_address, NetpuncherAddressFamily, NetpuncherIoEvent,
+    NetpuncherPacket, NetpuncherRole, ReliableUdpDisconnectReason, ReliableUdpDriverError,
+    ReliableUdpEvent, ReliableUdpSocketDriver,
 };
 
 const TCP_FRAME_PREFIX: u8 = 0xff;
@@ -37,6 +38,7 @@ const TCP_FRAME_HEADER_SIZE: usize = 5;
 const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024;
 const HUB_COMMAND_CAPACITY: usize = 64;
 const INCOMING_PEER_CAPACITY: usize = 32;
+const PUNCHER_EVENT_CAPACITY: usize = 16;
 const PEER_INBOUND_PACKET_CAPACITY: usize = 64;
 
 type HubCommandPermitFuture = Pin<
@@ -47,6 +49,20 @@ type HubCommandPermitFuture = Pin<
 >;
 
 enum HubCommand {
+    InitPuncher {
+        address: SocketAddr,
+        role: NetpuncherRole,
+        response: oneshot::Sender<io::Result<()>>,
+    },
+    SendPuncherPacket {
+        family: NetpuncherAddressFamily,
+        packet: NetpuncherPacket,
+        response: oneshot::Sender<io::Result<()>>,
+    },
+    ClosePuncher {
+        address: SocketAddr,
+        response: oneshot::Sender<io::Result<()>>,
+    },
     Connect {
         peer: SocketAddr,
         response: oneshot::Sender<io::Result<ReliableUdpPeerStream>>,
@@ -527,43 +543,86 @@ impl AsyncWrite for ReliableUdpOwnedPeerStream {
     }
 }
 
-/// Shared reliable-UDP socket with stream-like outgoing and incoming peers.
-pub struct ReliableUdpSessionHub {
-    local_addr: SocketAddr,
+/// Cloneable command side of a shared reliable-UDP socket. Keeping this
+/// separate from the hub owner lets client dial races, reconnects, and the
+/// netpuncher all retain the same NAT-visible source port.
+#[derive(Clone, Debug)]
+pub struct ReliableUdpSessionHandle {
     commands: mpsc::Sender<HubCommand>,
-    incoming: mpsc::Receiver<io::Result<ReliableUdpPeerStream>>,
-    task: Option<JoinHandle<io::Result<()>>>,
-    shutdown_requested: bool,
 }
 
-impl ReliableUdpSessionHub {
-    pub fn bind(bind_address: SocketAddr) -> io::Result<Self> {
-        Self::from_driver(ReliableUdpSocketDriver::bind(bind_address)?)
-    }
-
-    pub fn from_driver(driver: ReliableUdpSocketDriver) -> io::Result<Self> {
-        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+impl ReliableUdpSessionHandle {
+    pub async fn init_puncher(
+        &self,
+        address: SocketAddr,
+        role: NetpuncherRole,
+    ) -> io::Result<()> {
+        let (response, completed) = oneshot::channel();
+        self.commands
+            .send(HubCommand::InitPuncher {
+                address,
+                role,
+                response,
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "reliable-UDP session hub stopped during puncher initialization",
+                )
+            })?;
+        completed.await.map_err(|_| {
             io::Error::new(
-                io::ErrorKind::Other,
-                "reliable-UDP session hub requires an entered Tokio runtime",
+                io::ErrorKind::BrokenPipe,
+                "reliable-UDP session hub stopped during puncher initialization",
             )
-        })?;
-        let local_addr = canonical_reliable_udp_peer_address(driver.local_addr()?);
-        let (commands, command_rx) = mpsc::channel(HUB_COMMAND_CAPACITY);
-        let (incoming_tx, incoming) = mpsc::channel(INCOMING_PEER_CAPACITY);
-        let task_commands = commands.clone();
-        let task = runtime.spawn(run_hub(driver, task_commands, command_rx, incoming_tx));
-        Ok(Self {
-            local_addr,
-            commands,
-            incoming,
-            task: Some(task),
-            shutdown_requested: false,
-        })
+        })?
     }
 
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
+    pub async fn send_puncher_packet(
+        &self,
+        family: NetpuncherAddressFamily,
+        packet: NetpuncherPacket,
+    ) -> io::Result<()> {
+        let (response, completed) = oneshot::channel();
+        self.commands
+            .send(HubCommand::SendPuncherPacket {
+                family,
+                packet,
+                response,
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "reliable-UDP session hub stopped while sending a puncher packet",
+                )
+            })?;
+        completed.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "reliable-UDP session hub stopped while sending a puncher packet",
+            )
+        })?
+    }
+
+    pub async fn close_puncher(&self, address: SocketAddr) -> io::Result<()> {
+        let (response, completed) = oneshot::channel();
+        self.commands
+            .send(HubCommand::ClosePuncher { address, response })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "reliable-UDP session hub stopped while closing a puncher route",
+                )
+            })?;
+        completed.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "reliable-UDP session hub stopped while closing a puncher route",
+            )
+        })?
     }
 
     pub async fn connect(&self, peer: SocketAddr) -> io::Result<ReliableUdpPeerStream> {
@@ -586,6 +645,95 @@ impl ReliableUdpSessionHub {
                 "reliable-UDP session hub stopped during connect",
             )
         })?
+    }
+}
+
+/// Shared reliable-UDP socket with stream-like outgoing and incoming peers.
+pub struct ReliableUdpSessionHub {
+    local_addr: SocketAddr,
+    commands: mpsc::Sender<HubCommand>,
+    incoming: mpsc::Receiver<io::Result<ReliableUdpPeerStream>>,
+    puncher_events: Option<mpsc::Receiver<NetpuncherIoEvent>>,
+    task: Option<JoinHandle<io::Result<()>>>,
+    shutdown_requested: bool,
+}
+
+impl ReliableUdpSessionHub {
+    pub fn bind(bind_address: SocketAddr) -> io::Result<Self> {
+        Self::from_driver(ReliableUdpSocketDriver::bind(bind_address)?)
+    }
+
+    pub fn from_driver(driver: ReliableUdpSocketDriver) -> io::Result<Self> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "reliable-UDP session hub requires an entered Tokio runtime",
+            )
+        })?;
+        let local_addr = canonical_reliable_udp_peer_address(driver.local_addr()?);
+        let (commands, command_rx) = mpsc::channel(HUB_COMMAND_CAPACITY);
+        let (incoming_tx, incoming) = mpsc::channel(INCOMING_PEER_CAPACITY);
+        let (puncher_event_tx, puncher_events) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
+        let task_commands = commands.clone();
+        let task = runtime.spawn(run_hub(
+            driver,
+            task_commands,
+            command_rx,
+            incoming_tx,
+            puncher_event_tx,
+        ));
+        Ok(Self {
+            local_addr,
+            commands,
+            incoming,
+            puncher_events: Some(puncher_events),
+            task: Some(task),
+            shutdown_requested: false,
+        })
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub fn handle(&self) -> ReliableUdpSessionHandle {
+        ReliableUdpSessionHandle {
+            commands: self.commands.clone(),
+        }
+    }
+
+    pub async fn init_puncher(
+        &self,
+        address: SocketAddr,
+        role: NetpuncherRole,
+    ) -> io::Result<()> {
+        self.handle().init_puncher(address, role).await
+    }
+
+    pub async fn send_puncher_packet(
+        &self,
+        family: NetpuncherAddressFamily,
+        packet: NetpuncherPacket,
+    ) -> io::Result<()> {
+        self.handle().send_puncher_packet(family, packet).await
+    }
+
+    pub async fn close_puncher(&self, address: SocketAddr) -> io::Result<()> {
+        self.handle().close_puncher(address).await
+    }
+
+    /// Detaches the low-volume callback stream so a session loop can select
+    /// it independently from ordinary incoming game peers.
+    pub fn take_puncher_event_receiver(
+        &mut self,
+    ) -> mpsc::Receiver<NetpuncherIoEvent> {
+        self.puncher_events
+            .take()
+            .expect("puncher event receiver already taken")
+    }
+
+    pub async fn connect(&self, peer: SocketAddr) -> io::Result<ReliableUdpPeerStream> {
+        self.handle().connect(peer).await
     }
 
     /// Connects one peer and transfers ownership of this hub into the returned
@@ -666,6 +814,7 @@ async fn run_hub(
     commands: mpsc::Sender<HubCommand>,
     mut command_rx: mpsc::Receiver<HubCommand>,
     incoming: mpsc::Sender<io::Result<ReliableUdpPeerStream>>,
+    puncher_events: mpsc::Sender<NetpuncherIoEvent>,
 ) -> io::Result<()> {
     let mut peers = BTreeMap::<SocketAddr, ConnectedPeer>::new();
     let mut pending_connects =
@@ -681,6 +830,66 @@ async fn run_hub(
                     return Ok(());
                 };
                 match command {
+                    HubCommand::InitPuncher { address, role, response } => {
+                        let result = match driver.init_puncher(address, role).await {
+                            Ok(events) => {
+                                dispatch_events(
+                                    &mut driver,
+                                    events,
+                                    &commands,
+                                    &incoming,
+                                    &puncher_events,
+                                    &mut peers,
+                                    &mut pending_connects,
+                                    &mut next_peer_generation,
+                                )
+                                .await;
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let _ = response.send(result);
+                    }
+                    HubCommand::SendPuncherPacket { family, packet, response } => {
+                        let result = match driver.send_puncher_packet(family, &packet).await {
+                            Ok(events) => {
+                                dispatch_events(
+                                    &mut driver,
+                                    events,
+                                    &commands,
+                                    &incoming,
+                                    &puncher_events,
+                                    &mut peers,
+                                    &mut pending_connects,
+                                    &mut next_peer_generation,
+                                )
+                                .await;
+                                Ok(())
+                            }
+                            Err(error) => Err(reliable_udp_driver_io_error(error)),
+                        };
+                        let _ = response.send(result);
+                    }
+                    HubCommand::ClosePuncher { address, response } => {
+                        let result = match driver.close_puncher(address).await {
+                            Ok(events) => {
+                                dispatch_events(
+                                    &mut driver,
+                                    events,
+                                    &commands,
+                                    &incoming,
+                                    &puncher_events,
+                                    &mut peers,
+                                    &mut pending_connects,
+                                    &mut next_peer_generation,
+                                )
+                                .await;
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let _ = response.send(result);
+                    }
                     HubCommand::Connect { peer, response } => {
                         let peer = canonical_reliable_udp_peer_address(peer);
                         if peers.contains_key(&peer)
@@ -701,6 +910,7 @@ async fn run_hub(
                                     events,
                                     &commands,
                                     &incoming,
+                                    &puncher_events,
                                     &mut peers,
                                     &mut pending_connects,
                                     &mut next_peer_generation,
@@ -728,6 +938,7 @@ async fn run_hub(
                                     events,
                                     &commands,
                                     &incoming,
+                                    &puncher_events,
                                     &mut peers,
                                     &mut pending_connects,
                                     &mut next_peer_generation,
@@ -752,6 +963,7 @@ async fn run_hub(
                                     events,
                                     &commands,
                                     &incoming,
+                                    &puncher_events,
                                     &mut peers,
                                     &mut pending_connects,
                                     &mut next_peer_generation,
@@ -783,6 +995,7 @@ async fn run_hub(
                             events,
                             &commands,
                             &incoming,
+                            &puncher_events,
                             &mut peers,
                             &mut pending_connects,
                             &mut next_peer_generation,
@@ -806,6 +1019,7 @@ async fn dispatch_events(
     events: Vec<ReliableUdpEvent>,
     commands: &mpsc::Sender<HubCommand>,
     incoming: &mpsc::Sender<io::Result<ReliableUdpPeerStream>>,
+    puncher_events: &mpsc::Sender<NetpuncherIoEvent>,
     peers: &mut BTreeMap<SocketAddr, ConnectedPeer>,
     pending_connects: &mut BTreeMap<SocketAddr, oneshot::Sender<io::Result<ReliableUdpPeerStream>>>,
     next_peer_generation: &mut u64,
@@ -887,6 +1101,24 @@ async fn dispatch_events(
                         .try_send(PeerInbound::Disconnected(reason));
                 }
             }
+            ReliableUdpEvent::Puncher(event) => {
+                let puncher_address = event.puncher_address();
+                if puncher_events.try_send(event).is_err() {
+                    // Puncher input is network-driven. If the bounded callback
+                    // queue cannot retain it, close this exact special route
+                    // instead of leaking memory or misrouting later packets.
+                    let _ = driver.close_puncher(puncher_address).await;
+                }
+            }
+        }
+    }
+}
+
+fn reliable_udp_driver_io_error(error: ReliableUdpDriverError) -> io::Error {
+    match error {
+        ReliableUdpDriverError::Io(error) => error,
+        ReliableUdpDriverError::Runtime(error) => {
+            io::Error::new(io::ErrorKind::InvalidData, error.to_string())
         }
     }
 }
@@ -1060,6 +1292,159 @@ mod tests {
         assert_eq!(outgoing.peer_addr(), incoming_hub.local_addr());
         assert_eq!(incoming.peer_addr(), outgoing_hub.local_addr());
         (outgoing_hub, incoming_hub, outgoing, incoming)
+    }
+
+    #[tokio::test]
+    async fn netpuncher_route_reports_own_address_and_punches_without_a_game_peer() {
+        async fn write_payload(stream: &mut ReliableUdpPeerStream, payload: &[u8]) {
+            let mut frame = Vec::with_capacity(TCP_FRAME_HEADER_SIZE + payload.len());
+            frame.push(TCP_FRAME_PREFIX);
+            frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+            frame.extend_from_slice(payload);
+            stream.write_all(&frame).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+
+        async fn read_payload(stream: &mut ReliableUdpPeerStream) -> Vec<u8> {
+            let mut header = [0_u8; TCP_FRAME_HEADER_SIZE];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], TCP_FRAME_PREFIX);
+            let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let mut payload = vec![0_u8; length];
+            stream.read_exact(&mut payload).await.unwrap();
+            payload
+        }
+
+        let mut subject = ReliableUdpSessionHub::bind(loopback()).unwrap();
+        let subject_address = subject.local_addr();
+        let subject_handle = subject.handle();
+        let mut puncher_event_rx = subject.take_puncher_event_receiver();
+        let mut puncher = ReliableUdpSessionHub::bind(loopback()).unwrap();
+        let puncher_address = puncher.local_addr();
+
+        subject_handle
+            .init_puncher(puncher_address, NetpuncherRole::Host)
+            .await
+            .unwrap();
+        let mut puncher_stream = timeout(Duration::from_secs(2), puncher.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(puncher_stream.peer_addr(), subject_address);
+        assert_eq!(
+            timeout(Duration::from_secs(2), puncher_event_rx.recv())
+                .await
+                .unwrap(),
+            Some(NetpuncherIoEvent::Connected {
+                family: NetpuncherAddressFamily::Ipv4,
+                puncher_address,
+                observed_address: subject_address,
+            })
+        );
+        assert!(timeout(Duration::from_millis(50), subject.accept())
+            .await
+            .is_err());
+
+        subject_handle
+            .send_puncher_packet(
+                NetpuncherAddressFamily::Ipv4,
+                NetpuncherPacket::IdRequest,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), read_payload(&mut puncher_stream))
+                .await
+                .unwrap(),
+            crate::encode_netpuncher_packet(&NetpuncherPacket::IdRequest)
+        );
+
+        let target = UdpSocket::bind(loopback()).await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        write_payload(
+            &mut puncher_stream,
+            &crate::encode_netpuncher_packet(&NetpuncherPacket::ClientRequest {
+                address: target_address,
+            }),
+        )
+        .await;
+        let mut wire = [0_u8; 64];
+        let (length, source) = timeout(Duration::from_secs(2), target.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical_reliable_udp_peer_address(source), subject_address);
+        assert_eq!(length, 9);
+        assert_eq!(wire[0], 0x01);
+        assert_eq!(&wire[5..9], &0_u32.to_ne_bytes());
+        assert!(timeout(Duration::from_millis(50), target.recv_from(&mut wire))
+            .await
+            .is_err());
+        assert!(puncher_event_rx.try_recv().is_err());
+        assert!(timeout(Duration::from_millis(50), subject.accept())
+            .await
+            .is_err());
+
+        let assigned = NetpuncherPacket::AssignId { id: 0x1122_3344 };
+        write_payload(
+            &mut puncher_stream,
+            &crate::encode_netpuncher_packet(&assigned),
+        )
+        .await;
+        assert_eq!(
+            timeout(Duration::from_secs(2), puncher_event_rx.recv())
+                .await
+                .unwrap(),
+            Some(NetpuncherIoEvent::Packet {
+                family: NetpuncherAddressFamily::Ipv4,
+                puncher_address,
+                packet: assigned,
+            })
+        );
+
+        subject_handle
+            .close_puncher(puncher_address)
+            .await
+            .unwrap();
+        let mut closed = [0_u8; 1];
+        assert_eq!(
+            timeout(Duration::from_secs(2), puncher_stream.read(&mut closed))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        drop(puncher_stream);
+
+        subject_handle
+            .init_puncher(puncher_address, NetpuncherRole::Host)
+            .await
+            .unwrap();
+        let mut puncher_stream = timeout(Duration::from_secs(2), puncher.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), puncher_event_rx.recv())
+                .await
+                .unwrap(),
+            Some(NetpuncherIoEvent::Connected { .. })
+        ));
+        write_payload(&mut puncher_stream, &[0x51, 0x02, 0, 0, 0, 0]).await;
+        assert_eq!(
+            timeout(Duration::from_secs(2), puncher_stream.read(&mut closed))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(timeout(Duration::from_millis(50), subject.accept())
+            .await
+            .is_err());
+
+        drop(puncher_stream);
+        subject.shutdown().await.unwrap();
+        puncher.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1373,6 +1758,7 @@ mod tests {
         driver.connect(peer).await.unwrap();
         let (commands, _command_rx) = mpsc::channel(1);
         let (incoming, _incoming_rx) = mpsc::channel(1);
+        let (puncher_events, _puncher_event_rx) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
         let (inbound, inbound_rx) = mpsc::channel(PEER_INBOUND_PACKET_CAPACITY);
         let terminal = Arc::new(PeerTerminalState::open());
         let mut stream =
@@ -1401,6 +1787,7 @@ mod tests {
             }],
             &commands,
             &incoming,
+            &puncher_events,
             &mut peers,
             &mut pending_connects,
             &mut next_peer_generation,
@@ -1452,6 +1839,7 @@ mod tests {
         driver.connect(peer).await.unwrap();
         let (commands, _command_rx) = mpsc::channel(1);
         let (incoming, mut incoming_rx) = mpsc::channel(1);
+        let (puncher_events, _puncher_event_rx) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
         assert!(incoming
             .try_send(Err(io::Error::new(io::ErrorKind::Other, "occupied")))
             .is_ok());
@@ -1467,6 +1855,7 @@ mod tests {
             }],
             &commands,
             &incoming,
+            &puncher_events,
             &mut peers,
             &mut pending_connects,
             &mut next_peer_generation,

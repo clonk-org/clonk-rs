@@ -8,6 +8,7 @@ const PID_ASSIGN_ID: u8 = 0x51;
 const PID_SERVER_REQUEST: u8 = 0x52;
 const PID_CLIENT_REQUEST: u8 = 0x53;
 const PID_ID_REQUEST: u8 = 0x54;
+const PID_PONG: u8 = 0x01;
 
 /// Version byte following every `C4NetpuncherPacketType`.
 pub const NETPUNCHER_PROTOCOL_VERSION: u8 = 1;
@@ -40,6 +41,41 @@ pub enum NetpuncherRuntimeState {
 pub enum NetpuncherAddressFamily {
     Ipv4,
     Ipv6,
+}
+
+/// Events which cross C4Network2IO's puncher-address boundary without being
+/// mistaken for ordinary game-peer traffic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetpuncherIoEvent {
+    Connected {
+        family: NetpuncherAddressFamily,
+        puncher_address: SocketAddr,
+        observed_address: SocketAddr,
+    },
+    Packet {
+        family: NetpuncherAddressFamily,
+        puncher_address: SocketAddr,
+        packet: NetpuncherPacket,
+    },
+}
+
+impl NetpuncherIoEvent {
+    pub const fn family(&self) -> NetpuncherAddressFamily {
+        match self {
+            Self::Connected { family, .. } | Self::Packet { family, .. } => *family,
+        }
+    }
+
+    pub const fn puncher_address(&self) -> SocketAddr {
+        match self {
+            Self::Connected {
+                puncher_address, ..
+            }
+            | Self::Packet {
+                puncher_address, ..
+            } => *puncher_address,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +141,18 @@ pub fn encode_netpuncher_packet(packet: &NetpuncherPacket) -> Vec<u8> {
             wire.extend_from_slice(&[PID_ID_REQUEST, NETPUNCHER_PROTOCOL_VERSION]);
         }
     }
+    wire
+}
+
+/// Builds the raw application-level `PID_Pong + C4PacketPing` datagram used
+/// for NAT hole punching. This deliberately bypasses reliable-UDP framing;
+/// its leading `0x01` is consequently filtered as `IPID_Test` by the remote
+/// reliable layer after it has opened the NAT mapping.
+pub fn encode_netpuncher_punch(sent_at_ms: u32) -> [u8; 9] {
+    let mut wire = [0_u8; 9];
+    wire[0] = PID_PONG;
+    wire[1..5].copy_from_slice(&sent_at_ms.to_ne_bytes());
+    wire[5..9].copy_from_slice(&0_u32.to_ne_bytes());
     wire
 }
 
@@ -274,5 +322,13 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    #[test]
+    fn cpp_punch_is_one_raw_pong_with_a_default_packet_counter() {
+        let wire = encode_netpuncher_punch(0x0102_0304);
+        assert_eq!(wire[0], 0x01);
+        assert_eq!(&wire[1..5], &0x0102_0304_u32.to_ne_bytes());
+        assert_eq!(&wire[5..9], &0_u32.to_ne_bytes());
     }
 }
