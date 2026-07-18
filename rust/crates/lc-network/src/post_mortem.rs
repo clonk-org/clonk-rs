@@ -1,6 +1,15 @@
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ClientId;
+
+fn wall_clock_seconds() -> i64 {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    i64::try_from(seconds).unwrap_or(i64::MAX)
+}
 
 /// Recoverable packets rerouted after one connection to a peer closes.
 ///
@@ -46,6 +55,7 @@ pub(crate) struct PostMortemReplay {
 struct ClosedConnection {
     client_id: ClientId,
     next_inbound_packet: u32,
+    retained_at_seconds: i64,
 }
 
 #[derive(Debug, Default)]
@@ -62,13 +72,40 @@ impl ClosedConnectionRouter {
         client_id: ClientId,
         next_inbound_packet: u32,
     ) {
+        self.retain_at(
+            local_connection_id,
+            client_id,
+            next_inbound_packet,
+            wall_clock_seconds(),
+        );
+    }
+
+    fn retain_at(
+        &mut self,
+        local_connection_id: u32,
+        client_id: ClientId,
+        next_inbound_packet: u32,
+        retained_at_seconds: i64,
+    ) {
         self.connections.insert(
             local_connection_id,
             ClosedConnection {
                 client_id,
                 next_inbound_packet,
+                retained_at_seconds,
             },
         );
+    }
+
+    pub fn expire(&mut self) {
+        self.expire_at(wall_clock_seconds());
+    }
+
+    fn expire_at(&mut self, now_seconds: i64) {
+        self.connections.retain(|_, connection| {
+            now_seconds.saturating_sub(connection.retained_at_seconds)
+                <= crate::ACCEPT_TIMEOUT_SECONDS
+        });
     }
 
     pub fn contains(&self, local_connection_id: u32) -> bool {
@@ -87,6 +124,15 @@ impl ClosedConnectionRouter {
     }
 
     pub fn recover(&mut self, packet: &PostMortemPacket) -> Option<PostMortemReplay> {
+        self.recover_at(packet, wall_clock_seconds())
+    }
+
+    fn recover_at(
+        &mut self,
+        packet: &PostMortemPacket,
+        now_seconds: i64,
+    ) -> Option<PostMortemReplay> {
+        self.expire_at(now_seconds);
         self.connections
             .remove(&packet.connection_id)
             .map(|connection| PostMortemReplay {
@@ -250,8 +296,8 @@ mod tests {
         // and then removes exactly that connection from the IO list
         // (src/C4Network2IO.cpp:520-570,1036-1055).
         let mut router = ClosedConnectionRouter::default();
-        router.retain(7, 3, 5);
-        router.retain(8, 4, 0);
+        router.retain_at(7, 3, 5, 100);
+        router.retain_at(8, 4, 0, 100);
         let recovery = PostMortemPacket {
             connection_id: 7,
             packet_counter: 7,
@@ -259,7 +305,7 @@ mod tests {
         };
 
         assert_eq!(
-            router.recover(&recovery),
+            router.recover_at(&recovery, 110),
             Some(PostMortemReplay {
                 connection_id: 7,
                 client_id: 3,
@@ -268,7 +314,27 @@ mod tests {
         );
         assert!(!router.contains(7));
         assert!(router.contains(8));
-        assert_eq!(router.recover(&recovery), None);
+        assert_eq!(router.recover_at(&recovery, 110), None);
+    }
+
+    #[test]
+    fn recovery_router_expires_only_after_ten_whole_seconds() {
+        // CheckTimeout removes a closed connection only when the whole-second
+        // difftime is strictly greater than C4NetAcceptTimeout (10 seconds).
+        // A late PID_PostMortem then misses GetConnectionByID and is ignored
+        // (src/C4Network2IO.cpp:1047-1052,1177-1181).
+        let mut router = ClosedConnectionRouter::default();
+        router.retain_at(7, 3, 5, 100);
+        let recovery = PostMortemPacket {
+            connection_id: 7,
+            packet_counter: 7,
+            packets: vec![vec![0x10, 0x05], vec![0x10, 0x06]],
+        };
+
+        router.expire_at(110);
+        assert!(router.contains(7));
+        assert_eq!(router.recover_at(&recovery, 111), None);
+        assert!(!router.contains(7));
     }
 
     #[test]

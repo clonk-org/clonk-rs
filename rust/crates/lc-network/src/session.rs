@@ -3228,6 +3228,9 @@ async fn run_host(
                 request_missing_controls(&mut state).await;
             }
             _ = resource_timer.tick() => {
+                // C4Network2IO::CheckTimeout removes closed routes once their
+                // ten-second post-mortem recovery window has elapsed.
+                state.closed_routes.expire();
                 let now_seconds = state.resource_epoch.elapsed().as_secs();
                 if let Some(backend) = state.resource_backend.as_mut() {
                     let mut random = resource_safe_random;
@@ -4000,6 +4003,7 @@ async fn handle_post_mortem_recovery(
     ping_ms: i32,
     state: &mut HostState,
 ) {
+    state.closed_routes.expire();
     if let Some(expected_client_id) = state.closed_routes.client_id(packet.connection_id) {
         if expected_client_id != source_client_id {
             return;
@@ -5721,6 +5725,13 @@ impl ClientRouteManager {
             .map(|(route_id, _)| *route_id)
     }
 
+    fn expire_closed_routes(&mut self) {
+        self.closed_routes.expire();
+        let closed_routes = &self.closed_routes;
+        self.closed_route_peers
+            .retain(|route_id, _| closed_routes.contains(*route_id));
+    }
+
     async fn send_message(&mut self, mut message: ControlMessage) -> Result<(), TransportError> {
         let traffic = match &message {
             ControlMessage::Resource(packet) => resource_traffic_class(packet),
@@ -5756,6 +5767,7 @@ impl ClientRouteManager {
     }
 
     fn recover_post_mortem(&mut self, packet: crate::PostMortemPacket) -> bool {
+        self.expire_closed_routes();
         let Some(replay) = self.closed_routes.recover(&packet) else {
             return false;
         };
@@ -6532,6 +6544,7 @@ async fn run_client_loop_with_routes(
                 }
             }
             _ = resource_timer.tick() => {
+                transport.expire_closed_routes();
                 let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
                 if let Some(backend) = resource_state.backend.as_mut() {
                     let mut random = resource_safe_random;
