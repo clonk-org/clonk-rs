@@ -32,6 +32,26 @@ pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr =
 pub const CURRENT_GAME_VERSION: [i32; 4] = [4, 9, 11, 0];
 pub const CURRENT_GAME_BUILD: i32 = 362;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MasterserverVersion {
+    pub version: [i32; 4],
+    pub build: i32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MasterserverReplyInfo {
+    pub version: Option<MasterserverVersion>,
+    pub motd: String,
+    pub motd_url: String,
+    pub league_server_redirect: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReferenceQueryResponse {
+    pub references: Vec<NetworkGameReference>,
+    pub masterserver: MasterserverReplyInfo,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkGameReference {
     pub title: String,
@@ -570,6 +590,7 @@ fn normalize_master_server_url(value: &str) -> String {
 pub enum StartupGameSearchEvent {
     Cleared,
     ReferencesUpdated(Vec<NetworkGameReference>),
+    MasterserverReply(MasterserverReplyInfo),
     SearchError {
         source: Option<ReferenceQuerySource>,
         message: String,
@@ -677,7 +698,7 @@ struct QueryResult {
     generation: u64,
     masterserver_generation: u64,
     source: ReferenceQuerySource,
-    result: Result<Vec<NetworkGameReference>, ReferenceFetchError>,
+    result: Result<ReferenceQueryResponse, ReferenceFetchError>,
 }
 
 struct DiscoverySocket {
@@ -789,13 +810,20 @@ async fn run_game_search(
                 continue;
             }
             match query.result {
-                Ok(references) => {
+                Ok(response) => {
+                    let ReferenceQueryResponse {
+                        references,
+                        masterserver,
+                    } = response;
                     let now = Instant::now();
                     search.merge_references_at(now, references);
                     search.expire_references_at(now);
                     let _ = events.send(StartupGameSearchEvent::ReferencesUpdated(
                         search.references().to_vec(),
                     ));
+                    if query.source == ReferenceQuerySource::Masterserver {
+                        let _ = events.send(StartupGameSearchEvent::MasterserverReply(masterserver));
+                    }
                 }
                 Err(error) => {
                     let _ = events.send(StartupGameSearchEvent::SearchError {
@@ -889,9 +917,12 @@ async fn execute_search_command(
             let query_tx = query_tx.clone();
             let reference_config = reference_config.clone();
             let query = tokio::spawn(async move {
-                let result =
-                    fetch_reference_endpoint_with_config(endpoint, timeout, &reference_config)
-                        .await;
+                let result = fetch_reference_query_endpoint_with_config(
+                    endpoint,
+                    timeout,
+                    &reference_config,
+                )
+                .await;
                 let _ = query_tx.send(QueryResult {
                     generation,
                     masterserver_generation,
@@ -953,22 +984,36 @@ pub(crate) fn multicast_interface_indices() -> Vec<u32> {
 pub fn parse_reference_response(
     bytes: &[u8],
 ) -> Result<Vec<NetworkGameReference>, ReferenceParseError> {
-    parse_reference_response_with_config(bytes, &ReferenceQueryConfig::default())
+    Ok(parse_reference_query_response(bytes)?.references)
 }
 
-fn parse_reference_response_with_config(
+pub fn parse_reference_query_response(
+    bytes: &[u8],
+) -> Result<ReferenceQueryResponse, ReferenceParseError> {
+    parse_reference_query_response_with_config(bytes, &ReferenceQueryConfig::default())
+}
+
+pub fn parse_reference_query_response_with_config(
     bytes: &[u8],
     config: &ReferenceQueryConfig,
-) -> Result<Vec<NetworkGameReference>, ReferenceParseError> {
+) -> Result<ReferenceQueryResponse, ReferenceParseError> {
     let mut chunks = Vec::new();
     let mut current = None::<Vec<&[u8]>>;
     for line in bytes.split(|byte| *byte == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line == b"[Reference]" {
+        if let Some((indent, section)) = reference_ini_section(line) {
+            if indent != 0 {
+                if let Some(chunk) = current.as_mut() {
+                    chunk.push(line);
+                }
+                continue;
+            }
             if let Some(chunk) = current.take() {
                 chunks.push(chunk);
             }
-            current = Some(Vec::new());
+            if section == b"Reference" {
+                current = Some(Vec::new());
+            }
         } else if let Some(chunk) = current.as_mut() {
             chunk.push(line);
         }
@@ -976,17 +1021,165 @@ fn parse_reference_response_with_config(
     if let Some(chunk) = current {
         chunks.push(chunk);
     }
-    chunks
+    let references = chunks
         .into_iter()
         .map(|lines| parse_reference_chunk(lines, config))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    Ok(ReferenceQueryResponse {
+        references,
+        masterserver: parse_masterserver_reply_info(bytes, config)?,
+    })
+}
+
+fn parse_masterserver_reply_info(
+    bytes: &[u8],
+    config: &ReferenceQueryConfig,
+) -> Result<MasterserverReplyInfo, ReferenceParseError> {
+    let mut info = MasterserverReplyInfo::default();
+    let mut found_engine_section = false;
+    let mut in_engine_section = false;
+    let mut nested_section_indents = Vec::new();
+    let mut saw_version = false;
+    let mut saw_motd = false;
+    let mut saw_motd_url = false;
+    let mut saw_redirect = false;
+
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some((indent, section)) = reference_ini_section(line) {
+            if indent == 0 {
+                if in_engine_section {
+                    break;
+                }
+                if !found_engine_section && section == b"LegacyClonk" {
+                    found_engine_section = true;
+                    in_engine_section = true;
+                    nested_section_indents.clear();
+                }
+            } else if in_engine_section {
+                while nested_section_indents
+                    .last()
+                    .is_some_and(|parent| *parent >= indent)
+                {
+                    nested_section_indents.pop();
+                }
+                nested_section_indents.push(indent);
+            }
+            continue;
+        }
+        if !in_engine_section {
+            continue;
+        }
+
+        let content = trim_reference_horizontal_start(line);
+        if content.is_empty() {
+            continue;
+        }
+        let indent = line.len() - content.len();
+        let value_indent = indent.saturating_add(1);
+        while nested_section_indents
+            .last()
+            .is_some_and(|section| *section >= value_indent)
+        {
+            nested_section_indents.pop();
+        }
+        if !nested_section_indents.is_empty() {
+            continue;
+        }
+        let Some(equal) = content.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let key = &content[..equal];
+        let value = decode_masterserver_raw_value(&content[equal + 1..], config)?;
+        match key {
+            b"Version" if !saw_version => {
+                saw_version = true;
+                let version = parse_masterserver_version(&value);
+                info.version = (version.version[0] != 0).then_some(version);
+            }
+            b"MOTD" if !saw_motd => {
+                saw_motd = true;
+                info.motd = value;
+            }
+            b"MOTDURL" if !saw_motd_url => {
+                saw_motd_url = true;
+                info.motd_url = value;
+            }
+            b"LeagueServerRedirect" if !saw_redirect => {
+                saw_redirect = true;
+                info.league_server_redirect = value;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(info)
+}
+
+fn parse_masterserver_version(value: &str) -> MasterserverVersion {
+    let mut parts = [0_i32; 5];
+    for (index, part) in value.split(',').take(parts.len()).enumerate() {
+        let part = part.trim();
+        if !part.is_empty() {
+            parts[index] = part.parse().unwrap_or_default();
+        }
+    }
+    MasterserverVersion {
+        version: [parts[0], parts[1], parts[2], parts[3]],
+        build: parts[4],
+    }
+}
+
+fn decode_masterserver_raw_value(
+    value: &[u8],
+    config: &ReferenceQueryConfig,
+) -> Result<String, ReferenceParseError> {
+    let value = trim_reference_horizontal_start(value);
+    let end = value
+        .iter()
+        .position(|byte| matches!(*byte, b'\r' | 0))
+        .unwrap_or(value.len());
+    config.decode(&value[..end])
+}
+
+fn reference_ini_section(line: &[u8]) -> Option<(usize, &[u8])> {
+    let content = trim_reference_horizontal_start(line);
+    let indent = line.len() - content.len();
+    let content = content.strip_prefix(b"[")?;
+    let close = content.iter().position(|byte| *byte == b']')?;
+    let name = &content[..close];
+    if !name.first().is_some_and(|byte| byte.is_ascii_alphabetic())
+        || !name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_'))
+    {
+        return None;
+    }
+    Some((indent, name))
+}
+
+fn trim_reference_horizontal_start(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|byte| matches!(*byte, b' ' | b'\t')) {
+        bytes = &bytes[1..];
+    }
+    bytes
 }
 
 pub async fn fetch_reference_endpoint(
     endpoint: ReferenceEndpoint,
     timeout: Duration,
 ) -> Result<Vec<NetworkGameReference>, ReferenceFetchError> {
-    fetch_reference_endpoint_with_config(endpoint, timeout, &ReferenceQueryConfig::default()).await
+    Ok(fetch_reference_query_endpoint(endpoint, timeout)
+        .await?
+        .references)
+}
+
+pub async fn fetch_reference_query_endpoint(
+    endpoint: ReferenceEndpoint,
+    timeout: Duration,
+) -> Result<ReferenceQueryResponse, ReferenceFetchError> {
+    fetch_reference_query_endpoint_with_config(endpoint, timeout, &ReferenceQueryConfig::default())
+        .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1042,6 +1235,18 @@ pub async fn fetch_reference_endpoint_with_config(
     timeout: Duration,
     config: &ReferenceQueryConfig,
 ) -> Result<Vec<NetworkGameReference>, ReferenceFetchError> {
+    Ok(
+        fetch_reference_query_endpoint_with_config(endpoint, timeout, config)
+            .await?
+            .references,
+    )
+}
+
+pub async fn fetch_reference_query_endpoint_with_config(
+    endpoint: ReferenceEndpoint,
+    timeout: Duration,
+    config: &ReferenceQueryConfig,
+) -> Result<ReferenceQueryResponse, ReferenceFetchError> {
     let plan = ReferenceRequestPlan::for_endpoint(endpoint);
     let client = plan
         .client_builder()
@@ -1059,11 +1264,11 @@ pub async fn fetch_reference_endpoint_with_config(
         .error_for_status()?;
     let source = response.remote_addr();
     let bytes = response.bytes().await?;
-    let mut references = parse_reference_response_with_config(&bytes, config)?;
+    let mut response = parse_reference_query_response_with_config(&bytes, config)?;
     if let Some(source) = source {
-        fill_reference_source_addresses(&mut references, source);
+        fill_reference_source_addresses(&mut response.references, source);
     }
-    Ok(references)
+    Ok(response)
 }
 
 fn fill_reference_source_addresses(references: &mut [NetworkGameReference], source: SocketAddr) {
@@ -1655,8 +1860,9 @@ mod tests {
             let mut body = b"[Reference]\nTitle=\"".to_vec();
             body.extend_from_slice(encoded);
             body.extend_from_slice(b"\"\n");
-            let reference = parse_reference_response_with_config(&body, &config)
+            let reference = parse_reference_query_response_with_config(&body, &config)
                 .unwrap()
+                .references
                 .remove(0);
             assert_eq!(reference.title, expected, "{configured}");
         }

@@ -29336,6 +29336,7 @@ impl GameApp {
                     }
                     self.status_text = format!("Found {count} network game(s)");
                 }
+                lc_network::StartupGameSearchEvent::MasterserverReply(_) => {}
                 lc_network::StartupGameSearchEvent::SearchError { source, message } => {
                     tracing::warn!(?source, %message, "network game search failed");
                     self.status_text = message;

@@ -3,8 +3,9 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpListener};
 use std::time::Duration;
 
 use lc_network::{
-    fetch_reference_endpoint, fetch_reference_endpoint_with_config, parse_reference_response,
-    LanProbeTrigger, NetworkAddress, NetworkGameReference, NetworkGameSearch,
+    fetch_reference_endpoint, fetch_reference_endpoint_with_config,
+    parse_reference_query_response, parse_reference_response, LanProbeTrigger,
+    MasterserverVersion, NetworkAddress, NetworkGameReference, NetworkGameSearch,
     NetworkGameSearchConfig, NetworkProtocol, ReferenceEndpoint, ReferenceQueryConfig,
     ReferenceQuerySource, SearchCommand, StartupGameSearch, StartupGameSearchEvent,
     DEFAULT_MASTER_SERVER_URL,
@@ -362,6 +363,101 @@ Title="Second Game"
         references[1].tcp_addresses,
         vec!["[2001:db8::7]:12112".parse().unwrap()]
     );
+}
+
+#[test]
+fn masterserver_reply_parser_returns_extras_and_references() {
+    // GetReferences reads the engine envelope independently from the repeated
+    // Reference sections. The message fields use RCT_All: leading horizontal
+    // whitespace is skipped, while quotes, backslashes, equals, and trailing
+    // bytes remain literal (src/C4Network2Reference.cpp:994-1037;
+    // src/StdCompiler.cpp:936-1001).
+    let mut body = br#"[LegacyClonk]
+Version=4,9,12,1,400
+MOTD=  Welcome ~ \344 "quoted"@@
+MOTDURL=https://example.invalid/news?a=1&b=2
+LeagueServerRedirect=https://new.example.invalid/league
+
+[Reference]
+Title="Visible game"
+"#
+    .to_vec();
+    *body.iter_mut().find(|byte| **byte == b'~').unwrap() = 0xe4;
+    for byte in body.iter_mut().filter(|byte| **byte == b'@') {
+        *byte = b' ';
+    }
+
+    let response = parse_reference_query_response(&body).unwrap();
+
+    assert_eq!(
+        response.masterserver.version,
+        Some(MasterserverVersion {
+            version: [4, 9, 12, 1],
+            build: 400,
+        })
+    );
+    assert_eq!(
+        response.masterserver.motd,
+        "Welcome ä \\344 \"quoted\"  "
+    );
+    assert_eq!(
+        response.masterserver.motd_url,
+        "https://example.invalid/news?a=1&b=2"
+    );
+    assert_eq!(
+        response.masterserver.league_server_redirect,
+        "https://new.example.invalid/league"
+    );
+    assert_eq!(response.references.len(), 1);
+    assert_eq!(response.references[0].title, "Visible game");
+    assert_eq!(
+        parse_reference_response(&body).unwrap(),
+        response.references
+    );
+}
+
+#[test]
+fn masterserver_reply_zero_major_version_is_unset() {
+    // fVerSet is assigned only from MasterVersion.iVer[0], regardless of the
+    // remaining components and build (src/C4Network2Reference.cpp:999-1037).
+    // Placing the engine section last also pins root-section partitioning.
+    let response = parse_reference_query_response(
+        br#"[Reference]
+Title="Visible game"
+
+[LegacyClonk]
+Version=0,9,12,1,400
+MOTD=Still available
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(response.masterserver.version, None);
+    assert_eq!(response.masterserver.motd, "Still available");
+    assert_eq!(response.references.len(), 1);
+    assert_eq!(response.references[0].title, "Visible game");
+    assert_eq!(response.references[0].version, [0; 4]);
+}
+
+#[test]
+fn masterserver_reply_malformed_version_defaults_without_hiding_references() {
+    // Every C4GameVersion component and its build use default adaptors, so a
+    // malformed optional master version becomes zero instead of failing the
+    // complete GetReferences parse (src/C4GameVersion.h:52-62).
+    let response = parse_reference_query_response(
+        br#"[LegacyClonk]
+Version=bogus,9,12,1,400
+MOTD=Still available
+
+[Reference]
+Title="Visible game"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(response.masterserver.version, None);
+    assert_eq!(response.masterserver.motd, "Still available");
+    assert_eq!(response.references[0].title, "Visible game");
 }
 
 #[test]
@@ -734,13 +830,83 @@ Title="Visible ~ Game"
                 visible = Some(references);
                 break;
             }
-            StartupGameSearchEvent::Cleared | StartupGameSearchEvent::SearchError { .. } => {}
+            StartupGameSearchEvent::Cleared
+            | StartupGameSearchEvent::MasterserverReply(_)
+            | StartupGameSearchEvent::SearchError { .. } => {}
         }
     }
     server.join().unwrap();
     let visible = visible.expect("master reference update");
     assert_eq!(visible[0].title, "Visible А Game");
     assert_eq!(visible[0].host_name, "Visible Host");
+}
+
+#[test]
+fn masterserver_reply_reaches_background_search_event() {
+    let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let master_address = listener.local_addr().unwrap();
+    let discovery_port = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        let body = br#"[LegacyClonk]
+Version=4,9,12,1,400
+MOTD=Network news
+MOTDURL=https://example.invalid/news
+LeagueServerRedirect=https://new.example.invalid/league
+
+[Reference]
+Title="Visible game"
+"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let search = StartupGameSearch::start(NetworkGameSearchConfig {
+        internet_enabled: true,
+        use_alternate_server: false,
+        master_server_url: format!("http://{master_address}/"),
+        discovery_port,
+    })
+    .unwrap();
+    search.refresh().unwrap();
+
+    let mut reply = None;
+    let mut references = None;
+    for _ in 0..10 {
+        match search
+            .events()
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+        {
+            StartupGameSearchEvent::MasterserverReply(info) => reply = Some(info),
+            StartupGameSearchEvent::ReferencesUpdated(visible) => references = Some(visible),
+            StartupGameSearchEvent::Cleared | StartupGameSearchEvent::SearchError { .. } => {}
+        }
+        if reply.is_some() && references.is_some() {
+            break;
+        }
+    }
+    server.join().unwrap();
+
+    let reply = reply.expect("masterserver metadata event");
+    assert_eq!(reply.motd, "Network news");
+    assert_eq!(
+        reply.league_server_redirect,
+        "https://new.example.invalid/league"
+    );
+    let references = references.expect("masterserver reference update");
+    assert_eq!(references[0].title, "Visible game");
 }
 
 #[tokio::test]
