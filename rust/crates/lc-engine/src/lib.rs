@@ -22344,6 +22344,17 @@ impl Engine {
             .evaluate_league(success, result_message, players);
     }
 
+    /// Applies a network failure verdict without replacing an earlier,
+    /// more-specific result.
+    pub fn evaluate_network_round_results(
+        &mut self,
+        result: RoundResultsNetworkResult,
+        result_message: Option<Vec<u8>>,
+    ) {
+        self.round_results
+            .evaluate_network(result, result_message);
+    }
+
     /// Close the process-local query input and build its synchronized answer
     /// packet. This is the `MarkMessageBoardQueryAnswered` step performed by
     /// C4ChatInputDialog before the queued control executes.

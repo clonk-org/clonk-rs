@@ -24395,6 +24395,7 @@ impl GameApp {
             self.status_text = "Network desync detected".to_string();
             return;
         }
+        self.play_ui_sound("SyncError");
         if let Some(local_client_id) = self
             .network
             .as_ref()
@@ -24408,6 +24409,11 @@ impl GameApp {
                 local_client_id,
                 lc_network::LeagueDisconnectReason::Desync,
             );
+            self.engine.evaluate_network_round_results(
+                lc_engine::RoundResultsNetworkResult::NetworkError,
+                Some(b"Network: Synchronization loss!".to_vec()),
+            );
+            self.snapshot.round_results = self.engine.snapshot().round_results;
             self.change_network_control_to_local(local_client_id);
         }
         self.status_text = "Network desync detected; disconnected from host".to_string();
@@ -76869,6 +76875,19 @@ public func Grant(password) { return GainMissionAccess(password); }
         // ff 1a 00 00 00 42 02 85 64 00 32 00 6d 03 00 00 74 80 01 00
         // 00 00 00 00 98 01 99 01 56 02 00.
         let mut app = new_running_sandbox_app();
+        let sound_dir = tempdir().expect("desync sound fixture directory");
+        let sound_scenario = sound_dir.path().join("DesyncAudio.c4s");
+        fs::create_dir_all(&sound_scenario).expect("create desync sound fixture");
+        fs::write(
+            sound_scenario.join("SyncError.wav"),
+            silent_pcm_wav(100),
+        )
+        .expect("write SyncError fixture");
+        let audio = app.audio.as_mut().expect("sandbox audio context");
+        audio.options.sound_enabled = true;
+        assert!(audio.resolver.configure_scenario(Some(&sound_scenario)));
+        assert!(audio.loaded_sounds.is_empty());
+        assert!(app.snapshot.audio.is_empty());
         let local_player = app.local_owner;
         let local_client = 1;
         let remote_player = 17;
@@ -76940,6 +76959,133 @@ public func Grant(password) { return GainMissionAccess(password); }
             app.status_text,
             "Network desync detected; disconnected from host"
         );
+        assert_eq!(
+            app.engine.snapshot().round_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::NetworkError)
+        );
+        assert_eq!(
+            app.engine
+                .snapshot()
+                .round_results
+                .network_result_message
+                .as_slice(),
+            &b"Network: Synchronization loss!"[..]
+        );
+        assert_eq!(
+            app.snapshot.round_results,
+            app.engine.snapshot().round_results,
+            "the presentation snapshot exposes the verdict immediately"
+        );
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .expect("sandbox audio context remains")
+                .loaded_sounds
+                .len(),
+            1,
+            "SyncError is resolved and played immediately"
+        );
+        assert!(
+            app.snapshot.audio.is_empty(),
+            "the immediate UI cue is not replayed through engine audio"
+        );
+    }
+
+    #[test]
+    fn league_client_desync_reports_joined_local_players_before_change_to_local() {
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        let local_info = 55;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.control_player_infos.replace_snapshot(
+            local_info,
+            [lc_engine::PlayerInfoControlData {
+                client_id: local_client,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: local_info,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let (manager, events, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_is_league = true;
+
+        let local = app.engine.sync_check(local_client);
+        let mut remote = local.clone();
+        remote.random_count = remote.random_count.wrapping_add(1);
+        remote.by_client = 0;
+        app.sync_checks.record_local(local);
+        events
+            .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
+                remote,
+            )))
+            .expect("queue mismatching host sync check");
+        let report = std::thread::spawn(move || commands.complete_league_disconnect_report());
+
+        app.process_network_events()
+            .expect("process league desync");
+
+        let (reason, players) = report
+            .join()
+            .expect("join league report worker")
+            .expect("desync report was sent before network clear");
+        assert_eq!(reason, lc_network::LeagueDisconnectReason::Desync);
+        assert_eq!(players.client_id, local_client);
+        assert_eq!(players.players.len(), 1);
+        assert_eq!(players.players[0].id, local_info);
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert_eq!(
+            app.snapshot.round_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::NetworkError)
+        );
+        assert_eq!(
+            app.snapshot.round_results.network_result_message.as_slice(),
+            &b"Network: Synchronization loss!"[..]
+        );
+    }
+
+    #[test]
+    fn host_ignores_remote_sync_check_without_desync_side_effects() {
+        let mut app = new_running_sandbox_app();
+        let (manager, events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        let status_before = app.status_text.clone();
+        let local = app.engine.sync_check(0);
+        let mut remote = local.clone();
+        remote.random_count = remote.random_count.wrapping_add(1);
+        remote.by_client = 7;
+        app.sync_checks.record_local(local);
+        events
+            .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
+                remote,
+            )))
+            .expect("queue client sync check");
+
+        app.process_network_events()
+            .expect("host ignores client sync check");
+
+        assert!(app.network.is_some());
+        assert!(matches!(app.network_mode, Some(NetworkMode::Host(_))));
+        assert_eq!(app.status_text, status_before);
+        assert!(app.engine.snapshot().round_results.network_result.is_none());
+        assert!(app.snapshot.round_results.network_result.is_none());
+        assert!(app.sync_checks.remote.is_empty());
     }
 
     #[test]
