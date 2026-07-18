@@ -1854,7 +1854,13 @@ impl ControlPlayerInfoRegistry {
                 issued_join_ids.insert(player.id);
                 let (filename, source) = match player.resource.as_ref() {
                     Some(resource) => (
-                        path_for_resource(resource)?,
+                        // LoadResources installs a resource before its transfer
+                        // completes, and native queues the by-resource join at
+                        // that point. The filename is only authoritative for
+                        // the issuer; synchronized execution resolves this
+                        // form from the resource core.
+                        path_for_resource(resource)
+                            .unwrap_or_else(|| resource.filename.clone()),
                         JoinPlayerSource::Resource(resource.clone()),
                     ),
                     None if player.is_script_player() => (
@@ -4706,6 +4712,89 @@ mod tests {
                 ..Default::default()
             }]
         );
+        assert!(registry.issue_unjoined_players(3, |_| None).is_empty());
+    }
+
+    #[test]
+    fn host_issues_resource_join_before_local_resource_completion() {
+        // LoadResources creates the resource node while it is still loading;
+        // JoinUnjoinedPlayersInControlQueue immediately queues the by-resource
+        // control and PreExecute performs the later wait
+        // (src/C4Network2Players.cpp:353-388; src/C4Control.cpp:811-825).
+        let resource = NetworkResourceCore {
+            resource_type: 3,
+            id: 61,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Remote.c4p".to_vec())
+                .expect("valid resource filename"),
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![ControlPlayerInfoEntry {
+                id: 7,
+                flags: crate::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(resource.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+            ..Default::default()
+        });
+
+        let joins = registry.issue_unjoined_players(3, |_| None);
+
+        assert_eq!(
+            joins,
+            vec![JoinPlayerControlData {
+                filename: resource.filename.clone(),
+                at_client: 3,
+                info_id: 7,
+                source: JoinPlayerSource::Resource(resource),
+                by_client: 0,
+            }]
+        );
+        assert!(registry
+            .issue_unjoined_players(3, |_| {
+                Some(LegacyCString::from_bytes(b"Complete.c4p".to_vec()).unwrap())
+            })
+            .is_empty());
+    }
+
+    #[test]
+    fn host_marks_fileless_user_join_issued_before_dropping_it() {
+        // Native sets PIF_JoinIssued before rejecting a user player without a
+        // resource, so a later refresh cannot resurrect the failed join
+        // (src/C4Network2Players.cpp:353-378).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![ControlPlayerInfoEntry {
+                id: 7,
+                ..Default::default()
+            }],
+            by_client: 0,
+            ..Default::default()
+        });
+
+        assert!(registry.issue_unjoined_players(3, |_| None).is_empty());
+
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![ControlPlayerInfoEntry {
+                id: 7,
+                flags: crate::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(NetworkResourceCore {
+                    resource_type: 3,
+                    id: 61,
+                    loadable: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            by_client: 0,
+            ..Default::default()
+        });
         assert!(registry.issue_unjoined_players(3, |_| None).is_empty());
     }
 

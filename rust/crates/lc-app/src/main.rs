@@ -31638,41 +31638,48 @@ impl GameApp {
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let locally_controlled =
             local_client_id == Some(join.at_client) && !info.is_script_player();
-        let player_file = if info.is_script_player() && join.filename.is_empty() {
-            // Script players have no .c4p file even on the host that issued
-            // their fileless JoinPlayer control (C4Control.cpp:745-749).
-            None
-        } else if local_client_id == Some(join.by_client) {
-            let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
-            match PlayerFile::load_from_path(&path) {
-                Ok(file) => Some(file),
-                Err(error) => {
-                    tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load local player file");
+        let player_file = match &join.source {
+            lc_engine::JoinPlayerSource::Resource(core) => {
+                // Rust has no stable local temp path to serialize while this
+                // resource is loading. Resolve the completed registry entry by
+                // ID on the authoring host too, after PreExecute releases it.
+                let Some(path) = self.admission_resources.complete_path(core.id) else {
                     return Ok(());
-                }
-            }
-        } else {
-            match &join.source {
-                lc_engine::JoinPlayerSource::Embedded(_) => {
-                    match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
-                        Ok(lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
-                        Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
-                        Err(error) => {
-                            tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
-                            return Ok(());
-                        }
+                };
+                match PlayerFile::load_from_path(path) {
+                    Ok(file) => Some(file),
+                    Err(error) => {
+                        tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
+                        return Ok(());
                     }
                 }
-                lc_engine::JoinPlayerSource::Resource(core) => {
-                    let Some(path) = self.admission_resources.complete_path(core.id) else {
+            }
+            lc_engine::JoinPlayerSource::Embedded(_)
+                if info.is_script_player() && join.filename.is_empty() =>
+            {
+                // Script players have no .c4p file even on the host that issued
+                // their fileless JoinPlayer control (C4Control.cpp:745-749).
+                None
+            }
+            lc_engine::JoinPlayerSource::Embedded(_)
+                if local_client_id == Some(join.by_client) =>
+            {
+                let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
+                match PlayerFile::load_from_path(&path) {
+                    Ok(file) => Some(file),
+                    Err(error) => {
+                        tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load local player file");
                         return Ok(());
-                    };
-                    match PlayerFile::load_from_path(path) {
-                        Ok(file) => Some(file),
-                        Err(error) => {
-                            tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
-                            return Ok(());
-                        }
+                    }
+                }
+            }
+            lc_engine::JoinPlayerSource::Embedded(_) => {
+                match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
+                    Ok(lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
+                    Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
+                    Err(error) => {
+                        tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
+                        return Ok(());
                     }
                 }
             }
@@ -72686,6 +72693,70 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn running_host_queues_remote_join_before_player_resource_completes() {
+        // HandlePlayerInfo starts loading the advertised resource and queues
+        // JoinPlayer immediately. Resource completeness is checked later by
+        // the synchronized control's PreExecute
+        // (src/C4Network2Players.cpp:245-269,353-388;
+        // src/C4Control.cpp:811-825).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_clients.register(3, true, false);
+        let tick = app.local_control_submission_tick();
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 61,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"Remote.c4p".to_vec())
+                .expect("valid resource filename"),
+            ..Default::default()
+        };
+
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 41,
+                        flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                        resource: Some(resource.clone()),
+                        ..Default::default()
+                    }],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue direct resource-backed PlayerInfo");
+
+        app.process_network_events()
+            .expect("process direct resource-backed PlayerInfo");
+
+        assert_eq!(
+            app.admission_resources.status(resource.id),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
+        assert_eq!(
+            commands.take_submitted_join_players(),
+            vec![(
+                tick,
+                lc_engine::JoinPlayerControlData {
+                    filename: resource.filename.clone(),
+                    at_client: 3,
+                    info_id: 41,
+                    source: lc_engine::JoinPlayerSource::Resource(resource),
+                    by_client: 0,
+                },
+            )]
+        );
+    }
+
+    #[test]
     fn offline_create_script_player_joins_through_player_info_control_path() {
         let mut app = new_running_sandbox_app();
         let existing_player_info_id = app
@@ -75895,10 +75966,10 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn complete_resource_join_uses_registry_path() {
-        // Resource-backed execution relooks up solely by resource ID and
-        // passes the registry's getFile() path, not packet Filename or the
-        // core filename (src/C4Control.cpp:758-764;
-        // src/C4Network2Res.cpp:1388-1412).
+        // Rust resolves resource-backed execution by resource ID, including on
+        // the authoring host when issuance preceded resource completion. Use
+        // the registry path, not packet Filename or the core filename
+        // (src/C4Control.cpp:758-764; src/C4Network2Res.cpp:1388-1412).
         let mut app = new_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
@@ -75948,7 +76019,7 @@ protected func InputCallback(string answer, int player)
                         at_client: 0,
                         info_id,
                         source: lc_engine::JoinPlayerSource::Resource(resource),
-                        by_client: 1,
+                        by_client: 0,
                     }),
                 ],
             })
