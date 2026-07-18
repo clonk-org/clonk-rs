@@ -125,9 +125,10 @@ use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
 use lc_frontend::{
     ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
     GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
-    InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo, PlayerOverlay,
-    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
-    ViewportInput, ViewportPointer, default_owner_color,
+    InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction, MainMenuItem,
+    MaterialRenderInfo, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
+    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
+    default_owner_color,
 };
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
@@ -36932,10 +36933,16 @@ fn collect_crew_inventory(
                     })
                     .count();
             let child = eligible[current];
+            let prepared = inventory_object_picture_layers(engine, child);
+            let (picture, picture_overlays) = prepared
+                .map(|prepared| (Some(prepared.base), prepared.overlays))
+                .unwrap_or_default();
             groups.push(InventoryOverlay {
                 object_id: child.id,
                 definition_id: child.definition_id.clone(),
-                picture: inventory_object_picture(engine, child),
+                picture,
+                additive: child.blit_mode & 1 != 0,
+                picture_overlays,
                 count,
             });
         }
@@ -36949,6 +36956,19 @@ fn inventory_object_picture(engine: &Engine, object: &ObjectSnapshot) -> Option<
     let image = engine.object_picture_image(object)?;
     compose_inventory_picture(
         image,
+        engine.object_picture_overlay_images(object),
+        object.color,
+        object.color_modulation,
+        object.blit_mode,
+    )
+}
+
+fn inventory_object_picture_layers(
+    engine: &Engine,
+    object: &ObjectSnapshot,
+) -> Option<PreparedInventoryPicture> {
+    prepare_inventory_picture(
+        engine.object_picture_image(object)?,
         engine.object_picture_overlay_images(object),
         object.color,
         object.color_modulation,
@@ -37005,7 +37025,7 @@ fn crop_menu_image(
     Some(ImageData::new(width, height, pixels))
 }
 
-fn blit_menu_image(surface: &mut Surface, image: &ImageData, destination: Rect) -> Option<()> {
+fn copy_menu_image(surface: &mut Surface, image: &ImageData, destination: Rect) -> Option<()> {
     let source = Surface::from_bytes(
         image.width(),
         image.height(),
@@ -37013,16 +37033,12 @@ fn blit_menu_image(surface: &mut Surface, image: &ImageData, destination: Rect) 
         image.pixels().to_vec(),
     )
     .ok()?;
-    surface
-        .blit_stretched(
-            &source,
-            Rect::new(0, 0, image.width(), image.height()),
-            destination,
-            Color::opaque(255, 255, 255),
-            BlitMode::Normal,
-        )
-        .ok()?;
-    Some(())
+    copy_stretched_picture(
+        &source,
+        Rect::new(0, 0, image.width(), image.height()),
+        surface,
+        destination,
+    )
 }
 
 fn menu_aspect_fit_rect(source_width: u32, source_height: u32, destination: Rect) -> Option<Rect> {
@@ -37042,13 +37058,13 @@ fn menu_aspect_fit_rect(source_width: u32, source_height: u32, destination: Rect
     Some(fitted)
 }
 
-fn blit_menu_image_aspect(
+fn copy_menu_image_aspect(
     surface: &mut Surface,
     image: &ImageData,
     destination: Rect,
 ) -> Option<()> {
     let fitted = menu_aspect_fit_rect(image.width(), image.height(), destination)?;
-    blit_menu_image(surface, image, fitted)
+    copy_menu_image(surface, image, fitted)
 }
 
 fn menu_rank_picture(
@@ -37095,10 +37111,15 @@ fn menu_rank_picture(
     };
     let base = crop_menu_image(symbols, base_rank * cell, 0, cell, cell)?;
     let mut composed = Surface::new(cell, cell, PixelFormat::Rgba8888);
-    blit_menu_image(&mut composed, &base, Rect::new(0, 0, cell, cell))?;
+    copy_menu_image(&mut composed, &base, Rect::new(0, 0, cell, cell))?;
     if let Some(extension) = extension {
         let size = cell.saturating_mul(2) / 3;
-        blit_menu_image(&mut composed, &extension, Rect::new(0, 0, size, size))?;
+        software_blit_menu_image(
+            &mut composed,
+            &extension,
+            Rect::new(0, 0, size, size),
+            BlitMode::Normal,
+        )?;
     }
     Some(ImageData::new(cell, cell, composed.pixels().to_vec()))
 }
@@ -37117,7 +37138,7 @@ fn menu_object_rank_picture(
         side
     };
     let mut composed = Surface::new(width, side, PixelFormat::Rgba8888);
-    blit_menu_image_aspect(&mut composed, &object_picture, Rect::new(0, 0, side, side))?;
+    copy_menu_image_aspect(&mut composed, &object_picture, Rect::new(0, 0, side, side))?;
     if let Some(rank) = object.rank {
         if let Some(rank_picture) = menu_rank_picture(engine, hud, &object.definition_id, rank) {
             let rank_width = rank_picture.width().min(side);
@@ -37127,10 +37148,11 @@ fn menu_object_rank_picture(
             } else {
                 side.saturating_sub(rank_width) as i32
             };
-            blit_menu_image(
+            software_blit_menu_image(
                 &mut composed,
                 &rank_picture,
                 Rect::new(x, 0, rank_width, rank_height),
+                BlitMode::Normal,
             )?;
         }
     }
@@ -37147,7 +37169,10 @@ fn compose_owned_menu_picture(
 ) -> Option<ImageData> {
     let side = u32::try_from(object.symbol_size.max(1)).ok()?;
     let destination = Rect::new(0, 0, side, side);
-    let base_pixels = inventory_picture_pixels(&image, object.color);
+    let mut base_pixels = inventory_picture_pixels(&image, object.color);
+    let object_mode = inventory_blit_mode(object.blit_mode);
+    let object_modulation = inventory_modulation(object.color_modulation, object.blit_mode);
+    prepare_owned_menu_pixels(&mut base_pixels, object_modulation, object_mode);
     let base = Surface::from_bytes(
         image.width(),
         image.height(),
@@ -37155,29 +37180,16 @@ fn compose_owned_menu_picture(
         base_pixels,
     )
     .ok()?;
-    let object_mode = inventory_blit_mode(object.blit_mode);
-    let object_modulation = inventory_modulation(object.color_modulation, object.blit_mode)
-        .unwrap_or(Color::opaque(255, 255, 255));
     let mut composed = Surface::new(side, side, PixelFormat::Rgba8888);
-    composed
-        .blit_stretched(
-            &base,
-            Rect::new(0, 0, image.width(), image.height()),
-            menu_aspect_fit_rect(image.width(), image.height(), destination)?,
-            object_modulation,
-            object_mode,
-        )
-        .ok()?;
+    copy_stretched_picture(
+        &base,
+        Rect::new(0, 0, image.width(), image.height()),
+        &mut composed,
+        menu_aspect_fit_rect(image.width(), image.height(), destination)?,
+    )?;
 
     for (overlay, image) in overlays {
-        let overlay_pixels = inventory_picture_pixels(&image, object.color);
-        let overlay_surface = Surface::from_bytes(
-            image.width(),
-            image.height(),
-            PixelFormat::Rgba8888,
-            overlay_pixels,
-        )
-        .ok()?;
+        let mut overlay_pixels = inventory_picture_pixels(&image, object.color);
         let inherits_parent = overlay.blit_mode == 256;
         let mode = if inherits_parent {
             object_mode
@@ -37185,51 +37197,73 @@ fn compose_owned_menu_picture(
             inventory_blit_mode(overlay.blit_mode)
         };
         let modulation = if inherits_parent {
-            Some(object_modulation)
+            object_modulation
         } else if overlay.color_modulation == 0x00ff_ffff {
             None
         } else {
             inventory_modulation(overlay.color_modulation, overlay.blit_mode)
-        }
-        .unwrap_or(Color::opaque(255, 255, 255));
+        };
+        prepare_owned_menu_pixels(&mut overlay_pixels, modulation, mode);
+        let overlay_surface = Surface::from_bytes(
+            image.width(),
+            image.height(),
+            PixelFormat::Rgba8888,
+            overlay_pixels,
+        )
+        .ok()?;
         let source_rect = Rect::new(0, 0, image.width(), image.height());
         let fitted = menu_aspect_fit_rect(image.width(), image.height(), destination)?;
+        let mut layer = Surface::new(side, side, PixelFormat::Rgba8888);
+        let mut coverage_source =
+            Surface::new(image.width(), image.height(), PixelFormat::Rgba8888);
+        coverage_source.fill(Color::opaque(255, 255, 255));
+        let mut coverage = Surface::new(side, side, PixelFormat::Rgba8888);
         if let Some(transform) = overlay.transform {
-            let mut layer = Surface::new(side, side, PixelFormat::Rgba8888);
-            layer
-                .blit_stretched(
-                    &overlay_surface,
-                    source_rect,
-                    fitted,
-                    Color::opaque(255, 255, 255),
-                    BlitMode::Normal,
-                )
-                .ok()?;
+            let mut stretched = Surface::new(side, side, PixelFormat::Rgba8888);
+            copy_stretched_picture(&overlay_surface, source_rect, &mut stretched, fitted)?;
+            let mut stretched_coverage = Surface::new(side, side, PixelFormat::Rgba8888);
+            copy_stretched_picture(
+                &coverage_source,
+                source_rect,
+                &mut stretched_coverage,
+                fitted,
+            )?;
             let scale_factor = side as f32 / 35.0;
             let center = side as f32 / 2.0;
             let matrix =
                 centered_picture_transform(transform.matrix(), scale_factor, center, center);
-            composed
-                .blit_transformed(
-                    &layer,
+            layer
+                .copy_transformed(
+                    &stretched,
                     destination,
                     SurfacePoint::new(0, 0),
                     &matrix,
-                    modulation,
-                    mode,
+                )
+                .ok()?;
+            coverage
+                .copy_transformed(
+                    &stretched_coverage,
+                    destination,
+                    SurfacePoint::new(0, 0),
+                    &matrix,
                 )
                 .ok()?;
         } else {
-            composed
-                .blit_stretched(&overlay_surface, source_rect, fitted, modulation, mode)
-                .ok()?;
+            copy_stretched_picture(&overlay_surface, source_rect, &mut layer, fitted)?;
+            copy_stretched_picture(&coverage_source, source_rect, &mut coverage, fitted)?;
         }
+        composite_software_picture_layer(&mut composed, &layer, &coverage, mode)?;
     }
 
     Some(ImageData::new(side, side, composed.pixels().to_vec()))
 }
 
-fn compose_inventory_picture(
+struct PreparedInventoryPicture {
+    base: ImageData,
+    overlays: Vec<InventoryPictureOverlay>,
+}
+
+fn prepare_inventory_picture(
     image: lc_engine::DefinitionPictureImage,
     overlays: Vec<(
         lc_engine::ObjectGraphicsOverlay,
@@ -37238,41 +37272,21 @@ fn compose_inventory_picture(
     object_color: u32,
     color_modulation: u32,
     blit_mode: u32,
-) -> Option<ImageData> {
+) -> Option<PreparedInventoryPicture> {
     let width = image.width();
     let height = image.height();
     let mut pixels = inventory_picture_pixels(&image, object_color);
     let object_mode = inventory_blit_mode(blit_mode);
     let object_modulation = inventory_modulation(color_modulation, blit_mode);
 
-    if overlays.is_empty() && object_mode == BlitMode::Normal {
-        if let Some(modulation) = object_modulation {
-            modulate_inventory_pixels(&mut pixels, modulation);
-        }
-        return Some(ImageData::new(width, height, pixels));
+    if let Some(modulation) = object_modulation {
+        prepare_inventory_pixels(&mut pixels, modulation, object_mode);
     }
 
-    let source = Surface::from_bytes(width, height, PixelFormat::Rgba8888, pixels).ok()?;
-    let mut composed = Surface::new(width, height, PixelFormat::Rgba8888);
-    composed
-        .blit_region_ex(
-            &source,
-            Rect::new(0, 0, width, height),
-            SurfacePoint::new(0, 0),
-            object_modulation.unwrap_or(Color::opaque(255, 255, 255)),
-            object_mode,
-        )
-        .ok()?;
-
+    let base = ImageData::new(width, height, pixels);
+    let mut prepared_overlays = Vec::with_capacity(overlays.len());
     for (overlay, image) in overlays {
-        let overlay_pixels = inventory_picture_pixels(&image, object_color);
-        let overlay_surface = Surface::from_bytes(
-            image.width(),
-            image.height(),
-            PixelFormat::Rgba8888,
-            overlay_pixels,
-        )
-        .ok()?;
+        let mut overlay_pixels = inventory_picture_pixels(&image, object_color);
         let inherits_parent = overlay.blit_mode == 256;
         let mode = if inherits_parent {
             object_mode
@@ -37287,8 +37301,17 @@ fn compose_inventory_picture(
             inventory_modulation(overlay.color_modulation, overlay.blit_mode)
         }
         .unwrap_or(Color::opaque(255, 255, 255));
+        prepare_inventory_pixels(&mut overlay_pixels, modulation, mode);
+        let overlay_surface = Surface::from_bytes(
+            image.width(),
+            image.height(),
+            PixelFormat::Rgba8888,
+            overlay_pixels,
+        )
+        .ok()?;
         let source_rect = Rect::new(0, 0, image.width(), image.height());
         let destination_rect = Rect::new(0, 0, width, height);
+        let mut layer = Surface::new(width, height, PixelFormat::Rgba8888);
         if let Some(transform) = overlay.transform {
             let scale_factor = width as f32 / 64.0;
             let center_x = width as f32 / 2.0;
@@ -37296,39 +37319,91 @@ fn compose_inventory_picture(
             let matrix =
                 centered_picture_transform(transform.matrix(), scale_factor, center_x, center_y);
             let mut stretched = Surface::new(width, height, PixelFormat::Rgba8888);
-            stretched
-                .blit_stretched(
-                    &overlay_surface,
-                    source_rect,
-                    destination_rect,
-                    Color::opaque(255, 255, 255),
-                    BlitMode::Normal,
-                )
-                .ok()?;
-            composed
-                .blit_transformed(
+            copy_stretched_picture(
+                &overlay_surface,
+                source_rect,
+                &mut stretched,
+                destination_rect,
+            )?;
+            layer
+                .copy_transformed(
                     &stretched,
                     destination_rect,
                     SurfacePoint::new(0, 0),
                     &matrix,
-                    modulation,
-                    mode,
                 )
                 .ok()?;
         } else {
-            composed
-                .blit_stretched(
-                    &overlay_surface,
-                    source_rect,
-                    destination_rect,
-                    modulation,
-                    mode,
-                )
-                .ok()?;
+            copy_stretched_picture(
+                &overlay_surface,
+                source_rect,
+                &mut layer,
+                destination_rect,
+            )?;
         }
+        prepared_overlays.push(InventoryPictureOverlay {
+            picture: ImageData::new(width, height, layer.pixels().to_vec()),
+            additive: matches!(mode, BlitMode::Additive | BlitMode::Mod2Additive),
+        });
     }
 
-    Some(ImageData::new(width, height, composed.pixels().to_vec()))
+    Some(PreparedInventoryPicture {
+        base,
+        overlays: prepared_overlays,
+    })
+}
+
+fn compose_inventory_picture(
+    image: lc_engine::DefinitionPictureImage,
+    overlays: Vec<(
+        lc_engine::ObjectGraphicsOverlay,
+        lc_engine::DefinitionPictureImage,
+    )>,
+    object_color: u32,
+    color_modulation: u32,
+    blit_mode: u32,
+) -> Option<ImageData> {
+    let prepared = prepare_inventory_picture(
+        image,
+        overlays,
+        object_color,
+        color_modulation,
+        blit_mode,
+    )?;
+    if prepared.overlays.is_empty() {
+        return Some(prepared.base);
+    }
+
+    // Non-HUD consumers still require one flattened ImageData. The viewport
+    // inventory retains `prepared.overlays` and draws each blend mode directly.
+    let mut composed = Surface::from_bytes(
+        prepared.base.width(),
+        prepared.base.height(),
+        PixelFormat::Rgba8888,
+        prepared.base.pixels().to_vec(),
+    )
+    .ok()?;
+    for overlay in prepared.overlays {
+        let layer = Surface::from_bytes(
+            overlay.picture.width(),
+            overlay.picture.height(),
+            PixelFormat::Rgba8888,
+            overlay.picture.pixels().to_vec(),
+        )
+        .ok()?;
+        let mode = if overlay.additive {
+            BlitMode::Additive
+        } else {
+            BlitMode::Normal
+        };
+        composite_inventory_picture_layer(&mut composed, &layer, mode)?;
+    }
+
+    Some(ImageData::new(
+        composed.width(),
+        composed.height(),
+        composed.pixels().to_vec(),
+    ))
 }
 
 /// C4GraphicsOverlay::DrawPicture first rescales the transform's translation
@@ -37538,20 +37613,268 @@ fn inventory_modulation(color: u32, blit_mode: u32) -> Option<Color> {
 }
 
 fn inventory_blit_mode(raw: u32) -> BlitMode {
-    if raw & 2 != 0 {
-        BlitMode::Mod2
-    } else if raw & 1 != 0 {
-        BlitMode::Additive
-    } else {
-        BlitMode::Normal
+    match raw & 3 {
+        1 => BlitMode::Additive,
+        2 => BlitMode::Mod2,
+        3 => BlitMode::Mod2Additive,
+        _ => BlitMode::Normal,
     }
 }
 
-fn modulate_inventory_pixels(pixels: &mut [u8], modulation: Color) {
+fn prepare_inventory_pixels(pixels: &mut [u8], modulation: Color, mode: BlitMode) {
     for pixel in pixels.chunks_exact_mut(4) {
-        let modulated = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]).modulate_clr(modulation);
-        pixel.copy_from_slice(&[modulated.r, modulated.g, modulated.b, modulated.a]);
+        let prepared = mode.prepare_source(
+            Color::new(pixel[0], pixel[1], pixel[2], pixel[3]),
+            modulation,
+        );
+        pixel.copy_from_slice(&[prepared.r, prepared.g, prepared.b, prepared.a]);
     }
+}
+
+/// `C4Object::Picture2Facet` renders owned menu symbols into a non-primary
+/// surface, so native dispatches to the packed software color helpers instead
+/// of the live GL shader. Convert Rust opacity to/from C4's transparency byte
+/// around that operation.
+fn prepare_owned_menu_pixels(
+    pixels: &mut [u8],
+    modulation: Option<Color>,
+    mode: BlitMode,
+) {
+    let Some(modulation) = modulation else {
+        return;
+    };
+    let packed_modulate = |source: Color| {
+        let multiply = |source: u8, modulation: u8| -> u8 {
+            (u16::from(source) * u16::from(modulation) >> 8) as u8
+        };
+        let screen_transparency = |source: u8, modulation: u8| -> u8 {
+            let product = u16::from(source) * u16::from(modulation) >> 8;
+            (u16::from(source) + u16::from(modulation) - product).min(255) as u8
+        };
+        Color::new(
+            multiply(source.r, modulation.r),
+            multiply(source.g, modulation.g),
+            multiply(source.b, modulation.b),
+            screen_transparency(source.a, modulation.a),
+        )
+    };
+    for pixel in pixels.chunks_exact_mut(4) {
+        let packed = Color::new(pixel[0], pixel[1], pixel[2], 255 - pixel[3]);
+        let prepared = match mode {
+            BlitMode::Mod2 | BlitMode::Mod2Additive => {
+                packed.modulate_clr_mod2(modulation)
+            }
+            BlitMode::Normal | BlitMode::Additive => packed_modulate(packed),
+        };
+        pixel.copy_from_slice(&[
+            prepared.r,
+            prepared.g,
+            prepared.b,
+            255 - prepared.a,
+        ]);
+    }
+}
+
+/// Nearest-neighbour copy used when a native software blit first touches a
+/// fully transparent picture cache. `BltAlpha`/`BltAlphaAdd` copy that source
+/// pixel verbatim, retaining straight alpha for the later menu/HUD draw.
+fn copy_stretched_picture(
+    source: &Surface,
+    source_rect: Rect,
+    destination: &mut Surface,
+    destination_rect: Rect,
+) -> Option<()> {
+    if source_rect.width == 0
+        || source_rect.height == 0
+        || destination_rect.width == 0
+        || destination_rect.height == 0
+    {
+        return Some(());
+    }
+    for row in 0..destination_rect.height {
+        let source_y = source_rect.y
+            + (u64::from(row) * u64::from(source_rect.height)
+                / u64::from(destination_rect.height)) as i32;
+        let destination_y = destination_rect.y + row as i32;
+        for column in 0..destination_rect.width {
+            let source_x = source_rect.x
+                + (u64::from(column) * u64::from(source_rect.width)
+                    / u64::from(destination_rect.width)) as i32;
+            let destination_x = destination_rect.x + column as i32;
+            if source_x < 0 || source_y < 0 || destination_x < 0 || destination_y < 0 {
+                continue;
+            }
+            let color = source.get_pixel(source_x as u32, source_y as u32)?;
+            destination
+                .set_pixel(destination_x as u32, destination_y as u32, color)
+                .ok()?;
+        }
+    }
+    Some(())
+}
+
+fn software_blit_menu_image(
+    destination: &mut Surface,
+    image: &ImageData,
+    destination_rect: Rect,
+    mode: BlitMode,
+) -> Option<()> {
+    let source = Surface::from_bytes(
+        image.width(),
+        image.height(),
+        PixelFormat::Rgba8888,
+        image.pixels().to_vec(),
+    )
+    .ok()?;
+    let source_rect = Rect::new(0, 0, image.width(), image.height());
+    let mut layer = Surface::new(
+        destination.width(),
+        destination.height(),
+        PixelFormat::Rgba8888,
+    );
+    copy_stretched_picture(&source, source_rect, &mut layer, destination_rect)?;
+    let mut coverage_source =
+        Surface::new(image.width(), image.height(), PixelFormat::Rgba8888);
+    coverage_source.fill(Color::opaque(255, 255, 255));
+    let mut coverage = Surface::new(
+        destination.width(),
+        destination.height(),
+        PixelFormat::Rgba8888,
+    );
+    copy_stretched_picture(
+        &coverage_source,
+        source_rect,
+        &mut coverage,
+        destination_rect,
+    )?;
+    composite_software_picture_layer(destination, &layer, &coverage, mode)
+}
+
+fn composite_inventory_picture_layer(
+    destination: &mut Surface,
+    source: &Surface,
+    mode: BlitMode,
+) -> Option<()> {
+    if destination.width() != source.width() || destination.height() != source.height() {
+        return None;
+    }
+    for y in 0..destination.height() {
+        for x in 0..destination.width() {
+            let foreground = source.get_pixel(x, y)?;
+            if foreground.a == 0 {
+                continue;
+            }
+            let background = destination.get_pixel(x, y)?;
+            let output = match mode {
+                BlitMode::Normal | BlitMode::Mod2 => {
+                    blend_straight_picture_over(foreground, background)
+                }
+                BlitMode::Additive | BlitMode::Mod2Additive => {
+                    blend_straight_picture_additive(foreground, background)
+                }
+            };
+            destination.set_pixel(x, y, output).ok()?;
+        }
+    }
+    Some(())
+}
+
+/// Flatten source-over layers into a straight-alpha cache. This is the
+/// associative form needed when the finished inventory image is blended once
+/// more onto the real HUD framebuffer.
+fn blend_straight_picture_over(source: Color, destination: Color) -> Color {
+    if destination.a == 0 || source.a == 255 {
+        return source;
+    }
+    let source_alpha = f32::from(source.a) / 255.0;
+    let destination_alpha = f32::from(destination.a) / 255.0;
+    let output_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
+    let channel = |source: u8, destination: u8| -> u8 {
+        ((f32::from(source) * source_alpha
+            + f32::from(destination) * destination_alpha * (1.0 - source_alpha))
+            / output_alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::new(
+        channel(source.r, destination.r),
+        channel(source.g, destination.g),
+        channel(source.b, destination.b),
+        (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+/// Best representable flattening of an additive layer. With a nonzero cached
+/// destination alpha, scale the additive contribution back into straight RGB
+/// so the later normal HUD draw recreates it. A wholly transparent cache has
+/// no exact ImageData representation for background-preserving addition.
+fn blend_straight_picture_additive(source: Color, destination: Color) -> Color {
+    if destination.a == 0 {
+        return source;
+    }
+    let source_alpha = f32::from(source.a) / 255.0;
+    let destination_alpha = f32::from(destination.a) / 255.0;
+    let channel = |source: u8, destination: u8| -> u8 {
+        (f32::from(destination) + f32::from(source) * source_alpha / destination_alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::new(
+        channel(source.r, destination.r),
+        channel(source.g, destination.g),
+        channel(source.b, destination.b),
+        destination.a,
+    )
+}
+
+/// Exact `BltAlpha`/`BltAlphaAdd` composition used by non-primary C4Surface
+/// picture caches. Rust stores opacity, the inverse of C4's packed alpha byte.
+fn composite_software_picture_layer(
+    destination: &mut Surface,
+    source: &Surface,
+    coverage: &Surface,
+    mode: BlitMode,
+) -> Option<()> {
+    if destination.width() != source.width()
+        || destination.height() != source.height()
+        || destination.width() != coverage.width()
+        || destination.height() != coverage.height()
+    {
+        return None;
+    }
+    let additive = matches!(mode, BlitMode::Additive | BlitMode::Mod2Additive);
+    for y in 0..destination.height() {
+        for x in 0..destination.width() {
+            if coverage.get_pixel(x, y)?.a == 0 {
+                continue;
+            }
+            let foreground = source.get_pixel(x, y)?;
+            let background = destination.get_pixel(x, y)?;
+            let output = if background.a == 0 {
+                foreground
+            } else {
+                let alpha = u16::from(foreground.a);
+                let channel = |source: u8, destination: u8| -> u8 {
+                    if additive {
+                        (u16::from(destination) + (u16::from(source) * alpha >> 8))
+                            .min(255) as u8
+                    } else {
+                        ((u16::from(source) * alpha
+                            + u16::from(destination) * (255 - alpha))
+                            >> 8) as u8
+                    }
+                };
+                Color::new(
+                    channel(foreground.r, background.r),
+                    channel(foreground.g, background.g),
+                    channel(foreground.b, background.b),
+                    background.a.saturating_add(foreground.a),
+                )
+            };
+            destination.set_pixel(x, y, output).ok()?;
+        }
+    }
+    Some(())
 }
 
 fn select_focus_candidate(
@@ -46781,6 +47104,274 @@ func Award()
     }
 
     #[test]
+    fn inventory_and_owned_menu_mod2_follow_their_native_draw_targets() {
+        let mut definition =
+            Definition::from_script("M2PX", "Mod2 Picture", "").expect("definition compiles");
+        definition.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([64, 128, 192, 128]),
+            color_mask: None,
+        }));
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("MOD2 picture definition registers");
+        let image = engine
+            .definition_picture_phase_image("M2PX", 0)
+            .expect("definition picture");
+        let mut transparent_definition =
+            Definition::from_script("M2BG", "Transparent Picture", "")
+                .expect("transparent definition compiles");
+        transparent_definition.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        transparent_definition.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0, 0, 0, 0]),
+            color_mask: None,
+        }));
+        engine
+            .register_definition(transparent_definition)
+            .expect("transparent definition registers");
+        let transparent_image = engine
+            .definition_picture_phase_image("M2BG", 0)
+            .expect("transparent definition picture");
+        let modulation = 0x007f_7f7f;
+
+        let inventory = compose_inventory_picture(
+            image.clone(),
+            Vec::new(),
+            0,
+            modulation,
+            2,
+        )
+        .expect("inventory picture");
+        assert_eq!(
+            inventory.pixels(),
+            &[127, 255, 255, 128],
+            "direct HUD inventory uses live GL clamp(2*S + 2*M - 255)",
+        );
+
+        let menu = compose_owned_menu_picture(
+            image.clone(),
+            Vec::new(),
+            &lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "M2PX".to_string(),
+                symbol_size: 1,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 2,
+                color: 0,
+                color_modulation: modulation,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            },
+        )
+        .expect("owned menu picture");
+        assert_eq!(
+            menu.pixels(),
+            &[128, 255, 255, 128],
+            "Picture2Facet uses packed software MOD2 in its temporary surface",
+        );
+
+        let render_cached_picture = |picture: &ImageData| {
+            let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+            surface.fill(Color::opaque(10, 20, 30));
+            lc_frontend::draw_image_bilinear(
+                &mut surface,
+                &lc_gui::Rect::new(0.0, 0.0, 1.0, 1.0),
+                picture,
+                None,
+            );
+            surface.get_pixel(0, 0)
+        };
+        assert_eq!(
+            render_cached_picture(&inventory),
+            Some(Color::opaque(69, 138, 143)),
+            "the cached straight-alpha inventory pixel is blended exactly once",
+        );
+        assert_eq!(
+            render_cached_picture(&menu),
+            Some(Color::opaque(69, 138, 143)),
+            "the cached straight-alpha menu pixel is blended exactly once",
+        );
+
+        let black_reset = compose_inventory_picture(image.clone(), Vec::new(), 0, 0, 2)
+            .expect("zero-modulation MOD2 picture");
+        assert_eq!(black_reset.pixels(), &[0, 0, 0, 128]);
+        let software_zero = compose_owned_menu_picture(
+            image.clone(),
+            Vec::new(),
+            &lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "M2PX".to_string(),
+                symbol_size: 1,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 2,
+                color: 0,
+                color_modulation: 0,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            },
+        )
+        .expect("zero-modulation owned menu picture");
+        assert_eq!(software_zero.pixels(), &[0, 2, 130, 128]);
+
+        let transparent_overlay = lc_engine::ObjectGraphicsOverlay::new(
+            3,
+            lc_engine::GraphicsOverlayMode::Picture,
+        );
+        let software_transparent_overlay = compose_owned_menu_picture(
+            image.clone(),
+            vec![(transparent_overlay, transparent_image.clone())],
+            &lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "M2PX".to_string(),
+                symbol_size: 1,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 0,
+                color: 0,
+                color_modulation: 0,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            },
+        )
+        .expect("transparent software overlay");
+        assert_eq!(
+            software_transparent_overlay.pixels(),
+            &[63, 127, 191, 128],
+            "software BltAlpha retains its transparent-source /256 quirk",
+        );
+
+        let mut transformed_overlay = lc_engine::ObjectGraphicsOverlay::new(
+            1,
+            lc_engine::GraphicsOverlayMode::Picture,
+        );
+        transformed_overlay.blit_mode = 2;
+        transformed_overlay.color_modulation = modulation;
+        transformed_overlay.transform = Some(lc_engine::DrawTransform::identity());
+        let overlay_inventory = compose_inventory_picture(
+            transparent_image.clone(),
+            vec![(transformed_overlay, image.clone())],
+            0,
+            0,
+            0,
+        )
+        .expect("transformed MOD2 inventory overlay");
+        assert_eq!(overlay_inventory.pixels(), &[127, 255, 255, 128]);
+        assert_eq!(
+            render_cached_picture(&overlay_inventory),
+            Some(Color::opaque(69, 138, 143)),
+            "a translucent overlay over a transparent base is not alpha-squared",
+        );
+
+        let additive_picture = compose_inventory_picture(
+            image.clone(),
+            Vec::new(),
+            0,
+            modulation,
+            3,
+        )
+        .expect("MOD2+additive inventory picture");
+        let mut additive_target = Surface::new(45, 45, PixelFormat::Rgba8888);
+        additive_target.fill(Color::opaque(10, 20, 30));
+        let fallback_font = test_font();
+        lc_frontend::hud::draw_inventory(
+            &mut additive_target,
+            &lc_frontend::hud::HudFont::Fallback(fallback_font.as_ref()),
+            Rect::new(0, 0, 45, 45),
+            &[InventoryOverlay {
+                object_id: ObjectId::new(99),
+                definition_id: "M2PX".to_string(),
+                picture: Some(additive_picture),
+                additive: true,
+                picture_overlays: Vec::new(),
+                count: 1,
+            }],
+        );
+        assert_eq!(
+            additive_target.get_pixel(22, 22),
+            Some(Color::opaque(74, 148, 158)),
+            "direct inventory retains MOD2+ADDITIVE for the final HUD blend",
+        );
+
+        let mut additive_overlay = lc_engine::ObjectGraphicsOverlay::new(
+            4,
+            lc_engine::GraphicsOverlayMode::Picture,
+        );
+        additive_overlay.blit_mode = 3;
+        additive_overlay.color_modulation = modulation;
+        let prepared_mixed = prepare_inventory_picture(
+            transparent_image.clone(),
+            vec![(additive_overlay, image.clone())],
+            0,
+            0,
+            0,
+        )
+        .expect("mixed additive inventory layers prepare");
+        assert!(prepared_mixed.overlays[0].additive);
+        let mut mixed_target = Surface::new(45, 45, PixelFormat::Rgba8888);
+        mixed_target.fill(Color::opaque(10, 20, 30));
+        lc_frontend::hud::draw_inventory(
+            &mut mixed_target,
+            &lc_frontend::hud::HudFont::Fallback(fallback_font.as_ref()),
+            Rect::new(0, 0, 45, 45),
+            &[InventoryOverlay {
+                object_id: ObjectId::new(100),
+                definition_id: "M2BG".to_string(),
+                picture: Some(prepared_mixed.base),
+                additive: false,
+                picture_overlays: prepared_mixed.overlays,
+                count: 1,
+            }],
+        );
+        assert_eq!(
+            mixed_target.get_pixel(22, 22),
+            Some(Color::opaque(74, 148, 158)),
+            "an additive MOD2 overlay retains its own final HUD blend mode",
+        );
+
+        let mut inherited_overlay = lc_engine::ObjectGraphicsOverlay::new(
+            2,
+            lc_engine::GraphicsOverlayMode::Picture,
+        );
+        inherited_overlay.blit_mode = 256;
+        let overlay_menu = compose_owned_menu_picture(
+            transparent_image,
+            vec![(inherited_overlay, image)],
+            &lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "M2BG".to_string(),
+                symbol_size: 1,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 2,
+                color: 0,
+                color_modulation: 0,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            },
+        )
+        .expect("inherited zero-MOD2 owned-menu overlay");
+        assert_eq!(
+            overlay_menu.pixels(),
+            &[0, 2, 130, 128],
+            "owned-menu overlays use packed software MOD2 without the GL zero reset",
+        );
+        assert_eq!(inventory_blit_mode(3), BlitMode::Mod2Additive);
+    }
+
+    #[test]
     fn script_menu_images_use_resolved_definition_phase_and_color() {
         let mut definition =
             Definition::from_script("PHAS", "Phases", "").expect("phase definition compiles");
@@ -47026,10 +47617,15 @@ func Award()
         )
         .expect("owned picture composite");
         assert_eq!((picture.width(), picture.height()), (4, 4));
-        assert!(picture
-            .pixels()
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0, 0, 0xff, 0xff]));
+        for (index, pixel) in picture.pixels().chunks_exact(4).enumerate() {
+            let row = index / 4;
+            let blue = if (1..3).contains(&row) { 0xfe } else { 0xff };
+            assert_eq!(
+                pixel,
+                &[0, 0, blue, 0xff],
+                "opaque software overlay retains BltAlpha's /256 quirk over the red base",
+            );
+        }
 
         let mut ranked = item.clone();
         ranked.image = lc_engine::ObjectMenuImage::ObjectRank {
@@ -47098,7 +47694,11 @@ func Award()
         let picture = object_menu_item_picture(&engine, &snapshot, &item, 0, &hud, 1)
             .expect("extended rank picture");
         assert_eq!((picture.width(), picture.height()), (3, 3));
-        assert_eq!(&picture.pixels()[0..4], &[0, 0, 0xff, 0xff]);
+        assert_eq!(
+            &picture.pixels()[0..4],
+            &[0, 0, 0xfe, 0xff],
+            "captain overlay uses native software BltAlpha /256 composition",
+        );
         let bottom_right = ((2 * 3 + 2) * 4) as usize;
         assert_eq!(
             &picture.pixels()[bottom_right..bottom_right + 4],

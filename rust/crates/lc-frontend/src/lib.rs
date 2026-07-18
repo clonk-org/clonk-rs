@@ -1930,7 +1930,19 @@ pub struct InventoryOverlay {
     pub object_id: ObjectId,
     pub definition_id: DefinitionId,
     pub picture: Option<ImageData>,
+    /// Direct `C4ObjectList::DrawIDList` keeps the object's additive bit for
+    /// the final draw onto the viewport framebuffer.
+    pub additive: bool,
+    /// Prepared picture overlays retain their individual framebuffer blend
+    /// bit so mixed normal/additive object pictures can be drawn in order.
+    pub picture_overlays: Vec<InventoryPictureOverlay>,
     pub count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InventoryPictureOverlay {
+    pub picture: ImageData,
+    pub additive: bool,
 }
 
 #[derive(Debug)]
@@ -17812,6 +17824,8 @@ mod tests {
                     .collect(),
                 )),
                 count: 1,
+                additive: false,
+                picture_overlays: Vec::new(),
             }];
             let columns = [
                 [220, 0, 0, 255],

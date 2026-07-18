@@ -23,8 +23,36 @@ pub enum BlitMode {
     Normal,
     /// `C4GFXBLIT_ADDITIVE` — `dst + src·srcAlpha` (GL `GL_SRC_ALPHA, GL_ONE`).
     Additive,
-    /// `C4GFXBLIT_MOD2` — additive color modulation around 0x7f, alpha-weighted.
+    /// `C4GFXBLIT_MOD2` — ADD_SIGNED*2 source modulation, then alpha-over.
     Mod2,
+    /// `C4GFXBLIT_MOD2 | C4GFXBLIT_ADDITIVE` — MOD2 source preparation,
+    /// followed by additive framebuffer composition.
+    Mod2Additive,
+}
+
+impl BlitMode {
+    const fn uses_mod2(self) -> bool {
+        matches!(self, Self::Mod2 | Self::Mod2Additive)
+    }
+
+    /// Prepare one source texel as the live StdGL blit shader does before
+    /// framebuffer composition. Keeping this operation separate lets callers
+    /// that cache straight-alpha pictures avoid blending the texel into a
+    /// transparent scratch framebuffer first.
+    pub fn prepare_source(self, source: Color, modulation: Color) -> Color {
+        if self.uses_mod2() && modulation != Color::transparent() {
+            // PerformBlt resets MOD2 only for the exact packed value zero.
+            // Otherwise the live shader applies ADD_SIGNED*2 to RGB and
+            // leaves texture opacity untouched.
+            source.modulate_rgb_mod2(modulation)
+        } else if modulation != Color::opaque(255, 255, 255) {
+            // Exact zero reaches this path after the native MOD2 reset and
+            // therefore produces an ordinarily modulated black silhouette.
+            source.modulate_clr(modulation)
+        } else {
+            source
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,10 +374,10 @@ impl Surface {
         self.blit_region_ex(src, src_rect, dest, modulation, BlitMode::Normal)
     }
 
-    /// Full blit: modulate each source pixel by `modulation` (white = GL identity),
-    /// then composite onto the destination per `mode` (`StdDDraw2::Blit` +
-    /// `dwBlitMode`). The combination of `dwModClr` modulation and the blit mode is
-    /// the path every engine draw flows through.
+    /// Full blit: prepare each source pixel with `modulation`, then composite
+    /// onto the destination per `mode` (`StdDDraw2::Blit` + `dwBlitMode`).
+    /// White is the Normal-mode GL identity; MOD2 instead applies its
+    /// ADD_SIGNED*2 equation even for white.
     pub fn blit_region_ex(
         &mut self,
         src: &Surface,
@@ -438,8 +466,6 @@ impl Surface {
         }
 
         let bpp = self.format.bytes_per_pixel();
-        let modulate = modulation != Color::opaque(255, 255, 255);
-
         for row in 0..src_rect.height {
             let src_y = (src_rect.y + row as i32) as u32;
             let dest_y = (dest.y + row as i32) as u32;
@@ -450,15 +476,9 @@ impl Surface {
                 let src_offset = src_row_offset + col as usize * bpp;
                 let dest_offset = dest_row_offset + col as usize * bpp;
 
-                let source = {
-                    let slice = &src.data[src_offset..src_offset + bpp];
-                    let raw = Self::read_color(src.format, slice);
-                    if modulate {
-                        raw.modulate_clr(modulation)
-                    } else {
-                        raw
-                    }
-                };
+                let slice = &src.data[src_offset..src_offset + bpp];
+                let raw = Self::read_color(src.format, slice);
+                let source = mode.prepare_source(raw, modulation);
                 let destination = {
                     let slice = &self.data[dest_offset..dest_offset + bpp];
                     Self::read_color(self.format, slice)
@@ -478,9 +498,9 @@ impl Surface {
     /// the C++ `CBltTransform` path used for object sprites. The `src_rect` is
     /// conceptually placed at `dest_origin` and then `transform` is applied in
     /// destination space; each covered destination pixel is inverse-mapped
-    /// back to source space, sampled nearest-neighbour, modulated (white =
-    /// identity) and composited per `mode`. A non-invertible transform, or a
-    /// projective quad crossing the horizon, draws nothing.
+    /// back to source space, sampled nearest-neighbour, prepared according to
+    /// `mode`, and composited. A non-invertible transform, or a projective quad
+    /// crossing the horizon, draws nothing.
     pub fn blit_transformed(
         &mut self,
         src: &Surface,
@@ -489,6 +509,36 @@ impl Surface {
         transform: &crate::transform::Transform,
         modulation: Color,
         mode: BlitMode,
+    ) -> Result<(), SurfaceError> {
+        self.blit_transformed_impl(
+            src,
+            src_rect,
+            dest_origin,
+            transform,
+            Some((modulation, mode)),
+        )
+    }
+
+    /// Transformed nearest-neighbour copy with no modulation or framebuffer
+    /// blend. Picture-cache code uses this to preserve straight-alpha texels
+    /// until it can composite them with the cache's explicit alpha model.
+    pub fn copy_transformed(
+        &mut self,
+        src: &Surface,
+        src_rect: Rect,
+        dest_origin: Point,
+        transform: &crate::transform::Transform,
+    ) -> Result<(), SurfaceError> {
+        self.blit_transformed_impl(src, src_rect, dest_origin, transform, None)
+    }
+
+    fn blit_transformed_impl(
+        &mut self,
+        src: &Surface,
+        src_rect: Rect,
+        dest_origin: Point,
+        transform: &crate::transform::Transform,
+        composite: Option<(Color, BlitMode)>,
     ) -> Result<(), SurfaceError> {
         if self.format != src.format {
             return Err(SurfaceError::FormatMismatch {
@@ -564,7 +614,6 @@ impl Surface {
             (right - left) as u32,
             (bottom - top) as u32,
         );
-        let modulate = modulation != Color::opaque(255, 255, 255);
         let bpp = self.format.bytes_per_pixel();
         for row in 0..clipped.height {
             let dest_y = clipped.y + row as i32;
@@ -584,23 +633,21 @@ impl Surface {
                 }
                 let src_x = src_rect.x as u32 + lx as u32;
                 let src_y = src_rect.y as u32 + ly as u32;
-                let source = {
-                    let off = src.pixel_offset(src_x, src_y);
-                    let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
-                    if modulate {
-                        raw.modulate_clr(modulation)
-                    } else {
-                        raw
-                    }
-                };
+                let off = src.pixel_offset(src_x, src_y);
+                let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
                 let dest_off = self.pixel_offset(dest_x as u32, dest_y as u32);
-                let destination =
-                    Self::read_color(self.format, &self.data[dest_off..dest_off + bpp]);
-                let blended = Self::composite(source, destination, mode);
+                let output = if let Some((modulation, mode)) = composite {
+                    let source = mode.prepare_source(raw, modulation);
+                    let destination =
+                        Self::read_color(self.format, &self.data[dest_off..dest_off + bpp]);
+                    Self::composite(source, destination, mode)
+                } else {
+                    raw
+                };
                 Self::write_color(
                     self.format,
                     &mut self.data[dest_off..dest_off + bpp],
-                    blended,
+                    output,
                 );
             }
         }
@@ -611,15 +658,16 @@ impl Surface {
         match mode {
             BlitMode::Normal => source.blend_over(destination),
             BlitMode::Additive => source.blend_additive(destination),
-            BlitMode::Mod2 => source.blend_mod2(destination),
+            BlitMode::Mod2 => source.blend_shader_over(destination),
+            BlitMode::Mod2Additive => source.blend_shader_additive(destination),
         }
     }
 
     /// Stretched blit: sample `src_rect` of `src` into the (possibly
     /// differently-sized) `dest_rect` with nearest-neighbour sampling — the C++
     /// facet-scaling path (`StdGL::PerformBlt` texcoord stepping; pixel gfx use
-    /// point sampling). Each sampled pixel is modulated by `modulation`
-    /// (white = identity) and composited per `mode`. Clipped to the destination.
+    /// point sampling). Each sampled pixel is prepared with `modulation`
+    /// according to `mode` and then composited. Clipped to the destination.
     pub fn blit_stretched(
         &mut self,
         src: &Surface,
@@ -651,7 +699,6 @@ impl Surface {
             Some(r) => r,
             None => return Ok(()),
         };
-        let modulate = modulation != Color::opaque(255, 255, 255);
         let bpp = self.format.bytes_per_pixel();
         for row in 0..clipped.height {
             let dest_y = (clipped.y + row as i32) as u32;
@@ -661,15 +708,9 @@ impl Surface {
                 let dest_x = (clipped.x + col as i32) as u32;
                 let local_x = (clipped.x - dest_rect.x) as u32 + col;
                 let src_x = src_rect.x as u32 + (local_x * src_rect.width) / dest_rect.width;
-                let source = {
-                    let off = src.pixel_offset(src_x, src_y);
-                    let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
-                    if modulate {
-                        raw.modulate_clr(modulation)
-                    } else {
-                        raw
-                    }
-                };
+                let off = src.pixel_offset(src_x, src_y);
+                let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
+                let source = mode.prepare_source(raw, modulation);
                 let dest_off = self.pixel_offset(dest_x, dest_y);
                 let destination =
                     Self::read_color(self.format, &self.data[dest_off..dest_off + bpp]);
@@ -828,24 +869,138 @@ mod tests {
     }
 
     #[test]
-    fn blit_mod2_mode_combines_around_midgrey() {
-        let mut dest = Surface::new(1, 1, PixelFormat::Rgba8888);
-        dest.fill(Color::opaque(0x7f, 0x7f, 0x7f));
+    fn blit_mod2_prepares_source_independently_of_destination() {
+        let mut src = Surface::new(2, 1, PixelFormat::Rgba8888);
+        src.fill(Color::opaque(64, 128, 192));
+        let mut dest = Surface::new(2, 1, PixelFormat::Rgba8888);
+        dest.set_pixel(0, 0, Color::opaque(10, 20, 30)).unwrap();
+        dest.set_pixel(1, 0, Color::opaque(210, 120, 40)).unwrap();
+
+        dest.blit_region_ex(
+            &src,
+            Rect::new(0, 0, 2, 1),
+            Point::new(0, 0),
+            Color::new(32, 64, 128, 0),
+            BlitMode::Mod2,
+        )
+        .unwrap();
+
+        // Live StdGL: clamp(2*S + 2*M - 255), never source-vs-destination.
+        let prepared = Some(Color::opaque(0, 129, 255));
+        assert_eq!(dest.get_pixel(0, 0), prepared);
+        assert_eq!(dest.get_pixel(1, 0), prepared);
+
+        let mut pivot = Surface::new(2, 1, PixelFormat::Rgba8888);
+        pivot
+            .blit_region_ex(
+                &src,
+                Rect::new(0, 0, 2, 1),
+                Point::new(0, 0),
+                Color::new(0x7f, 0x7f, 0x7f, 0),
+                BlitMode::Mod2,
+            )
+            .unwrap();
+        assert_eq!(
+            pivot.get_pixel(0, 0),
+            Some(Color::opaque(127, 255, 255)),
+            "0x7f is not an identity: live GL yields clamp(2*S-1)",
+        );
+    }
+
+    #[test]
+    fn blit_mod2_keeps_source_alpha_and_resets_only_for_exact_zero() {
         let mut src = Surface::new(1, 1, PixelFormat::Rgba8888);
-        src.fill(Color::new(0x7f, 0x7f, 0x7f, 255));
+        src.fill(Color::new(64, 128, 192, 128));
+        let background = Color::opaque(10, 20, 30);
+
+        let render = |modulation| {
+            let mut dest = Surface::new(1, 1, PixelFormat::Rgba8888);
+            dest.fill(background);
+            dest.blit_region_ex(
+                &src,
+                Rect::new(0, 0, 1, 1),
+                Point::new(0, 0),
+                modulation,
+                BlitMode::Mod2,
+            )
+            .unwrap();
+            dest.get_pixel(0, 0)
+        };
+
+        assert_eq!(
+            render(Color::new(32, 64, 128, 255)),
+            Some(Color::opaque(5, 75, 143)),
+            "MOD2 ignores the modulation high byte and blends with source alpha 128",
+        );
+        assert_eq!(
+            render(Color::new(0x7f, 0x7f, 0x7f, 0)),
+            Some(Color::opaque(69, 138, 143)),
+            "the live 0x7f pivot produces clamp(2*S-1) and preserves partial alpha",
+        );
+        assert_eq!(
+            render(Color::transparent()),
+            Some(Color::opaque(5, 10, 15)),
+            "packed zero disables MOD2, then ordinary black modulation applies",
+        );
+        assert_eq!(
+            render(Color::new(0, 0, 0, 1)),
+            Some(Color::opaque(5, 10, 80)),
+            "a nonzero high byte keeps MOD2 enabled even with black RGB",
+        );
+    }
+
+    #[test]
+    fn blit_mod2_additive_modulates_before_framebuffer_addition() {
+        let mut src = Surface::new(1, 1, PixelFormat::Rgba8888);
+        src.fill(Color::new(64, 128, 192, 128));
+        let mut dest = Surface::new(1, 1, PixelFormat::Rgba8888);
+        dest.fill(Color::opaque(10, 20, 30));
+
         dest.blit_region_ex(
             &src,
             Rect::new(0, 0, 1, 1),
             Point::new(0, 0),
-            Color::opaque(255, 255, 255),
-            BlitMode::Mod2,
+            Color::new(32, 64, 128, 0),
+            BlitMode::Mod2Additive,
         )
         .unwrap();
-        // (0x7f+0x7f-0x7f)*2 = 0xfe per channel; dest alpha preserved.
-        assert_eq!(
-            dest.get_pixel(0, 0),
-            Some(Color::new(0xfe, 0xfe, 0xfe, 255))
-        );
+
+        assert_eq!(dest.get_pixel(0, 0), Some(Color::opaque(10, 85, 158)));
+    }
+
+    #[test]
+    fn stretched_and_transformed_blits_share_live_mod2_source_preparation() {
+        use crate::transform::Transform;
+
+        let mut src = Surface::new(1, 1, PixelFormat::Rgba8888);
+        src.fill(Color::opaque(64, 128, 192));
+        let modulation = Color::new(32, 64, 128, 0);
+        let expected = Some(Color::opaque(0, 129, 255));
+
+        let mut stretched = Surface::new(2, 2, PixelFormat::Rgba8888);
+        stretched
+            .blit_stretched(
+                &src,
+                Rect::new(0, 0, 1, 1),
+                Rect::new(0, 0, 2, 2),
+                modulation,
+                BlitMode::Mod2,
+            )
+            .unwrap();
+        assert_eq!(stretched.get_pixel(1, 1), expected);
+
+        let mut transformed = Surface::new(1, 1, PixelFormat::Rgba8888);
+        transformed
+            .blit_transformed(
+                &src,
+                Rect::new(0, 0, 1, 1),
+                Point::new(0, 0),
+                &Transform::identity(),
+                modulation,
+                BlitMode::Mod2,
+            )
+            .unwrap();
+        assert_eq!(transformed.get_pixel(0, 0), expected);
     }
 
     #[test]

@@ -67,6 +67,24 @@ impl Color {
         }
     }
 
+    /// Live StdGL `LC_MOD2` source preparation. The fragment shader combines
+    /// texture and modulation RGB as ADD_SIGNED*2, while deliberately leaving
+    /// texture opacity untouched (`src/StdGL.cpp:1071-1076`). This differs by
+    /// one RGB unit and by alpha semantics from the packed-color
+    /// [`Self::modulate_clr_mod2`] helper used by software surface reads.
+    pub(crate) fn modulate_rgb_mod2(self, modulation: Color) -> Color {
+        let channel = |source: u8, modulation: u8| -> u8 {
+            (2 * i32::from(source) + 2 * i32::from(modulation) - 255)
+                .clamp(0, 255) as u8
+        };
+        Color {
+            r: channel(self.r, modulation.r),
+            g: channel(self.g, modulation.g),
+            b: channel(self.b, modulation.b),
+            a: self.a,
+        }
+    }
+
     /// Additive composite of this (already-modulated) source over `dest`,
     /// mirroring the C++ sprite additive path `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`
     /// (`src/StdGL.cpp:908`): `dst + src·srcAlpha`, clamped per channel. Used by
@@ -83,29 +101,45 @@ impl Color {
         }
     }
 
-    /// `C4GFXBLIT_MOD2` composite: combine the (modulated) source with the
-    /// destination via `modulate_clr_mod2` (additive modulation around 0x7f),
-    /// alpha-weighted by the source so transparent pixels leave the destination
-    /// unchanged. Destination alpha is preserved. (Full/zero source alpha are
-    /// exact; partial alpha lerps toward the combined value.)
-    pub(crate) fn blend_mod2(self, dest: Color) -> Color {
-        let combined = self.modulate_clr_mod2(dest);
-        let sa = self.a as u16;
-        if sa == 0 {
+    /// Framebuffer blend used after the live blit shader. Shader RGB remains
+    /// normalized until the RGBA8 store, which rounds the final blend instead
+    /// of truncating the individual integer products.
+    pub(crate) fn blend_shader_over(self, dest: Color) -> Color {
+        let alpha = self.a as u16;
+        if alpha == 0 {
             return dest;
         }
-        if sa == 255 {
-            return Color {
-                a: dest.a,
-                ..combined
-            };
+        if alpha == 255 {
+            return self;
         }
-        let inv = 255 - sa;
-        let mix = |c: u8, d: u8| -> u8 { ((c as u16 * sa + d as u16 * inv) / 255) as u8 };
+
+        let inv_alpha = 255 - alpha;
+        let blend = |source: u8, destination: u8| -> u8 {
+            let numerator = source as u16 * alpha + destination as u16 * inv_alpha;
+            ((numerator + 127) / 255) as u8
+        };
         Color {
-            r: mix(combined.r, dest.r),
-            g: mix(combined.g, dest.g),
-            b: mix(combined.b, dest.b),
+            r: blend(self.r, dest.r),
+            g: blend(self.g, dest.g),
+            b: blend(self.b, dest.b),
+            // Match the renderer's established alpha-channel model; only RGB
+            // stays in shader precision through the framebuffer blend.
+            a: (alpha + (dest.a as u16 * inv_alpha) / 255).min(255) as u8,
+        }
+    }
+
+    /// Additive counterpart of [`Self::blend_shader_over`], matching the
+    /// rounded RGBA8 store after `GL_SRC_ALPHA, GL_ONE` RGB blending.
+    pub(crate) fn blend_shader_additive(self, dest: Color) -> Color {
+        let alpha = self.a as u16;
+        let add = |source: u8, destination: u8| -> u8 {
+            let contribution = (source as u16 * alpha + 127) / 255;
+            (destination as u16 + contribution).min(255) as u8
+        };
+        Color {
+            r: add(self.r, dest.r),
+            g: add(self.g, dest.g),
+            b: add(self.b, dest.b),
             a: dest.a,
         }
     }

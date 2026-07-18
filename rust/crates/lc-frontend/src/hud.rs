@@ -16,8 +16,8 @@
 //!   — one log line over the tiled background strip at the screen bottom.
 
 use crate::{
-    draw_image_bilinear, draw_image_strip, fill_rect, ClonkFontSet, HudGraphics, ImageData,
-    InventoryOverlay,
+    draw_image_bilinear, draw_image_bilinear_additive, draw_image_strip, fill_rect, ClonkFontSet,
+    HudGraphics, ImageData, InventoryOverlay,
 };
 use lc_graphics::{
     clonk_font::TextAlign, Color, GammaRamp, Rect as SurfaceRect, Surface, TextFont,
@@ -886,8 +886,25 @@ pub(crate) fn draw_inventory_with_gamma(
             SYMBOL_SIZE as u32,
             SYMBOL_SIZE as u32,
         );
+        let draw_picture = |surface: &mut Surface, picture: &ImageData, additive: bool| {
+            let target = aspect_fit(picture.width() as i32, picture.height() as i32, cell);
+            let rect = lc_gui::Rect::new(
+                target.x as f32,
+                target.y as f32,
+                target.width as f32,
+                target.height as f32,
+            );
+            if additive {
+                draw_image_bilinear_additive(surface, &rect, picture, gamma);
+            } else {
+                draw_hud_image_bilinear(surface, &rect, picture, gamma);
+            }
+        };
         if let Some(picture) = item.picture.as_ref() {
-            draw_image_aspect(surface, picture, cell, gamma);
+            draw_picture(surface, picture, item.additive);
+        }
+        for overlay in &item.picture_overlays {
+            draw_picture(surface, &overlay.picture, overlay.additive);
         }
         // DrawIDList writes "{count}x" at the section's bottom-right for
         // every stack except a single item (C4ObjectList.cpp:343-368).
@@ -2854,12 +2871,16 @@ mod tests {
                 object_id: lc_engine::ObjectId::new(1),
                 definition_id: "FLAG".to_string(),
                 picture: Some(solid_image(4, 4, [220, 10, 10, 255])),
+                additive: false,
+                picture_overlays: Vec::new(),
                 count: 1,
             },
             crate::InventoryOverlay {
                 object_id: lc_engine::ObjectId::new(2),
                 definition_id: "ROCK".to_string(),
                 picture: Some(solid_image(4, 4, [10, 220, 10, 255])),
+                additive: false,
+                picture_overlays: Vec::new(),
                 count: 1,
             },
         ];
@@ -2891,6 +2912,8 @@ mod tests {
                 object_id: lc_engine::ObjectId::new(1),
                 definition_id: "ROCK".to_string(),
                 picture: None,
+                additive: false,
+                picture_overlays: Vec::new(),
                 count,
             }];
             draw_inventory(
