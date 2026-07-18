@@ -18871,6 +18871,28 @@ impl Engine {
         self.audio_registry.music_level()
     }
 
+    /// Savegame player finalization runs before C++ `PlayScenarioMusic`.
+    /// Fold its deferred Music calls into `Game.IsMusicEnabled`, then discard
+    /// presentation commands that the final default-playlist/play/level pass
+    /// supersedes. The registry remains untouched so `Game.PlayList` and
+    /// `iMusicLevel` retain their script-visible values for the next save.
+    #[doc(hidden)]
+    pub fn reconcile_music_after_restore(&mut self, mut enabled: bool) -> bool {
+        self.pending_audio.retain(|command| match command {
+            AudioCommand::PlayMusic { .. } => {
+                enabled = true;
+                false
+            }
+            AudioCommand::StopMusic => {
+                enabled = false;
+                false
+            }
+            AudioCommand::SetMusicLevel { .. } | AudioCommand::SetMusicPlaylist { .. } => false,
+            _ => true,
+        });
+        enabled
+    }
+
     pub fn set_construction_needs_material(&mut self, enabled: bool) {
         self.construction_needs_material = enabled;
     }
@@ -57811,6 +57833,43 @@ func Probe() {
                 level: DEFAULT_MUSIC_LEVEL,
             })
         );
+    }
+
+    #[test]
+    fn resume_reconciliation_folds_music_commands_without_mutating_saved_fields() {
+        let mut engine = Engine::new();
+        engine
+            .audio_registry
+            .restore_music_playlist(Some("Theme*".to_string()));
+        engine.audio_registry.restore_music_level(25);
+        engine.pending_audio = vec![
+            AudioCommand::PlayMusic {
+                name: "Intro".to_string(),
+                looped: false,
+            },
+            AudioCommand::StopMusic,
+            AudioCommand::SetMusicPlaylist {
+                playlist: Some("FinalInit*".to_string()),
+                restart: true,
+            },
+            AudioCommand::SetMusicLevel { level: 25 },
+        ];
+
+        assert!(!engine.reconcile_music_after_restore(false));
+        assert!(engine.pending_audio.is_empty());
+        let state = engine.capture_state();
+        assert_eq!(state.play_list.as_deref(), Some("Theme*"));
+        assert_eq!(state.music_level, 25);
+
+        engine.pending_audio = vec![
+            AudioCommand::StopMusic,
+            AudioCommand::PlayMusic {
+                name: "Final".to_string(),
+                looped: true,
+            },
+        ];
+        assert!(engine.reconcile_music_after_restore(false));
+        assert!(engine.pending_audio.is_empty());
     }
 
     #[test]

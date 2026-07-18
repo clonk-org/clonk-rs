@@ -36959,6 +36959,9 @@ impl GameApp {
         self.engine
             .finalize_restored_players()
             .context("failed to run restored player FinalInit")?;
+        let restored_music_enabled = self
+            .engine
+            .reconcile_music_after_restore(save.runtime_music_enabled.unwrap_or(false));
 
         // Commit presentation resources only after every fallible restore
         // step. A rejected save must not leak its HUD/cursor/palette into the
@@ -36973,12 +36976,15 @@ impl GameApp {
         if let Some(player_infos) = offline_player_infos {
             self.control_player_infos = player_infos;
         }
-        if let Some(enabled) = save.runtime_music_enabled {
-            self.runtime_music_enabled = enabled;
-        }
+        // PlayScenarioMusic one-way enables Game.IsMusicEnabled when RXMusic
+        // is on; a configured-off client does not erase a restored true.
+        self.runtime_music_enabled |= restored_music_enabled;
         self.active_scenario = Some(frontend.clone());
         if let Some(audio) = self.audio.as_mut() {
-            audio.set_music_playlist(save.engine_state.play_list.clone());
+            // CompileRuntimeData temporarily applied Game.PlayList, but
+            // PlayScenarioMusic always installs its physical DEFAULT filter
+            // without changing the saved Game.PlayList string.
+            audio.set_music_playlist(None);
         }
         if scenario_info.sandbox {
             self.play_sandbox_audio();
@@ -86685,7 +86691,83 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn saved_game_restores_runtime_music_flag_but_not_transient_flash() {
+    fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter() {
+        let mut app = real_tutorial_app(1, "Music resume ordering parity");
+        let paths = cached_app_paths().expect("test app paths");
+        paths.ensure_user_dirs().expect("test config directory");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("configure restore language");
+        let scenario = app
+            .active_scenario
+            .clone()
+            .expect("real tutorial remains active");
+        let mut engine_state = app.engine.capture_state();
+        engine_state.play_list = Some("Theme*".to_string());
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("restored playlist".to_string()),
+            runtime_music_enabled: Some(false),
+            engine_state,
+        };
+        app.audio
+            .as_mut()
+            .expect("test audio")
+            .options
+            .music_enabled = true;
+
+        app.apply_loaded_game(save).expect("restore tutorial save");
+
+        assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
+        assert_eq!(
+            app.engine.capture_state().play_list.as_deref(),
+            Some("Theme*"),
+            "Game.PlayList remains available to script and the next save"
+        );
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .music_resolver
+                .playlist
+                .as_deref(),
+            None,
+            "PlayScenarioMusic installs the physical DEFAULT filter"
+        );
+
+        app.snapshot = app.engine.tick().expect("first restored tick succeeds");
+        assert!(
+            app.snapshot
+                .audio
+                .iter()
+                .all(|command| !matches!(command, AudioCommand::SetMusicPlaylist { .. })),
+            "the delayed restore command cannot reinstall the saved filter"
+        );
+        app.update_audio();
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .music_resolver
+                .playlist
+                .as_deref(),
+            None
+        );
+        assert_eq!(
+            app.engine.capture_state().play_list.as_deref(),
+            Some("Theme*")
+        );
+    }
+
+    #[test]
+    fn saved_game_rxmusic_reenables_music_but_not_transient_flash() {
         let mut app = new_running_sandbox_app();
         let scenario = app
             .active_scenario
@@ -86724,8 +86806,8 @@ protected func InputCallback(string answer, int player)
                 .music_enabled,
             "RXMusic remains an independent configured option"
         );
-        assert!(!app.runtime_music_enabled);
-        assert!(!app.audio.as_ref().expect("test audio").music_is_playing());
+        assert!(app.runtime_music_enabled, "RXMusic force-enables resume");
+        assert!(app.audio.as_ref().expect("test audio").music_is_playing());
         assert!(app.runtime_flash_message.is_none());
     }
 
