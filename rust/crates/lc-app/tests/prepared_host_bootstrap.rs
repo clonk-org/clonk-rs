@@ -58,6 +58,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
             auto_frame_skip: true,
             max_load_file_size: 100 * 1024 * 1024,
             no_runtime_join: true,
+            enable_upnp: true,
             network_tcp_port: 11_112,
             network_udp_port: 11_113,
         },
@@ -74,6 +75,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     assert_eq!(host.local_resource_roots, install_roots);
     assert_eq!(prepared.start_time(), 1_720_000_122);
     assert_eq!(host.max_players, 1);
+    assert!(host.enable_upnp);
     assert_eq!(host.configured_tcp_port, Some(11_112));
     assert_eq!(host.configured_udp_port, Some(11_113));
     assert_eq!(
@@ -733,6 +735,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
                 auto_frame_skip: false,
                 max_load_file_size: 100 * 1024 * 1024,
                 no_runtime_join: true,
+                enable_upnp: true,
                 network_tcp_port: 11_112,
                 network_udp_port: 11_113,
             },
@@ -1097,6 +1100,7 @@ fn prepare_with_names(
             auto_frame_skip: false,
             max_load_file_size: 100 * 1024 * 1024,
             no_runtime_join: true,
+            enable_upnp: true,
             network_tcp_port: 11_112,
             network_udp_port: 11_113,
         },

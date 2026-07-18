@@ -54,6 +54,7 @@ pub struct PreparedHostBootstrapConfig {
     pub auto_frame_skip: bool,
     pub max_load_file_size: u32,
     pub no_runtime_join: bool,
+    pub enable_upnp: bool,
     pub network_tcp_port: u16,
     pub network_udp_port: u16,
 }
@@ -1092,6 +1093,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         },
         password: LegacyCString::default(),
         allow_join: false,
+        enable_upnp: spec.config.enable_upnp,
         configured_tcp_port: Some(spec.config.network_tcp_port),
         configured_udp_port: Some(spec.config.network_udp_port),
         local_resource_roots: spec.install_roots.to_vec(),

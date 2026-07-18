@@ -15027,6 +15027,7 @@ fn build_network_host_preparation(
             auto_frame_skip: boolean("Graphics", "AutoFrameSkip", true),
             max_load_file_size,
             no_runtime_join: boolean("Network", "NoRuntimeJoin", true),
+            enable_upnp: boolean("Network", "EnableUPnP", true),
             network_tcp_port: integer("Network", "PortTCP", 11_112)
                 .try_into()
                 .ok()

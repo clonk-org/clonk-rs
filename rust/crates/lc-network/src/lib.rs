@@ -38,6 +38,7 @@ mod transport;
 mod udp;
 mod udp_runtime;
 mod udp_session;
+mod upnp;
 
 pub use address_packet::{
     append_received_address, decode_address_packet_payload, decode_tcp_sim_open_packet_payload,

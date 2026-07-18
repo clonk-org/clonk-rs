@@ -86,6 +86,10 @@ pub struct HostConfig {
     /// listener-port behavior of direct API callers.
     pub configured_tcp_port: Option<u16>,
     pub configured_udp_port: Option<u16>,
+    /// Requests C++-style best-effort UPnP IGD mappings for each successfully
+    /// bound host transport. Direct API callers opt in explicitly; the app
+    /// applies the stock `Config.Network.EnableUPnP` default.
+    pub enable_upnp: bool,
     pub initial_join_snapshot: Option<HostJoinSnapshot>,
     /// Resources in C++ publication order. `ResourceCatalog::register`
     /// prepends each entry, reproducing the linked-list discovery order.
@@ -148,6 +152,7 @@ impl Default for HostConfig {
             netpuncher_addresses: Vec::new(),
             configured_tcp_port: None,
             configured_udp_port: None,
+            enable_upnp: false,
             initial_join_snapshot: Some(synthetic_join_snapshot(local_core, 8)),
             resource_registrations: Vec::new(),
             resource_directory: None,
@@ -1156,27 +1161,52 @@ pub async fn start_host_with_udp_binding(
     config: HostConfig,
     udp_binding: HostUdpBinding,
 ) -> Result<HostHandle, HostError> {
+    start_host_with_udp_binding_and_backend(
+        listener,
+        config,
+        udp_binding,
+        &crate::upnp::RealPortMappingBackend,
+    )
+    .await
+}
+
+async fn start_host_with_udp_binding_and_backend(
+    listener: TcpListener,
+    config: HostConfig,
+    udp_binding: HostUdpBinding,
+    port_mapping_backend: &dyn crate::upnp::PortMappingBackend,
+) -> Result<HostHandle, HostError> {
     let resource_backend = build_host_resource_backend(&config)?;
     let HostUdpBinding {
         hub: udp_hub,
         start_error: udp_start_error,
     } = udp_binding;
+    let tcp_local_addr = listener.local_addr().ok();
     let udp_local_addr = udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::local_addr);
+    let mapping_requests = host_port_mapping_requests(&config, tcp_local_addr, udp_local_addr);
+    let active_port_mappings =
+        (!mapping_requests.is_empty()).then(|| port_mapping_backend.start(&mapping_requests));
     let (command_tx, command_rx) = mpsc::channel::<HostCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join_handle = tokio::spawn(run_host(
-        listener,
-        udp_hub,
-        udp_start_error,
-        config,
-        resource_backend,
-        command_rx,
-        event_tx.clone(),
-        shutdown_rx,
-    ));
+    let join_handle = tokio::spawn(async move {
+        run_host(
+            listener,
+            udp_hub,
+            udp_start_error,
+            config,
+            resource_backend,
+            command_rx,
+            event_tx.clone(),
+            shutdown_rx,
+        )
+        .await;
+        if let Some(active_port_mappings) = active_port_mappings {
+            active_port_mappings.shutdown().await;
+        }
+    });
     Ok(HostHandle {
         command_tx,
         event_rx: Some(event_rx),
@@ -1184,6 +1214,39 @@ pub async fn start_host_with_udp_binding(
         join_handle,
         udp_local_addr,
     })
+}
+
+fn host_port_mapping_requests(
+    config: &HostConfig,
+    tcp_local_addr: Option<SocketAddr>,
+    udp_local_addr: Option<SocketAddr>,
+) -> Vec<crate::upnp::PortMappingRequest> {
+    if !config.enable_upnp {
+        return Vec::new();
+    }
+
+    let mut requests = Vec::with_capacity(2);
+    let tcp_port = tcp_local_addr
+        .map(|address| config.configured_tcp_port.unwrap_or(address.port()))
+        .filter(|port| *port != 0);
+    if let Some(internal_port) = tcp_port {
+        requests.push(crate::upnp::PortMappingRequest {
+            protocol: crate::upnp::PortMappingProtocol::Tcp,
+            internal_port,
+            external_port: 0,
+        });
+    }
+    let udp_port = udp_local_addr
+        .map(|address| config.configured_udp_port.unwrap_or(address.port()))
+        .filter(|port| *port != 0);
+    if let Some(internal_port) = udp_port {
+        requests.push(crate::upnp::PortMappingRequest {
+            protocol: crate::upnp::PortMappingProtocol::Udp,
+            internal_port,
+            external_port: 0,
+        });
+    }
+    requests
 }
 
 /// Starts the multiplayer host loop.
@@ -10048,6 +10111,111 @@ mod tests {
         let mut payload = vec![0; length];
         stream.read_exact(&mut payload).await.unwrap();
         payload
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingPortMappingBackend {
+        started: Arc<Mutex<Vec<Vec<crate::upnp::PortMappingRequest>>>>,
+        released: Arc<Mutex<Vec<Vec<crate::upnp::PortMappingRequest>>>>,
+    }
+
+    struct RecordingActivePortMappings {
+        requests: Vec<crate::upnp::PortMappingRequest>,
+        released: Arc<Mutex<Vec<Vec<crate::upnp::PortMappingRequest>>>>,
+    }
+
+    impl crate::upnp::ActivePortMappings for RecordingActivePortMappings {
+        fn shutdown(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+            Box::pin(async move {
+                self.released.lock().unwrap().push(self.requests);
+            })
+        }
+    }
+
+    impl crate::upnp::PortMappingBackend for RecordingPortMappingBackend {
+        fn start(
+            &self,
+            requests: &[crate::upnp::PortMappingRequest],
+        ) -> Box<dyn crate::upnp::ActivePortMappings> {
+            self.started.lock().unwrap().push(requests.to_vec());
+            Box::new(RecordingActivePortMappings {
+                requests: requests.to_vec(),
+                released: Arc::clone(&self.released),
+            })
+        }
+    }
+
+    #[test]
+    fn upnp_mapping_requests_require_enablement_and_live_bound_transports() {
+        let mut config = HostConfig {
+            enable_upnp: true,
+            configured_tcp_port: Some(31_112),
+            configured_udp_port: Some(31_113),
+            ..HostConfig::default()
+        };
+        let tcp = SocketAddr::from(([127, 0, 0, 1], 40_001));
+        let udp = SocketAddr::from(([127, 0, 0, 1], 40_002));
+        assert_eq!(
+            host_port_mapping_requests(&config, Some(tcp), Some(udp)),
+            vec![
+                crate::upnp::PortMappingRequest {
+                    protocol: crate::upnp::PortMappingProtocol::Tcp,
+                    internal_port: 31_112,
+                    external_port: 0,
+                },
+                crate::upnp::PortMappingRequest {
+                    protocol: crate::upnp::PortMappingProtocol::Udp,
+                    internal_port: 31_113,
+                    external_port: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            host_port_mapping_requests(&config, Some(tcp), None),
+            vec![crate::upnp::PortMappingRequest {
+                protocol: crate::upnp::PortMappingProtocol::Tcp,
+                internal_port: 31_112,
+                external_port: 0,
+            }],
+            "an unavailable UDP listener must not map its configured port"
+        );
+
+        config.enable_upnp = false;
+        assert!(host_port_mapping_requests(&config, Some(tcp), Some(udp)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn enabled_upnp_host_requests_tcp_udp_and_releases_on_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = HostConfig {
+            enable_upnp: true,
+            udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+            configured_tcp_port: Some(31_112),
+            configured_udp_port: Some(31_113),
+            ..HostConfig::default()
+        };
+        let udp_binding = HostUdpBinding::bind(&config);
+        assert!(udp_binding.local_addr().is_some());
+        let backend = RecordingPortMappingBackend::default();
+        let host = start_host_with_udp_binding_and_backend(listener, config, udp_binding, &backend)
+            .await
+            .unwrap();
+        let expected = vec![
+            crate::upnp::PortMappingRequest {
+                protocol: crate::upnp::PortMappingProtocol::Tcp,
+                internal_port: 31_112,
+                external_port: 0,
+            },
+            crate::upnp::PortMappingRequest {
+                protocol: crate::upnp::PortMappingProtocol::Udp,
+                internal_port: 31_113,
+                external_port: 0,
+            },
+        ];
+        assert_eq!(&*backend.started.lock().unwrap(), &[expected.clone()]);
+
+        host.shutdown().await.unwrap();
+        assert_eq!(&*backend.released.lock().unwrap(), &[expected]);
     }
 
     #[tokio::test]
