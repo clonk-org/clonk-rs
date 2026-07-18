@@ -502,30 +502,7 @@ impl ResourceCatalog {
                 .into_iter()
                 .collect()
             }
-            ResourcePacket::Derive(core) => {
-                if core.derived_id < 0 {
-                    return Vec::new();
-                }
-                self.resources
-                    .iter_mut()
-                    .filter(|resource| {
-                        resource.registration.resource_id == RESOURCE_ID_ANONYMOUS
-                            && resource
-                                .core
-                                .as_ref()
-                                .is_some_and(|anonymous| anonymous.derived_id == core.derived_id)
-                    })
-                    .map(|resource| {
-                        let binary_compatible = resource.registration.binary_compatible;
-                        resource.registration =
-                            ResourceRegistration::from_core(core, binary_compatible, false);
-                        resource.core = Some(core.clone());
-                        resource.local_chunks =
-                            ChunkSet::complete(resource.registration.chunk_count);
-                        ResourceCatalogAction::FinishDerived { core: core.clone() }
-                    })
-                    .collect()
-            }
+            ResourcePacket::Derive(core) => self.finish_matching_anonymous_derived(core, false),
             ResourcePacket::Request(request) => self
                 .resource_mut(request.resource_id)
                 .filter(|resource| {
@@ -555,6 +532,49 @@ impl ResourceCatalog {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    /// Finishes a locally created derived resource and announces its new core.
+    /// The announcement is emitted only when a matching anonymous resource was
+    /// rebound, mirroring `C4Network2Res::FinishDerive`.
+    pub fn finish_local_derived(
+        &mut self,
+        core: &NetworkResourceCore,
+    ) -> Vec<ResourceCatalogAction> {
+        let mut actions = self.finish_matching_anonymous_derived(core, true);
+        if !actions.is_empty() {
+            actions.push(ResourceCatalogAction::Broadcast {
+                packet: ResourcePacket::Derive(core.clone()),
+            });
+        }
+        actions
+    }
+
+    fn finish_matching_anonymous_derived(
+        &mut self,
+        core: &NetworkResourceCore,
+        dirty: bool,
+    ) -> Vec<ResourceCatalogAction> {
+        if core.derived_id < 0 {
+            return Vec::new();
+        }
+        self.resources
+            .iter_mut()
+            .filter(|resource| {
+                resource.registration.resource_id == RESOURCE_ID_ANONYMOUS
+                    && resource
+                        .core
+                        .as_ref()
+                        .is_some_and(|anonymous| anonymous.derived_id == core.derived_id)
+            })
+            .map(|resource| {
+                resource.registration = ResourceRegistration::from_core(core, true, false);
+                resource.core = Some(core.clone());
+                resource.local_chunks = ChunkSet::complete(resource.registration.chunk_count);
+                resource.dirty = dirty;
+                ResourceCatalogAction::FinishDerived { core: core.clone() }
+            })
+            .collect()
     }
 
     /// Produces the periodic protocol work from `C4Network2ResList::OnTimer`.

@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lc_engine::{LegacyCString, NetworkResourceCore};
 use lc_network::{
-    ResourceCatalogAction, ResourceDataPacket, ResourceDiscoverPacket, ResourceFileOwnership,
-    ResourcePacket, ResourceRequestPacket, ResourceStatusPacket, ResourceTransferBackend,
-    ResourceTransferEvent,
+    HostResourceType, ResourceCatalogAction, ResourceDataPacket, ResourceDiscoverPacket,
+    ResourceFileOwnership, ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
+    ResourceTransferBackend, ResourceTransferEvent,
 };
 
 fn core(
@@ -25,6 +25,13 @@ fn core(
         chunk_size,
         filename: LegacyCString::from_bytes(filename.to_vec()).unwrap(),
         ..NetworkResourceCore::default()
+    }
+}
+
+fn derivable_core(resource_id: i32) -> NetworkResourceCore {
+    NetworkResourceCore {
+        resource_type: HostResourceType::Scenario as u8,
+        ..core(resource_id, b"scenario.c4s", 5, 2, 0x8bd6_88e8)
     }
 }
 
@@ -79,8 +86,7 @@ fn cpp_host_and_client_exchange_all_chunks_without_sockets() {
                 ResourceTransferEvent::Transport(ResourceCatalogAction::Broadcast { .. }) => {
                     panic!("the direct exchange should not broadcast")
                 }
-                ResourceTransferEvent::LoadFailed { .. }
-                | ResourceTransferEvent::FinishDerivedUnsupported { .. } => {
+                ResourceTransferEvent::LoadFailed { .. } => {
                     panic!("unexpected terminal resource event")
                 }
                 ResourceTransferEvent::Transport(action) => {
@@ -181,11 +187,115 @@ fn cpp_status_schedules_one_request_with_an_eligible_chunk_draw() {
 }
 
 #[test]
-fn cpp_derive_action_remains_explicit_until_group_delta_support_exists() {
-    // HandlePacket delegates matching anonymous resources to FinishDerive;
-    // this backend must not silently claim that C4Group delta work has run
-    // (src/C4Network2Res.cpp:1584-1593).
-    let directory = TestDirectory::new("derive");
+fn cpp_host_derivation_preserves_old_bytes_and_broadcasts_the_finished_core() {
+    // Derive rescues a standalone that aliases the mutable source; FinishDerive
+    // binds the rewritten source to the new ID and broadcasts that exact core
+    // (src/C4Network2Res.cpp:718-823).
+    let directory = TestDirectory::new("derive-host");
+    let source = directory.path().join("scenario.c4s");
+    fs::write(&source, b"local").unwrap();
+    let parent = derivable_core(4);
+    let mut backend = ResourceTransferBackend::new(0, directory.path()).unwrap();
+    backend
+        .register_local_complete(parent, &source, ResourceFileOwnership::Persistent, true)
+        .unwrap();
+
+    let derivation = backend
+        .begin_derive(4, &source, ResourceFileOwnership::Persistent, 17)
+        .unwrap();
+    let rescued = backend.path(4).unwrap().to_path_buf();
+    assert_ne!(rescued, source);
+    assert_eq!(fs::read(&rescued).unwrap(), b"local");
+
+    fs::write(&source, b"changed").unwrap();
+    let (derived, events) = backend.finish_derive(derivation, 11).unwrap();
+
+    assert_eq!(derived.id, 11);
+    assert_eq!(derived.derived_id, 4);
+    assert_eq!(
+        events,
+        vec![
+            ResourceTransferEvent::Completed {
+                resource_id: 11,
+                core: derived.clone(),
+                path: source.clone(),
+            },
+            ResourceTransferEvent::Transport(ResourceCatalogAction::Broadcast {
+                packet: ResourcePacket::Derive(derived.clone()),
+            }),
+        ]
+    );
+    assert_eq!(backend.core(4).unwrap().id, 4);
+    assert_eq!(backend.core(11), Some(&derived));
+    assert_eq!(fs::read(backend.path(4).unwrap()).unwrap(), b"local");
+    assert_eq!(fs::read(backend.path(11).unwrap()).unwrap(), b"changed");
+}
+
+#[test]
+fn cpp_matching_derive_rebinds_the_complete_file_without_downloading() {
+    // Receiving PID_NetResDerive finishes a matching anonymous SetDerived
+    // entry in place and marks every chunk present without CRC verification
+    // (src/C4Network2Res.cpp:526-546,778-823,1584-1593).
+    let directory = TestDirectory::new("derive-receive");
+    let source = directory.path().join("scenario.c4s");
+    fs::write(&source, b"local").unwrap();
+    let mut backend = ResourceTransferBackend::new(1, directory.path()).unwrap();
+    backend
+        .register_local_complete(
+            derivable_core(4),
+            &source,
+            ResourceFileOwnership::Persistent,
+            true,
+        )
+        .unwrap();
+    let _derivation = backend
+        .begin_derive(4, &source, ResourceFileOwnership::Persistent, 17)
+        .unwrap();
+    fs::write(&source, b"changed").unwrap();
+    let derived = NetworkResourceCore {
+        resource_type: HostResourceType::Scenario as u8,
+        id: 11,
+        derived_id: 4,
+        loadable: true,
+        file_size: 7,
+        file_crc: 0xdead_beef,
+        chunk_size: 2,
+        filename: LegacyCString::from_bytes(b"scenario.c4s".to_vec()).unwrap(),
+        ..NetworkResourceCore::default()
+    };
+    let mut safe_random = |_| panic!("derive does not use SafeRandom");
+
+    let events = backend
+        .on_packet(
+            0,
+            &ResourcePacket::Derive(derived.clone()),
+            18,
+            &mut safe_random,
+        )
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![ResourceTransferEvent::Completed {
+            resource_id: 11,
+            core: derived.clone(),
+            path: source.clone(),
+        }]
+    );
+    assert_eq!(backend.core(11), Some(&derived));
+    assert_eq!(backend.path(11), Some(source.as_path()));
+    assert_eq!(fs::read(backend.path(11).unwrap()).unwrap(), b"changed");
+    let chunks = backend.catalog().local_chunks(11).unwrap();
+    assert!(chunks.is_complete());
+    assert_eq!(chunks.present_chunk_count(), chunks.chunk_count());
+    assert_eq!(backend.catalog().outstanding_load_count(11), 0);
+}
+
+#[test]
+fn cpp_unmatched_derive_packet_is_a_silent_no_op() {
+    // HandlePacket scans only matching anonymous resources and otherwise does
+    // nothing (src/C4Network2Res.cpp:1584-1593).
+    let directory = TestDirectory::new("derive-unmatched");
     let mut backend = ResourceTransferBackend::new(1, directory.path()).unwrap();
     let derived = NetworkResourceCore {
         id: 11,
@@ -195,19 +305,12 @@ fn cpp_derive_action_remains_explicit_until_group_delta_support_exists() {
     let mut safe_random = |_| panic!("derive does not use SafeRandom");
 
     let events = backend
-        .process_actions(
-            [ResourceCatalogAction::FinishDerived {
-                core: derived.clone(),
-            }],
-            0,
-            &mut safe_random,
-        )
+        .on_packet(0, &ResourcePacket::Derive(derived), 18, &mut safe_random)
         .unwrap();
 
-    assert_eq!(
-        events,
-        vec![ResourceTransferEvent::FinishDerivedUnsupported { core: derived }]
-    );
+    assert!(events.is_empty());
+    assert!(backend.core(11).is_none());
+    assert!(backend.path(11).is_none());
 }
 
 #[test]

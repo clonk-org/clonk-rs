@@ -15,7 +15,10 @@ const STOCK_CHUNK_DATA_SIZE: u64 = 100 * 1024;
 pub enum ResourceFileStoreError {
     Io(io::Error),
     DuplicateResource(i32),
+    DuplicatePendingDerivation(i32),
     UnknownResource(i32),
+    UnknownPendingDerivation(i32),
+    ResourceNotComplete(i32),
     ResourceNotLoadable(i32),
     ZeroChunkSize(i32),
     EmptyFilename(i32),
@@ -56,8 +59,19 @@ impl fmt::Display for ResourceFileStoreError {
             Self::DuplicateResource(resource_id) => {
                 write!(formatter, "resource {resource_id} is already registered")
             }
+            Self::DuplicatePendingDerivation(resource_id) => write!(
+                formatter,
+                "resource {resource_id} already has a pending derivation"
+            ),
             Self::UnknownResource(resource_id) => {
                 write!(formatter, "resource {resource_id} is not registered")
+            }
+            Self::UnknownPendingDerivation(resource_id) => write!(
+                formatter,
+                "resource {resource_id} has no pending derivation"
+            ),
+            Self::ResourceNotComplete(resource_id) => {
+                write!(formatter, "resource {resource_id} is not complete")
             }
             Self::ResourceNotLoadable(resource_id) => {
                 write!(formatter, "resource {resource_id} is not loadable")
@@ -166,6 +180,7 @@ struct ResourceFile {
 pub struct ResourceFileStore {
     root: PathBuf,
     resources: HashMap<i32, ResourceFile>,
+    pending_derived: HashMap<i32, ResourceFile>,
 }
 
 impl ResourceFileStore {
@@ -175,7 +190,12 @@ impl ResourceFileStore {
         Ok(Self {
             root,
             resources: HashMap::new(),
+            pending_derived: HashMap::new(),
         })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn create_remote(
@@ -239,6 +259,128 @@ impl ResourceFileStore {
             },
         );
         Ok(())
+    }
+
+    /// Preserve a complete parent resource before its source is rewritten and
+    /// remember that mutable source as an anonymous derived resource.
+    pub fn begin_derive(
+        &mut self,
+        parent_resource_id: i32,
+        mutable_source: impl AsRef<Path>,
+        ownership: ResourceFileOwnership,
+    ) -> Result<(), ResourceFileStoreError> {
+        if self.pending_derived.contains_key(&parent_resource_id) {
+            return Err(ResourceFileStoreError::DuplicatePendingDerivation(
+                parent_resource_id,
+            ));
+        }
+
+        let mutable_source = mutable_source.as_ref().to_path_buf();
+        let metadata = fs::metadata(&mutable_source)?;
+        if !metadata.is_file() {
+            return Err(ResourceFileStoreError::NotRegularFile(mutable_source));
+        }
+
+        let parent = self
+            .resources
+            .get(&parent_resource_id)
+            .ok_or(ResourceFileStoreError::UnknownResource(parent_resource_id))?;
+        if !matches!(parent.state, ResourceFileState::Complete) {
+            return Err(ResourceFileStoreError::ResourceNotComplete(
+                parent_resource_id,
+            ));
+        }
+        let mut anonymous_core = parent.core.clone();
+        anonymous_core.id = -2;
+        anonymous_core.derived_id = parent_resource_id;
+
+        if parent.path == mutable_source {
+            let filename = sanitized_basename(&parent.core)
+                .ok_or(ResourceFileStoreError::EmptyFilename(parent_resource_id))?;
+            let (rescued_path, rescued_file) = self.create_temporary_file(&filename)?;
+            drop(rescued_file);
+            if let Err(error) = fs::copy(&mutable_source, &rescued_path) {
+                let _ = fs::remove_file(&rescued_path);
+                return Err(error.into());
+            }
+            let parent = self
+                .resources
+                .get_mut(&parent_resource_id)
+                .expect("parent resource checked above");
+            parent.path = rescued_path;
+            parent.ownership = ResourceFileOwnership::Temporary;
+        }
+
+        self.pending_derived.insert(
+            parent_resource_id,
+            ResourceFile {
+                core: anonymous_core,
+                path: mutable_source,
+                ownership,
+                state: ResourceFileState::Complete,
+            },
+        );
+        Ok(())
+    }
+
+    /// Point a pending derivation at the standalone file prepared for its
+    /// final resource core.
+    pub fn replace_pending_derived_file(
+        &mut self,
+        parent_resource_id: i32,
+        path: impl AsRef<Path>,
+        ownership: ResourceFileOwnership,
+    ) -> Result<(), ResourceFileStoreError> {
+        if !self.pending_derived.contains_key(&parent_resource_id) {
+            return Err(ResourceFileStoreError::UnknownPendingDerivation(
+                parent_resource_id,
+            ));
+        }
+        let path = path.as_ref().to_path_buf();
+        let metadata = fs::metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(ResourceFileStoreError::NotRegularFile(path));
+        }
+        let pending = self
+            .pending_derived
+            .get_mut(&parent_resource_id)
+            .expect("pending derivation checked above");
+        if pending.ownership == ResourceFileOwnership::Temporary && pending.path != path {
+            match fs::remove_file(&pending.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        pending.path = path;
+        pending.ownership = ownership;
+        Ok(())
+    }
+
+    /// Bind a matching anonymous derivation to its allocated resource ID.
+    /// C++ FinishDerive trusts the announced core and does not validate the
+    /// standalone file's size or CRC here.
+    pub fn finish_derived(
+        &mut self,
+        core: &NetworkResourceCore,
+    ) -> Result<PathBuf, ResourceFileStoreError> {
+        if !self.pending_derived.contains_key(&core.derived_id) {
+            return Err(ResourceFileStoreError::UnknownPendingDerivation(
+                core.derived_id,
+            ));
+        }
+        if self.resources.contains_key(&core.id) {
+            return Err(ResourceFileStoreError::DuplicateResource(core.id));
+        }
+        let mut resource = self
+            .pending_derived
+            .remove(&core.derived_id)
+            .expect("pending derivation checked above");
+        resource.core = core.clone();
+        resource.state = ResourceFileState::Complete;
+        let path = resource.path.clone();
+        self.resources.insert(core.id, resource);
+        Ok(path)
     }
 
     pub fn path(&self, resource_id: i32) -> Option<&Path> {
@@ -409,11 +551,14 @@ impl ResourceFileStore {
 
 impl Drop for ResourceFileStore {
     fn drop(&mut self) {
-        self.resources.values().for_each(|resource| {
-            if resource.ownership == ResourceFileOwnership::Temporary {
-                let _ = fs::remove_file(&resource.path);
-            }
-        });
+        self.resources
+            .values()
+            .chain(self.pending_derived.values())
+            .for_each(|resource| {
+                if resource.ownership == ResourceFileOwnership::Temporary {
+                    let _ = fs::remove_file(&resource.path);
+                }
+            });
     }
 }
 

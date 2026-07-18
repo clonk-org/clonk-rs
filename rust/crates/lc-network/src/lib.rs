@@ -180,7 +180,7 @@ pub use resource_packet::{
     PID_NET_RES_STATUS,
 };
 pub use resource_transfer_backend::{
-    ResourceTransferBackend, ResourceTransferError, ResourceTransferEvent,
+    ResourceDerivation, ResourceTransferBackend, ResourceTransferError, ResourceTransferEvent,
 };
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
 pub use search::{

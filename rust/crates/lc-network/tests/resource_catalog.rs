@@ -5,14 +5,14 @@ mod resource_catalog;
 #[path = "../src/resource_packet.rs"]
 mod resource_packet;
 
-use lc_engine::NetworkResourceCore;
+use lc_engine::{LegacyCString, NetworkResourceCore};
 use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, PeerStatusOutcome, ResourceCatalog, ResourceCatalogAction,
     ResourceLoadPoll, ResourceRegistration,
 };
 use resource_packet::{
-    ResourceChunkAvailability, ResourceChunkRange, ResourceDiscoverPacket, ResourcePacket,
-    ResourceRequestPacket, ResourceStatusPacket,
+    encode_resource_packet, ResourceChunkAvailability, ResourceChunkRange,
+    ResourceDiscoverPacket, ResourcePacket, ResourceRequestPacket, ResourceStatusPacket,
 };
 
 fn registration(resource_id: i32) -> ResourceRegistration {
@@ -59,6 +59,27 @@ fn cpp_derive_only_finishes_anonymous_resources_with_the_matching_parent() {
     assert_eq!(catalog.resource_core(11), Some(&derived));
     assert_eq!(catalog.local_chunks(11), Some(&ChunkSet::complete(3)));
     assert_eq!(catalog.last_request_at(11), Some(100));
+    assert_eq!(
+        catalog.on_packet(
+            7,
+            &ResourcePacket::Discover(ResourceDiscoverPacket {
+                resource_ids: vec![11],
+            }),
+        ),
+        vec![ResourceCatalogAction::SendToPeer {
+            peer_id: 7,
+            packet: ResourcePacket::Status(ResourceStatusPacket {
+                resource_id: 11,
+                chunks: ResourceChunkAvailability {
+                    chunk_count: 3,
+                    ranges: vec![ResourceChunkRange {
+                        start: 0,
+                        length: 3,
+                    }],
+                },
+            }),
+        }]
+    );
 
     // The matching anonymous entry is no longer anonymous; the unmatched one
     // remains eligible for its own parent's announcement.
@@ -78,6 +99,68 @@ fn cpp_derive_only_finishes_anonymous_resources_with_the_matching_parent() {
             .len(),
         1
     );
+}
+
+#[test]
+fn local_finish_derive_rebinds_then_broadcasts_the_new_core() {
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register_anonymous_derived(4, false));
+    let derived = NetworkResourceCore {
+        id: 11,
+        derived_id: 4,
+        loadable: true,
+        file_size: 205,
+        chunk_size: 100,
+        ..NetworkResourceCore::default()
+    };
+
+    assert_eq!(
+        catalog.finish_local_derived(&derived),
+        vec![
+            ResourceCatalogAction::FinishDerived {
+                core: derived.clone(),
+            },
+            ResourceCatalogAction::Broadcast {
+                packet: ResourcePacket::Derive(derived.clone()),
+            },
+        ]
+    );
+    assert_eq!(catalog.resource_core(11), Some(&derived));
+    assert_eq!(catalog.local_chunks(11), Some(&ChunkSet::complete(3)));
+
+    let unmatched = NetworkResourceCore {
+        id: 12,
+        derived_id: 8,
+        ..derived
+    };
+    assert!(catalog.finish_local_derived(&unmatched).is_empty());
+}
+
+#[test]
+fn local_finish_derive_broadcast_matches_the_cpp_codec_fixture() {
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register_anonymous_derived(0x0102_0304, true));
+    let core = NetworkResourceCore {
+        resource_type: 2,
+        id: -1,
+        derived_id: 0x0102_0304,
+        loadable: false,
+        contents_crc: 0x1122_3344,
+        filename: LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+        author: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+        ..NetworkResourceCore::default()
+    };
+    let actions = catalog.finish_local_derived(&core);
+    let ResourceCatalogAction::Broadcast { packet } = &actions[1] else {
+        panic!("local FinishDerive did not emit its derive broadcast");
+    };
+    let expected = [
+        0x32, 0x02, 0xff, 0xff, 0xff, 0xff, 0x04, 0x03, 0x02, 0x01, 0x00, 0x44, 0x33, 0x22,
+        0x11, 0x00, b'S', b'c', b'e', b'n', b'a', b'r', b'i', b'o', b'.', b'c', b'4', b's',
+        0x00, b'A', b'l', b'i', b'c', b'e', 0x00,
+    ];
+
+    assert_eq!(encode_resource_packet(packet).unwrap(), expected);
 }
 
 #[test]

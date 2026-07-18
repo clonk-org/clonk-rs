@@ -11,10 +11,29 @@ use std::path::{Path, PathBuf};
 use lc_engine::NetworkResourceCore;
 
 use crate::{
-    ChunkStoreOutcome, ChunkWriteOutcome, ResourceCatalog, ResourceCatalogAction,
+    build_host_resource_core, ChunkStoreOutcome, ChunkWriteOutcome, HostResourceCoreError,
+    HostResourceCoreSpec, HostResourceType, ResourceCatalog, ResourceCatalogAction,
     ResourceDataPacket, ResourceFileOwnership, ResourceFileStore, ResourceFileStoreError,
     ResourcePacket, ResourceRegistration,
 };
+
+/// Opaque handle for the file protected by [`ResourceTransferBackend::begin_derive`].
+///
+/// The handle is consumed when the control host finishes and announces the
+/// derivation. Non-host peers retain only the anonymous backend state and
+/// finish it when the matching `PID_NetResDerive` arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceDerivation {
+    parent_resource_id: i32,
+    source_path: PathBuf,
+    source_ownership: ResourceFileOwnership,
+}
+
+impl ResourceDerivation {
+    pub fn parent_resource_id(&self) -> i32 {
+        self.parent_resource_id
+    }
+}
 
 /// Externally observable work produced after all local catalog actions run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,9 +48,6 @@ pub enum ResourceTransferEvent {
     },
     /// Discovery/load timeout removed the temporary resource file.
     LoadFailed { resource_id: i32 },
-    /// Derivation needs the C4Group delta algorithm and is intentionally left
-    /// explicit until that algorithm has a verified Rust implementation.
-    FinishDerivedUnsupported { core: NetworkResourceCore },
 }
 
 #[derive(Debug)]
@@ -41,6 +57,10 @@ pub enum ResourceTransferError {
     CatalogRegistrationRejected(i32),
     MissingCore(i32),
     MissingPath(i32),
+    UnsupportedResourceType(u8),
+    DerivedResourceNotLoadable(i32),
+    CatalogDerivationMissing(i32),
+    ResourceCore(HostResourceCoreError),
     ChunkIndexOverflow(u32),
     CatalogRejectedStoredChunk {
         resource_id: i32,
@@ -70,6 +90,18 @@ impl fmt::Display for ResourceTransferError {
             Self::MissingPath(resource_id) => {
                 write!(formatter, "resource {resource_id} has no retained path")
             }
+            Self::UnsupportedResourceType(resource_type) => {
+                write!(formatter, "resource type {resource_type} cannot be derived")
+            }
+            Self::DerivedResourceNotLoadable(resource_id) => {
+                write!(formatter, "derived resource {resource_id} has no standalone")
+            }
+            Self::CatalogDerivationMissing(resource_id) => {
+                write!(formatter, "resource {resource_id} has no anonymous derivation")
+            }
+            Self::ResourceCore(error) => {
+                write!(formatter, "derived resource build failed: {error}")
+            }
             Self::ChunkIndexOverflow(chunk) => {
                 write!(formatter, "resource chunk {chunk} does not fit an int32")
             }
@@ -97,6 +129,7 @@ impl std::error::Error for ResourceTransferError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::FileStore(error) => Some(error),
+            Self::ResourceCore(error) => Some(error),
             _ => None,
         }
     }
@@ -105,6 +138,12 @@ impl std::error::Error for ResourceTransferError {
 impl From<ResourceFileStoreError> for ResourceTransferError {
     fn from(error: ResourceFileStoreError) -> Self {
         Self::FileStore(error)
+    }
+}
+
+impl From<HostResourceCoreError> for ResourceTransferError {
+    fn from(error: HostResourceCoreError) -> Self {
+        Self::ResourceCore(error)
     }
 }
 
@@ -223,6 +262,86 @@ impl ResourceTransferBackend {
         self.files
             .path(resource_id)
             .or_else(|| self.local_sources.get(&resource_id).map(PathBuf::as_path))
+    }
+
+    /// Protects a complete resource before its mutable source is rewritten.
+    ///
+    /// This mirrors `C4Network2Res::Derive`: the old serving bytes are rescued
+    /// when necessary and an anonymous `SetDerived` catalog entry is created.
+    pub fn begin_derive(
+        &mut self,
+        parent_resource_id: i32,
+        source_path: impl AsRef<Path>,
+        source_ownership: ResourceFileOwnership,
+        now_seconds: u64,
+    ) -> Result<ResourceDerivation, ResourceTransferError> {
+        if !self.cores.contains_key(&parent_resource_id) {
+            return Err(ResourceTransferError::MissingCore(parent_resource_id));
+        }
+        let source_path = source_path.as_ref().to_path_buf();
+        self.files
+            .begin_derive(parent_resource_id, &source_path, source_ownership)?;
+        self.catalog
+            .register_anonymous_derived_at(parent_resource_id, true, now_seconds);
+        Ok(ResourceDerivation {
+            parent_resource_id,
+            source_path,
+            source_ownership,
+        })
+    }
+
+    /// Rebuilds and announces a locally-authored anonymous derivation.
+    ///
+    /// The caller supplies the already-allocated resource ID. The returned
+    /// transport event contains the exact `PID_NetResDerive` core emitted by
+    /// C++ `FinishDerive`.
+    pub fn finish_derive(
+        &mut self,
+        derivation: ResourceDerivation,
+        resource_id: i32,
+    ) -> Result<(NetworkResourceCore, Vec<ResourceTransferEvent>), ResourceTransferError> {
+        self.ensure_unregistered(resource_id)?;
+        let parent = self
+            .cores
+            .get(&derivation.parent_resource_id)
+            .cloned()
+            .ok_or(ResourceTransferError::MissingCore(
+                derivation.parent_resource_id,
+            ))?;
+        let resource_type = host_resource_type(parent.resource_type)?;
+        let publication = build_host_resource_core(
+            &derivation.source_path,
+            self.files.root(),
+            HostResourceCoreSpec::new_with_raw_group_maker(
+                resource_type,
+                resource_id,
+                parent.filename,
+                parent.author,
+            )
+            .with_source_ownership(derivation.source_ownership),
+        )?;
+        let mut core = publication.core;
+        core.derived_id = derivation.parent_resource_id;
+        let path = publication
+            .standalone_path
+            .ok_or(ResourceTransferError::DerivedResourceNotLoadable(resource_id))?;
+        let ownership = publication
+            .standalone_ownership
+            .ok_or(ResourceTransferError::DerivedResourceNotLoadable(resource_id))?;
+        self.files.replace_pending_derived_file(
+            derivation.parent_resource_id,
+            path,
+            ownership,
+        )?;
+        let actions = self.catalog.finish_local_derived(&core);
+        if actions.is_empty() {
+            return Err(ResourceTransferError::CatalogDerivationMissing(
+                derivation.parent_resource_id,
+            ));
+        }
+        let mut no_random = |_| 0;
+        let events = self.process_actions(actions, 0, &mut no_random)?;
+        Ok((core, events))
     }
 
     /// Marks resources in the departed client's ID namespace for the
@@ -451,7 +570,13 @@ impl ResourceTransferBackend {
                         .for_each(|action| pending.push_front(action));
                 }
                 ResourceCatalogAction::FinishDerived { core } => {
-                    events.push(ResourceTransferEvent::FinishDerivedUnsupported { core });
+                    let path = self.files.finish_derived(&core)?;
+                    self.cores.insert(core.id, core.clone());
+                    events.push(ResourceTransferEvent::Completed {
+                        resource_id: core.id,
+                        core,
+                        path,
+                    });
                 }
                 ResourceCatalogAction::ResourceLoadFailed { resource_id } => {
                     self.files.remove(resource_id)?;
@@ -469,6 +594,18 @@ impl ResourceTransferBackend {
         } else {
             Ok(())
         }
+    }
+}
+
+fn host_resource_type(resource_type: u8) -> Result<HostResourceType, ResourceTransferError> {
+    match resource_type {
+        1 => Ok(HostResourceType::Scenario),
+        2 => Ok(HostResourceType::Dynamic),
+        3 => Ok(HostResourceType::Player),
+        4 => Ok(HostResourceType::Definitions),
+        5 => Ok(HostResourceType::System),
+        6 => Ok(HostResourceType::Material),
+        other => Err(ResourceTransferError::UnsupportedResourceType(other)),
     }
 }
 

@@ -481,6 +481,16 @@ pub enum HostCommand {
         request: crate::ClientPlayerResourceRequest,
         completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
     },
+    BeginResourceDerive {
+        resource_id: i32,
+        source_path: PathBuf,
+        ownership: crate::ResourceFileOwnership,
+        completion: oneshot::Sender<Result<crate::ResourceDerivation, String>>,
+    },
+    FinishResourceDerive {
+        derivation: crate::ResourceDerivation,
+        completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
+    },
     SetJoinAllowed {
         allowed: bool,
         completion: oneshot::Sender<()>,
@@ -639,6 +649,49 @@ impl HostHandle {
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         published
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
+    }
+
+    /// Protects a complete resource before its source file is rewritten.
+    pub async fn begin_resource_derive(
+        &self,
+        resource_id: i32,
+        source_path: impl Into<PathBuf>,
+        ownership: crate::ResourceFileOwnership,
+    ) -> Result<crate::ResourceDerivation, HostError> {
+        let (completion, derived) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::BeginResourceDerive {
+                resource_id,
+                source_path: source_path.into(),
+                ownership,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        derived
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
+    }
+
+    /// Publishes the rewritten source under a fresh ID and broadcasts its
+    /// `PID_NetResDerive` core to every connected peer.
+    pub async fn finish_resource_derive(
+        &self,
+        derivation: crate::ResourceDerivation,
+    ) -> Result<lc_engine::NetworkResourceCore, HostError> {
+        let (completion, finished) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::FinishResourceDerive {
+                derivation,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        finished
             .await
             .map_err(|_| HostError::HostLoopGone)?
             .map_err(HostError::Resource)
@@ -2654,6 +2707,12 @@ pub enum ClientCommand {
         request: crate::ClientPlayerResourceRequest,
         completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
     },
+    BeginResourceDerive {
+        resource_id: i32,
+        source_path: PathBuf,
+        ownership: crate::ResourceFileOwnership,
+        completion: oneshot::Sender<Result<crate::ResourceDerivation, String>>,
+    },
     GracefulPart {
         completion: oneshot::Sender<Result<(), String>>,
     },
@@ -2741,6 +2800,30 @@ impl ClientHandle {
             .await
             .map_err(|_| ClientError::ClientLoopGone)?;
         published
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::Resource)
+    }
+
+    /// Protects a local complete resource and waits for the control host's
+    /// matching derive announcement after the source is rewritten.
+    pub async fn begin_resource_derive(
+        &self,
+        resource_id: i32,
+        source_path: impl Into<PathBuf>,
+        ownership: crate::ResourceFileOwnership,
+    ) -> Result<crate::ResourceDerivation, ClientError> {
+        let (completion, derived) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::BeginResourceDerive {
+                resource_id,
+                source_path: source_path.into(),
+                ownership,
+                completion,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        derived
             .await
             .map_err(|_| ClientError::ClientLoopGone)?
             .map_err(ClientError::Resource)
@@ -3429,6 +3512,25 @@ impl ClientResourceState {
         Ok(core)
     }
 
+    fn begin_resource_derive(
+        &mut self,
+        resource_id: i32,
+        source_path: PathBuf,
+        ownership: crate::ResourceFileOwnership,
+    ) -> Result<crate::ResourceDerivation, String> {
+        let now_seconds = self.resource_epoch.elapsed().as_secs();
+        let backend = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| "client has no filesystem resource backend".to_string())?;
+        let derivation = backend
+            .begin_derive(resource_id, source_path, ownership, now_seconds)
+            .map_err(|error| error.to_string())?;
+        self.catalog
+            .register_anonymous_derived_at(resource_id, true, now_seconds);
+        Ok(derivation)
+    }
+
     fn remove_resource(&mut self, resource_id: i32) -> Result<(), String> {
         let removed_from_catalog = self.catalog.remove_resource(resource_id);
         let removed_from_backend = self
@@ -3775,6 +3877,24 @@ fn resource_traffic_class(packet: &ResourcePacket) -> ConnectionTrafficClass {
     }
 }
 
+fn update_derived_resource_sources(
+    sources: &mut BTreeMap<PathBuf, lc_engine::NetworkResourceCore>,
+    events: &[crate::ResourceTransferEvent],
+) {
+    for event in events {
+        let crate::ResourceTransferEvent::Completed { core, .. } = event else {
+            continue;
+        };
+        if core.derived_id < 0 {
+            continue;
+        }
+        sources
+            .values_mut()
+            .filter(|source| source.id == core.derived_id)
+            .for_each(|source| *source = core.clone());
+    }
+}
+
 fn publish_host_player_resource(
     request: crate::ClientPlayerResourceRequest,
     state: &mut HostState,
@@ -3847,6 +3967,68 @@ fn publish_host_player_resource(
         .published_player_sources
         .insert(source_path, core.clone());
     Ok(core)
+}
+
+fn begin_host_resource_derive(
+    resource_id: i32,
+    source_path: PathBuf,
+    ownership: crate::ResourceFileOwnership,
+    state: &mut HostState,
+) -> Result<crate::ResourceDerivation, String> {
+    let now_seconds = state.resource_epoch.elapsed().as_secs();
+    let backend = state
+        .resource_backend
+        .as_mut()
+        .ok_or_else(|| "host has no filesystem resource backend".to_string())?;
+    let derivation = backend
+        .begin_derive(resource_id, source_path, ownership, now_seconds)
+        .map_err(|error| error.to_string())?;
+    state
+        .resource_catalog
+        .register_anonymous_derived_at(resource_id, true, now_seconds);
+    Ok(derivation)
+}
+
+fn finish_host_resource_derive(
+    derivation: crate::ResourceDerivation,
+    state: &mut HostState,
+) -> Result<
+    (
+        lc_engine::NetworkResourceCore,
+        Vec<crate::ResourceTransferEvent>,
+    ),
+    String,
+> {
+    let parent_resource_id = derivation.parent_resource_id();
+    let resource_id = loop {
+        let candidate = state.resource_catalog.allocate_resource_id();
+        let occupied_by_backend = state
+            .resource_backend
+            .as_ref()
+            .is_some_and(|backend| backend.catalog().contains_resource(candidate));
+        if !occupied_by_backend {
+            break candidate;
+        }
+    };
+    let backend = state
+        .resource_backend
+        .as_mut()
+        .ok_or_else(|| "host filesystem resource backend disappeared".to_string())?;
+    let (core, events) = backend
+        .finish_derive(derivation, resource_id)
+        .map_err(|error| error.to_string())?;
+    let shadow_actions = state.resource_catalog.finish_local_derived(&core);
+    if shadow_actions.is_empty() {
+        return Err(format!(
+            "resource {parent_resource_id} has no session derivation"
+        ));
+    }
+    state
+        .published_player_sources
+        .values_mut()
+        .filter(|published| published.id == parent_resource_id)
+        .for_each(|published| *published = core.clone());
+    Ok((core, events))
 }
 
 async fn accept_udp_session(
@@ -4364,6 +4546,32 @@ async fn run_host(
                         let result = publish_host_player_resource(request, &mut state);
                         let _ = completion.send(result);
                     }
+                    HostCommand::BeginResourceDerive {
+                        resource_id,
+                        source_path,
+                        ownership,
+                        completion,
+                    } => {
+                        let result = begin_host_resource_derive(
+                            resource_id,
+                            source_path,
+                            ownership,
+                            &mut state,
+                        );
+                        let _ = completion.send(result);
+                    }
+                    HostCommand::FinishResourceDerive {
+                        derivation,
+                        completion,
+                    } => match finish_host_resource_derive(derivation, &mut state) {
+                        Ok((core, events)) => {
+                            dispatch_host_resource_events(events, &mut state).await;
+                            let _ = completion.send(Ok(core));
+                        }
+                        Err(error) => {
+                            let _ = completion.send(Err(error));
+                        }
+                    },
                     HostCommand::SetJoinAllowed {
                         allowed,
                         completion,
@@ -5093,7 +5301,18 @@ async fn handle_client_message(
             if let Some(backend) = state.resource_backend.as_mut() {
                 let mut random = resource_safe_random;
                 match backend.on_packet(client_id as i32, &packet, now_seconds, &mut random) {
-                    Ok(events) => dispatch_host_resource_events(events, state).await,
+                    Ok(events) => {
+                        if matches!(&packet, ResourcePacket::Derive(_)) {
+                            let _ = state
+                                .resource_catalog
+                                .on_packet(client_id as i32, &packet);
+                        }
+                        update_derived_resource_sources(
+                            &mut state.published_player_sources,
+                            &events,
+                        );
+                        dispatch_host_resource_events(events, state).await;
+                    }
                     Err(error) => report_host_resource_error(error, state).await,
                 }
             } else {
@@ -5483,12 +5702,6 @@ async fn dispatch_host_resource_events(
                 let _ = state
                     .event_tx
                     .send(HostEvent::ResourceLoadFailed { resource_id })
-                    .await;
-            }
-            crate::ResourceTransferEvent::FinishDerivedUnsupported { core } => {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::ResourceDeriveUnsupported { core })
                     .await;
             }
         }
@@ -8252,6 +8465,19 @@ async fn run_client_loop_with_routes(
                         let result = resource_state.publish_player_resource(request);
                         let _ = completion.send(result);
                     }
+                    ClientCommand::BeginResourceDerive {
+                        resource_id,
+                        source_path,
+                        ownership,
+                        completion,
+                    } => {
+                        let result = resource_state.begin_resource_derive(
+                            resource_id,
+                            source_path,
+                            ownership,
+                        );
+                        let _ = completion.send(result);
+                    }
                     ClientCommand::GracefulPart { completion } => {
                         let result = match transport
                             .send_message(ControlMessage::ConnectionReply(
@@ -8830,6 +9056,16 @@ async fn run_client_loop_with_routes(
                                 &mut random,
                             ) {
                                 Ok(events) => {
+                                    if matches!(&packet, ResourcePacket::Derive(_)) {
+                                        let _ = resource_state.catalog.on_packet(
+                                            resource_state.host_peer_id,
+                                            &packet,
+                                        );
+                                    }
+                                    update_derived_resource_sources(
+                                        &mut resource_state.local_resource_sources,
+                                        &events,
+                                    );
                                     if let Err(error) = dispatch_client_resource_events(
                                         events,
                                         &mut transport,
@@ -9306,11 +9542,6 @@ async fn dispatch_client_resource_events(
             crate::ResourceTransferEvent::LoadFailed { resource_id } => {
                 let _ = event_tx
                     .send(ClientEvent::ResourceLoadFailed { resource_id })
-                    .await;
-            }
-            crate::ResourceTransferEvent::FinishDerivedUnsupported { core } => {
-                let _ = event_tx
-                    .send(ClientEvent::ResourceDeriveUnsupported { core })
                     .await;
             }
         }
@@ -13786,6 +14017,119 @@ mod tests {
         };
 
         assert_eq!(fs::read(&completed_path).unwrap(), b"local");
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_and_client_finish_a_derived_resource_without_redownloading_it() {
+        // C4Player::Save calls Derive before replacing the file. The control
+        // host then calls FinishDerive and every peer with a matching anonymous
+        // resource adopts the new core with complete chunks
+        // (src/C4Player.cpp:452-461; src/C4Network2Res.cpp:718-823,1584-1594).
+        let directories = SessionResourceDirectories::new();
+        let host_source = directories.host.join("Dynamic.c4d");
+        fs::write(&host_source, b"local").unwrap();
+        let parent = lc_engine::NetworkResourceCore {
+            resource_type: crate::HostResourceType::Dynamic as u8,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = parent.clone();
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_registrations = vec![crate::ResourceRegistration::from_core(
+            &parent, true, false,
+        )];
+        host_config.resource_files = vec![HostedResourceFile {
+            core: parent.clone(),
+            path: host_source.clone(),
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: true,
+        }];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await
+        .unwrap();
+
+        let client_source = loop {
+            match timeout(EVENT_WAIT, client.events().recv())
+                .await
+                .expect("parent resource transfer stalled")
+                .expect("client event stream closed")
+            {
+                ClientEvent::ResourceComplete {
+                    resource_id, path, ..
+                } if resource_id == parent.id => break path,
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected while loading parent: {reason:?}")
+                }
+                _ => continue,
+            }
+        };
+
+        let host_derivation = host
+            .begin_resource_derive(
+                parent.id,
+                host_source.clone(),
+                crate::ResourceFileOwnership::Persistent,
+            )
+            .await
+            .unwrap();
+        let _client_derivation = client
+            .begin_resource_derive(
+                parent.id,
+                client_source.clone(),
+                crate::ResourceFileOwnership::Temporary,
+            )
+            .await
+            .unwrap();
+        fs::write(&host_source, b"changed").unwrap();
+        fs::write(&client_source, b"changed").unwrap();
+
+        let derived = host
+            .finish_resource_derive(host_derivation)
+            .await
+            .unwrap();
+        assert_ne!(derived.id, parent.id);
+        assert_eq!(derived.derived_id, parent.id);
+        let completed_path = loop {
+            match timeout(EVENT_WAIT, client.events().recv())
+                .await
+                .expect("derive announcement stalled")
+                .expect("client event stream closed")
+            {
+                ClientEvent::ResourceComplete {
+                    resource_id,
+                    core,
+                    path,
+                } if resource_id == derived.id => {
+                    assert_eq!(core, derived);
+                    break path;
+                }
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected during derivation: {reason:?}")
+                }
+                _ => continue,
+            }
+        };
+        assert_eq!(completed_path, client_source);
+        assert_eq!(fs::read(completed_path).unwrap(), b"changed");
+
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
     }

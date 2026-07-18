@@ -1,5 +1,7 @@
 use lc_engine::{LegacyCString, NetworkResourceCore};
-use lc_network::{ChunkWriteOutcome, ResourceFileOwnership, ResourceFileStore};
+use lc_network::{
+    ChunkWriteOutcome, ResourceFileOwnership, ResourceFileStore, ResourceFileStoreError,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,6 +215,107 @@ fn cpp_local_binary_compatibility_checks_whole_file_crc_but_not_sha() {
     store
         .register_local_complete(&exact, &path, ResourceFileOwnership::Persistent)
         .unwrap();
+}
+
+#[test]
+fn cpp_derive_rescues_a_shared_source_and_rebinds_the_rewrite_without_validation() {
+    // Derive copies a parent's shared source to a stock temporary file before
+    // the caller rewrites it. FinishDerive then binds the anonymous entry to
+    // the announced ID and marks it complete without checking CRC or contents
+    // (src/C4Network2Res.cpp:718-823, 526-546).
+    let directory = TestDirectory::new();
+    let source = directory.path().join("shared.c4s");
+    fs::write(&source, b"local").unwrap();
+    let rescued_path;
+    {
+        let mut store = ResourceFileStore::new(directory.path()).unwrap();
+        store
+            .register_local_complete(
+                &core_with_crc(20, b"shared.c4s", 5, 5, 0x8bd6_88e8),
+                &source,
+                ResourceFileOwnership::Persistent,
+            )
+            .unwrap();
+
+        store
+            .begin_derive(20, &source, ResourceFileOwnership::Persistent)
+            .unwrap();
+        rescued_path = store.path(20).unwrap().to_path_buf();
+        assert_ne!(rescued_path, source);
+        assert_eq!(fs::read(&rescued_path).unwrap(), b"local");
+
+        fs::write(&source, b"fresh").unwrap();
+        let derived = NetworkResourceCore {
+            id: 21,
+            derived_id: 20,
+            file_size: 999,
+            file_crc: 0xdead_beef,
+            ..core(21, b"shared.c4s", 1, 1)
+        };
+        assert_eq!(store.finish_derived(&derived).unwrap(), source);
+
+        assert!(store.is_complete(20));
+        assert!(store.is_complete(21));
+        assert_eq!(fs::read(store.path(20).unwrap()).unwrap(), b"local");
+        assert_eq!(fs::read(store.path(21).unwrap()).unwrap(), b"fresh");
+    }
+
+    assert!(!rescued_path.exists());
+    assert_eq!(fs::read(source).unwrap(), b"fresh");
+}
+
+#[test]
+fn cpp_derive_can_replace_its_pending_source_and_unmatched_finish_is_rejected() {
+    // FinishDerive matches anonymous resources by DerID. Host-side standalone
+    // preparation may replace the initially tracked mutable source before the
+    // matching core arrives (src/C4Network2Res.cpp:526-546, 778-823).
+    let directory = TestDirectory::new();
+    let stock = directory.path().join("stock.c4s");
+    let mutable = directory.path().join("mutable.c4s");
+    let standalone = directory.path().join("standalone.c4s");
+    fs::write(&stock, b"local").unwrap();
+    fs::write(&mutable, b"fresh").unwrap();
+    fs::write(&standalone, b"built").unwrap();
+    {
+        let mut store = ResourceFileStore::new(directory.path()).unwrap();
+        store
+            .register_local_complete(
+                &core_with_crc(30, b"stock.c4s", 5, 5, 0x8bd6_88e8),
+                &stock,
+                ResourceFileOwnership::Persistent,
+            )
+            .unwrap();
+        store
+            .begin_derive(30, &mutable, ResourceFileOwnership::Persistent)
+            .unwrap();
+        assert_eq!(store.path(30), Some(stock.as_path()));
+        store
+            .replace_pending_derived_file(30, &standalone, ResourceFileOwnership::Temporary)
+            .unwrap();
+
+        let unmatched = NetworkResourceCore {
+            id: 31,
+            derived_id: 29,
+            ..core(31, b"unmatched.c4s", 5, 5)
+        };
+        assert!(matches!(
+            store.finish_derived(&unmatched),
+            Err(ResourceFileStoreError::UnknownPendingDerivation(29))
+        ));
+
+        let derived = NetworkResourceCore {
+            id: 31,
+            derived_id: 30,
+            ..core(31, b"standalone.c4s", 5, 5)
+        };
+        assert_eq!(store.finish_derived(&derived).unwrap(), standalone);
+        assert_eq!(store.path(30), Some(stock.as_path()));
+        assert_eq!(store.path(31), Some(standalone.as_path()));
+    }
+
+    assert!(stock.exists());
+    assert!(mutable.exists());
+    assert!(!standalone.exists());
 }
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
