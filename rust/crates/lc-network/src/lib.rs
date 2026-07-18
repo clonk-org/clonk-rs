@@ -35,6 +35,7 @@ mod resync;
 mod search;
 mod session;
 mod statistics;
+mod stats;
 mod status;
 mod transport;
 mod udp;
@@ -220,6 +221,11 @@ pub use statistics::{
     ConnectionRateStatistics, ConnectionStatisticsKey, ConnectionStatisticsRecorder,
     NetworkIoStatistics, NetworkIoStatisticsSnapshot, ProtocolRateStatistics,
     NETWORK_STATISTICS_INTERVAL_MS, TCP_STATISTICS_HEADER_BYTES, UDP_STATISTICS_HEADER_BYTES,
+};
+pub use stats::{
+    ClientPingSample, NetworkStats, NetworkStatsGraph, PlayerControlSample, ProtocolRateSample,
+    TableGraph, CONTROL_GRAPH_AVERAGE, DEFAULT_GRAPH_BACKLOG, FORWARD_AVERAGE_FACTOR,
+    PLAYER_GRAPH_BACKLOG,
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{
