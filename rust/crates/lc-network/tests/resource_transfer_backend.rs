@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lc_engine::{LegacyCString, NetworkResourceCore};
 use lc_network::{
-    ResourceCatalogAction, ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket,
-    ResourceRequestPacket, ResourceStatusPacket, ResourceTransferBackend, ResourceTransferEvent,
+    ResourceCatalogAction, ResourceDataPacket, ResourceDiscoverPacket, ResourceFileOwnership,
+    ResourcePacket, ResourceRequestPacket, ResourceStatusPacket, ResourceTransferBackend,
+    ResourceTransferEvent,
 };
 
 fn core(
@@ -278,6 +279,252 @@ fn cpp_backend_forwards_packet_time_to_removed_resource_retention() {
     assert!(!backend.catalog().contains_resource(resource_id));
 }
 
+#[test]
+fn cpp_resource_chunk_failure_drops_bad_stores_and_continues_batch() {
+    // AddTo failures do not abort OnChunk's surrounding work. The chunk
+    // bitmap changes only after a complete write, and later queued actions
+    // still run (src/C4Network2Res.cpp:911-941,1263-1319).
+    let directory = TestDirectory::new("bad-store-batch");
+    let mut backend = ResourceTransferBackend::new(1, directory.path()).unwrap();
+    let path = backend
+        .register_remote_loadable(core(12, b"two.c4s", 2, 1, 0))
+        .unwrap();
+    let mut safe_random = |_| 0;
+
+    let initial = requests_from(
+        backend
+            .on_packet(
+                7,
+                &ResourcePacket::Status(ResourceStatusPacket {
+                    resource_id: 12,
+                    chunks: lc_network::ResourceChunkAvailability {
+                        chunk_count: 2,
+                        ranges: vec![lc_network::ResourceChunkRange {
+                            start: 0,
+                            length: 2,
+                        }],
+                    },
+                }),
+                0,
+                &mut safe_random,
+            )
+            .unwrap(),
+    );
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].1.chunk, 0);
+
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let trailing = ResourceCatalogAction::Broadcast {
+        packet: ResourcePacket::Discover(ResourceDiscoverPacket {
+            resource_ids: vec![12],
+        }),
+    };
+    let io_events = backend
+        .process_actions(
+            [
+                ResourceCatalogAction::StoreChunk {
+                    peer_id: 7,
+                    packet: ResourceDataPacket {
+                        resource_id: 12,
+                        chunk: 0,
+                        data: vec![b'A'],
+                    },
+                },
+                trailing.clone(),
+            ],
+            0,
+            &mut safe_random,
+        )
+        .expect("write-open failure is dropped without aborting the batch");
+    assert_eq!(
+        io_events,
+        [
+            ResourceTransferEvent::Transport(ResourceCatalogAction::SendToPeer {
+                peer_id: 7,
+                packet: ResourcePacket::Request(ResourceRequestPacket {
+                    resource_id: 12,
+                    chunk: 1,
+                }),
+            }),
+            ResourceTransferEvent::Transport(trailing),
+        ]
+    );
+    assert!(!backend.catalog().local_chunks(12).unwrap().contains(0));
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, []).unwrap();
+
+    let events = backend
+        .process_actions(
+            [
+                ResourceCatalogAction::StoreChunk {
+                    peer_id: 7,
+                    packet: ResourceDataPacket {
+                        resource_id: 12,
+                        chunk: 2,
+                        data: vec![b'X'],
+                    },
+                },
+                ResourceCatalogAction::StoreChunk {
+                    peer_id: 7,
+                    packet: ResourceDataPacket {
+                        resource_id: 12,
+                        chunk: 2,
+                        data: Vec::new(),
+                    },
+                },
+                ResourceCatalogAction::StoreChunk {
+                    peer_id: 7,
+                    packet: ResourceDataPacket {
+                        resource_id: 12,
+                        chunk: 0,
+                        data: vec![b'A'],
+                    },
+                },
+                ResourceCatalogAction::StoreChunk {
+                    peer_id: 7,
+                    packet: ResourceDataPacket {
+                        resource_id: 12,
+                        chunk: 1,
+                        data: vec![b'B'],
+                    },
+                },
+            ],
+            0,
+            &mut safe_random,
+        )
+        .expect("peer-controlled bad chunks are dropped");
+
+    assert!(matches!(
+        events.as_slice(),
+        [ResourceTransferEvent::Completed {
+            resource_id: 12,
+            ..
+        }]
+    ));
+    assert_eq!(fs::read(path).unwrap(), b"AB");
+}
+
+#[test]
+fn cpp_resource_chunk_failure_retains_load_until_timeout_refill() {
+    // Failed AddTo leaves the original load wait and timestamp untouched.
+    // DoLoad expires it at 60 seconds and StartNewLoads immediately issues a
+    // replacement (src/C4Network2Res.cpp:911-941,943-969).
+    let directory = TestDirectory::new("bad-store-timeout");
+    let mut backend = ResourceTransferBackend::new(1, directory.path()).unwrap();
+    backend
+        .register_remote_loadable(core(13, b"one.c4s", 1, 1, 0))
+        .unwrap();
+    let status = ResourcePacket::Status(ResourceStatusPacket {
+        resource_id: 13,
+        chunks: lc_network::ResourceChunkAvailability {
+            chunk_count: 1,
+            ranges: vec![lc_network::ResourceChunkRange {
+                start: 0,
+                length: 1,
+            }],
+        },
+    });
+    let mut safe_random = |_| 0;
+
+    let initial = requests_from(
+        backend
+            .on_packet(7, &status, 10, &mut safe_random)
+            .unwrap(),
+    );
+    assert_eq!(initial, [(7, ResourceRequestPacket { resource_id: 13, chunk: 0 })]);
+    assert_eq!(backend.catalog().outstanding_load_count(13), 1);
+
+    let dropped = backend
+        .on_packet(
+            7,
+            &ResourcePacket::Data(ResourceDataPacket {
+                resource_id: 13,
+                chunk: 0,
+                data: vec![b'X', b'Y'],
+            }),
+            11,
+            &mut safe_random,
+        )
+        .expect("oversized requested chunk is non-fatal");
+    assert!(dropped.is_empty());
+    assert_eq!(backend.catalog().outstanding_load_count(13), 1);
+
+    let before_timeout = backend.on_timer(69, &mut safe_random).unwrap();
+    assert!(!before_timeout.iter().any(is_resource_request));
+    assert_eq!(backend.catalog().outstanding_load_count(13), 1);
+
+    let at_timeout = backend.on_timer(70, &mut safe_random).unwrap();
+    let retries = at_timeout
+        .iter()
+        .filter_map(|event| match event {
+            ResourceTransferEvent::Transport(ResourceCatalogAction::SendToPeer {
+                peer_id,
+                packet: ResourcePacket::Request(request),
+            }) => Some((*peer_id, request.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(retries, [(7, ResourceRequestPacket { resource_id: 13, chunk: 0 })]);
+    assert_eq!(backend.catalog().outstanding_load_count(13), 1);
+}
+
+#[test]
+fn cpp_resource_chunk_failure_serves_empty_data_after_read_error() {
+    // SendChunk ignores Set's return after validating the request, so an
+    // open/read failure still sends the ids with an empty data buffer and the
+    // rest of the action batch continues (src/C4Network2Res.cpp:848-865).
+    let directory = TestDirectory::new("bad-serve");
+    let source = directory.path().join("scenario.c4s");
+    fs::write(&source, b"local").unwrap();
+    let mut backend = ResourceTransferBackend::new(0, directory.path()).unwrap();
+    backend
+        .register_local_complete(
+            core(14, b"scenario.c4s", 5, 2, 0x8bd6_88e8),
+            &source,
+            ResourceFileOwnership::Persistent,
+            true,
+        )
+        .unwrap();
+    fs::remove_file(&source).unwrap();
+    let trailing = ResourceCatalogAction::Broadcast {
+        packet: ResourcePacket::Discover(ResourceDiscoverPacket {
+            resource_ids: vec![14],
+        }),
+    };
+    let mut safe_random = |_| 0;
+
+    let events = backend
+        .process_actions(
+            [
+                ResourceCatalogAction::ServeChunk {
+                    peer_id: 7,
+                    resource_id: 14,
+                    chunk: 0,
+                },
+                trailing.clone(),
+            ],
+            0,
+            &mut safe_random,
+        )
+        .expect("read failure becomes an empty data packet");
+
+    assert_eq!(
+        events,
+        vec![
+            ResourceTransferEvent::Transport(ResourceCatalogAction::SendToPeer {
+                peer_id: 7,
+                packet: ResourcePacket::Data(ResourceDataPacket {
+                    resource_id: 14,
+                    chunk: 0,
+                    data: Vec::new(),
+                }),
+            }),
+            ResourceTransferEvent::Transport(trailing),
+        ]
+    );
+}
+
 fn only_transport(events: Vec<ResourceTransferEvent>) -> ResourcePacket {
     let [ResourceTransferEvent::Transport(ResourceCatalogAction::SendToPeer { packet, .. })] =
         events.as_slice()
@@ -298,6 +545,16 @@ fn requests_from(events: Vec<ResourceTransferEvent>) -> Vec<(i32, ResourceReques
             event => panic!("expected a directed request, got {event:?}"),
         })
         .collect()
+}
+
+fn is_resource_request(event: &ResourceTransferEvent) -> bool {
+    matches!(
+        event,
+        ResourceTransferEvent::Transport(ResourceCatalogAction::SendToPeer {
+            packet: ResourcePacket::Request(_),
+            ..
+        })
+    )
 }
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);

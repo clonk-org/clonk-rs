@@ -9486,10 +9486,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn buffered_bootstrap_chunks_are_persisted_before_completion_is_reported() {
+    async fn client_resource_chunk_failure_stays_connected_and_later_completes() {
         // Once HandleJoinData registers the dynamic, resource Status and Data
         // packets run through C4Network2Res::OnStatus/OnChunk. OnChunk writes
-        // the bytes before marking the chunk present and ending the load
+        // the bytes before marking the chunk present and ending the load. A
+        // malformed chunk is dropped without aborting the buffered packet
+        // batch or disconnecting the accepted client
         // (pristine 9ffa0a5d src/C4Network2.cpp:1612-1617;
         // src/C4Network2Res.cpp:886-940,1263-1318,1571-1615).
         let directories = SessionResourceDirectories::new();
@@ -9529,6 +9531,11 @@ mod tests {
                         length: 1,
                     }],
                 },
+            }),
+            ResourcePacket::Data(crate::ResourceDataPacket {
+                resource_id: core.id,
+                chunk: 1,
+                data: b"malformed".to_vec(),
             }),
             ResourcePacket::Data(crate::ResourceDataPacket {
                 resource_id: core.id,
@@ -9577,7 +9584,9 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"early");
         assert!(path.is_file());
 
-        shutdown_tx.send(()).unwrap();
+        shutdown_tx
+            .send(())
+            .expect("bad resource chunk did not disconnect the client loop");
         client_loop.await.unwrap();
     }
 

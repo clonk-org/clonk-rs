@@ -306,25 +306,59 @@ impl ResourceTransferBackend {
                     // C4Network2Res::SendChunk and C4Network2ResChunk::Set read
                     // at chunk*ChunkSize with the fixed 100 KiB data cap
                     // (src/C4Network2Res.cpp:848-865,1230-1260).
-                    let data = self.files.read_chunk(resource_id, chunk)?;
-                    pending.push_back(ResourceCatalogAction::SendToPeer {
-                        peer_id,
-                        packet: ResourcePacket::Data(ResourceDataPacket {
-                            resource_id,
-                            chunk,
-                            data,
-                        }),
-                    });
+                    let data = match self.files.read_chunk(resource_id, chunk) {
+                        Ok(data) => data,
+                        // C4Network2Res::SendChunk ignores Set's return value:
+                        // once id/range/connection preconditions passed, a
+                        // failed open, seek, or read is sent as an empty data
+                        // packet (src/C4Network2Res.cpp:848-865,1230-1260).
+                        Err(ResourceFileStoreError::Io(_)) => Vec::new(),
+                        Err(error) => return Err(error.into()),
+                    };
+                    events.push(ResourceTransferEvent::Transport(
+                        ResourceCatalogAction::SendToPeer {
+                            peer_id,
+                            packet: ResourcePacket::Data(ResourceDataPacket {
+                                resource_id,
+                                chunk,
+                                data,
+                            }),
+                        },
+                    ));
                 }
                 ResourceCatalogAction::StoreChunk { packet, .. } => {
                     // AddTo writes first; OnChunk only records and schedules
                     // after that succeeds (src/C4Network2Res.cpp:911-940,
                     // 1263-1318).
-                    let write_outcome =
-                        self.files
-                            .write_chunk(packet.resource_id, packet.chunk, &packet.data)?;
-                    let chunk = i32::try_from(packet.chunk)
-                        .map_err(|_| ResourceTransferError::ChunkIndexOverflow(packet.chunk))?;
+                    let write_outcome = match self.files.write_chunk(
+                        packet.resource_id,
+                        packet.chunk,
+                        &packet.data,
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(error) if is_discarded_store_error(&error) => {
+                            // AddTo failure leaves the matching load wait and
+                            // timestamp untouched, but OnChunk still calls
+                            // StartNewLoads for other free slots.
+                            pending.push_front(ResourceCatalogAction::RefillRequests {
+                                resource_id: packet.resource_id,
+                            });
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    if matches!(write_outcome, ChunkWriteOutcome::WrittenOutsideChunkRange) {
+                        pending.push_front(ResourceCatalogAction::RefillRequests {
+                            resource_id: packet.resource_id,
+                        });
+                        continue;
+                    }
+                    let Ok(chunk) = i32::try_from(packet.chunk) else {
+                        pending.push_front(ResourceCatalogAction::RefillRequests {
+                            resource_id: packet.resource_id,
+                        });
+                        continue;
+                    };
                     let catalog_outcome =
                         self.catalog.record_chunk_stored(packet.resource_id, chunk);
                     match catalog_outcome {
@@ -339,7 +373,7 @@ impl ResourceTransferBackend {
                                     catalog_outcome,
                                 });
                             }
-                            pending.push_back(ResourceCatalogAction::RefillRequests {
+                            pending.push_front(ResourceCatalogAction::RefillRequests {
                                 resource_id: packet.resource_id,
                             });
                         }
@@ -371,7 +405,9 @@ impl ResourceTransferBackend {
                                 path,
                             });
                         }
-                        outcome => {
+                        outcome @ (ChunkStoreOutcome::UnknownResource
+                        | ChunkStoreOutcome::NotLoading
+                        | ChunkStoreOutcome::InvalidChunk) => {
                             return Err(ResourceTransferError::CatalogRejectedStoredChunk {
                                 resource_id: packet.resource_id,
                                 chunk: packet.chunk,
@@ -402,11 +438,17 @@ impl ResourceTransferBackend {
                 ResourceCatalogAction::RefillRequests { resource_id } => {
                     // StartNewLoads shuffles peers and fills all available slots
                     // (src/C4Network2Res.cpp:1017-1064).
-                    pending.extend(self.catalog.refill_requests(
+                    let refill = self.catalog.refill_requests(
                         resource_id,
                         now_seconds,
                         &mut *safe_random,
-                    ));
+                    );
+                    // StartNewLoads sends every generated request before
+                    // OnChunk returns to later packet/action work.
+                    refill
+                        .into_iter()
+                        .rev()
+                        .for_each(|action| pending.push_front(action));
                 }
                 ResourceCatalogAction::FinishDerived { core } => {
                     events.push(ResourceTransferEvent::FinishDerivedUnsupported { core });
@@ -428,6 +470,19 @@ impl ResourceTransferBackend {
             Ok(())
         }
     }
+}
+
+fn is_discarded_store_error(error: &ResourceFileStoreError) -> bool {
+    matches!(
+        error,
+        // These are the false returns from C4Network2ResChunk::AddTo: peer
+        // bounds validation and local open/seek/write failures. OnChunk drops
+        // all of them without changing logical chunk/load bookkeeping.
+        ResourceFileStoreError::Io(_)
+            | ResourceFileStoreError::ChunkOutOfRange { .. }
+            | ResourceFileStoreError::ChunkExceedsFile { .. }
+            | ResourceFileStoreError::ShortWrite { .. }
+    )
 }
 
 /// `ResourceCatalog` intentionally keeps its eligible-set representation
