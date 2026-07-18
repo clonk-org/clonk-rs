@@ -991,7 +991,7 @@ fn parse_escaped_array(raw: &[u8]) -> [LegacyCString; MAX_LEAGUES] {
     values
 }
 
-fn parse_escaped_value(raw: &[u8]) -> (Vec<u8>, &[u8], bool) {
+pub(crate) fn parse_escaped_value(raw: &[u8]) -> (Vec<u8>, &[u8], bool) {
     let Some(mut remaining) = raw.strip_prefix(b"\"") else {
         return (raw.to_vec(), &[], false);
     };

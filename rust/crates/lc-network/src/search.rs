@@ -960,11 +960,11 @@ fn parse_reference_response_with_config(
     bytes: &[u8],
     config: &ReferenceQueryConfig,
 ) -> Result<Vec<NetworkGameReference>, ReferenceParseError> {
-    let text = config.decode(bytes)?;
     let mut chunks = Vec::new();
-    let mut current = None::<Vec<&str>>;
-    for line in text.lines() {
-        if line == "[Reference]" {
+    let mut current = None::<Vec<&[u8]>>;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line == b"[Reference]" {
             if let Some(chunk) = current.take() {
                 chunks.push(chunk);
             }
@@ -976,7 +976,10 @@ fn parse_reference_response_with_config(
     if let Some(chunk) = current {
         chunks.push(chunk);
     }
-    chunks.into_iter().map(parse_reference_chunk).collect()
+    chunks
+        .into_iter()
+        .map(|lines| parse_reference_chunk(lines, config))
+        .collect()
 }
 
 pub async fn fetch_reference_endpoint(
@@ -1102,7 +1105,10 @@ fn reference_url(address: SocketAddr) -> String {
     }
 }
 
-fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, ReferenceParseError> {
+fn parse_reference_chunk(
+    lines: Vec<&[u8]>,
+    config: &ReferenceQueryConfig,
+) -> Result<NetworkGameReference, ReferenceParseError> {
     let mut reference = NetworkGameReference::default();
     let mut direct_client = false;
     let mut netpuncher_id = false;
@@ -1111,9 +1117,10 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
     let mut direct_client_nick = None;
 
     for line in lines {
-        let indent = line.len() - line.trim_start().len();
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let trimmed_start = trim_reference_ascii_start(line);
+        let indent = line.len() - trimmed_start.len();
+        let trimmed = trim_reference_ascii_end(trimmed_start);
+        if trimmed.starts_with(b"[") && trimmed.ends_with(b"]") {
             if direct_client {
                 flush_direct_client(
                     &mut reference,
@@ -1122,27 +1129,31 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
                     &mut direct_client_nick,
                 );
             }
-            direct_client = indent == 2 && trimmed == "[Client]";
-            netpuncher_id = indent == 2 && trimmed == "[NetpuncherID]";
+            direct_client = indent == 2 && trimmed == b"[Client]";
+            netpuncher_id = indent == 2 && trimmed == b"[NetpuncherID]";
             continue;
         }
-        let Some((key, raw_value)) = trimmed.split_once('=') else {
+        let Some(equal) = trimmed.iter().position(|byte| *byte == b'=') else {
             continue;
         };
-        let value = unquote(raw_value.trim());
+        let Ok(key) = std::str::from_utf8(&trimmed[..equal]) else {
+            continue;
+        };
+        let raw_value = trim_reference_ascii(&trimmed[equal + 1..]);
+        let value = decode_reference_value(raw_value, config)?;
         if direct_client && indent == 2 {
             match key {
-                "ID" => direct_client_id = Some(parse_i32(key, value)?),
-                "Name" => direct_client_name = Some(value.to_string()),
-                "Nick" => direct_client_nick = Some(value.to_string()),
+                "ID" => direct_client_id = Some(parse_i32(key, &value)?),
+                "Name" => direct_client_name = Some(value),
+                "Nick" => direct_client_nick = Some(value),
                 _ => {}
             }
             continue;
         }
         if netpuncher_id && indent == 2 {
             match key {
-                "IPv4" => reference.netpuncher_ipv4 = parse_u32(key, value)?,
-                "IPv6" => reference.netpuncher_ipv6 = parse_u32(key, value)?,
+                "IPv4" => reference.netpuncher_ipv4 = parse_u32(key, &value)?,
+                "IPv6" => reference.netpuncher_ipv6 = parse_u32(key, &value)?,
                 _ => {}
             }
             continue;
@@ -1151,16 +1162,16 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
             continue;
         }
         match key {
-            "State" => reference.state = value.to_string(),
-            "CtrlMode" => reference.control_mode = parse_i32(key, value)?,
-            "StartTime" => reference.start_time = parse_i64(key, value)?,
-            "JoinAllowed" => reference.join_allowed = parse_bool(value),
-            "PasswordNeeded" => reference.password_needed = parse_bool(value),
-            "OfficialServer" => reference.official_server = parse_bool(value),
-            "LeagueAddress" => reference.league_address = value.to_string(),
-            "MaxPlayers" => reference.max_players = parse_i32(key, value)?,
+            "State" => reference.state = value,
+            "CtrlMode" => reference.control_mode = parse_i32(key, &value)?,
+            "StartTime" => reference.start_time = parse_i64(key, &value)?,
+            "JoinAllowed" => reference.join_allowed = parse_bool(&value),
+            "PasswordNeeded" => reference.password_needed = parse_bool(&value),
+            "OfficialServer" => reference.official_server = parse_bool(&value),
+            "LeagueAddress" => reference.league_address = value,
+            "MaxPlayers" => reference.max_players = parse_i32(key, &value)?,
             "Address" => {
-                let addresses = parse_reference_addresses(value)?;
+                let addresses = parse_reference_addresses(&value)?;
                 reference.tcp_addresses = addresses
                     .iter()
                     .filter(|address| address.protocol == NetworkProtocol::Tcp)
@@ -1168,15 +1179,15 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
                     .collect();
                 reference.addresses = addresses;
             }
-            "Game" => reference.game = value.to_string(),
+            "Game" => reference.game = value,
             "Version" => {
                 for (index, part) in value.split(',').take(4).enumerate() {
                     reference.version[index] = parse_i32(key, part.trim())?;
                 }
             }
-            "Build" => reference.build = parse_i32(key, value)?,
-            "Title" => reference.title = value.to_string(),
-            "NetpuncherAddr" => reference.netpuncher_address = value.to_string(),
+            "Build" => reference.build = parse_i32(key, &value)?,
+            "Title" => reference.title = value,
+            "NetpuncherAddr" => reference.netpuncher_address = value,
             _ => {}
         }
     }
@@ -1189,6 +1200,39 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
         );
     }
     Ok(reference)
+}
+
+fn trim_reference_ascii_start(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[1..];
+    }
+    bytes
+}
+
+fn trim_reference_ascii_end(mut bytes: &[u8]) -> &[u8] {
+    while bytes.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn trim_reference_ascii(bytes: &[u8]) -> &[u8] {
+    trim_reference_ascii_end(trim_reference_ascii_start(bytes))
+}
+
+fn decode_reference_value(
+    value: &[u8],
+    config: &ReferenceQueryConfig,
+) -> Result<String, ReferenceParseError> {
+    if value.starts_with(b"\"") {
+        let (mut decoded, _, _) = crate::league::parse_escaped_value(value);
+        if let Some(nul) = decoded.iter().position(|byte| *byte == 0) {
+            decoded.truncate(nul);
+        }
+        config.decode(&decoded)
+    } else {
+        config.decode(value)
+    }
 }
 
 fn flush_direct_client(

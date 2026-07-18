@@ -365,6 +365,34 @@ Title="Second Game"
 }
 
 #[test]
+fn reference_cpp_escaped_strings_decode_before_code_page() {
+    // StdCompilerINIWrite escapes legacy bytes before C4Network2Reference is
+    // sent, and StdCompilerINIRead restores those bytes before the frontend's
+    // configured code-page conversion (src/StdCompiler.cpp:423-460,897-1062;
+    // src/C4Network2Reference.cpp:88-109).
+    let reference = parse_reference_response(
+        br#"[Reference]
+Game="Legacy\"Clonk\\Engine"
+Title="R\344uber"
+
+  [Client]
+  ID=0
+  Name="H\366st \"One\""
+  Nick="N\374ck\\tag\nLine"
+NetpuncherAddr="p\374ncher\\relay"
+"#,
+    )
+    .unwrap()
+    .remove(0);
+
+    assert_eq!(reference.title, "Räuber");
+    assert_eq!(reference.game, "Legacy\"Clonk\\Engine");
+    assert_eq!(reference.host_name, "Höst \"One\"");
+    assert_eq!(reference.host_nick, "Nück\\tag\nLine");
+    assert_eq!(reference.netpuncher_address, "püncher\\relay");
+}
+
+#[test]
 fn cpp_reference_parser_preserves_numeric_transport_protocols() {
     // Verbose StdEnumAdapt accepts a uint8 protocol value when no UDP/TCP
     // identifier is present, and C4Network2Reference retains that complete
