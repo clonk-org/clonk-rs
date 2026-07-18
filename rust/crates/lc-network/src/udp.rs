@@ -8,18 +8,23 @@ use std::{
 
 use thiserror::Error;
 
+const IPID_PING: u8 = 0x00;
+const IPID_TEST: u8 = 0x01;
 const IPID_CONN: u8 = 0x02;
 const IPID_CONN_OK: u8 = 0x03;
 const IPID_DATA: u8 = 0x04;
 const IPID_CHECK: u8 = 0x05;
 const IPID_CLOSE: u8 = 0x06;
+const IPID_ADD_ADDRESS: u8 = 0x07;
 const INTERNAL_PACKET_TYPE_MASK: u8 = 0x7f;
 const BIN_ADDR_SIZE: usize = 19;
+const PACKET_HEADER_SIZE: usize = 5;
 const CONNECT_PACKET_SIZE: usize = 47;
 const CONNECT_OK_PACKET_SIZE: usize = 28;
 const DATA_PACKET_HEADER_SIZE: usize = 13;
 const CHECK_PACKET_HEADER_SIZE: usize = 21;
 const CLOSE_PACKET_SIZE: usize = 24;
+const ADD_ADDRESS_PACKET_SIZE: usize = 43;
 const MAX_DATAGRAM_SIZE: usize = 512;
 const MAX_CHECK_ASK_COUNT: usize = 10;
 
@@ -75,14 +80,25 @@ pub struct ReliableUdpClose {
     pub address: SocketAddr,
 }
 
+/// Fields carried by C++'s packed alternate-address notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReliableUdpAddAddress {
+    pub packet_number: u32,
+    pub address: SocketAddr,
+    pub new_address: SocketAddr,
+}
+
 /// Internal reliable-UDP packet kind after masking the multicast bit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReliableUdpPacketKind {
+    Ping,
+    Test,
     Connect,
     ConnectOk,
     Data,
     Check,
     Close,
+    AddAddress,
     Other(u8),
 }
 
@@ -476,6 +492,16 @@ pub enum ReliableUdpDecodeError {
     InvalidCheckCounts,
 }
 
+/// Builds the connectionless five-byte reply used for an unknown-peer Ping.
+/// Only the multicast flag survives from the incoming status byte; C++ resets
+/// the packet number to zero.
+pub fn encode_reliable_udp_ping_response(incoming_status: u8) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(PACKET_HEADER_SIZE);
+    wire.push(IPID_PING | (incoming_status & !INTERNAL_PACKET_TYPE_MASK));
+    wire.extend_from_slice(&0_u32.to_ne_bytes());
+    wire
+}
+
 /// Encodes the packed native-endian connection request used by `C4NetIOUDP`.
 pub fn encode_reliable_udp_connect(connection: &ReliableUdpConnect) -> Vec<u8> {
     let mut wire = Vec::with_capacity(CONNECT_PACKET_SIZE);
@@ -583,15 +609,50 @@ pub fn decode_reliable_udp_close(wire: &[u8]) -> Result<ReliableUdpClose, Reliab
     })
 }
 
+/// Encodes C++'s packed notification that two endpoints address one peer.
+pub fn encode_reliable_udp_add_address(packet: &ReliableUdpAddAddress) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(ADD_ADDRESS_PACKET_SIZE);
+    wire.push(IPID_ADD_ADDRESS);
+    wire.extend_from_slice(&packet.packet_number.to_ne_bytes());
+    encode_bin_address(packet.address, &mut wire);
+    encode_bin_address(packet.new_address, &mut wire);
+    wire
+}
+
+/// Decodes C++'s packed alternate-address notification. Native reads the
+/// first complete structure and does not reject trailing datagram bytes.
+pub fn decode_reliable_udp_add_address(
+    wire: &[u8],
+) -> Result<ReliableUdpAddAddress, ReliableUdpDecodeError> {
+    if wire.len() < ADD_ADDRESS_PACKET_SIZE {
+        return Err(ReliableUdpDecodeError::InvalidLength {
+            expected: ADD_ADDRESS_PACKET_SIZE,
+            actual: wire.len(),
+        });
+    }
+    if wire[0] != IPID_ADD_ADDRESS {
+        return Err(ReliableUdpDecodeError::UnexpectedType(wire[0]));
+    }
+    Ok(ReliableUdpAddAddress {
+        packet_number: decode_native_u32(wire, 1)
+            .expect("checked alternate-address packet length"),
+        address: decode_bin_address(&wire[5..24])?,
+        new_address: decode_bin_address(&wire[24..ADD_ADDRESS_PACKET_SIZE])?,
+    })
+}
+
 /// Reads the five-byte common header kind without decoding a packet body.
 pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
     let packet_type = *wire.first()? & INTERNAL_PACKET_TYPE_MASK;
     Some(match packet_type {
+        IPID_PING => ReliableUdpPacketKind::Ping,
+        IPID_TEST => ReliableUdpPacketKind::Test,
         IPID_CONN => ReliableUdpPacketKind::Connect,
         IPID_CONN_OK => ReliableUdpPacketKind::ConnectOk,
         IPID_DATA => ReliableUdpPacketKind::Data,
         IPID_CHECK => ReliableUdpPacketKind::Check,
         IPID_CLOSE => ReliableUdpPacketKind::Close,
+        IPID_ADD_ADDRESS => ReliableUdpPacketKind::AddAddress,
         other => ReliableUdpPacketKind::Other(other),
     })
 }
@@ -952,6 +1013,75 @@ mod tests {
         let mut wrong_version = fixture;
         wrong_version[5..9].copy_from_slice(&3_u32.to_ne_bytes());
         assert_eq!(decode_reliable_udp_connect(&wrong_version), Ok(None));
+    }
+
+    #[test]
+    fn cpp_ping_response_and_add_address_codec_preserve_the_packed_layout() {
+        assert_eq!(
+            encode_reliable_udp_ping_response(0x00),
+            vec![0x00, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_reliable_udp_ping_response(0x80),
+            vec![0x80, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            reliable_udp_packet_kind(&[0x00]),
+            Some(ReliableUdpPacketKind::Ping)
+        );
+        assert_eq!(
+            reliable_udp_packet_kind(&[0x81, 0xaa]),
+            Some(ReliableUdpPacketKind::Test)
+        );
+
+        let packet = ReliableUdpAddAddress {
+            packet_number: 0x1122_3344,
+            address: SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(203, 0, 113, 7),
+                11_115,
+            )),
+            new_address: SocketAddr::V6(SocketAddrV6::new(
+                "2001:db8::1234".parse::<Ipv6Addr>().unwrap(),
+                11_113,
+                0,
+                0,
+            )),
+        };
+        let mut expected = vec![0x07];
+        expected.extend_from_slice(&packet.packet_number.to_ne_bytes());
+        expected.extend_from_slice(&packet.address.port().to_ne_bytes());
+        expected.push(1);
+        expected.extend_from_slice(&[203, 0, 113, 7]);
+        expected.extend_from_slice(&[0; 12]);
+        expected.extend_from_slice(&packet.new_address.port().to_ne_bytes());
+        expected.push(2);
+        expected.extend_from_slice(
+            &"2001:db8::1234"
+                .parse::<Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+
+        assert_eq!(expected.len(), ADD_ADDRESS_PACKET_SIZE);
+        assert_eq!(encode_reliable_udp_add_address(&packet), expected);
+        assert_eq!(decode_reliable_udp_add_address(&expected), Ok(packet));
+
+        let mut oversized = expected.clone();
+        oversized.push(0xaa);
+        assert_eq!(decode_reliable_udp_add_address(&oversized), Ok(packet));
+        assert_eq!(
+            decode_reliable_udp_add_address(&expected[..expected.len() - 1]),
+            Err(ReliableUdpDecodeError::InvalidLength {
+                expected: ADD_ADDRESS_PACKET_SIZE,
+                actual: ADD_ADDRESS_PACKET_SIZE - 1,
+            })
+        );
+        let mut multicast_flagged = expected;
+        multicast_flagged[0] = 0x87;
+        assert_eq!(
+            decode_reliable_udp_add_address(&multicast_flagged),
+            Err(ReliableUdpDecodeError::UnexpectedType(0x87))
+        );
     }
 
     #[test]

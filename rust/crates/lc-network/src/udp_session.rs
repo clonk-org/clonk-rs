@@ -683,7 +683,10 @@ async fn run_hub(
                 match command {
                     HubCommand::Connect { peer, response } => {
                         let peer = canonical_reliable_udp_peer_address(peer);
-                        if peers.contains_key(&peer) || pending_connects.contains_key(&peer) {
+                        if peers.contains_key(&peer)
+                            || pending_connects.contains_key(&peer)
+                            || driver.core().peer_status(peer).is_some()
+                        {
                             let _ = response.send(Err(io::Error::new(
                                 io::ErrorKind::AlreadyExists,
                                 format!("reliable-UDP peer {peer} is already connected or connecting"),

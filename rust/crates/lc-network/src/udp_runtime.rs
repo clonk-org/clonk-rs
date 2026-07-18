@@ -12,13 +12,15 @@ use thiserror::Error;
 use tokio::{net::UdpSocket, time::Instant};
 
 use crate::udp::{
-    decode_reliable_udp_check, decode_reliable_udp_close, decode_reliable_udp_connect,
-    decode_reliable_udp_connect_ok, decode_reliable_udp_data_fragment, encode_reliable_udp_check,
-    encode_reliable_udp_close, encode_reliable_udp_connect, encode_reliable_udp_connect_ok,
-    encode_reliable_udp_data_fragments, reliable_udp_packet_kind, ReliableUdpChannel,
-    ReliableUdpClose, ReliableUdpConnect, ReliableUdpConnectOk, ReliableUdpEncodeError,
-    ReliableUdpMulticastMode, ReliableUdpPacketKind, ReliableUdpReassembledPacket,
-    ReliableUdpReceiveWindow,
+    decode_reliable_udp_add_address, decode_reliable_udp_check, decode_reliable_udp_close,
+    decode_reliable_udp_connect, decode_reliable_udp_connect_ok,
+    decode_reliable_udp_data_fragment, encode_reliable_udp_add_address,
+    encode_reliable_udp_check, encode_reliable_udp_close, encode_reliable_udp_connect,
+    encode_reliable_udp_connect_ok, encode_reliable_udp_data_fragments,
+    encode_reliable_udp_ping_response, reliable_udp_packet_kind, ReliableUdpAddAddress,
+    ReliableUdpChannel, ReliableUdpClose, ReliableUdpConnect, ReliableUdpConnectOk,
+    ReliableUdpEncodeError, ReliableUdpMulticastMode, ReliableUdpPacketKind,
+    ReliableUdpReassembledPacket, ReliableUdpReceiveWindow,
 };
 
 pub const RELIABLE_UDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -115,6 +117,7 @@ impl ReliableUdpStoredPacket {
 #[derive(Clone, Debug)]
 struct ReliableUdpPeer {
     address: SocketAddr,
+    alternate_address: Option<SocketAddr>,
     observed_address: Option<SocketAddr>,
     status: ReliableUdpPeerStatus,
     outgoing_packet_number: u32,
@@ -130,6 +133,7 @@ impl ReliableUdpPeer {
     fn connecting(address: SocketAddr, now: Duration, notify_connect_failure: bool) -> Self {
         Self {
             address,
+            alternate_address: None,
             observed_address: None,
             status: ReliableUdpPeerStatus::Connecting,
             outgoing_packet_number: 0,
@@ -223,12 +227,15 @@ impl ReliableUdpPeer {
             return ReliableUdpStep::default();
         };
         match kind {
+            ReliableUdpPacketKind::Ping
+            | ReliableUdpPacketKind::Test
+            | ReliableUdpPacketKind::AddAddress
+            | ReliableUdpPacketKind::Other(_) => ReliableUdpStep::default(),
             ReliableUdpPacketKind::Connect => self.receive_connect(wire),
             ReliableUdpPacketKind::ConnectOk => self.receive_connect_ok(wire),
             ReliableUdpPacketKind::Data => self.receive_data(wire),
             ReliableUdpPacketKind::Check => self.receive_check(wire),
             ReliableUdpPacketKind::Close => self.receive_close(wire),
-            ReliableUdpPacketKind::Other(_) => ReliableUdpStep::default(),
         }
     }
 
@@ -236,11 +243,22 @@ impl ReliableUdpPeer {
         let Ok(Some(connection)) = decode_reliable_udp_connect(wire) else {
             return ReliableUdpStep::default();
         };
-        if self.observed_address.is_some_and(|observed_address| {
-            canonical_reliable_udp_peer_address(observed_address)
+        if let Some(observed_address) = self.observed_address.filter(|observed_address| {
+            canonical_reliable_udp_peer_address(*observed_address)
                 != canonical_reliable_udp_peer_address(connection.address)
         }) {
-            return ReliableUdpStep::default();
+            if wire[0] & 0x80 != 0 {
+                return ReliableUdpStep::default();
+            }
+            let packet = ReliableUdpAddAddress {
+                packet_number: self.outgoing_packet_number,
+                address: observed_address,
+                new_address: connection.address,
+            };
+            return ReliableUdpStep {
+                datagrams: vec![self.datagram(encode_reliable_udp_add_address(&packet))],
+                events: Vec::new(),
+            };
         }
         let next_expected_packet_number = self
             .receive_window
@@ -406,11 +424,7 @@ impl ReliableUdpEndpointCore {
 
     pub fn connect_at(&mut self, peer: SocketAddr, now: Duration) -> ReliableUdpStep {
         let peer = canonical_reliable_udp_peer_address(peer);
-        if self
-            .peers
-            .get(&peer)
-            .is_some_and(|peer| peer.status != ReliableUdpPeerStatus::Closed)
-        {
+        if self.peer_key(peer).is_some() {
             return ReliableUdpStep::default();
         }
         let connection = ReliableUdpPeer::connecting(peer, now, true);
@@ -428,9 +442,12 @@ impl ReliableUdpEndpointCore {
         payload: &[u8],
     ) -> Result<ReliableUdpStep, ReliableUdpRuntimeError> {
         let peer = canonical_reliable_udp_peer_address(peer);
+        let peer_key = self
+            .peer_key(peer)
+            .ok_or(ReliableUdpRuntimeError::UnknownPeer(peer))?;
         self.peers
-            .get_mut(&peer)
-            .ok_or(ReliableUdpRuntimeError::UnknownPeer(peer))?
+            .get_mut(&peer_key)
+            .expect("resolved reliable-UDP peer exists")
             .send_packet(payload)
             .map_err(Into::into)
     }
@@ -442,19 +459,42 @@ impl ReliableUdpEndpointCore {
         now: Duration,
     ) -> ReliableUdpStep {
         let source = canonical_reliable_udp_peer_address(source);
-        if self
-            .peers
-            .get(&source)
-            .is_some_and(|peer| peer.status == ReliableUdpPeerStatus::Closed)
-        {
-            self.peers.remove(&source);
+        let Some(kind) = reliable_udp_packet_kind(wire) else {
+            return ReliableUdpStep::default();
+        };
+        // C++ filters loopback-test and hole-punch datagrams by their masked
+        // status byte before looking up or mutating any peer.
+        if kind == ReliableUdpPacketKind::Test {
+            return ReliableUdpStep::default();
         }
-        if let Some(peer) = self.peers.get_mut(&source) {
+        if let Some(peer_key) = self.peer_key(source) {
+            // AddAddr is intercepted at the endpoint because it may merge two
+            // peer objects. The multicast-bit form is not an AddAddr packet in
+            // C++ even though generic kind inspection masks that bit.
+            if kind == ReliableUdpPacketKind::AddAddress && wire[0] & 0x80 == 0 {
+                return self.receive_add_address(source, wire);
+            }
+            let peer = self
+                .peers
+                .get_mut(&peer_key)
+                .expect("resolved reliable-UDP peer exists");
             let step = peer.receive(wire);
             if peer.status == ReliableUdpPeerStatus::Closed {
-                self.peers.remove(&source);
+                self.peers.remove(&peer_key);
             }
             return step;
+        }
+        if kind == ReliableUdpPacketKind::Ping {
+            // Native sends a flagged response to its multicast endpoint. This
+            // unicast-only runtime retains the exact header while replying to
+            // the source endpoint through the same dual-stack socket.
+            return ReliableUdpStep {
+                datagrams: vec![ReliableUdpDatagram {
+                    destination: reliable_udp_send_address(source),
+                    payload: encode_reliable_udp_ping_response(wire[0]),
+                }],
+                events: Vec::new(),
+            };
         }
         if wire.first() != Some(&0x02) {
             return ReliableUdpStep::default();
@@ -468,6 +508,34 @@ impl ReliableUdpEndpointCore {
             datagrams: vec![datagram],
             events: Vec::new(),
         }
+    }
+
+    fn receive_add_address(&mut self, source: SocketAddr, wire: &[u8]) -> ReliableUdpStep {
+        let Ok(packet) = decode_reliable_udp_add_address(wire) else {
+            return ReliableUdpStep::default();
+        };
+        let address = canonical_reliable_udp_peer_address(packet.address);
+        let new_address = canonical_reliable_udp_peer_address(packet.new_address);
+        if source != address && source != new_address {
+            return ReliableUdpStep::default();
+        }
+        let Some(peer_key) = self.peer_key(address) else {
+            return ReliableUdpStep::default();
+        };
+        let Some(duplicate_key) = self.peer_key(new_address) else {
+            return ReliableUdpStep::default();
+        };
+        if peer_key == duplicate_key {
+            return ReliableUdpStep::default();
+        }
+        self.peers
+            .get_mut(&peer_key)
+            .expect("resolved reliable-UDP peer exists")
+            .alternate_address = Some(new_address);
+        self.peers
+            .remove(&duplicate_key)
+            .map(|mut duplicate| duplicate.close(ReliableUdpDisconnectReason::Closed))
+            .unwrap_or_default()
     }
 
     pub fn timer_at(&mut self, now: Duration) -> ReliableUdpStep {
@@ -520,22 +588,43 @@ impl ReliableUdpEndpointCore {
         reason: ReliableUdpDisconnectReason,
     ) -> ReliableUdpStep {
         let peer = canonical_reliable_udp_peer_address(peer);
+        let Some(peer_key) = self.peer_key(peer) else {
+            return ReliableUdpStep::default();
+        };
         self.peers
-            .remove(&peer)
+            .remove(&peer_key)
             .map(|mut peer| peer.close(reason))
             .unwrap_or_default()
     }
 
     pub fn peer_status(&self, peer: SocketAddr) -> Option<ReliableUdpPeerStatus> {
+        let peer_key = self.peer_key(peer)?;
         self.peers
-            .get(&canonical_reliable_udp_peer_address(peer))
+            .get(&peer_key)
             .map(|peer| peer.status)
     }
 
     pub fn outgoing_packet_count(&self, peer: SocketAddr) -> Option<usize> {
+        let peer_key = self.peer_key(peer)?;
         self.peers
-            .get(&canonical_reliable_udp_peer_address(peer))
+            .get(&peer_key)
             .map(|peer| peer.outgoing_packets.len())
+    }
+
+    fn peer_key(&self, address: SocketAddr) -> Option<SocketAddr> {
+        let address = canonical_reliable_udp_peer_address(address);
+        if self
+            .peers
+            .get(&address)
+            .is_some_and(|peer| peer.status != ReliableUdpPeerStatus::Closed)
+        {
+            return Some(address);
+        }
+        self.peers.iter().find_map(|(peer_key, peer)| {
+            (peer.status != ReliableUdpPeerStatus::Closed
+                && peer.alternate_address == Some(address))
+            .then_some(*peer_key)
+        })
     }
 
     pub fn next_deadline(&self) -> Duration {
@@ -578,7 +667,13 @@ pub struct ReliableUdpSocketDriver {
     core: ReliableUdpEndpointCore,
     started_at: Instant,
     receive_buffer: Vec<u8>,
-    last_send_peer: Option<SocketAddr>,
+    last_send: Option<ReliableUdpLastSend>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReliableUdpLastSend {
+    Peer(SocketAddr),
+    BestEffort,
 }
 
 pub(crate) enum ReliableUdpPollReady {
@@ -606,7 +701,7 @@ impl ReliableUdpSocketDriver {
             core: ReliableUdpEndpointCore::new_at(Duration::ZERO),
             started_at,
             receive_buffer: vec![0; u16::MAX as usize + 1],
-            last_send_peer: None,
+            last_send: None,
         })
     }
 
@@ -665,11 +760,18 @@ impl ReliableUdpSocketDriver {
             ReliableUdpPollReady::Timer => self.core.timer_at(now),
             ReliableUdpPollReady::SocketError(error) => {
                 if reliable_udp_unreachable_error(&error) {
-                    if let Some(peer) = self.last_send_peer {
-                        let step = self.core.report_unreachable(peer);
-                        if !step.events.is_empty() {
-                            return self.flush_step(step).await;
+                    match self.last_send {
+                        Some(ReliableUdpLastSend::Peer(peer)) => {
+                            let step = self.core.report_unreachable(peer);
+                            if !step.events.is_empty() {
+                                return self.flush_step(step).await;
+                            }
                         }
+                        // C++ ignores failure to send Ping replies and the
+                        // best-effort Close/AddAddr controls; it must not tear
+                        // down an unrelated or surviving peer.
+                        Some(ReliableUdpLastSend::BestEffort) => return Ok(Vec::new()),
+                        None => {}
                     }
                 }
                 return Err(error);
@@ -708,13 +810,21 @@ impl ReliableUdpSocketDriver {
         let mut first_send_error = None;
         for datagram in step.datagrams {
             let peer = canonical_reliable_udp_peer_address(datagram.destination);
-            self.last_send_peer = Some(peer);
+            let peer_backed = !reliable_udp_send_is_best_effort(&datagram.payload)
+                && self.core.peer_status(peer).is_some();
+            self.last_send = Some(if peer_backed {
+                ReliableUdpLastSend::Peer(peer)
+            } else {
+                ReliableUdpLastSend::BestEffort
+            });
             if let Err(error) = self
                 .socket
                 .send_to(&datagram.payload, datagram.destination)
                 .await
             {
-                first_send_error.get_or_insert((error, peer));
+                if peer_backed {
+                    first_send_error.get_or_insert((error, peer));
+                }
             }
         }
         // Native control sends are best effort: a failed Check/ConnOK/Close
@@ -760,6 +870,17 @@ fn reliable_udp_unreachable_error(error: &io::Error) -> bool {
             | io::ErrorKind::ConnectionReset
             | io::ErrorKind::HostUnreachable
             | io::ErrorKind::NetworkUnreachable
+    )
+}
+
+fn reliable_udp_send_is_best_effort(payload: &[u8]) -> bool {
+    matches!(
+        reliable_udp_packet_kind(payload),
+        Some(
+            ReliableUdpPacketKind::Ping
+                | ReliableUdpPacketKind::Close
+                | ReliableUdpPacketKind::AddAddress
+        )
     )
 }
 
@@ -854,6 +975,205 @@ mod tests {
         assert_eq!(
             canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)),
             a_address
+        );
+    }
+
+    #[test]
+    fn test_datagrams_are_dropped_and_unknown_ping_is_answered_without_a_peer() {
+        let source = address(9, 19_999);
+        let mut endpoint = ReliableUdpEndpointCore::new_at(Duration::ZERO);
+
+        for status in [0x01, 0x81] {
+            for length in [1, 5, 37] {
+                let mut wire = vec![0xaa; length];
+                wire[0] = status;
+                assert_eq!(
+                    endpoint.receive_at(source, &wire, Duration::ZERO),
+                    ReliableUdpStep::default(),
+                    "test status 0x{status:02x}, length {length}"
+                );
+            }
+        }
+        assert_eq!(endpoint.peer_status(source), None);
+
+        for status in [0x00, 0x80] {
+            let step = endpoint.receive_at(source, &[status], Duration::ZERO);
+            assert!(step.events.is_empty());
+            assert_eq!(
+                step.datagrams,
+                vec![ReliableUdpDatagram {
+                    destination: reliable_udp_send_address(source),
+                    payload: vec![status, 0, 0, 0, 0],
+                }]
+            );
+            assert_eq!(endpoint.peer_status(source), None);
+        }
+
+        let (_, known_peer, mut connected, _) = handshake_pair();
+        for status in [0x00, 0x80, 0x01, 0x81] {
+            assert_eq!(
+                connected.receive_at(known_peer, &[status], Duration::ZERO),
+                ReliableUdpStep::default()
+            );
+        }
+        for status in [0x01, 0x81] {
+            let mut wire = vec![status];
+            wire.extend_from_slice(&99_u32.to_ne_bytes());
+            wire.extend_from_slice(&[0xaa; 13]);
+            assert_eq!(
+                connected.receive_at(known_peer, &wire, Duration::ZERO),
+                ReliableUdpStep::default()
+            );
+        }
+        let check = connected.timer_at(Duration::from_secs(1));
+        assert_eq!(check.datagrams.len(), 1);
+        let check = decode_reliable_udp_check(&check.datagrams[0].payload).unwrap();
+        assert_eq!(check.next_expected_packet_number, 0);
+        assert!(check.missing_packet_numbers.is_empty());
+        assert_eq!(
+            connected.peer_status(known_peer),
+            Some(ReliableUdpPeerStatus::Working)
+        );
+    }
+
+    #[test]
+    fn changed_unicast_conn_emits_add_address_without_resetting_the_peer() {
+        let (local_address, peer_address, mut endpoint, _) = handshake_pair();
+        let new_local_address = address(8, 18_888);
+        let changed_conn = encode_reliable_udp_connect(&ReliableUdpConnect::unicast(
+            0,
+            new_local_address,
+        ));
+
+        let mut multicast_conn = changed_conn.clone();
+        multicast_conn[0] |= 0x80;
+        assert_eq!(
+            endpoint.receive_at(peer_address, &multicast_conn, Duration::ZERO),
+            ReliableUdpStep::default(),
+            "only a changed unicast Conn emits AddAddr"
+        );
+
+        let step = endpoint.receive_at(peer_address, &changed_conn, Duration::ZERO);
+
+        assert!(step.events.is_empty());
+        assert_eq!(step.datagrams.len(), 1);
+        assert_eq!(
+            step.datagrams[0].destination,
+            reliable_udp_send_address(peer_address)
+        );
+        assert_eq!(
+            decode_reliable_udp_add_address(&step.datagrams[0].payload),
+            Ok(ReliableUdpAddAddress {
+                packet_number: 0,
+                address: local_address,
+                new_address: new_local_address,
+            })
+        );
+        assert_eq!(
+            endpoint.peer_status(peer_address),
+            Some(ReliableUdpPeerStatus::Working)
+        );
+    }
+
+    #[test]
+    fn add_address_rejects_spoof_then_merges_duplicate_and_routes_the_alias() {
+        fn establish(endpoint: &mut ReliableUdpEndpointCore, peer: SocketAddr) {
+            assert_eq!(endpoint.connect_at(peer, Duration::ZERO).datagrams.len(), 1);
+            let connect_ok = encode_reliable_udp_connect_ok(&ReliableUdpConnectOk {
+                packet_number: 0,
+                multicast_mode: ReliableUdpMulticastMode::NoMulticast,
+                observed_address: peer,
+            });
+            assert!(matches!(
+                endpoint
+                    .receive_at(peer, &connect_ok, Duration::ZERO)
+                    .events
+                    .as_slice(),
+                [ReliableUdpEvent::Connected { peer: connected, .. }] if *connected == peer
+            ));
+        }
+
+        let old_address = address(2, 22_222);
+        let new_address = address(3, 33_333);
+        let attacker = address(4, 44_444);
+        let mut endpoint = ReliableUdpEndpointCore::new_at(Duration::ZERO);
+        for peer in [old_address, new_address, attacker] {
+            establish(&mut endpoint, peer);
+        }
+        let packet = ReliableUdpAddAddress {
+            packet_number: 7,
+            address: old_address,
+            new_address,
+        };
+        let wire = encode_reliable_udp_add_address(&packet);
+
+        assert_eq!(
+            endpoint.receive_at(attacker, &wire, Duration::ZERO),
+            ReliableUdpStep::default(),
+            "a known third peer may not merge two carried addresses"
+        );
+        let mut multicast_flagged = wire.clone();
+        multicast_flagged[0] |= 0x80;
+        assert_eq!(
+            endpoint.receive_at(new_address, &multicast_flagged, Duration::ZERO),
+            ReliableUdpStep::default(),
+            "C++ intercepts only exact unicast IPID_AddAddr"
+        );
+
+        let merged = endpoint.receive_at(new_address, &wire, Duration::ZERO);
+        assert_eq!(merged.datagrams.len(), 1);
+        assert!(reliable_udp_send_is_best_effort(
+            &merged.datagrams[0].payload
+        ));
+        assert_eq!(
+            decode_reliable_udp_close(&merged.datagrams[0].payload),
+            Ok(ReliableUdpClose {
+                packet_number: 0,
+                address: new_address,
+            })
+        );
+        assert_eq!(
+            merged.events,
+            vec![ReliableUdpEvent::Disconnected {
+                peer: new_address,
+                reason: ReliableUdpDisconnectReason::Closed,
+            }]
+        );
+        assert_eq!(
+            endpoint.peer_status(old_address),
+            Some(ReliableUdpPeerStatus::Working)
+        );
+        assert_eq!(
+            endpoint.peer_status(new_address),
+            Some(ReliableUdpPeerStatus::Working),
+            "the duplicate address now resolves to the surviving peer"
+        );
+        assert!(endpoint
+            .connect_at(new_address, Duration::ZERO)
+            .datagrams
+            .is_empty());
+
+        let data = encode_reliable_udp_data_fragments(0, b"via alternate")
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            endpoint.receive_at(new_address, &data, Duration::ZERO),
+            ReliableUdpStep {
+                datagrams: Vec::new(),
+                events: vec![ReliableUdpEvent::Packet {
+                    peer: old_address,
+                    payload: b"via alternate".to_vec(),
+                }],
+            }
+        );
+        let outbound = endpoint.send_packet(new_address, b"same peer").unwrap();
+        assert_eq!(outbound.datagrams.len(), 1);
+        assert!(!reliable_udp_send_is_best_effort(
+            &outbound.datagrams[0].payload
+        ));
+        assert_eq!(
+            outbound.datagrams[0].destination,
+            reliable_udp_send_address(old_address)
         );
     }
 
@@ -1307,6 +1627,46 @@ mod tests {
             }]
         );
         assert_eq!(b.core().peer_status(a_address), None);
+    }
+
+    #[tokio::test]
+    async fn socket_driver_answers_connectionless_ping_and_silently_filters_test() {
+        let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+        let mut driver = ReliableUdpSocketDriver::bind(wildcard).unwrap();
+        let driver_address =
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), driver.local_addr().unwrap().port());
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let spy_address = spy.local_addr().unwrap();
+        let mut buffer = [0_u8; 64];
+
+        for status in [0x00, 0x80] {
+            spy.send_to(&[status], driver_address).await.unwrap();
+            assert!(driver.poll().await.unwrap().is_empty());
+            let (length, source) =
+                tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(canonical_reliable_udp_peer_address(source), driver_address);
+            assert_eq!(&buffer[..length], &[status, 0, 0, 0, 0]);
+            assert_eq!(driver.core().peer_status(spy_address), None);
+        }
+
+        for status in [0x01, 0x81] {
+            let mut wire = vec![status];
+            wire.extend_from_slice(&99_u32.to_ne_bytes());
+            wire.extend_from_slice(&[0xaa; 7]);
+            spy.send_to(&wire, driver_address).await.unwrap();
+            assert!(driver.poll().await.unwrap().is_empty());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), spy.recv_from(&mut buffer))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(driver.core().peer_status(spy_address), None);
+        }
     }
 
     #[tokio::test]
