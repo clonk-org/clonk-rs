@@ -4111,6 +4111,7 @@ impl FrontendAssets {
             gui_button: self.dialog_image("GUIButton.png")?,
             gui_button_down: self.dialog_image("GUIButtonDown.png")?,
             gui_button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
+            gui_scroll: self.dialog_image("GUIScroll.png")?,
             gui_icons_ex: self.dialog_image("GUIIcons2.png")?,
         })
     }
@@ -18553,6 +18554,29 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            if native_delta == 0 {
+                return Ok(());
+            }
+            let actions = self
+                .startup_network_dialog
+                .as_mut()
+                .and_then(|dialog| {
+                    dialog
+                        .pointer_position()
+                        .map(|point| dialog.handle_wheel(point, native_delta))
+                })
+                .unwrap_or_default();
+            self.process_network_dialog_actions(actions)?;
+            self.mark_menu_dirty();
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::About {
             let delta = match delta {
                 MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
@@ -28134,6 +28158,10 @@ impl GameApp {
                 NetDlgAction::FocusChanged(_)
                 | NetDlgAction::ModeChanged(lc_frontend::startup_netdlg::NetDlgMode::GameList)
                 | NetDlgAction::JoinAddressChanged(_) => {}
+                NetDlgAction::GuiSound(sound) => self.play_ui_sound(match sound {
+                    lc_frontend::startup_netdlg::NetDlgSound::ArrowHit => "ArrowHit",
+                    lc_frontend::startup_netdlg::NetDlgSound::Command => "Command",
+                }),
                 NetDlgAction::Back => self.show_main_menu(),
                 NetDlgAction::Refresh => {
                     return Err(classic_startup_action_error(
@@ -28220,6 +28248,11 @@ impl GameApp {
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
     ) {
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            // Transition guards suppress subsequent input, so release every
+            // net-dialog press/capture before installing that guard.
+            dialog.cancel_interaction();
+        }
         self.startup_network_connection = Some(StartupNetworkConnection {
             receiver,
             selected_scenario,
@@ -35391,6 +35424,17 @@ impl GameApp {
                 let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
+                if self.startup_view == StartupView::NetworkGame
+                    && !self.startup_network_transition_active()
+                    && self
+                        .startup_network_dialog
+                        .as_mut()
+                        .is_some_and(|dialog| dialog.tick_scrollbar())
+                {
+                    // C4GUI::ScrollBar repeats held arrows from DrawElement,
+                    // so advance once per presentation rather than per update.
+                    self.mark_menu_dirty();
+                }
                 if self.startup_view == StartupView::Options {
                     let actions = self
                         .startup_options_dialog
@@ -67944,6 +67988,137 @@ public func Grant(password) { return GainMissionAccess(password); }
         click_main_button(&mut app, 5);
         assert!(app.take_exit_request(), "Exit button requests shutdown");
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn network_game_list_wheel_and_held_arrow_route_through_app() {
+        use lc_frontend::startup_netdlg::{
+            net_dlg_layout, NetDlgConfig, NetDlgController, NetDlgFontMetrics, NetDlgGameEntry,
+        };
+
+        let mut app = new_classic_menu_app(640, 480);
+        let metrics = NetDlgFontMetrics::from_fonts(
+            app.assets
+                .clonk_fonts
+                .as_deref()
+                .expect("classic startup fonts"),
+        );
+        let layout = net_dlg_layout(640, 480, &metrics);
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                record: false,
+            },
+            metrics,
+        );
+        controller.resize(640, 480);
+        controller.set_games(
+            (0..32)
+                .map(|index| NetDlgGameEntry {
+                    title: format!("Game {index}"),
+                    details: String::new(),
+                    address: None,
+                    joinable: true,
+                })
+                .collect(),
+        );
+        assert!(controller.list_max_scroll() > 60);
+        app.startup_view = StartupView::NetworkGame;
+        app.startup_network_dialog = Some(controller);
+        app.startup_game_search = None;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.list_viewport.x + 4),
+            f64::from(layout.list_viewport.y + 4),
+        ))
+        .expect("point inside network game list");
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("wheel down through app shell");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .list_scroll_offset(),
+            60
+        );
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("wheel up through app shell");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .list_scroll_offset(),
+            0
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.list_scrollbar.x + 8),
+            f64::from(layout.list_scrollbar.y + layout.list_scrollbar.h - 8),
+        ))
+        .expect("point at bottom scrollbar arrow");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold bottom scrollbar arrow");
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut frame).expect("first held-arrow frame");
+        let first = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .list_scroll_offset();
+        app.render(&mut frame).expect("second held-arrow frame");
+        let second = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .list_scroll_offset();
+        assert!(first > 0 && second > first);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release bottom scrollbar arrow");
+        app.render(&mut frame).expect("post-release frame");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .list_scroll_offset(),
+            second
+        );
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold arrow before network transition");
+        let before_transition = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("network dialog")
+            .list_scroll_offset();
+        let (_sender, receiver) = mpsc::channel();
+        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::Join, None);
+        assert!(
+            !app.startup_network_dialog
+                .as_mut()
+                .expect("network dialog")
+                .tick_scrollbar(),
+            "transition start must cancel the held arrow"
+        );
+        app.status_text.clear();
+        app.render(&mut frame)
+            .expect("transition frame does not repeat stale arrow");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .list_scroll_offset(),
+            before_transition
+        );
+        app.startup_network_connection = None;
+        app.render(&mut frame)
+            .expect("post-transition frame does not resume stale arrow");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .list_scroll_offset(),
+            before_transition
+        );
     }
 
     #[test]

@@ -29,6 +29,8 @@ const CLR_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 const CLR_DISABLED: [u8; 4] = [0x7f, 0x7f, 0x7f, 0xff];
 /// ListBox background / C4GUI_EditBGColor.
 const CLR_DARK_BG: u32 = 0x7f00_0000;
+const SCROLLBAR_WIDTH: i32 = 16;
+const SCROLLBAR_PART: i32 = 16;
 
 /// The `Graphics.c4g` images `C4StartupNetDlg` draws (C4Startup.cpp:48,82-83;
 /// C4Gui.cpp:1087-1097).
@@ -45,6 +47,8 @@ pub struct NetDlgAssets {
     pub gui_button_down: ImageData,
     /// `GUIButtonHighlight.png`: additive focus/hover/pressed overlay.
     pub gui_button_highlight: ImageData,
+    /// `GUIScroll.png` (32x48): classic vertical scrollbar facets.
+    pub gui_scroll: ImageData,
     /// `GUIIcons2.png` (256x320): extended 64x64 icon grid, 4 columns.
     pub gui_icons_ex: ImageData,
 }
@@ -100,6 +104,11 @@ pub struct NetDlgLayout {
     pub game_list: IntRect,
     /// List box client area, margins 3 (C4GuiListBox.h:120-123).
     pub list_client: IntRect,
+    /// ScrollWindow viewport. The 16px scrollbar remains reserved even while
+    /// its auto-hide mode makes it invisible (C4GuiContainers.cpp:477-491).
+    pub list_viewport: IntRect,
+    /// Fixed-width vertical scrollbar beside [`Self::list_viewport`].
+    pub list_scrollbar: IntRect,
     /// The masterserver query entry (width minus scroll bar reserve;
     /// C4GuiContainers.cpp:477-491, C4StartupNetDlg.cpp:39-81).
     pub list_entry: IntRect,
@@ -318,10 +327,22 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
     // Entry: iHeight = 2*22 + 4 = 48 after label restack
     // (C4StartupNetDlg.cpp:42-44,372-388).
     let entry_h = metrics.text_line_height * 2 + 4;
-    let list_entry = IntRect {
+    let list_viewport = IntRect {
         x: list_client.x,
         y: list_client.y,
-        w: list_client.w - 16,
+        w: list_client.w - SCROLLBAR_WIDTH,
+        h: list_client.h,
+    };
+    let list_scrollbar = IntRect {
+        x: list_viewport.x + list_viewport.w,
+        y: list_viewport.y,
+        w: SCROLLBAR_WIDTH,
+        h: list_viewport.h,
+    };
+    let list_entry = IntRect {
+        x: list_viewport.x,
+        y: list_viewport.y,
+        w: list_viewport.w,
         h: entry_h,
     };
     // Aspect-fit of the 40x32 query-icon facet into the 48x48 icon bounds
@@ -370,6 +391,8 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
         game_list_caption,
         game_list,
         list_client,
+        list_viewport,
+        list_scrollbar,
         list_entry,
         entry_icon,
         entry_labels,
@@ -464,6 +487,13 @@ pub enum NetDlgControl {
     CreateGame,
 }
 
+/// Classic GUI sounds produced by the net-dialog scrollbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgSound {
+    ArrowHit,
+    Command,
+}
+
 /// Requests produced by [`NetDlgController`]. The controller mutates only
 /// presentation-local state; the application owns network/config side effects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -477,6 +507,7 @@ pub enum NetDlgAction {
     MasterserverSignupChanged(bool),
     RecordingChanged(bool),
     JoinAddressChanged(String),
+    GuiSound(NetDlgSound),
 }
 
 /// Live input state for the pixel-parity network dialog.
@@ -498,6 +529,11 @@ pub struct NetDlgController {
     key_pressed: Option<(NetDlgControl, KeyCode)>,
     games: Vec<NetDlgGameEntry>,
     selection: Option<NetDlgSelection>,
+    list_scroll_y: i32,
+    list_scroll_pin: i32,
+    scrollbar_dragging: bool,
+    scrollbar_arrow_captured: bool,
+    scrollbar_arrow: i8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -523,6 +559,11 @@ impl NetDlgController {
             key_pressed: None,
             games: Vec::new(),
             selection: None,
+            list_scroll_y: 0,
+            list_scroll_pin: 0,
+            scrollbar_dragging: false,
+            scrollbar_arrow_captured: false,
+            scrollbar_arrow: 0,
         }
     }
 
@@ -532,6 +573,7 @@ impl NetDlgController {
         self.hovered = self
             .pointer_position
             .and_then(|point| self.hit_button(point));
+        self.clamp_list_scroll();
     }
 
     pub const fn config(&self) -> NetDlgConfig {
@@ -549,6 +591,10 @@ impl NetDlgController {
     /// synchronized here because `UpdateMasterserver` does not read it.
     pub fn sync_masterserver_signup_from_config(&mut self, masterserver_signup: bool) {
         self.config.masterserver_signup = masterserver_signup;
+        if !masterserver_signup && self.selection == Some(NetDlgSelection::Masterserver) {
+            self.selection = None;
+        }
+        self.clamp_list_scroll();
     }
 
     pub const fn mode(&self) -> NetDlgMode {
@@ -568,6 +614,9 @@ impl NetDlgController {
         self.hovered = position.and_then(|point| self.hit_button(point));
         if position.is_none() {
             self.pointer_pressed = None;
+            self.scrollbar_dragging = false;
+            self.scrollbar_arrow_captured = false;
+            self.scrollbar_arrow = 0;
         }
     }
 
@@ -596,6 +645,7 @@ impl NetDlgController {
         {
             self.selection = None;
         }
+        self.clamp_list_scroll();
     }
 
     pub fn games(&self) -> &[NetDlgGameEntry] {
@@ -607,6 +657,16 @@ impl NetDlgController {
             Some(NetDlgSelection::Game(index)) => Some(index),
             Some(NetDlgSelection::Masterserver) | None => None,
         }
+    }
+
+    /// Current vertical ScrollWindow displacement in logical pixels.
+    pub const fn list_scroll_offset(&self) -> i32 {
+        self.list_scroll_y
+    }
+
+    /// Maximum displacement for the current rows and viewport.
+    pub fn list_max_scroll(&self) -> i32 {
+        self.max_list_scroll(&self.layout())
     }
 
     /// Adds text received from the windowing layer while the IP edit owns
@@ -632,6 +692,17 @@ impl NetDlgController {
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
+        let layout = self.layout();
+        if self.scrollbar_dragging {
+            self.set_scroll_from_pointer(position, &layout);
+        } else if self.scrollbar_arrow_captured {
+            let was_down = self.scrollbar_arrow != 0;
+            let inside_bar = contains(layout.list_scrollbar, position);
+            self.scrollbar_arrow = self.scrollbar_arrow_at(position, &layout);
+            if inside_bar && was_down != (self.scrollbar_arrow != 0) {
+                return vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)];
+            }
+        }
         Vec::new()
     }
 
@@ -639,6 +710,17 @@ impl NetDlgController {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         self.pointer_pressed = self.hovered;
+
+        let layout = self.layout();
+        if self.mode == NetDlgMode::GameList
+            && self.max_list_scroll(&layout) > 0
+            && contains(layout.list_scrollbar, position)
+        {
+            self.pointer_pressed = None;
+            let mut actions = self.change_focus(NetDlgControl::GameList);
+            actions.extend(self.begin_scrollbar_pointer(position, &layout));
+            return actions;
+        }
 
         let hit = self.hit_control(position);
         match hit {
@@ -655,6 +737,22 @@ impl NetDlgController {
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
+        if self.scrollbar_dragging {
+            let layout = self.layout();
+            self.set_scroll_from_pointer(position, &layout);
+            self.scrollbar_dragging = false;
+            return Vec::new();
+        }
+        if self.scrollbar_arrow_captured {
+            let was_down = self.scrollbar_arrow != 0;
+            self.scrollbar_arrow_captured = false;
+            self.scrollbar_arrow = 0;
+            return if was_down {
+                vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
+            } else {
+                Vec::new()
+            };
+        }
         let Some(pressed) = self.pointer_pressed.take() else {
             return Vec::new();
         };
@@ -662,6 +760,38 @@ impl NetDlgController {
             return Vec::new();
         }
         self.activate(pressed)
+    }
+
+    /// Routes the native signed wheel delta over the ScrollWindow viewport.
+    /// C4FullScreen supplies +60 for one notch up; ScrollWindow negates it.
+    pub fn handle_wheel(&mut self, position: GuiPoint, delta: i32) -> Vec<NetDlgAction> {
+        self.pointer_position = Some(position);
+        self.hovered = self.hit_button(position);
+        let layout = self.layout();
+        if self.mode == NetDlgMode::GameList && contains(layout.list_viewport, position) {
+            self.scroll_list_by(delta.saturating_neg(), &layout);
+        }
+        Vec::new()
+    }
+
+    /// Advances a held arrow by one fixed thumb pixel, matching
+    /// `C4GUI::ScrollBar::DrawElement`. The mapped content offset may remain
+    /// unchanged for a frame because both conversions truncate integers.
+    pub fn tick_scrollbar(&mut self) -> bool {
+        if self.scrollbar_arrow == 0 {
+            return false;
+        }
+        let layout = self.layout();
+        let max_scroll = self.max_list_scroll(&layout);
+        let max_pin = Self::scrollbar_range(&layout);
+        if max_scroll == 0 {
+            return false;
+        }
+        let previous_pin = self.list_scroll_pin;
+        self.list_scroll_pin =
+            (self.list_scroll_pin + i32::from(self.scrollbar_arrow)).clamp(0, max_pin);
+        self.list_scroll_y = max_scroll * self.list_scroll_pin / max_pin;
+        self.list_scroll_pin != previous_pin
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<NetDlgAction> {
@@ -834,6 +964,12 @@ impl NetDlgController {
             }
             NetDlgControl::Internet => {
                 self.config.masterserver_signup = !self.config.masterserver_signup;
+                if !self.config.masterserver_signup
+                    && self.selection == Some(NetDlgSelection::Masterserver)
+                {
+                    self.selection = None;
+                }
+                self.clamp_list_scroll();
                 vec![NetDlgAction::MasterserverSignupChanged(
                     self.config.masterserver_signup,
                 )]
@@ -855,6 +991,9 @@ impl NetDlgController {
 
     fn change_mode(&mut self, mode: NetDlgMode) -> Vec<NetDlgAction> {
         self.mode = mode;
+        self.scrollbar_dragging = false;
+        self.scrollbar_arrow_captured = false;
+        self.scrollbar_arrow = 0;
         let replacement_focus = match (mode, self.focus) {
             (NetDlgMode::Chat, NetDlgControl::GameList | NetDlgControl::JoinAddress) => {
                 Some(NetDlgControl::ChatInput)
@@ -884,10 +1023,12 @@ impl NetDlgController {
 
     fn select_list_row(&mut self, position: GuiPoint) {
         let layout = self.layout();
-        if !contains(layout.list_client, position) {
+        if !contains(layout.list_viewport, position) {
             return;
         }
-        let row = ((position.y as i32 - layout.list_entry.y) / layout.list_entry.h) as usize;
+        let previous = self.selection;
+        let row = ((position.y as i32 - layout.list_viewport.y + self.list_scroll_y)
+            / layout.list_entry.h) as usize;
         if self.config.masterserver_signup {
             self.selection = if row == 0 {
                 Some(NetDlgSelection::Masterserver)
@@ -897,9 +1038,13 @@ impl NetDlgController {
         } else {
             self.selection = (row < self.games.len()).then_some(NetDlgSelection::Game(row));
         }
+        if self.selection != previous {
+            self.ensure_selection_visible(&layout);
+        }
     }
 
     fn move_game_selection(&mut self, forward: bool) {
+        let previous = self.selection;
         let master = self.config.masterserver_signup;
         self.selection = match (self.selection, forward) {
             (None, true) if master => Some(NetDlgSelection::Masterserver),
@@ -925,6 +1070,137 @@ impl NetDlgController {
                 .map(NetDlgSelection::Game)
                 .or(self.selection),
         };
+        if self.selection != previous {
+            let layout = self.layout();
+            self.ensure_selection_visible(&layout);
+        }
+    }
+
+    fn list_row_count(&self) -> usize {
+        self.games.len() + usize::from(self.config.masterserver_signup)
+    }
+
+    fn list_content_height(&self, layout: &NetDlgLayout) -> i32 {
+        i32::try_from(self.list_row_count())
+            .unwrap_or(i32::MAX)
+            .saturating_mul(layout.list_entry.h)
+    }
+
+    fn max_list_scroll(&self, layout: &NetDlgLayout) -> i32 {
+        self.list_content_height(layout)
+            .saturating_sub(layout.list_viewport.h)
+            .max(0)
+    }
+
+    fn scrollbar_has_pin(layout: &NetDlgLayout) -> bool {
+        layout.list_scrollbar.h > 3 * SCROLLBAR_PART
+    }
+
+    fn scrollbar_range(layout: &NetDlgLayout) -> i32 {
+        if Self::scrollbar_has_pin(layout) {
+            layout.list_scrollbar.h - 3 * SCROLLBAR_PART
+        } else {
+            // C4GUI::ScrollBar::GetMaxScroll uses a synthetic range when the
+            // viewport is too short to display a thumb. Arrows remain usable.
+            100
+        }
+    }
+
+    fn clamp_list_scroll(&mut self) {
+        let layout = self.layout();
+        self.list_scroll_y = self.list_scroll_y.clamp(0, self.max_list_scroll(&layout));
+        self.sync_pin_from_scroll(&layout);
+        if self.max_list_scroll(&layout) == 0 {
+            self.scrollbar_dragging = false;
+            self.scrollbar_arrow_captured = false;
+            self.scrollbar_arrow = 0;
+        }
+    }
+
+    fn sync_pin_from_scroll(&mut self, layout: &NetDlgLayout) {
+        let max_scroll = self.max_list_scroll(layout);
+        self.list_scroll_pin = if max_scroll == 0 || !Self::scrollbar_has_pin(layout) {
+            0
+        } else {
+            Self::scrollbar_range(layout) * self.list_scroll_y / max_scroll
+        };
+    }
+
+    fn scroll_list_by(&mut self, amount: i32, layout: &NetDlgLayout) {
+        self.list_scroll_y = self
+            .list_scroll_y
+            .saturating_add(amount)
+            .clamp(0, self.max_list_scroll(layout));
+        self.sync_pin_from_scroll(layout);
+    }
+
+    fn set_scroll_from_pointer(&mut self, point: GuiPoint, layout: &NetDlgLayout) {
+        let max_pin = Self::scrollbar_range(layout);
+        self.list_scroll_pin =
+            (point.y as i32 - layout.list_scrollbar.y - SCROLLBAR_PART - SCROLLBAR_PART / 2)
+                .clamp(0, max_pin);
+        self.list_scroll_y = self.max_list_scroll(layout) * self.list_scroll_pin / max_pin.max(1);
+    }
+
+    fn scrollbar_arrow_at(&self, point: GuiPoint, layout: &NetDlgLayout) -> i8 {
+        if !contains(layout.list_scrollbar, point) {
+            return 0;
+        }
+        let local_y = point.y as i32 - layout.list_scrollbar.y;
+        if local_y < SCROLLBAR_PART {
+            -1
+        } else if local_y >= layout.list_scrollbar.h - SCROLLBAR_PART {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn begin_scrollbar_pointer(
+        &mut self,
+        point: GuiPoint,
+        layout: &NetDlgLayout,
+    ) -> Vec<NetDlgAction> {
+        let arrow = self.scrollbar_arrow_at(point, layout);
+        if arrow != 0 {
+            self.scrollbar_arrow_captured = true;
+            self.scrollbar_arrow = arrow;
+            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
+        } else if Self::scrollbar_has_pin(layout) {
+            self.scrollbar_arrow_captured = false;
+            self.set_scroll_from_pointer(point, layout);
+            self.scrollbar_dragging = true;
+            vec![NetDlgAction::GuiSound(NetDlgSound::Command)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn selected_row(&self) -> Option<usize> {
+        match self.selection {
+            Some(NetDlgSelection::Masterserver) => Some(0),
+            Some(NetDlgSelection::Game(index)) => {
+                Some(index + usize::from(self.config.masterserver_signup))
+            }
+            None => None,
+        }
+    }
+
+    fn ensure_selection_visible(&mut self, layout: &NetDlgLayout) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let top = i32::try_from(row)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(layout.list_entry.h);
+        let bottom = top.saturating_add(layout.list_entry.h);
+        if self.list_scroll_y > top {
+            self.list_scroll_y = top;
+        } else if self.list_scroll_y + layout.list_viewport.h < bottom {
+            self.list_scroll_y = bottom - layout.list_viewport.h;
+        }
+        self.list_scroll_y = self.list_scroll_y.clamp(0, self.max_list_scroll(layout));
+        self.sync_pin_from_scroll(layout);
     }
 
     fn is_highlighted(&self, control: NetDlgControl) -> bool {
@@ -1097,51 +1373,90 @@ impl NetDlgScreen {
             );
             draw_3d_frame(surface, list, gamma);
 
+            // ScrollWindow draws its children at y=-scroll and installs its
+            // viewport as the primary clipper. Keep the clip on the original
+            // surface so semantic/native font capture retains it as well.
+            let viewport = layout.list_viewport;
+            let saved_clip = surface.clip();
+            let viewport_clip = lc_graphics::Rect::new(
+                viewport.x,
+                viewport.y,
+                viewport.w.max(0) as u32,
+                viewport.h.max(0) as u32,
+            );
+            let active_clip = saved_clip
+                .and_then(|clip| clip.intersection(viewport_clip))
+                .unwrap_or_else(|| {
+                    if saved_clip.is_some() {
+                        lc_graphics::Rect::new(viewport.x, viewport.y, 0, 0)
+                    } else {
+                        viewport_clip
+                    }
+                });
+            surface.set_clip(active_clip);
+
+            let scroll_y = controller.map_or(0, |state| state.list_scroll_y);
+            let row_visible =
+                |rect: IntRect| rect.y < viewport.y + viewport.h && rect.y + rect.h > viewport.y;
             let mut row = 0_i32;
             if config.masterserver_signup {
-                if controller
-                    .is_some_and(|state| state.selection == Some(NetDlgSelection::Masterserver))
-                {
-                    let rect = layout.list_entry;
-                    draw_engine_box(
+                let dy = -scroll_y;
+                let row_rect = offset(layout.list_entry, 0, dy);
+                if row_visible(row_rect) {
+                    if controller
+                        .is_some_and(|state| state.selection == Some(NetDlgSelection::Masterserver))
+                    {
+                        draw_engine_box(
+                            surface,
+                            row_rect.x,
+                            row_rect.y,
+                            row_rect.x + row_rect.w - 1,
+                            row_rect.y + row_rect.h - 1,
+                            0xafaf_0000,
+                            gamma,
+                        );
+                    }
+                    // The masterserver query entry: animated NetGetRef icon,
+                    // aspect-fit 40x32 -> 48x38 (C4StartupNetDlg.cpp:144-160).
+                    let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
+                    crate::draw_image_bilinear(
                         surface,
-                        rect.x,
-                        rect.y,
-                        rect.x + rect.w - 1,
-                        rect.y + rect.h - 1,
-                        0xafaf_0000,
+                        &gui_rect(offset(layout.entry_icon, 0, dy)),
+                        &phase,
                         gamma,
                     );
-                }
-                // The masterserver query entry: animated NetGetRef icon,
-                // aspect-fit 40x32 -> 48x38 (C4StartupNetDlg.cpp:144-160).
-                let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
-                crate::draw_image_bilinear(surface, &gui_rect(layout.entry_icon), &phase, gamma);
-                let entry_texts = [
-                    "Internet server on league.clonkspot.org",
-                    "Querying game infos...",
-                ];
-                for (rect, text) in layout.entry_labels.iter().zip(entry_texts) {
-                    fonts.text.draw_with_gamma(
-                        surface,
-                        rect.x,
-                        rect.y,
-                        text,
-                        CLR_WHITE,
-                        TextAlign::Left,
-                        true,
-                        gamma,
-                    );
+                    let entry_texts = [
+                        "Internet server on league.clonkspot.org",
+                        "Querying game infos...",
+                    ];
+                    for (rect, text) in layout
+                        .entry_labels
+                        .iter()
+                        .map(|rect| offset(*rect, 0, dy))
+                        .zip(entry_texts)
+                    {
+                        fonts.text.draw_with_gamma(
+                            surface,
+                            rect.x,
+                            rect.y,
+                            text,
+                            CLR_WHITE,
+                            TextAlign::Left,
+                            true,
+                            gamma,
+                        );
+                    }
                 }
                 row += 1;
             }
 
             if let Some(controller) = controller {
                 for (index, game) in controller.games().iter().enumerate() {
-                    let dy = row * layout.list_entry.h;
+                    let dy = row * layout.list_entry.h - scroll_y;
                     let row_rect = offset(layout.list_entry, 0, dy);
-                    if row_rect.y + row_rect.h > layout.list_client.y + layout.list_client.h {
-                        break;
+                    if !row_visible(row_rect) {
+                        row += 1;
+                        continue;
                     }
                     if controller.selection == Some(NetDlgSelection::Game(index)) {
                         draw_engine_box(
@@ -1177,6 +1492,18 @@ impl NetDlgScreen {
                         );
                     }
                     row += 1;
+                }
+            }
+
+            if let Some(saved) = saved_clip {
+                surface.set_clip(saved);
+            } else {
+                surface.clear_clip();
+            }
+
+            if let Some(controller) = controller {
+                if controller.max_list_scroll(&layout) > 0 {
+                    Self::draw_scrollbar(surface, assets, controller, layout, gamma);
                 }
             }
 
@@ -1299,6 +1626,80 @@ impl NetDlgScreen {
                     pressed: controller.is_some_and(|state| state.is_pressed(control)),
                     highlighted: controller.is_some_and(|state| state.is_highlighted(control)),
                 },
+                gamma,
+            );
+        }
+    }
+
+    fn draw_scrollbar(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        controller: &NetDlgController,
+        layout: NetDlgLayout,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let bar = layout.list_scrollbar;
+        let top_x = if controller.scrollbar_arrow < 0 {
+            16
+        } else {
+            0
+        };
+        let bottom_x = if controller.scrollbar_arrow > 0 {
+            16
+        } else {
+            0
+        };
+        crate::draw_image_strip(
+            surface,
+            bar.x,
+            bar.y,
+            &assets.gui_scroll,
+            top_x,
+            0,
+            16,
+            16,
+            gamma,
+        );
+        let mut y = SCROLLBAR_PART;
+        while y < bar.h - 5 {
+            let tile_height = SCROLLBAR_PART.min(bar.h - 5 - y).max(0) as u32;
+            if tile_height == 0 {
+                break;
+            }
+            crate::draw_image_strip(
+                surface,
+                bar.x,
+                bar.y + y,
+                &assets.gui_scroll,
+                0,
+                16,
+                16,
+                tile_height,
+                gamma,
+            );
+            y += SCROLLBAR_PART;
+        }
+        crate::draw_image_strip(
+            surface,
+            bar.x,
+            bar.y + bar.h - SCROLLBAR_PART,
+            &assets.gui_scroll,
+            bottom_x,
+            32,
+            16,
+            16,
+            gamma,
+        );
+        if NetDlgController::scrollbar_has_pin(&layout) {
+            crate::draw_image_strip(
+                surface,
+                bar.x,
+                bar.y + SCROLLBAR_PART + controller.list_scroll_pin,
+                &assets.gui_scroll,
+                16,
+                16,
+                16,
+                16,
                 gamma,
             );
         }
@@ -1437,6 +1838,8 @@ mod tests {
         assert_eq!(layout.game_list_caption, rect(238, 69, 804, 23));
         assert_eq!(layout.game_list, rect(238, 92, 804, 496));
         assert_eq!(layout.list_client, rect(241, 95, 798, 490));
+        assert_eq!(layout.list_viewport, rect(241, 95, 782, 490));
+        assert_eq!(layout.list_scrollbar, rect(1023, 95, 16, 490));
         assert_eq!(layout.list_entry, rect(241, 95, 782, 48));
         assert_eq!(layout.entry_icon, rect(241, 100, 48, 38));
         assert_eq!(layout.entry_labels[0], rect(292, 96, 730, 22));
@@ -1457,6 +1860,17 @@ mod tests {
             caption_line_height: 25,
             title_line_height: 34,
         }
+    }
+
+    fn games(count: usize) -> Vec<NetDlgGameEntry> {
+        (0..count)
+            .map(|index| NetDlgGameEntry {
+                title: format!("Game {index:02}"),
+                details: format!("Lobby {index:02} — Host"),
+                address: Some(format!("203.0.113.{index}:11112")),
+                joinable: true,
+            })
+            .collect()
     }
 
     fn center(rect: IntRect) -> crate::GuiPoint {
@@ -1744,6 +2158,192 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_game_list_wheel_scrolls_clamps_and_hit_tests_content() {
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_games(games(20));
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        let point = GuiPoint::new(
+            (layout.list_viewport.x + 4) as f32,
+            (layout.list_viewport.y + 4) as f32,
+        );
+
+        assert_eq!(controller.list_max_scroll(), 470);
+        assert!(controller.handle_wheel(point, -60).is_empty());
+        assert_eq!(controller.list_scroll_offset(), 60);
+        controller.handle_wheel(point, -10_000);
+        assert_eq!(
+            controller.list_scroll_offset(),
+            controller.list_max_scroll()
+        );
+        controller.handle_wheel(point, 10_000);
+        assert_eq!(controller.list_scroll_offset(), 0);
+
+        let scrollbar_point = GuiPoint::new(
+            (layout.list_scrollbar.x + 8) as f32,
+            (layout.list_scrollbar.y + 40) as f32,
+        );
+        controller.handle_wheel(scrollbar_point, -60);
+        assert_eq!(controller.list_scroll_offset(), 0);
+
+        controller.handle_wheel(point, -96);
+        assert!(controller.handle_pointer_down(point).is_empty());
+        assert_eq!(controller.selected_game(), Some(2));
+    }
+
+    #[test]
+    fn keyboard_selection_scrolls_each_row_range_into_view() {
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_games(games(20));
+        let layout = net_dlg_layout(1280, 720, &metrics());
+
+        for index in 0..20 {
+            assert!(controller.handle_key_down(KeyCode::Down).is_empty());
+            assert_eq!(controller.selected_game(), Some(index));
+            let top = index as i32 * layout.list_entry.h;
+            let bottom = top + layout.list_entry.h;
+            assert!(controller.list_scroll_offset() <= top);
+            assert!(controller.list_scroll_offset() + layout.list_viewport.h >= bottom);
+        }
+        assert_eq!(
+            controller.list_scroll_offset(),
+            controller.list_max_scroll()
+        );
+
+        for index in (0..19).rev() {
+            assert!(controller.handle_key_down(KeyCode::Up).is_empty());
+            assert_eq!(controller.selected_game(), Some(index));
+        }
+        assert_eq!(controller.list_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scrollbar_track_drag_and_held_arrows_match_fixed_pin_math() {
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_games(games(20));
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        let track = GuiPoint::new(
+            (layout.list_scrollbar.x + 8) as f32,
+            (layout.list_scrollbar.y + layout.list_scrollbar.h / 2) as f32,
+        );
+
+        assert_eq!(
+            controller.handle_pointer_down(center(layout.join_edit)),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        assert_eq!(
+            controller.handle_pointer_down(track),
+            vec![
+                NetDlgAction::FocusChanged(NetDlgControl::GameList),
+                NetDlgAction::GuiSound(NetDlgSound::Command),
+            ]
+        );
+        assert!(controller.list_scroll_offset() > 0);
+        let below = GuiPoint::new(track.x, (layout.list_scrollbar.y + 10_000) as f32);
+        assert!(controller.handle_pointer_move(below).is_empty());
+        assert_eq!(
+            controller.list_scroll_offset(),
+            controller.list_max_scroll()
+        );
+        assert!(controller.handle_pointer_up(below).is_empty());
+
+        let viewport = GuiPoint::new(
+            (layout.list_viewport.x + 4) as f32,
+            (layout.list_viewport.y + 4) as f32,
+        );
+        controller.handle_wheel(viewport, 10_000);
+        let bottom_arrow = GuiPoint::new(
+            (layout.list_scrollbar.x + 8) as f32,
+            (layout.list_scrollbar.y + layout.list_scrollbar.h - 8) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_down(bottom_arrow),
+            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
+        );
+        assert_eq!(controller.list_scroll_pin, 0);
+        assert!(controller.tick_scrollbar());
+        assert_eq!(controller.list_scroll_pin, 1);
+        assert!(controller.tick_scrollbar());
+        assert_eq!(controller.list_scroll_pin, 2);
+        assert_eq!(
+            controller.handle_pointer_move(track),
+            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
+        );
+        assert!(!controller.tick_scrollbar());
+        assert_eq!(
+            controller.handle_pointer_move(bottom_arrow),
+            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
+        );
+        assert!(controller.tick_scrollbar());
+        assert_eq!(controller.list_scroll_pin, 3);
+        let after_held_frames = controller.list_scroll_offset();
+        assert_eq!(
+            controller.handle_pointer_up(bottom_arrow),
+            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
+        );
+        assert!(!controller.tick_scrollbar());
+        assert_eq!(controller.list_scroll_offset(), after_held_frames);
+
+        controller.change_mode(NetDlgMode::Chat);
+        let before_hidden_click = controller.list_scroll_offset();
+        assert!(controller.handle_pointer_down(bottom_arrow).is_empty());
+        assert!(!controller.scrollbar_arrow_captured);
+        assert!(!controller.tick_scrollbar());
+        assert_eq!(controller.list_scroll_offset(), before_hidden_click);
+    }
+
+    #[test]
+    fn tiny_scrollbar_without_thumb_keeps_native_synthetic_arrow_range() {
+        let height = (100..500)
+            .find(|height| net_dlg_layout(1280, *height, &metrics()).list_viewport.h == 48)
+            .expect("a screen height with an exact 48px list viewport");
+        let layout = net_dlg_layout(1280, height, &metrics());
+        assert!(!NetDlgController::scrollbar_has_pin(&layout));
+
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, height);
+        controller.set_games(games(4));
+        assert_eq!(controller.list_max_scroll(), 144);
+        let bottom_arrow = GuiPoint::new(
+            (layout.list_scrollbar.x + 8) as f32,
+            (layout.list_scrollbar.y + layout.list_scrollbar.h - 8) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_down(bottom_arrow),
+            vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
+        );
+        assert!(controller.tick_scrollbar());
+        assert_eq!(controller.list_scroll_pin, 1);
+        assert_eq!(controller.list_scroll_offset(), 1);
+    }
+
+    #[test]
     fn gamepad_horizontal_traverses_without_firing_keyboard_back() {
         let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
         controller.resize(1280, 720);
@@ -1773,6 +2373,7 @@ mod tests {
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_scroll: load_graphics_png("GUIScroll.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
@@ -1929,6 +2530,7 @@ mod tests {
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_scroll: load_graphics_png("GUIScroll.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
@@ -1969,6 +2571,135 @@ mod tests {
         assert_ne!(with_address.pixels(), chat.pixels());
     }
 
+    #[test]
+    fn scrolled_rows_and_scrollbar_are_clipped_inside_the_list_client() {
+        use crate::test_support::{load_graphics_png, standard_gamma};
+        let assets = NetDlgAssets {
+            background: load_graphics_png("StartupNetworkBG.png"),
+            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            gui_caption: load_graphics_png("GUICaption.png"),
+            gui_button: load_graphics_png("GUIButton.png"),
+            gui_button_down: load_graphics_png("GUIButtonDown.png"),
+            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
+        };
+        let fonts = endeavour_font_set();
+        let config = NetDlgConfig {
+            masterserver_signup: false,
+            ..NetDlgConfig::default()
+        };
+        let mut controller = NetDlgController::new(config, metrics());
+        controller.resize(1280, 720);
+        controller.set_games(games(20));
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        let render = |controller: &NetDlgController| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            NetDlgScreen::render_controller(
+                &mut surface,
+                &assets,
+                &fonts,
+                Some(standard_gamma()),
+                controller,
+                0,
+            );
+            surface
+        };
+
+        let top = render(&controller);
+        controller.handle_wheel(
+            GuiPoint::new(
+                (layout.list_viewport.x + 4) as f32,
+                (layout.list_viewport.y + 4) as f32,
+            ),
+            -10_000,
+        );
+        let bottom = render(&controller);
+
+        let mut viewport_changed = false;
+        for (index, (top_pixel, bottom_pixel)) in top
+            .pixels()
+            .chunks_exact(4)
+            .zip(bottom.pixels().chunks_exact(4))
+            .enumerate()
+        {
+            let point = GuiPoint::new((index % 1280) as f32, (index / 1280) as f32);
+            if contains(layout.list_viewport, point) {
+                viewport_changed |= top_pixel != bottom_pixel;
+            } else if !contains(layout.list_client, point) {
+                assert_eq!(
+                    top_pixel, bottom_pixel,
+                    "scrolled row bled outside list client at pixel {index}"
+                );
+            }
+        }
+        assert!(viewport_changed, "later rows must become visible");
+    }
+
+    #[test]
+    fn ordered_native_game_row_text_retains_the_scrollwindow_clipper() {
+        use crate::test_support::{load_graphics_png, standard_gamma};
+        let assets = NetDlgAssets {
+            background: load_graphics_png("StartupNetworkBG.png"),
+            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            gui_caption: load_graphics_png("GUICaption.png"),
+            gui_button: load_graphics_png("GUIButton.png"),
+            gui_button_down: load_graphics_png("GUIButtonDown.png"),
+            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
+        };
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_games(games(20));
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        controller.handle_wheel(
+            GuiPoint::new(
+                (layout.list_viewport.x + 4) as f32,
+                (layout.list_viewport.y + 4) as f32,
+            ),
+            -10_000,
+        );
+
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        NetDlgScreen::render_controller(
+            &mut surface,
+            &assets,
+            &fonts,
+            Some(standard_gamma()),
+            &controller,
+            0,
+        );
+        let expected = lc_graphics::Rect::new(
+            layout.list_viewport.x,
+            layout.list_viewport.y,
+            layout.list_viewport.w as u32,
+            layout.list_viewport.h as u32,
+        );
+        let row_commands = surface
+            .take_clonk_text_capture()
+            .into_iter()
+            .filter(|command| {
+                command.text.starts_with("Game ") || command.text.starts_with("Lobby ")
+            })
+            .collect::<Vec<_>>();
+        assert!(!row_commands.is_empty());
+        assert!(
+            row_commands
+                .iter()
+                .all(|command| command.clip == Some(expected)),
+            "every native game-row text command must retain the viewport clip"
+        );
+    }
+
     /// Renders the dialog at 1280x720 with the final whole-surface gamma pass
     /// (mirroring the app's render_startup_frame) and dumps the PPM artifact
     /// that is diffed offline against the C++ F9 reference. CI has no
@@ -1983,6 +2714,7 @@ mod tests {
             gui_button: load_graphics_png("GUIButton.png"),
             gui_button_down: load_graphics_png("GUIButtonDown.png"),
             gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_scroll: load_graphics_png("GUIScroll.png"),
             gui_icons_ex: load_graphics_png("GUIIcons2.png"),
         };
         let fonts = endeavour_font_set();
