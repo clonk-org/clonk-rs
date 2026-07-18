@@ -3235,6 +3235,15 @@ impl NetworkTickGate {
         self.ready.remove(&expected_tick)
     }
 
+    fn exact_is_ready_if<F>(&self, expected_tick: Tick, pre_execute: F) -> bool
+    where
+        F: FnOnce(&[NetworkControl]) -> bool,
+    {
+        self.ready
+            .get(&expected_tick)
+            .is_some_and(|controls| pre_execute(controls.as_slice()))
+    }
+
     /// Number of consecutive ready control ticks beginning at `expected_tick`.
     /// C++ advances `iControlReady` only across a gap-free prefix, so a future
     /// out-of-order packet must not trigger catch-up by itself.
@@ -8770,6 +8779,10 @@ struct GameApp {
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
     network_control_running: bool,
+    /// App-owned counterpart of C4Network2's runtime fStatusReached state.
+    /// The session owns acknowledgement consensus; the app owns driving
+    /// simulation to this target and stopping exactly at the control boundary.
+    runtime_network_status_barrier: Option<RuntimeNetworkStatusBarrier>,
     /// Live host `Game.Network.Status` projection for periodic references.
     /// This is distinct from the control barrier, which may still be waiting
     /// after ChangeGameStatus has already switched Paused/Running.
@@ -9735,6 +9748,27 @@ enum RuntimeNetworkRole {
     Host,
     Client,
     Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeNetworkStatusBarrier {
+    status: lc_network::NetworkStatus,
+    local_reached: bool,
+    actual_control_tick: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeStatusReachOutcome {
+    NotReached,
+    Reported,
+    ReportFailed,
+}
+
+fn same_runtime_network_status_barrier(
+    left: lc_network::NetworkStatus,
+    right: lc_network::NetworkStatus,
+) -> bool {
+    left.state == right.state && left.target_tick == right.target_tick
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16501,6 +16535,7 @@ impl GameApp {
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
             network_control_running,
+            runtime_network_status_barrier: None,
             host_reference_paused: false,
             network_control_clock,
             network_max_players,
@@ -20146,6 +20181,155 @@ impl GameApp {
             .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
     }
 
+    /// Rust advances this clock as soon as a cadence control is consumed,
+    /// while C++ advances ControlTick at the following frame boundary.
+    /// Consequently Rust's current tick is already C++ getNextControlTick.
+    fn next_network_control_tick(&self) -> i32 {
+        self.network_control_clock
+            .map(NetworkControlClock::current_tick)
+            .unwrap_or_else(|| {
+                i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX)
+            })
+    }
+
+    fn arm_runtime_network_status_barrier(
+        &mut self,
+        status: lc_network::NetworkStatus,
+    ) -> bool {
+        if self.mode != AppMode::Running
+            || self.network.is_none()
+            || status.target_tick < 0
+            || !matches!(
+                status.state,
+                lc_network::NETWORK_STATE_GO | lc_network::NETWORK_STATE_PAUSE
+            )
+        {
+            return false;
+        }
+        if self.runtime_network_status_barrier.is_some_and(|pending| {
+            same_runtime_network_status_barrier(pending.status, status)
+        }) {
+            return false;
+        }
+        self.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+            status,
+            local_reached: false,
+            actual_control_tick: None,
+        });
+        // CheckStatusReached tests the target before SetRunning(true). This is
+        // observable for Go requested from a committed Pause: current-tick
+        // packets received while stopped are not promoted before the node
+        // reaches and acknowledges the Go barrier.
+        if self.check_runtime_network_status_reached() == RuntimeStatusReachOutcome::NotReached {
+            self.network_control_running = true;
+        }
+        true
+    }
+
+    fn change_runtime_network_status(
+        &mut self,
+        status: lc_network::NetworkStatus,
+    ) -> Result<()> {
+        self.network
+            .as_ref()
+            .ok_or_else(|| anyhow!("runtime network is unavailable"))?
+            .change_status(status)
+            .map_err(|error| anyhow!(error))?;
+        if let Some(clock) = self.network_control_clock.as_mut() {
+            clock.set_target_tick(Some(status.target_tick));
+        }
+        // The host session also echoes every authoritative status request.
+        // Arm synchronously so a sync control that opens a follow-up barrier
+        // cannot be overwritten by the old commit's tail.
+        self.arm_runtime_network_status_barrier(status);
+        Ok(())
+    }
+
+    fn check_runtime_network_status_reached(&mut self) -> RuntimeStatusReachOutcome {
+        let Some(pending) = self
+            .runtime_network_status_barrier
+            .filter(|pending| !pending.local_reached)
+        else {
+            return RuntimeStatusReachOutcome::NotReached;
+        };
+        let Some(clock) = self.network_control_clock else {
+            return RuntimeStatusReachOutcome::NotReached;
+        };
+        let current_control_tick = clock.current_tick();
+        if current_control_tick < pending.status.target_tick
+            || self.engine.frame() % clock.control_rate() as u64 != 0
+        {
+            return RuntimeStatusReachOutcome::NotReached;
+        }
+        let Ok(expected_tick) = Tick::try_from(current_control_tick) else {
+            return RuntimeStatusReachOutcome::NotReached;
+        };
+        // Native reaches only after the current *executable* control queue is
+        // empty. CheckCompleteCtrl advances readiness only after PreExecute;
+        // raw packets blocked on a resource do not keep the barrier running.
+        // While committed Pause is stopped, newly received controls likewise
+        // have not been promoted to CtrlReady yet.
+        let current_control_ready = if self.network_control_running {
+            let network_ticks = &self.network_ticks;
+            let admission_resources = &mut self.admission_resources;
+            let control_clients = &self.control_clients;
+            network_ticks.exact_is_ready_if(expected_tick, |controls| {
+                preflight_admission_resources(admission_resources, control_clients, controls)
+            })
+        } else {
+            false
+        };
+        if current_control_ready {
+            return RuntimeStatusReachOutcome::NotReached;
+        }
+
+        // OnStatusReached stops control before the host reports local reach
+        // or the client sends PID_StatusAck.
+        self.network_control_running = false;
+        let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+        let role = self.runtime_network_role();
+        let reached = match role {
+            RuntimeNetworkRole::Host => self
+                .network
+                .as_ref()
+                .map(|network| {
+                    network.status_reached(pending.status, current_control_tick)
+                }),
+            RuntimeNetworkRole::Client => self.network.as_mut().map(|network| {
+                network.acknowledge_expected_status_at_frame(
+                    pending.status,
+                    current_control_tick,
+                    current_frame,
+                )
+            }),
+            RuntimeNetworkRole::Offline | RuntimeNetworkRole::Ambiguous => None,
+        };
+        match reached {
+            Some(Ok(())) => {
+                if let Some(active) = self.runtime_network_status_barrier.as_mut() {
+                    if same_runtime_network_status_barrier(active.status, pending.status) {
+                        active.local_reached = true;
+                        active.actual_control_tick = Some(current_control_tick);
+                        if role == RuntimeNetworkRole::Client {
+                            // A client acknowledges the ControlTick it actually
+                            // reached, which may be later than the request.
+                            active.status.target_tick = current_control_tick;
+                        }
+                    }
+                }
+                RuntimeStatusReachOutcome::Reported
+            }
+            Some(Err(error)) => {
+                tracing::error!(%error, "failed to report runtime network status arrival");
+                RuntimeStatusReachOutcome::ReportFailed
+            }
+            None => {
+                tracing::error!("cannot report runtime network status for ambiguous role");
+                RuntimeStatusReachOutcome::ReportFailed
+            }
+        }
+    }
+
     fn network_control_pacing(&mut self) -> NetworkControlPacing {
         if self.mode != AppMode::Running
             || self.network.is_none()
@@ -22184,8 +22368,21 @@ impl GameApp {
         &mut self,
         status: lc_network::NetworkStatus,
     ) -> Result<(), EngineError> {
-        self.network_control_running = false;
-        let client_commit = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+        let runtime_commit = self.runtime_network_status_barrier;
+        if runtime_commit.is_some_and(|pending| {
+            !pending.local_reached
+                || !same_runtime_network_status_barrier(pending.status, status)
+        }) {
+            tracing::warn!(
+                state = status.state,
+                target_tick = status.target_tick,
+                "ignoring runtime network commit before local arrival"
+            );
+            return Ok(());
+        }
+        let client_commit = if runtime_commit.is_some() {
+            true
+        } else if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
             self.client_start_barrier.status_committed(status).is_some()
         } else {
             true
@@ -22198,6 +22395,7 @@ impl GameApp {
             );
             return Ok(());
         }
+        self.network_control_running = false;
         let prepared_go = self
             .loading_state
             .as_ref()
@@ -22249,9 +22447,26 @@ impl GameApp {
                 return Ok(());
             }
         }
-        let sync_controls = self.network_sync.take_exact(target_tick);
+        // Clear the completed barrier before synchronized controls execute.
+        // A VoteEnd control may synchronously open the follow-up Go barrier;
+        // that newer transition must own the final running/reference state.
+        if runtime_commit.is_some() {
+            self.runtime_network_status_barrier = None;
+        }
+        let sync_tick = runtime_commit
+            .and_then(|pending| pending.actual_control_tick)
+            .and_then(|tick| Tick::try_from(tick).ok())
+            .unwrap_or(target_tick);
+        let sync_controls = self.network_sync.take_exact(sync_tick);
         if !sync_controls.is_empty() {
-            self.apply_ready_controls(target_tick, sync_controls)?;
+            self.apply_ready_controls(sync_tick, sync_controls)?;
+        }
+        if runtime_commit.is_some()
+            && (self.mode != AppMode::Running
+                || self.network.is_none()
+                || self.runtime_network_status_barrier.is_some())
+        {
+            return Ok(());
         }
         if status.state == lc_network::NETWORK_STATE_GO {
             self.host_reference_paused = false;
@@ -23088,6 +23303,9 @@ impl GameApp {
                         if let Some(clock) = self.network_control_clock.as_mut() {
                             clock.set_target_tick(Some(status.target_tick));
                         }
+                        if self.mode == AppMode::Running {
+                            self.arm_runtime_network_status_barrier(status);
+                        }
                     }
                     NetworkEvent::JoinData(join_data) => {
                         // Game.Parameters is the authoritative client/player
@@ -23213,21 +23431,26 @@ impl GameApp {
                         }
                     }
                     NetworkEvent::StatusRequested(status) => {
-                        // The C++ client stops at the requested barrier until
-                        // local preparation reaches the exact status target
-                        // (src/C4Network2.cpp:2053-2086). Do not acknowledge
-                        // or commit it from the event-dispatch path.
                         if let Some(clock) = self.network_control_clock.as_mut() {
                             clock.set_target_tick(Some(status.target_tick));
                         }
-                        self.network_control_running = false;
-                        if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
-                            if let Some(requested) =
-                                self.client_start_barrier.status_requested(status)
-                            {
-                                self.pending_client_start_status = Some(requested);
+                        if self.mode == AppMode::Running {
+                            // CheckStatusReached keeps control running until
+                            // the requested target is reached at an empty
+                            // cadence boundary. Receipt alone never pauses.
+                            self.arm_runtime_network_status_barrier(status);
+                        } else {
+                            // Before InitGameFinal, local scenario preparation
+                            // is the reach condition and control stays stopped.
+                            self.network_control_running = false;
+                            if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                                if let Some(requested) =
+                                    self.client_start_barrier.status_requested(status)
+                                {
+                                    self.pending_client_start_status = Some(requested);
+                                }
+                                self.prepare_client_network_scenario_if_ready();
                             }
-                            self.prepare_client_network_scenario_if_ready();
                         }
                         tracing::debug!(
                             state = status.state,
@@ -27683,6 +27906,7 @@ impl GameApp {
                     &self.control_player_infos,
                 );
                 self.network_control_running = true;
+                self.runtime_network_status_barrier = None;
                 self.control_clients = initial_control_clients(None, None);
                 self.startup_view = StartupView::NetworkGame;
                 self.mode = AppMode::Menu;
@@ -27720,6 +27944,7 @@ impl GameApp {
                 &self.control_player_infos,
             );
             self.network_control_running = true;
+            self.runtime_network_status_barrier = None;
             self.control_clients = initial_control_clients(None, None);
             self.startup_view = StartupView::NetworkGame;
         }
@@ -30425,6 +30650,7 @@ impl GameApp {
                 &self.control_player_infos,
             );
             self.network_control_running = true;
+            self.runtime_network_status_barrier = None;
             self.control_clients = initial_control_clients(None, None);
             self.network_client_activity.clear();
             self.scenario_game_options = GameOptionButtons::new(
@@ -30641,6 +30867,7 @@ impl GameApp {
         self.network_sync.clear();
         self.sync_checks.clear();
         self.network_control_running = true;
+        self.runtime_network_status_barrier = None;
         self.league_votes.clear();
         self.admission_resources.clear();
         self.pending_network_join_data = None;
@@ -31616,26 +31843,14 @@ impl GameApp {
         {
             return;
         }
-        let target_tick = i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX);
+        let target_tick = self.next_network_control_tick();
         let status = lc_network::NetworkStatus {
             state: lc_network::NETWORK_STATE_PAUSE,
             control_mode: self.league_vote_control_mode(),
             target_tick,
         };
-        match self
-            .network
-            .as_ref()
-            .map(|network| network.change_status(status))
-        {
-            Some(Ok(())) => {
-                if let Some(clock) = self.network_control_clock.as_mut() {
-                    clock.set_target_tick(Some(target_tick));
-                }
-            }
-            Some(Err(error)) => {
-                tracing::error!(%error, "failed to pause host for league vote");
-            }
-            None => {}
+        if let Err(error) = self.change_runtime_network_status(status) {
+            tracing::error!(%error, "failed to pause host for league vote");
         }
         self.league_votes.paused_for_vote = true;
         self.host_reference_paused = true;
@@ -31660,20 +31875,8 @@ impl GameApp {
             control_mode: self.league_vote_control_mode(),
             target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
         };
-        match self
-            .network
-            .as_ref()
-            .map(|network| network.change_status(status))
-        {
-            Some(Ok(())) => {
-                if let Some(clock) = self.network_control_clock.as_mut() {
-                    clock.set_target_tick(Some(status.target_tick));
-                }
-            }
-            Some(Err(error)) => {
-                tracing::error!(%error, "failed to restore host after league vote");
-            }
-            None => {}
+        if let Err(error) = self.change_runtime_network_status(status) {
+            tracing::error!(%error, "failed to restore host after league vote");
         }
         self.league_votes.paused_for_vote = false;
         self.host_reference_paused = false;
@@ -31972,6 +32175,9 @@ impl GameApp {
         self.poll_startup_game_search();
         self.poll_startup_network_connection();
         self.process_network_events()?;
+        // C4Network2::Execute probes the runtime status target before
+        // Control.Prepare on every attempted frame, including halted frames.
+        self.check_runtime_network_status_reached();
         // Native runs Network.Execute before Control.Prepare, so this scan
         // must still happen when the ready-control gate returns early.
         self.deactivate_inactive_network_clients();
@@ -32135,6 +32341,7 @@ impl GameApp {
     /// tests and other hosts may pulse it explicitly.
     fn sec1_timer(&mut self) -> Result<bool, EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        let status_reached = self.check_runtime_network_status_reached();
         // C4Network2 is also a one-second timer proc and calls Execute from
         // that independent scheduler callback (`src/C4Network2.cpp:674-677`).
         self.deactivate_inactive_network_clients();
@@ -32154,7 +32361,8 @@ impl GameApp {
             // than releasing its listener at the lobby boundary.
             self.publish_running_host_reference();
         }
-        Ok(lobby_countdown_changed
+        Ok(status_reached == RuntimeStatusReachOutcome::Reported
+            || lobby_countdown_changed
             || ready_check_changed
             || vote_timeout_changed
             || after != before)
@@ -32640,7 +32848,9 @@ impl GameApp {
                                 None => None,
                             }
                         } else {
-                            self.network.as_ref().map(NetworkManager::status_reached)
+                            self.network
+                                .as_ref()
+                                .map(NetworkManager::status_reached_current)
                         };
                         match reached {
                             Some(Ok(())) => {
@@ -36131,6 +36341,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.network_control_running = self.network.is_none();
+        self.runtime_network_status_barrier = None;
         self.league_votes.clear();
         self.frames_per_second = 0;
         self.frames_since_second = 0;
@@ -38192,6 +38403,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.network_control_running = self.network.is_none();
+        self.runtime_network_status_barrier = None;
         if self.network.is_none() {
             self.control_clients = initial_control_clients(None, None);
             self.control_player_infos = ControlPlayerInfoRegistry::default();
@@ -65014,6 +65226,23 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(commands.take_status_reached(), 1);
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());
+        events
+            .send(NetworkEvent::StatusRequested(expected_go))
+            .expect("queue the host session's delayed self-echo");
+        app.process_network_events()
+            .expect("preserve an already reached prepared barrier");
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .and_then(|loading| loading.prepared_go.as_ref())
+                .map(|pending| pending.local_reached),
+            Some(true)
+        );
+        assert_eq!(
+            commands.take_status_reached(),
+            0,
+            "an identical host status echo must not report local reach twice"
+        );
         assert!(
             app.engine.snapshot().players.is_empty(),
             "network InitPlayers must not directly join the local player before host-issued JoinPlr controls"
@@ -67004,6 +67233,463 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    fn install_running_network_stub(
+        app: &mut GameApp,
+        local_client_id: lc_network::ClientId,
+        start_tick: i32,
+        control_rate: i32,
+    ) -> (mpsc::Sender<NetworkEvent>, network::TestNetworkCommands) {
+        let (manager, events, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client_id);
+        app.network_mode = Some(if local_client_id == 0 {
+            NetworkMode::Host(HostSettings {
+                bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                player_name: "Host".to_string(),
+                prepared: None,
+            })
+        } else {
+            NetworkMode::Client(ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            ))
+        });
+        app.network = Some(manager);
+        app.network_control_clock = Some(NetworkControlClock::new(start_tick, control_rate));
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(start_tick, control_rate)
+                .expect("valid runtime network timing"),
+        );
+        app.network_control_running = true;
+        app.runtime_network_status_barrier = None;
+        (events, commands)
+    }
+
+    fn queue_empty_ready_tick(app: &GameApp, events: &mpsc::Sender<NetworkEvent>) {
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick: app.expected_network_control_tick(),
+                controls: Vec::new(),
+            })
+            .expect("queue complete empty control tick");
+    }
+
+    #[test]
+    fn runtime_client_pause_and_go_drive_to_targets_before_acknowledging() {
+        // CheckStatusReached keeps both Pause and Go control running until the
+        // cadence boundary at/after the requested tick, stops first, and only
+        // then sends PID_StatusAck (src/C4Network2.cpp:2017-2060,2081-2113).
+        let mut app = new_running_sandbox_app();
+        assert_eq!(app.engine.frame(), 0, "fixture starts on a cadence boundary");
+        let (events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        let pause = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 2,
+        };
+
+        events
+            .send(NetworkEvent::StatusRequested(pause))
+            .expect("request runtime Pause");
+        app.process_network_events().expect("arm runtime Pause");
+        assert!(app.network_control_running, "receipt alone must not halt control");
+        assert_eq!(app.pending_client_start_status, None);
+        assert!(commands.take_framed_status_acknowledgements().is_empty());
+
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("execute control tick zero");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (1, 1));
+        app.update().expect("advance non-control frame one");
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("execute control tick one");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (3, 2));
+        assert!(app.network_control_running, "tick target is not a cadence boundary yet");
+        app.update().expect("reach Pause cadence boundary");
+        app.update().expect("probe reached Pause before another frame");
+
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (4, 2));
+        assert!(!app.network_control_running);
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(pause, 4)]
+        );
+        app.update().expect("remain stopped awaiting Pause commit");
+        app.sec1_timer().expect("recheck stopped Pause barrier");
+        assert!(commands.take_framed_status_acknowledgements().is_empty());
+
+        events
+            .send(NetworkEvent::StatusCommitted(pause))
+            .expect("commit Pause");
+        app.process_network_events().expect("apply Pause commit");
+        assert!(!app.network_control_running);
+
+        let go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            target_tick: 4,
+            ..pause
+        };
+        events
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("request runtime Go");
+        app.process_network_events().expect("arm runtime Go");
+        assert!(app.network_control_running, "Go drives out of committed Pause");
+
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("execute control tick two");
+        app.update().expect("advance non-control frame five");
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("execute control tick three");
+        app.update().expect("reach Go cadence boundary");
+        app.update().expect("probe reached Go before another frame");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (8, 4));
+        assert!(!app.network_control_running, "Go also waits halted for commit");
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(go, 8)]
+        );
+
+        events
+            .send(NetworkEvent::StatusCommitted(go))
+            .expect("commit Go");
+        app.process_network_events().expect("apply Go commit");
+        assert!(app.network_control_running);
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("resume after committed Go");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (9, 5));
+    }
+
+    #[test]
+    fn runtime_client_drains_ready_target_before_retargeted_ack() {
+        // Native's reach predicate also requires !CtrlReady(ControlTick). If
+        // target control is complete already, execute it and acknowledge the
+        // later actual tick at the next cadence boundary.
+        let mut app = new_running_sandbox_app();
+        let (events, mut commands) = install_running_network_stub(&mut app, 7, 0, 2);
+        let pause = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 2,
+        };
+        events
+            .send(NetworkEvent::StatusRequested(pause))
+            .expect("request runtime Pause");
+        for tick in 0..=2 {
+            events
+                .send(NetworkEvent::ReadyTick {
+                    tick,
+                    controls: Vec::new(),
+                })
+                .expect("queue complete control through requested target");
+        }
+        for _ in 0..7 {
+            app.update().expect("drive queued target and cadence frames");
+        }
+
+        let reached = lc_network::NetworkStatus {
+            target_tick: 3,
+            ..pause
+        };
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (6, 3));
+        assert!(!app.network_control_running);
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(reached, 6)]
+        );
+    }
+
+    #[test]
+    fn runtime_host_commit_executes_sync_at_the_actual_overshoot_tick() {
+        let mut app = new_running_sandbox_app();
+        let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+        let pause = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 2,
+        };
+        events
+            .send(NetworkEvent::StatusRequested(pause))
+            .expect("request runtime Pause");
+        for tick in 0..=2 {
+            events
+                .send(NetworkEvent::ReadyTick {
+                    tick,
+                    controls: Vec::new(),
+                })
+                .expect("queue complete control through requested target");
+        }
+        let mut status_commands = Vec::new();
+        for _ in 0..7 {
+            app.update().expect("drive through the requested target");
+            status_commands.extend(commands.take_runtime_status_commands());
+        }
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (6, 3));
+        assert_eq!(
+            status_commands,
+            vec![network::TestRuntimeStatusCommand::Reached {
+                status: pause,
+                actual_control_tick: 3,
+            }]
+        );
+
+        events
+            .send(NetworkEvent::ScheduledSync {
+                tick: 3,
+                controls: vec![NetworkControl::Message(message_control(
+                    MESSAGE_TYPE_NORMAL,
+                    -1,
+                    -1,
+                    b"overshoot-sync",
+                    0,
+                ))],
+            })
+            .expect("queue sync control at the host's actual arrival tick");
+        app.process_network_events()
+            .expect("retain the released sync batch until commit");
+        assert!(app.network_sync.scheduled.contains_key(&3));
+        assert!(app
+            .board_log_history
+            .iter()
+            .all(|line| !line.contains("overshoot-sync")));
+        events
+            .send(NetworkEvent::StatusCommitted(pause))
+            .expect("commit the requested Pause");
+        app.process_network_events()
+            .expect("execute sync control before completing Pause");
+
+        assert!(app.network_sync.scheduled.is_empty());
+        assert!(app
+            .board_log_history
+            .iter()
+            .any(|line| line.contains("overshoot-sync")));
+        assert!(!app.network_control_running);
+    }
+
+    #[test]
+    fn runtime_host_pause_retarget_and_go_report_each_local_reach_once() {
+        let mut app = new_running_sandbox_app();
+        let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 2);
+
+        // Rust's already-incremented clock maps to native getNextControlTick:
+        // after tick zero, both identify tick one even off cadence
+        // (src/C4GameControl.cpp:325-365).
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("execute host control tick zero");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (1, 1));
+        app.pause_host_for_league_vote();
+        let status_commands = commands.take_runtime_status_commands();
+        let [network::TestRuntimeStatusCommand::Change(pause)] = status_commands.as_slice() else {
+            panic!("expected one Pause change, got {status_commands:?}");
+        };
+        let pause = *pause;
+        assert_eq!(pause.state, lc_network::NETWORK_STATE_PAUSE);
+        assert_eq!(pause.target_tick, 1);
+        assert!(app.network_control_running);
+
+        app.update().expect("advance to host Pause boundary");
+        app.update().expect("probe reached host Pause");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (2, 1));
+        assert!(!app.network_control_running);
+        assert_eq!(
+            commands.take_runtime_status_commands(),
+            vec![network::TestRuntimeStatusCommand::Reached {
+                status: pause,
+                actual_control_tick: 1,
+            }]
+        );
+        app.sec1_timer().expect("recheck reached host Pause");
+        assert!(
+            commands.take_runtime_status_commands().is_empty(),
+            "local reach is sent once"
+        );
+
+        let retargeted = lc_network::NetworkStatus {
+            target_tick: 3,
+            ..pause
+        };
+        events
+            .send(NetworkEvent::StatusRequested(retargeted))
+            .expect("surface authoritative higher target");
+        app.process_network_events().expect("rearm retargeted Pause");
+        assert!(app.network_control_running);
+        assert!(commands.take_runtime_status_commands().is_empty());
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("execute host control tick one");
+        app.update().expect("advance host non-control frame three");
+        queue_empty_ready_tick(&app, &events);
+        app.update().expect("execute host control tick two");
+        app.update().expect("advance to retargeted Pause boundary");
+        app.update().expect("probe reached retargeted Pause");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (6, 3));
+        assert!(!app.network_control_running);
+        assert_eq!(
+            commands.take_runtime_status_commands(),
+            vec![network::TestRuntimeStatusCommand::Reached {
+                status: retargeted,
+                actual_control_tick: 3,
+            }]
+        );
+
+        events
+            .send(NetworkEvent::StatusCommitted(retargeted))
+            .expect("commit retargeted Pause");
+        app.process_network_events().expect("apply retargeted Pause");
+        assert!(!app.network_control_running);
+
+        // A packet received during committed Pause is still raw, not
+        // CtrlReady. Start must reach Go before re-enabling control and leave
+        // this target batch for execution after the commit.
+        queue_empty_ready_tick(&app, &events);
+        app.process_network_events()
+            .expect("retain current control while Pause is committed");
+        app.finish_host_vote_pause(lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_PAUSE,
+            approve: true,
+            data: 0,
+            by_client: 0,
+        });
+        let status_commands = commands.take_runtime_status_commands();
+        let [
+            network::TestRuntimeStatusCommand::Change(go),
+            network::TestRuntimeStatusCommand::Reached {
+                status: reached_go,
+                actual_control_tick,
+            },
+        ] = status_commands.as_slice()
+        else {
+            panic!("expected Go change then immediate local reach, got {status_commands:?}");
+        };
+        let go = *go;
+        assert_eq!(*reached_go, go);
+        assert_eq!(*actual_control_tick, 3);
+        assert_eq!(go.state, lc_network::NETWORK_STATE_GO);
+        assert_eq!(go.target_tick, 3);
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (6, 3));
+        assert!(!app.network_control_running);
+        assert!(app.network_ticks.ready.contains_key(&3));
+        events
+            .send(NetworkEvent::StatusCommitted(go))
+            .expect("commit follow-up Go");
+        app.process_network_events().expect("resume committed Go");
+        assert!(app.network_control_running);
+        app.update().expect("execute retained control after Go commit");
+        assert_eq!((app.engine.frame(), app.expected_network_control_tick()), (7, 4));
+        assert!(!app.network_ticks.ready.contains_key(&3));
+    }
+
+    #[test]
+    fn runtime_status_reach_uses_preflight_ready_not_raw_packet_presence() {
+        // CheckCompleteCtrl advances CtrlReady only after Control.PreExecute.
+        // A raw JoinPlayer blocked on its resource therefore does not prevent
+        // CheckStatusReached from stopping at the barrier.
+        let mut app = new_running_sandbox_app();
+        let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 1);
+        app.control_clients.register(0, true, false);
+        let resource_id = 91;
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: resource_id,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"Pending.c4p".to_vec())
+                .expect("valid resource filename"),
+            ..Default::default()
+        };
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick: 0,
+                controls: vec![NetworkControl::JoinPlayer(
+                    lc_engine::JoinPlayerControlData {
+                        at_client: 0,
+                        info_id: 9,
+                        source: lc_engine::JoinPlayerSource::Resource(core),
+                        by_client: 0,
+                        ..Default::default()
+                    },
+                )],
+            })
+            .expect("queue raw resource-blocked target control");
+        let pause = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        events
+            .send(NetworkEvent::StatusRequested(pause))
+            .expect("request Pause at blocked control");
+
+        app.process_network_events()
+            .expect("preflight target while handling Pause");
+
+        assert!(!app.network_control_running);
+        assert!(app.network_ticks.ready.contains_key(&0));
+        assert_eq!(
+            app.admission_resources.status(resource_id),
+            Some(&AdmissionResourceState::Loading { removed: false })
+        );
+        assert_eq!(
+            commands.take_runtime_status_commands(),
+            vec![network::TestRuntimeStatusCommand::Reached {
+                status: pause,
+                actual_control_tick: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_host_rechecks_unreported_arrival_on_sec1_timer() {
+        // C4Network2::OnSec1Timer calls Execute/CheckStatusReached even when
+        // no simulation attempt is scheduled (src/C4Network2.cpp:674-690).
+        let mut app = new_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 0, 1);
+        let pause = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        app.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
+            status: pause,
+            local_reached: false,
+            actual_control_tick: None,
+        });
+
+        app.sec1_timer().expect("one-second status reach probe");
+
+        assert!(!app.network_control_running);
+        assert_eq!(
+            commands.take_runtime_status_commands(),
+            vec![network::TestRuntimeStatusCommand::Reached {
+                status: pause,
+                actual_control_tick: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_status_report_failure_remains_stopped_and_unreached() {
+        let mut app = new_running_sandbox_app();
+        let (events, commands) = install_running_network_stub(&mut app, 7, 0, 1);
+        drop(commands);
+        let pause = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        events
+            .send(NetworkEvent::StatusRequested(pause))
+            .expect("request immediately reachable Pause");
+
+        app.process_network_events()
+            .expect("failed acknowledgement is handled without resuming");
+
+        assert!(!app.network_control_running);
+        assert_eq!(
+            app.runtime_network_status_barrier,
+            Some(RuntimeNetworkStatusBarrier {
+                status: pause,
+                local_reached: false,
+                actual_control_tick: None,
+            })
+        );
     }
 
     fn message_control(

@@ -446,6 +446,16 @@ pub(crate) enum TestLobbyStartCommand {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestRuntimeStatusCommand {
+    Change(NetworkStatus),
+    Reached {
+        status: NetworkStatus,
+        actual_control_tick: i32,
+    },
+}
+
+#[cfg(test)]
 type RuntimeHostJoinResult = (
     Vec<&'static str>,
     Vec<ClientPlayerResourceRequest>,
@@ -872,11 +882,36 @@ impl TestNetworkCommands {
     pub(crate) fn take_status_reached(&mut self) -> usize {
         let mut count = 0;
         while let Ok(command) = self.command_rx.try_recv() {
-            if matches!(command, NetworkCommand::StatusReached) {
+            if matches!(
+                command,
+                NetworkCommand::StatusReachedCurrent | NetworkCommand::StatusReached { .. }
+            ) {
                 count += 1;
             }
         }
         count
+    }
+
+    pub(crate) fn take_runtime_status_commands(&mut self) -> Vec<TestRuntimeStatusCommand> {
+        let mut observed = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                NetworkCommand::ChangeStatus(status) => {
+                    observed.push(TestRuntimeStatusCommand::Change(status));
+                }
+                NetworkCommand::StatusReached {
+                    status,
+                    actual_control_tick,
+                } => {
+                    observed.push(TestRuntimeStatusCommand::Reached {
+                        status,
+                        actual_control_tick,
+                    });
+                }
+                _ => {}
+            }
+        }
+        observed
     }
 
     pub(crate) fn take_status_acknowledgements(&mut self) -> Vec<NetworkStatus> {
@@ -1081,7 +1116,11 @@ enum NetworkCommand {
         tick: Tick,
     },
     ChangeStatus(NetworkStatus),
-    StatusReached,
+    StatusReachedCurrent,
+    StatusReached {
+        status: NetworkStatus,
+        actual_control_tick: i32,
+    },
     AcknowledgeRequestedStatus {
         status: NetworkStatus,
         current_control_tick: i32,
@@ -1694,14 +1733,36 @@ impl NetworkManager {
             })
     }
 
-    pub fn status_reached(&self) -> std::result::Result<(), NetworkStatusCommandError> {
+    pub fn status_reached(
+        &self,
+        status: NetworkStatus,
+        actual_control_tick: i32,
+    ) -> std::result::Result<(), NetworkStatusCommandError> {
         if self.role != NetworkRole::Host {
             return Err(NetworkStatusCommandError::HostRoleRequired {
                 operation: "mark game status reached",
             });
         }
         self.command_tx
-            .blocking_send(NetworkCommand::StatusReached)
+            .blocking_send(NetworkCommand::StatusReached {
+                status,
+                actual_control_tick,
+            })
+            .map_err(|_| NetworkStatusCommandError::WorkerUnavailable {
+                operation: "game-status arrival",
+            })
+    }
+
+    pub fn status_reached_current(
+        &self,
+    ) -> std::result::Result<(), NetworkStatusCommandError> {
+        if self.role != NetworkRole::Host {
+            return Err(NetworkStatusCommandError::HostRoleRequired {
+                operation: "mark game status reached",
+            });
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::StatusReachedCurrent)
             .map_err(|_| NetworkStatusCommandError::WorkerUnavailable {
                 operation: "game-status arrival",
             })
@@ -1721,22 +1782,41 @@ impl NetworkManager {
             .client_status
             .requested
             .ok_or(NetworkStatusCommandError::NoRequestedStatus)?;
+        self.acknowledge_expected_status_at_frame(
+            status,
+            current_control_tick,
+            current_frame,
+        )
+    }
+
+    pub fn acknowledge_expected_status_at_frame(
+        &mut self,
+        expected: NetworkStatus,
+        current_control_tick: i32,
+        current_frame: i32,
+    ) -> std::result::Result<(), NetworkStatusCommandError> {
+        if self.role != NetworkRole::Client {
+            return Err(NetworkStatusCommandError::ClientRoleRequired {
+                operation: "acknowledge a host game status",
+            });
+        }
         let Some(acknowledgement) = self
             .client_status
-            .acknowledge_requested_at(status, current_control_tick)
+            .acknowledge_requested_at(expected, current_control_tick)
         else {
             return Err(NetworkStatusCommandError::NoRequestedStatus);
         };
         if self
             .command_tx
             .blocking_send(NetworkCommand::AcknowledgeRequestedStatus {
-                status,
+                status: expected,
                 current_control_tick,
                 current_frame,
             })
             .is_err()
         {
-            self.client_status.restore_request(status, acknowledgement);
+            self.client_status
+                .restore_request(expected, acknowledgement);
             return Err(NetworkStatusCommandError::WorkerUnavailable {
                 operation: "game-status acknowledgements",
             });
@@ -2208,8 +2288,16 @@ async fn run_host_worker(
                             .await
                             .map_err(|err| anyhow!("host status change failed: {err}"))?;
                     }
-                    NetworkCommand::StatusReached => {
-                        host.status_reached()
+                    NetworkCommand::StatusReachedCurrent => {
+                        host.status_reached_current()
+                            .await
+                            .map_err(|err| anyhow!("host status arrival failed: {err}"))?;
+                    }
+                    NetworkCommand::StatusReached {
+                        status,
+                        actual_control_tick,
+                    } => {
+                        host.status_reached(status, actual_control_tick)
                             .await
                             .map_err(|err| anyhow!("host status arrival failed: {err}"))?;
                     }
@@ -2627,7 +2715,7 @@ async fn run_client_worker(
                             "client attempted to change authoritative game status".to_string(),
                         ));
                     }
-                    NetworkCommand::StatusReached => {
+                    NetworkCommand::StatusReachedCurrent | NetworkCommand::StatusReached { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to mark authoritative game status reached".to_string(),
                         ));
@@ -3972,7 +4060,7 @@ mod tests {
         assert_eq!(commands.take_status_changes(), vec![status]);
 
         manager
-            .status_reached()
+            .status_reached(status, status.target_tick)
             .expect("host queues local status arrival");
         assert_eq!(commands.take_status_reached(), 1);
     }
@@ -4079,6 +4167,53 @@ mod tests {
             vec![NetworkEvent::StatusCommitted(acknowledgement)]
         );
         assert_eq!(manager.client_status.awaiting_commit, None);
+    }
+
+    #[test]
+    fn client_manager_rejects_a_drained_stale_status_before_acking_the_latest() {
+        let (mut manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let first = NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        let latest = NetworkStatus {
+            target_tick: 44,
+            ..first
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(first))
+            .expect("queue first host status");
+        event_tx
+            .send(NetworkEvent::StatusRequested(latest))
+            .expect("queue retargeted host status");
+        assert_eq!(
+            manager.poll_events(),
+            vec![
+                NetworkEvent::StatusRequested(first),
+                NetworkEvent::StatusRequested(latest),
+            ]
+        );
+
+        assert_eq!(
+            manager
+                .acknowledge_expected_status_at_frame(first, 44, 123)
+                .expect_err("the drained first event must not consume the newer request"),
+            NetworkStatusCommandError::NoRequestedStatus
+        );
+        assert_eq!(manager.client_status.requested, Some(latest));
+        assert_eq!(manager.client_status.awaiting_commit, None);
+        assert!(commands.take_status_acknowledgements().is_empty());
+
+        manager
+            .acknowledge_expected_status_at_frame(latest, 44, 123)
+            .expect("the latest request remains acknowledgeable");
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(latest, 123)]
+        );
+        assert_eq!(manager.client_status.awaiting_commit, Some(latest));
     }
 
     #[test]
@@ -4496,7 +4631,7 @@ mod tests {
         );
         assert_eq!(
             client
-                .status_reached()
+                .status_reached(status, status.target_tick)
                 .expect_err("client cannot mark the host barrier reached"),
             NetworkStatusCommandError::HostRoleRequired {
                 operation: "mark game status reached",
@@ -4775,6 +4910,31 @@ mod tests {
                 tick: 23,
                 controls: vec![NetworkControl::VoteEnd(result)],
             })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_status_change_is_forwarded_to_the_app() {
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 23,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+
+        handle_host_event(
+            HostEvent::StatusChanged(status),
+            0,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward requested status");
+
+        assert_eq!(
+            event_rx.recv().expect("status event"),
+            NetworkEvent::HostStatusChanged(status)
         );
     }
 

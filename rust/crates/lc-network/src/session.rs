@@ -292,6 +292,10 @@ fn synthetic_join_snapshot(
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    /// The authoritative host barrier was opened or retargeted. Runtime
+    /// control owns the actual drive-to-target/stop operation, so surface
+    /// every accepted `ChangeGameStatus` rather than inferring it from raw
+    /// client acknowledgements.
     StatusChanged(NetworkStatus),
     StatusCommitted(NetworkStatus),
     StatusAck {
@@ -368,7 +372,11 @@ pub enum HostEvent {
 pub enum HostCommand {
     ChangeStatus(NetworkStatus),
     BroadcastStatusAck(NetworkStatus),
-    StatusReached,
+    StatusReachedCurrent,
+    StatusReached {
+        status: NetworkStatus,
+        actual_control_tick: i32,
+    },
     SubmitLocal(ControlPacket),
     SubmitLobbyCountdown(LobbyCountdownPacket),
     SubmitReadyCheck(ReadyCheckPacket),
@@ -464,9 +472,30 @@ impl HostHandle {
             .map_err(|_| HostError::HostLoopGone)
     }
 
-    pub async fn status_reached(&self) -> Result<(), HostError> {
+    /// Report local arrival only for the barrier the caller actually drove.
+    /// A higher remote acknowledgement may retarget the session before this
+    /// command is processed, in which case the stale arrival must be ignored.
+    pub async fn status_reached(
+        &self,
+        status: NetworkStatus,
+        actual_control_tick: i32,
+    ) -> Result<(), HostError> {
         self.command_tx
-            .send(HostCommand::StatusReached)
+            .send(HostCommand::StatusReached {
+                status,
+                actual_control_tick,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Preserve the scenario-start path's existing ownership: FinalInit
+    /// reaches whichever authoritative barrier is current when the command is
+    /// processed. Runtime transitions use `status_reached` so stale reports
+    /// cannot satisfy a later generation.
+    pub async fn status_reached_current(&self) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::StatusReachedCurrent)
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -3090,8 +3119,17 @@ async fn run_host(
                     HostCommand::BroadcastStatusAck(status) => {
                         broadcast_status(status, true, &mut state).await;
                     }
-                    HostCommand::StatusReached => {
+                    HostCommand::StatusReachedCurrent => {
                         let effects = state.status_barrier.local_reached();
+                        apply_barrier_effects(effects, &mut state).await;
+                    }
+                    HostCommand::StatusReached {
+                        status,
+                        actual_control_tick,
+                    } => {
+                        let effects = state
+                            .status_barrier
+                            .local_reached_for(status, actual_control_tick);
                         apply_barrier_effects(effects, &mut state).await;
                     }
                     HostCommand::SubmitLocal(packet) => {
@@ -4361,7 +4399,6 @@ async fn handle_client_disconnected(
         let retry_effects = retry_unreached_status_after_disconnect(
             &mut state.status_barrier,
             state.coordinator.current_tick(),
-            state.game_started,
         );
         apply_barrier_effects(retry_effects, state).await;
     }
@@ -4391,7 +4428,6 @@ async fn handle_admission_failed(connection_id: u32, error: String, state: &mut 
         let retry_effects = retry_unreached_status_after_disconnect(
             &mut state.status_barrier,
             state.coordinator.current_tick(),
-            state.game_started,
         );
         apply_barrier_effects(retry_effects, state).await;
     }
@@ -4407,7 +4443,6 @@ async fn handle_admission_failed(connection_id: u32, error: String, state: &mut 
 fn retry_unreached_status_after_disconnect(
     barrier: &mut StatusBarrier,
     current_tick: Tick,
-    game_started: bool,
 ) -> Vec<BarrierEffect> {
     if !matches!(
         barrier.phase,
@@ -4423,14 +4458,10 @@ fn retry_unreached_status_after_disconnect(
         target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
         ..barrier.status
     };
-    let mut effects = barrier.change_status(status);
-    // ChangeGameStatus immediately calls CheckStatusReached. The disconnect
-    // retry deliberately targets ControlTick. A running game has reached that
-    // tick already; initial Go must still wait for FinalInit.
-    if game_started {
-        effects.extend(barrier.local_reached());
-    }
-    effects
+    // ChangeGameStatus immediately asks the runtime to CheckStatusReached.
+    // Keep local arrival app-owned even when this target equals the session
+    // coordinator's tick; otherwise a one-shot commit can outrun GameApp.
+    barrier.change_status(status)
 }
 
 async fn queue_disconnected_client_remove(
@@ -5146,12 +5177,12 @@ fn contiguous_complete_controls(
     Ok(contiguous)
 }
 
-async fn apply_host_control_mode(mode: i32, state: &mut HostState) {
+async fn apply_host_control_mode(mode: i32, from_tick: i32, state: &mut HostState) {
     if state.control_mode == mode {
         return;
     }
     state.control_mode = mode;
-    let Ok(from_tick) = Tick::try_from(state.status_barrier.status.target_tick) else {
+    let Ok(from_tick) = Tick::try_from(from_tick) else {
         return;
     };
     let packets = match mode {
@@ -5189,13 +5220,15 @@ async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostStat
             | BarrierEffect::StopControl
             | BarrierEffect::SweepUnjoinedPlayers
             | BarrierEffect::StartControl => {}
-            BarrierEffect::SetControlMode(mode) => apply_host_control_mode(mode, state).await,
+            BarrierEffect::SetControlMode { mode, from_tick } => {
+                apply_host_control_mode(mode, from_tick, state).await
+            }
             BarrierEffect::BroadcastStatus(status) => {
                 broadcast_status(status, false, state).await;
                 let _ = state.event_tx.send(HostEvent::StatusChanged(status)).await;
             }
-            BarrierEffect::ExecutePendingSyncControls => {
-                if let Ok(control_tick) = Tick::try_from(state.status_barrier.status.target_tick) {
+            BarrierEffect::ExecutePendingSyncControls(actual_control_tick) => {
+                if let Ok(control_tick) = Tick::try_from(actual_control_tick) {
                     broadcast_exec_sync(control_tick, state).await;
                 }
             }
@@ -12194,7 +12227,9 @@ mod tests {
         }
         alice.submit_status_ack(running).await.unwrap();
         beta.submit_status_ack(running).await.unwrap();
-        host.status_reached().await.unwrap();
+        host.status_reached(running, running.target_tick)
+            .await
+            .unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
@@ -14107,6 +14142,19 @@ mod tests {
 
         host.change_status(status).await.expect("broadcast status");
         loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host status request wait")
+            {
+                Some(HostEvent::StatusChanged(requested)) => {
+                    assert_eq!(requested, status);
+                    break;
+                }
+                Some(HostEvent::ClientJoined { .. }) | Some(HostEvent::Direct { .. }) => continue,
+                other => panic!("expected host status request event, got {other:?}"),
+            }
+        }
+        loop {
             match timeout(EVENT_WAIT, client_events.recv())
                 .await
                 .expect("client status wait")
@@ -14146,7 +14194,7 @@ mod tests {
         assert!(timeout(Duration::from_millis(50), client_events.recv())
             .await
             .is_err());
-        host.status_reached()
+        host.status_reached(status, status.target_tick)
             .await
             .expect("host reached status target");
         match timeout(EVENT_WAIT, client_events.recv())
@@ -14223,7 +14271,7 @@ mod tests {
             .send_message(ControlMessage::StatusAck(decentral))
             .await
             .unwrap();
-        host.status_reached().await.unwrap();
+        host.status_reached(decentral, decentral.target_tick).await.unwrap();
 
         let mut saw_final_ack = false;
         loop {
@@ -14318,7 +14366,7 @@ mod tests {
             .send_message(ControlMessage::StatusAck(central))
             .await
             .unwrap();
-        host.status_reached().await.unwrap();
+        host.status_reached(central, central.target_tick).await.unwrap();
 
         let mut saw_final_ack = false;
         loop {
@@ -14398,6 +14446,16 @@ mod tests {
             .await
             .expect("broadcast requested Pause");
         loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host requested Pause event wait")
+            {
+                Some(HostEvent::StatusChanged(status)) if status == requested => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before requested Pause event"),
+            }
+        }
+        loop {
             match timeout(EVENT_WAIT, client_events.recv())
                 .await
                 .expect("client requested Pause wait")
@@ -14429,6 +14487,16 @@ mod tests {
                 None => panic!("host event stream ended before retargeted status ack"),
             }
         }
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host retargeted Pause event wait")
+            {
+                Some(HostEvent::StatusChanged(status)) if status == retargeted => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before retargeted Pause event"),
+            }
+        }
 
         match timeout(EVENT_WAIT, client_events.recv())
             .await
@@ -14452,7 +14520,7 @@ mod tests {
             "retargeted barrier committed before the host reached tick 44"
         );
 
-        host.status_reached()
+        host.status_reached(retargeted, retargeted.target_tick)
             .await
             .expect("host reached retargeted Pause");
         loop {
@@ -14529,7 +14597,7 @@ mod tests {
             .submit_status_ack(running)
             .await
             .expect("acknowledge initial Go");
-        host.status_reached()
+        host.status_reached(running, running.target_tick)
             .await
             .expect("host reached initial Go");
         let mut host_running = false;
@@ -14638,7 +14706,7 @@ mod tests {
             .submit_status_ack(sync_status)
             .await
             .expect("acknowledge synchronization status");
-        host.status_reached()
+        host.status_reached(sync_status, sync_status.target_tick)
             .await
             .expect("host reached synchronization target");
         let mut host_controls = None;
@@ -15125,7 +15193,7 @@ mod tests {
             }
         }
         client.submit_status_ack(running).await.unwrap();
-        host.status_reached().await.unwrap();
+        host.status_reached(running, running.target_tick).await.unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
@@ -15146,6 +15214,7 @@ mod tests {
                 None => panic!("host event stream ended before client departure"),
             }
         }
+        host.status_reached(running, running.target_tick).await.unwrap();
 
         let mut synchronized_remove = None;
         let mut committed = false;
@@ -15194,7 +15263,7 @@ mod tests {
     }
 
     #[test]
-    fn unreached_pause_disconnect_retry_targets_current_tick_and_reaches_locally() {
+    fn unreached_pause_disconnect_retry_waits_for_runtime_local_reach() {
         let pause = NetworkStatus {
             state: NETWORK_STATE_PAUSE,
             control_mode: 1,
@@ -15213,19 +15282,18 @@ mod tests {
             ..pause
         };
         assert_eq!(
-            retry_unreached_status_after_disconnect(&mut barrier, 4, true),
+            retry_unreached_status_after_disconnect(&mut barrier, 4),
             vec![
                 BarrierEffect::InvalidateReference,
                 BarrierEffect::BroadcastStatus(retargeted),
                 BarrierEffect::DriveControlTo(4),
-                BarrierEffect::StopControl,
             ]
         );
         assert_eq!(barrier.status, retargeted);
         assert_eq!(
             barrier.phase,
             BarrierPhase::Waiting {
-                local_reached: true
+                local_reached: false
             }
         );
         assert_eq!(
@@ -15233,9 +15301,13 @@ mod tests {
             Some(&RemoteBarrierState::NotReady)
         );
         assert_eq!(
+            barrier.local_reached_for(retargeted, 4),
+            vec![BarrierEffect::StopControl]
+        );
+        assert_eq!(
             barrier.remote_ack(7, retargeted),
             vec![
-                BarrierEffect::ExecutePendingSyncControls,
+                BarrierEffect::ExecutePendingSyncControls(4),
                 BarrierEffect::BroadcastStatusAck(retargeted),
             ]
         );
@@ -15261,7 +15333,7 @@ mod tests {
             ..initial_go
         };
         assert_eq!(
-            retry_unreached_status_after_disconnect(&mut barrier, 4, false),
+            retry_unreached_status_after_disconnect(&mut barrier, 4),
             vec![
                 BarrierEffect::InvalidateReference,
                 BarrierEffect::BroadcastStatus(retargeted),
@@ -15274,6 +15346,21 @@ mod tests {
             BarrierPhase::Waiting {
                 local_reached: false
             }
+        );
+        assert_eq!(
+            barrier.local_reached(),
+            vec![
+                BarrierEffect::StopControl,
+                BarrierEffect::ExecutePendingSyncControls(4),
+                BarrierEffect::BroadcastStatusAck(retargeted),
+                BarrierEffect::SetControlMode {
+                    mode: 1,
+                    from_tick: 4,
+                },
+                BarrierEffect::SweepUnjoinedPlayers,
+                BarrierEffect::StartControl,
+            ],
+            "FinalInit reaches the authoritative retarget, not its stale prepared copy"
         );
     }
 
@@ -15326,7 +15413,7 @@ mod tests {
         }
         alpha.submit_status_ack(running).await.unwrap();
         beta.submit_status_ack(running).await.unwrap();
-        host.status_reached().await.unwrap();
+        host.status_reached(running, running.target_tick).await.unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
@@ -15410,6 +15497,7 @@ mod tests {
         }
 
         beta.submit_status_ack(retargeted).await.unwrap();
+        host.status_reached(retargeted, retargeted.target_tick).await.unwrap();
 
         let mut released = None;
         let mut synchronized_remove = None;
@@ -15627,7 +15715,7 @@ mod tests {
             }
         }
         witness.submit_status_ack(running).await.unwrap();
-        host.status_reached().await.unwrap();
+        host.status_reached(running, running.target_tick).await.unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
@@ -15743,6 +15831,7 @@ mod tests {
             }
         }
         witness.submit_status_ack(retargeted).await.unwrap();
+        host.status_reached(retargeted, retargeted.target_tick).await.unwrap();
 
         let mut synchronized_remove = None;
         let mut committed = false;

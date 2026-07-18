@@ -32,13 +32,16 @@ pub enum BarrierEffect {
     BroadcastStatus(NetworkStatus),
     DriveControlTo(i32),
     StopControl,
-    ExecutePendingSyncControls,
+    ExecutePendingSyncControls(i32),
     BroadcastStatusAck(NetworkStatus),
     SendStatusAck {
         client_id: ClientId,
         status: NetworkStatus,
     },
-    SetControlMode(i32),
+    SetControlMode {
+        mode: i32,
+        from_tick: i32,
+    },
     SweepUnjoinedPlayers,
     StartControl,
 }
@@ -49,6 +52,7 @@ pub struct StatusBarrier {
     pub status: NetworkStatus,
     pub phase: BarrierPhase,
     pub remotes: BTreeMap<ClientId, RemoteBarrierState>,
+    local_reached_tick: Option<i32>,
 }
 
 impl StatusBarrier {
@@ -57,6 +61,7 @@ impl StatusBarrier {
             status,
             phase: BarrierPhase::Stable,
             remotes: BTreeMap::new(),
+            local_reached_tick: None,
         }
     }
 
@@ -82,6 +87,7 @@ impl StatusBarrier {
         self.phase = BarrierPhase::Waiting {
             local_reached: false,
         };
+        self.local_reached_tick = None;
         let mut effects = vec![
             BarrierEffect::InvalidateReference,
             BarrierEffect::BroadcastStatus(status),
@@ -93,6 +99,10 @@ impl StatusBarrier {
     }
 
     pub fn local_reached(&mut self) -> Vec<BarrierEffect> {
+        self.local_reached_at(self.status.target_tick)
+    }
+
+    fn local_reached_at(&mut self, actual_control_tick: i32) -> Vec<BarrierEffect> {
         let BarrierPhase::Waiting { local_reached } = &mut self.phase else {
             return Vec::new();
         };
@@ -100,9 +110,23 @@ impl StatusBarrier {
             return self.try_commit();
         }
         *local_reached = true;
+        self.local_reached_tick = Some(actual_control_tick);
         let mut effects = vec![BarrierEffect::StopControl];
         effects.extend(self.try_commit());
         effects
+    }
+
+    /// Applies a runtime-owned local arrival only if the host barrier has not
+    /// been retargeted since that runtime began driving toward it.
+    pub fn local_reached_for(
+        &mut self,
+        expected: NetworkStatus,
+        actual_control_tick: i32,
+    ) -> Vec<BarrierEffect> {
+        if expected.state != self.status.state || expected.target_tick != self.status.target_tick {
+            return Vec::new();
+        }
+        self.local_reached_at(actual_control_tick)
     }
 
     pub fn remote_ack(
@@ -208,13 +232,19 @@ impl StatusBarrier {
         }
 
         self.phase = BarrierPhase::Stable;
+        let sync_control_tick = self
+            .local_reached_tick
+            .unwrap_or(self.status.target_tick);
         let mut effects = vec![
-            BarrierEffect::ExecutePendingSyncControls,
+            BarrierEffect::ExecutePendingSyncControls(sync_control_tick),
             BarrierEffect::BroadcastStatusAck(self.status),
         ];
         if self.status.state == NETWORK_STATE_GO {
             effects.extend([
-                BarrierEffect::SetControlMode(self.status.control_mode),
+                BarrierEffect::SetControlMode {
+                    mode: self.status.control_mode,
+                    from_tick: sync_control_tick,
+                },
                 BarrierEffect::SweepUnjoinedPlayers,
                 BarrierEffect::StartControl,
             ]);
@@ -260,15 +290,49 @@ mod tests {
         assert_eq!(
             barrier.remote_ack(2, go),
             vec![
-                BarrierEffect::ExecutePendingSyncControls,
+                BarrierEffect::ExecutePendingSyncControls(10),
                 BarrierEffect::BroadcastStatusAck(go),
-                BarrierEffect::SetControlMode(1),
+                BarrierEffect::SetControlMode {
+                    mode: 1,
+                    from_tick: 10,
+                },
                 BarrierEffect::SweepUnjoinedPlayers,
                 BarrierEffect::StartControl,
             ]
         );
         assert!(barrier.is_running());
         assert_eq!(barrier.phase, BarrierPhase::Stable);
+    }
+
+    #[test]
+    fn go_mode_switch_replays_from_the_hosts_actual_reached_tick() {
+        let lobby = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        };
+        let go = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 10,
+        };
+        let mut barrier = StatusBarrier::stable(lobby);
+        barrier.change_status(go);
+
+        assert_eq!(
+            barrier.local_reached_for(go, 12),
+            vec![
+                BarrierEffect::StopControl,
+                BarrierEffect::ExecutePendingSyncControls(12),
+                BarrierEffect::BroadcastStatusAck(go),
+                BarrierEffect::SetControlMode {
+                    mode: 1,
+                    from_tick: 12,
+                },
+                BarrierEffect::SweepUnjoinedPlayers,
+                BarrierEffect::StartControl,
+            ]
+        );
     }
 
     #[test]
@@ -353,6 +417,42 @@ mod tests {
             BarrierPhase::Waiting {
                 local_reached: false
             }
+        );
+    }
+
+    #[test]
+    fn stale_local_reach_cannot_complete_a_retargeted_barrier() {
+        let mut barrier = StatusBarrier::stable(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 3,
+        });
+        let original = NetworkStatus {
+            state: NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 10,
+        };
+        barrier.change_status(original);
+        let retargeted = NetworkStatus {
+            target_tick: 12,
+            ..original
+        };
+        barrier.change_status(retargeted);
+
+        assert!(barrier.local_reached_for(original, 10).is_empty());
+        assert_eq!(
+            barrier.phase,
+            BarrierPhase::Waiting {
+                local_reached: false
+            }
+        );
+        assert_eq!(
+            barrier.local_reached_for(retargeted, 14),
+            vec![
+                BarrierEffect::StopControl,
+                BarrierEffect::ExecutePendingSyncControls(14),
+                BarrierEffect::BroadcastStatusAck(retargeted),
+            ]
         );
     }
 
