@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lc_engine::{ClientCoreControlData, LegacyCString};
@@ -10,9 +10,9 @@ use tokio::time::Instant;
 use crate::{
     AddressPacket, AdmissionDecision, ClientAdmission, ConnectionAction, ConnectionLiveness,
     ConnectionRequest, ConnectionStatus, ConnectionTimeout, ControlMessage, ControlPacket,
-    ControlTransport, JoinDataEnvelope, LegacyConnection, LivenessClock, LobbyCountdownPacket,
-    PingPacket, PingSchedule, ReadyCheckPacket, ResourcePacket, TransportError,
-    NETWORK_TIMER_INTERVAL_MS,
+    ControlTransport, JoinDataEnvelope, KnownPeerAdmission, LegacyConnection, LivenessClock,
+    LobbyCountdownPacket, PingPacket, PingSchedule, ReadyCheckPacket, ResourcePacket,
+    TransportError, NETWORK_TIMER_INTERVAL_MS,
 };
 
 /// The synchronized values established by the client-side C++ connection
@@ -393,13 +393,34 @@ pub(crate) async fn run_client_route_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    run_known_peer_connection_handshake(transport, local_request, expected_peer_core).await
+}
+
+/// Runs mutual admission for a transport whose logical peer is already in the
+/// synchronized client registry.
+///
+/// Both inbound and outbound mesh sockets use the same C++ `PID_Conn` /
+/// `PID_ConnRe` exchange. Supplying the registry-owned core up front permits a
+/// positive reply to arrive before the peer request is dispatched, while the
+/// request itself is still checked with [`KnownPeerAdmission`] before this
+/// function returns. No `PID_JoinData` packet is consumed or expected.
+pub(crate) async fn run_known_peer_connection_handshake<S>(
+    transport: &mut ControlTransport<S>,
+    local_request: ConnectionRequest,
+    canonical_peer_core: &ClientCoreControlData,
+) -> Result<ClientRouteHandshake, ConnectionHandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let local_connection_id = local_request.connection_id;
-    let mut connection = LegacyConnection::new(local_request);
+    let mut connection =
+        LegacyConnection::with_known_peer(local_request, canonical_peer_core.clone());
     let mut liveness = ConnectionLivenessState::new_system();
     send_initial_request(transport, &mut connection).await?;
 
-    let mut registered_host = None;
-    let peer_core = loop {
+    let mut authenticated_peer_request = false;
+    let mut associated_peer = None;
+    loop {
         let message = read_handshake_message(transport, &mut liveness).await?;
         match message {
             ControlMessage::Ping(packet) => {
@@ -409,8 +430,9 @@ where
                 record_admitted_pong(&connection, &mut liveness, packet);
             }
             ControlMessage::ConnectionRequest(request) => {
-                handle_peer_request(transport, &mut connection, &mut registered_host, request)
+                handle_known_peer_request(transport, &mut connection, canonical_peer_core, request)
                     .await?;
+                authenticated_peer_request = true;
                 if connection.status() == ConnectionStatus::HalfAccepted {
                     liveness.mark_half_accepted();
                 }
@@ -418,35 +440,117 @@ where
             ControlMessage::ConnectionReply(reply) => {
                 if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
                     liveness.mark_accepted();
-                    break peer_core;
+                    associated_peer = Some(peer_core);
                 }
             }
             _ => continue,
         }
-    };
 
-    if registered_host.as_ref() != Some(&peer_core) {
-        return Err(ConnectionHandshakeError::ReducerInvariant(
-            "accepted secondary-route peer was not provisionally registered",
-        ));
+        let Some(peer_core) = associated_peer.as_ref() else {
+            continue;
+        };
+        if !authenticated_peer_request {
+            continue;
+        }
+        if peer_core != canonical_peer_core {
+            return Err(ConnectionHandshakeError::ReducerInvariant(
+                "known-peer route associated a different canonical core",
+            ));
+        }
+        let remote_connection_id =
+            connection
+                .remote_connection_id()
+                .ok_or(ConnectionHandshakeError::ReducerInvariant(
+                    "accepted known-peer route has no peer connection ID",
+                ))?;
+        return Ok(ClientRouteHandshake {
+            local_connection_id,
+            remote_connection_id,
+            peer_core: peer_core.clone(),
+            liveness,
+        });
     }
-    if &peer_core != expected_peer_core {
-        return Err(ConnectionHandshakeError::ReducerInvariant(
-            "secondary route connected to a different host core",
-        ));
+}
+
+/// Runs mutual admission for an inbound mesh transport whose logical peer is
+/// not known until its `PID_Conn` is decoded.
+///
+/// The registry lookup is deliberately keyed only by the requested client ID;
+/// [`KnownPeerAdmission`] then performs the C++ build and canonical
+/// ID/name/nick checks. Unknown set IDs receive C++'s default negative
+/// `connection denied` reply. As on every C++ connection, admission completes
+/// only after both the peer request and its positive reply to our request have
+/// been processed.
+pub(crate) async fn run_registered_peer_connection_handshake<S>(
+    transport: &mut ControlTransport<S>,
+    local_request: ConnectionRequest,
+    canonical_peer_cores: &BTreeMap<i32, ClientCoreControlData>,
+) -> Result<ClientRouteHandshake, ConnectionHandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let local_connection_id = local_request.connection_id;
+    let mut connection = LegacyConnection::new(local_request);
+    let mut liveness = ConnectionLivenessState::new_system();
+    send_initial_request(transport, &mut connection).await?;
+
+    let mut authenticated_peer = None;
+    let mut associated_peer = None;
+    loop {
+        let message = read_handshake_message(transport, &mut liveness).await?;
+        match message {
+            ControlMessage::Ping(packet) => {
+                transport.send_message(ControlMessage::Pong(packet)).await?;
+            }
+            ControlMessage::Pong(packet) => {
+                record_admitted_pong(&connection, &mut liveness, packet);
+            }
+            ControlMessage::ConnectionRequest(request) => {
+                authenticated_peer = Some(
+                    handle_registered_peer_request(
+                        transport,
+                        &mut connection,
+                        canonical_peer_cores,
+                        request,
+                    )
+                    .await?,
+                );
+                if connection.status() == ConnectionStatus::HalfAccepted {
+                    liveness.mark_half_accepted();
+                }
+            }
+            ControlMessage::ConnectionReply(reply) => {
+                if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
+                    liveness.mark_accepted();
+                    associated_peer = Some(peer_core);
+                }
+            }
+            _ => continue,
+        }
+
+        let (Some(authenticated_peer), Some(associated_peer)) =
+            (authenticated_peer.as_ref(), associated_peer.as_ref())
+        else {
+            continue;
+        };
+        if associated_peer != authenticated_peer {
+            return Err(ConnectionHandshakeError::ReducerInvariant(
+                "registered-peer route associated a different canonical core",
+            ));
+        }
+        let remote_connection_id =
+            connection
+                .remote_connection_id()
+                .ok_or(ConnectionHandshakeError::ReducerInvariant(
+                    "accepted registered-peer route has no peer connection ID",
+                ))?;
+        return Ok(ClientRouteHandshake {
+            local_connection_id,
+            remote_connection_id,
+            peer_core: associated_peer.clone(),
+            liveness,
+        });
     }
-    let remote_connection_id =
-        connection
-            .remote_connection_id()
-            .ok_or(ConnectionHandshakeError::ReducerInvariant(
-                "accepted secondary route has no peer connection ID",
-            ))?;
-    Ok(ClientRouteHandshake {
-        local_connection_id,
-        remote_connection_id,
-        peer_core,
-        liveness,
-    })
 }
 
 pub(crate) async fn run_client_connection_handshake_with_liveness<S>(
@@ -536,6 +640,7 @@ where
             ControlMessage::ReadyCheck(packet) => pending_ready_checks.push(packet),
             ControlMessage::LobbyCountdown(packet) => pending_lobby_countdowns.push(packet),
             ControlMessage::Address(_)
+            | ControlMessage::TcpSimOpen(_)
             | ControlMessage::Status(_)
             | ControlMessage::StatusAck(_)
             | ControlMessage::LeagueRoundResults(_)
@@ -702,6 +807,7 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::StatusAck(_) => 0x11,
         ControlMessage::Address(_) => 0x12,
         ControlMessage::ActivationRequest { .. } => 0x13,
+        ControlMessage::TcpSimOpen(_) => 0x14,
         ControlMessage::JoinData(_) => 0x15,
         ControlMessage::PlayerInfoUpdate(_) => 0x16,
         ControlMessage::LeagueRoundResults(_) => 0x17,
@@ -932,6 +1038,100 @@ where
     Ok(())
 }
 
+async fn handle_known_peer_request<S>(
+    transport: &mut ControlTransport<S>,
+    connection: &mut LegacyConnection,
+    canonical_peer_core: &ClientCoreControlData,
+    request: ConnectionRequest,
+) -> Result<(), ConnectionHandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let decision = KnownPeerAdmission::admit(&request, canonical_peer_core, false);
+    handle_known_peer_decision(transport, connection, request, decision).await
+}
+
+async fn handle_registered_peer_request<S>(
+    transport: &mut ControlTransport<S>,
+    connection: &mut LegacyConnection,
+    canonical_peer_cores: &BTreeMap<i32, ClientCoreControlData>,
+    request: ConnectionRequest,
+) -> Result<ClientCoreControlData, ConnectionHandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let canonical_peer_core = canonical_peer_cores.get(&request.core.client_id).cloned();
+    let decision = match canonical_peer_core.as_ref() {
+        Some(canonical_peer_core) => {
+            KnownPeerAdmission::admit(&request, canonical_peer_core, false)
+        }
+        None => AdmissionDecision::Reject {
+            message: LegacyCString::from_bytes(b"connection denied".to_vec()).unwrap_or_default(),
+            wrong_password: false,
+        },
+    };
+    handle_known_peer_decision(transport, connection, request, decision).await?;
+    canonical_peer_core.ok_or(ConnectionHandshakeError::ReducerInvariant(
+        "unknown registered-peer request survived negative admission",
+    ))
+}
+
+async fn handle_known_peer_decision<S>(
+    transport: &mut ControlTransport<S>,
+    connection: &mut LegacyConnection,
+    request: ConnectionRequest,
+    decision: AdmissionDecision,
+) -> Result<(), ConnectionHandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let actions = connection.accept_peer_request(request, |_| decision);
+    for action in actions {
+        match action {
+            ConnectionAction::SendReply(reply) => {
+                let rejected = (!reply.ok).then(|| ConnectionHandshakeError::LocalRejection {
+                    message: reply.message.clone(),
+                    wrong_password: reply.wrong_password,
+                });
+                if let Err(error) = transport
+                    .send_message(ControlMessage::ConnectionReply(reply))
+                    .await
+                {
+                    let _ = connection.on_reply_sent(false);
+                    return Err(error.into());
+                }
+                let follow_up = connection.on_reply_sent(true);
+                if let Some(rejection) = rejected {
+                    return Err(rejection);
+                }
+                if !follow_up.is_empty() {
+                    return Err(ConnectionHandshakeError::ReducerInvariant(
+                        "positive known-peer connection-reply send emitted follow-up actions",
+                    ));
+                }
+            }
+            ConnectionAction::Close {
+                message,
+                wrong_password,
+            } => {
+                return Err(ConnectionHandshakeError::LocalRejection {
+                    message,
+                    wrong_password,
+                });
+            }
+            ConnectionAction::SendRequest(_)
+            | ConnectionAction::EmitDirectClientJoin(_)
+            | ConnectionAction::RegisterHost(_)
+            | ConnectionAction::AssociatePeer(_) => {
+                return Err(ConnectionHandshakeError::ReducerInvariant(
+                    "known-peer admission emitted an out-of-phase action",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn handle_peer_reply(
     connection: &mut LegacyConnection,
     reply: crate::ConnectionReply,
@@ -984,6 +1184,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::JoinData(_) => "PID_JoinData",
         ControlMessage::LeagueRoundResults(_) => "PID_LeagueRoundResults",
         ControlMessage::Address(_) => "PID_Addr",
+        ControlMessage::TcpSimOpen(_) => "PID_TCPSimOpen",
         ControlMessage::Resource(packet) => match packet {
             ResourcePacket::Discover(_) => "PID_NetResDis",
             ResourcePacket::Status(_) => "PID_NetResStat",
@@ -1006,7 +1207,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::BTreeMap, time::Duration};
 
     use lc_engine::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
     use tokio::io::{duplex, AsyncWriteExt};
@@ -1102,6 +1303,188 @@ mod tests {
         assert_eq!(host.remote_connection_id, 11);
         assert_eq!(client.local_connection_id, 11);
         assert_eq!(client.remote_connection_id, 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn known_peer_mesh_handshake_accepts_status_only_core_differences_without_join_data() {
+        // CheckConn compares the synchronized ID/name/nick identity and keeps
+        // the registry-owned core. Runtime status flags in the Conn payload do
+        // not prevent two already joined clients from accepting a direct route
+        // (src/C4Network2.cpp:1282-1363,1448-1499).
+        let alice_core = request(3, b"Alice", 0).core;
+        let bob_core = request(4, b"Bob", 0).core;
+        let mut alice_request = request(3, b"Alice", 7);
+        alice_request.core.activated = true;
+        let mut bob_request = request(4, b"Bob", 11);
+        bob_request.core.observer = true;
+
+        let (alice_stream, bob_stream) = duplex(4096);
+        let expected_bob = bob_core.clone();
+        let alice_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(alice_stream);
+            run_known_peer_connection_handshake(&mut transport, alice_request, &expected_bob).await
+        });
+        let expected_alice = alice_core.clone();
+        let bob_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(bob_stream);
+            run_known_peer_connection_handshake(&mut transport, bob_request, &expected_alice).await
+        });
+
+        let (alice, bob) = timeout(Duration::from_secs(1), async {
+            (
+                alice_task.await.unwrap().unwrap(),
+                bob_task.await.unwrap().unwrap(),
+            )
+        })
+        .await
+        .expect("known peers should finish at mutual Conn/ConnRe admission");
+        assert_eq!(alice.local_connection_id, 7);
+        assert_eq!(alice.remote_connection_id, 11);
+        assert_eq!(alice.peer_core, bob_core);
+        assert_eq!(alice.liveness.connection().phase(), LivenessPhase::Accepted);
+        assert_eq!(bob.local_connection_id, 11);
+        assert_eq!(bob.remote_connection_id, 7);
+        assert_eq!(bob.peer_core, alice_core);
+        assert_eq!(bob.liveness.connection().phase(), LivenessPhase::Accepted);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn known_peer_mesh_handshake_rejects_changed_identity_and_wrong_build() {
+        async fn assert_rejected(
+            incoming: ConnectionRequest,
+            expected_message: &[u8],
+        ) -> ConnectionHandshakeError {
+            let canonical_peer = request(4, b"Bob", 0).core;
+            let (local_stream, peer_stream) = duplex(2048);
+            let task = tokio::spawn(async move {
+                let mut transport = ControlTransport::new(local_stream);
+                run_known_peer_connection_handshake(
+                    &mut transport,
+                    request(3, b"Alice", 7),
+                    &canonical_peer,
+                )
+                .await
+            });
+            let mut peer = ControlTransport::new(peer_stream);
+            assert!(matches!(
+                peer.read_message().await.unwrap(),
+                ControlMessage::ConnectionRequest(_)
+            ));
+            peer.send_message(ControlMessage::ConnectionRequest(incoming))
+                .await
+                .unwrap();
+            assert!(matches!(
+                peer.read_message().await.unwrap(),
+                ControlMessage::ConnectionReply(ConnectionReply {
+                    ok: false,
+                    ref message,
+                    wrong_password: false,
+                }) if message.as_bytes() == expected_message
+            ));
+            task.await.unwrap().unwrap_err()
+        }
+
+        let mut changed_identity = request(4, b"Bob", 11);
+        changed_identity.core.nick = wire_string(b"Impostor");
+        assert!(matches!(
+            assert_rejected(changed_identity, b"wrong client core").await,
+            ConnectionHandshakeError::LocalRejection {
+                wrong_password: false,
+                ..
+            }
+        ));
+
+        let mut wrong_build = request(4, b"Bob", 12);
+        wrong_build.build = 361;
+        assert!(matches!(
+            assert_rejected(wrong_build, b"wrong engine (361, I have 362)").await,
+            ConnectionHandshakeError::LocalRejection {
+                wrong_password: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registered_peer_mesh_handshake_selects_canonical_core_from_inbound_conn() {
+        let alice_core = request(3, b"Alice", 0).core;
+        let bob_core = request(4, b"Bob", 0).core;
+        let mut inbound_registry = BTreeMap::new();
+        inbound_registry.insert(bob_core.client_id, bob_core.clone());
+        let mut bob_request = request(4, b"Bob", 11);
+        bob_request.core.activated = true;
+
+        let (inbound_stream, outbound_stream) = duplex(4096);
+        let inbound_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(inbound_stream);
+            run_registered_peer_connection_handshake(
+                &mut transport,
+                request(3, b"Alice", 7),
+                &inbound_registry,
+            )
+            .await
+        });
+        let expected_alice = alice_core.clone();
+        let outbound_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(outbound_stream);
+            run_known_peer_connection_handshake(&mut transport, bob_request, &expected_alice).await
+        });
+
+        let (inbound, outbound) = timeout(Duration::from_secs(1), async {
+            (
+                inbound_task.await.unwrap().unwrap(),
+                outbound_task.await.unwrap().unwrap(),
+            )
+        })
+        .await
+        .expect("inbound registry admission should finish without JoinData");
+        assert_eq!(inbound.local_connection_id, 7);
+        assert_eq!(inbound.remote_connection_id, 11);
+        assert_eq!(inbound.peer_core, bob_core);
+        assert_eq!(outbound.local_connection_id, 11);
+        assert_eq!(outbound.remote_connection_id, 7);
+        assert_eq!(outbound.peer_core, alice_core);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registered_peer_mesh_handshake_rejects_unknown_set_id_before_close() {
+        let bob_core = request(4, b"Bob", 0).core;
+        let registry = BTreeMap::from([(bob_core.client_id, bob_core)]);
+        let (inbound_stream, peer_stream) = duplex(2048);
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(inbound_stream);
+            run_registered_peer_connection_handshake(
+                &mut transport,
+                request(3, b"Alice", 7),
+                &registry,
+            )
+            .await
+        });
+        let mut peer = ControlTransport::new(peer_stream);
+        assert!(matches!(
+            peer.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        peer.send_message(ControlMessage::ConnectionRequest(request(
+            99, b"Unknown", 11,
+        )))
+        .await
+        .unwrap();
+        assert!(matches!(
+            peer.read_message().await.unwrap(),
+            ControlMessage::ConnectionReply(ConnectionReply {
+                ok: false,
+                ref message,
+                wrong_password: false,
+            }) if message.as_bytes() == b"connection denied"
+        ));
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(ConnectionHandshakeError::LocalRejection {
+                ref message,
+                wrong_password: false,
+            }) if message.as_bytes() == b"connection denied"
+        ));
     }
 
     #[test]

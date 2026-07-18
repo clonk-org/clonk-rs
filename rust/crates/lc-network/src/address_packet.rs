@@ -5,6 +5,9 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocke
 /// `C4PacketType::PID_Addr` (`src/C4PacketBase.h:109-110`).
 pub const PID_ADDR: u8 = 0x12;
 
+/// `C4PacketType::PID_TCPSimOpen` (`src/C4PacketBase.h:116`).
+pub const PID_TCP_SIM_OPEN: u8 = 0x14;
+
 /// The byte-sized `C4Network2IOProtocol` carried by `C4Network2Address`.
 ///
 /// Binary compilation casts the C++ enum to `uint8_t` without validation
@@ -76,7 +79,14 @@ impl NetworkAddress {
     /// delegates to endpoint `IsNull`: the host must be unspecified and the
     /// port must be zero.
     pub fn is_ip_null(&self) -> bool {
-        self.endpoint.ip().is_unspecified() && self.endpoint.port() == 0
+        self.has_null_host() && self.endpoint.port() == 0
+    }
+
+    /// Mirrors `C4Network2EndpointAddress::IsNullHost`, which ignores the
+    /// endpoint port. Client mesh dialing rejects unspecified hosts even when
+    /// an announced address carries a nonzero configured port.
+    pub fn has_null_host(&self) -> bool {
+        self.endpoint.ip().is_unspecified()
     }
 
     /// Mirrors `C4Network2Address::SetIP`. Despite its name, C++ delegates to
@@ -97,6 +107,18 @@ impl NetworkAddress {
 /// packet per address (`src/C4Network2Client.cpp:319-337`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AddressPacket {
+    pub client_id: i32,
+    pub address: NetworkAddress,
+}
+
+/// One `PID_TCPSimOpen` payload.
+///
+/// C++ compiles this as the same packed client ID plus `C4Network2Address`
+/// field sequence as [`AddressPacket`], but it has distinct session semantics
+/// and therefore remains a separate type
+/// (`src/C4Network2Client.cpp:665-670`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TcpSimOpenPacket {
     pub client_id: i32,
     pub address: NetworkAddress,
 }
@@ -193,6 +215,25 @@ pub fn encode_address_packet_payload(packet: &AddressPacket) -> Vec<u8> {
     payload.extend_from_slice(endpoint_wire_text(packet.address.endpoint).as_bytes());
     payload.push(0);
     payload
+}
+
+/// Decodes the body after `PID_TCPSimOpen`.
+pub fn decode_tcp_sim_open_packet_payload(
+    payload: &[u8],
+) -> Result<TcpSimOpenPacket, AddressPacketDecodeError> {
+    let packet = decode_address_packet_payload(payload)?;
+    Ok(TcpSimOpenPacket {
+        client_id: packet.client_id,
+        address: packet.address,
+    })
+}
+
+/// Encodes the body after `PID_TCPSimOpen` in C++ field order.
+pub fn encode_tcp_sim_open_packet_payload(packet: &TcpSimOpenPacket) -> Vec<u8> {
+    encode_address_packet_payload(&AddressPacket {
+        client_id: packet.client_id,
+        address: packet.address,
+    })
 }
 
 fn canonicalize_mapped_ipv4(endpoint: SocketAddr) -> SocketAddr {
@@ -364,6 +405,30 @@ mod tests {
     }
 
     #[test]
+    fn cpp_tcp_sim_open_vector_uses_the_address_packet_field_layout() {
+        // C4PacketTCPSimOpen compiles packed ClientID followed by Addr, in the
+        // same order and representation as C4PacketAddr
+        // (src/C4Network2Client.cpp:655-670).
+        let payload = [
+            0x07, 0x01, b'[', b'2', b'0', b'0', b'1', b':', b'd', b'b', b'8', b':', b':', b'7',
+            b']', b':', b'1', b'1', b'1', b'1', b'2', 0x00,
+        ];
+        let packet = TcpSimOpenPacket {
+            client_id: 7,
+            address: NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "[2001:db8::7]:11112".parse().unwrap(),
+            ),
+        };
+
+        assert_eq!(encode_tcp_sim_open_packet_payload(&packet), payload);
+        assert_eq!(
+            decode_tcp_sim_open_packet_payload(&payload).unwrap(),
+            packet
+        );
+    }
+
+    #[test]
     fn receive_substitutes_full_peer_endpoint_only_for_null_endpoint() {
         // Despite its name, isIPNull delegates to endpoint IsNull (unspecified
         // host AND port zero). SetIP then copies the peer host and peer port
@@ -391,6 +456,18 @@ mod tests {
             null_endpoint.announcement_for_peer(peer).address.endpoint,
             peer
         );
+    }
+
+    #[test]
+    fn null_host_detection_ignores_the_endpoint_port() {
+        let configured_port =
+            NetworkAddress::new(NetworkProtocol::Tcp, "0.0.0.0:11112".parse().unwrap());
+        assert!(configured_port.has_null_host());
+        assert!(!configured_port.is_ip_null());
+
+        let routable =
+            NetworkAddress::new(NetworkProtocol::Tcp, "198.51.100.1:11112".parse().unwrap());
+        assert!(!routable.has_null_host());
     }
 
     #[test]

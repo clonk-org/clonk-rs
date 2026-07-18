@@ -4679,6 +4679,20 @@ fn client_settings_for_paths(
         language_sequence: query.language_sequence,
     };
     if let Some(paths) = paths {
+        let config = Config::load(paths.config_file()).ok();
+        let network_port = |key: &str, default: u16| {
+            config
+                .as_ref()
+                .and_then(|config| config.get_in(Some("Network"), key))
+                .and_then(|value| value.trim().parse::<u16>().ok())
+                .unwrap_or(default)
+        };
+        let tcp_port = network_port("PortTCP", 11_112);
+        let udp_port = network_port("PortUDP", 11_113);
+        settings.mesh_tcp_bind_address = (tcp_port != 0)
+            .then_some(SocketAddr::from(([0_u16; 8], tcp_port)));
+        settings.mesh_udp_bind_address = (udp_port != 0)
+            .then_some(SocketAddr::from(([0_u16; 8], udp_port)));
         settings.resource_directory = paths.cache_dir().join("Network");
         settings.local_system_path = Some(paths.system_group_path().to_path_buf());
         settings.local_resource_roots = vec![
@@ -27884,12 +27898,18 @@ impl GameApp {
             return Ok(());
         }
         let attempts = reference.join_attempts_for_local_host();
+        let netpuncher_address = reference.netpuncher_address.clone();
+        let netpuncher_game_ids = lc_network::NetpuncherGameIds {
+            ipv4: reference.netpuncher_ipv4,
+            ipv6: reference.netpuncher_ipv6,
+        };
         let settings = client_settings_for_paths(
             reference.source_address,
             self.player_name.clone(),
             self.app_paths.as_ref(),
         )
-        .with_join_attempts(attempts);
+        .with_join_attempts(attempts)
+        .with_netpuncher(netpuncher_address, netpuncher_game_ids);
         self.startup_game_search = None;
         self.pending_network_join = Some(settings);
         if reference.password_needed {
@@ -64636,10 +64656,50 @@ public func Grant(password) { return GainMissionAccess(password); }
             settings.local_system_path.as_deref(),
             Some(paths.system_group_path())
         );
+        assert_eq!(
+            settings.mesh_tcp_bind_address,
+            Some(SocketAddr::from(([0_u16; 8], 11_112)))
+        );
+        assert_eq!(
+            settings.mesh_udp_bind_address,
+            Some(SocketAddr::from(([0_u16; 8], 11_113)))
+        );
         assert!(settings
             .local_resource_roots
             .iter()
             .any(|root| Some(root.as_path()) == paths.content_dir()));
+    }
+
+    #[test]
+    fn client_network_settings_preserve_configured_ports_and_zero_disables_protocol() {
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+        let mut config = Config::new();
+        config.set_in(Some("Network"), "PortTCP", "0");
+        config.set_in(Some("Network"), "PortUDP", "22113");
+        config.save(paths.config_file()).expect("persist ports");
+
+        let settings = client_settings_for_paths(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client".to_string(),
+            Some(&paths),
+        );
+
+        assert_eq!(settings.mesh_tcp_bind_address, None);
+        assert_eq!(
+            settings.mesh_udp_bind_address,
+            Some(SocketAddr::from(([0_u16; 8], 22_113)))
+        );
     }
 
     #[test]

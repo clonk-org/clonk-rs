@@ -1,6 +1,7 @@
 use crate::address_packet::{
-    decode_address_packet_payload, encode_address_packet_payload, AddressPacket,
-    AddressPacketDecodeError, PID_ADDR,
+    decode_address_packet_payload, decode_tcp_sim_open_packet_payload,
+    encode_address_packet_payload, encode_tcp_sim_open_packet_payload, AddressPacket,
+    AddressPacketDecodeError, TcpSimOpenPacket, PID_ADDR, PID_TCP_SIM_OPEN,
 };
 use crate::forward_packet::{
     decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
@@ -38,7 +39,6 @@ const PID_POST_MORTEM: u8 = 0x06;
 const PID_STATUS: u8 = 0x10;
 const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
-const PID_TCP_SIM_OPEN: u8 = 0x14;
 const PID_JOIN_DATA: u8 = 0x15;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
 const PID_LOBBY_COUNTDOWN: u8 = 0x20;
@@ -202,6 +202,8 @@ pub enum TransportError {
     LeagueRoundResultsEncode(#[source] LeagueRoundResultsEncodeError),
     #[error("invalid client-address packet: {0}")]
     AddressDecode(#[source] AddressPacketDecodeError),
+    #[error("invalid TCP simultaneous-open packet: {0}")]
+    TcpSimOpenDecode(#[source] AddressPacketDecodeError),
     #[error("invalid resource packet: {0}")]
     ResourceDecode(#[source] ResourcePacketCodecError),
     #[error("failed to encode resource packet: {0}")]
@@ -256,6 +258,7 @@ pub enum ControlMessage {
     JoinData(Box<JoinDataEnvelope>),
     LeagueRoundResults(LeagueRoundResultsPacket),
     Address(AddressPacket),
+    TcpSimOpen(TcpSimOpenPacket),
     Resource(ResourcePacket),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
@@ -463,20 +466,7 @@ where
                 );
             }
             ControlMessage::PostMortem(packet) => {
-                frame.push(PID_POST_MORTEM);
-                frame.extend_from_slice(&packet.connection_id.to_ne_bytes());
-                frame.extend_from_slice(&packet.packet_counter.to_ne_bytes());
-                let packet_count = u32::try_from(packet.packets.len()).map_err(|_| {
-                    TransportError::PostMortemPacketCountOutOfRange(packet.packets.len())
-                })?;
-                frame.extend_from_slice(&packet_count.to_ne_bytes());
-                for nested in packet.packets {
-                    let length = u32::try_from(nested.len()).map_err(|_| {
-                        TransportError::PostMortemPacketLengthOutOfRange(nested.len())
-                    })?;
-                    encode_varint(length, &mut frame);
-                    frame.extend_from_slice(&nested);
-                }
+                frame.extend(encode_complete_post_mortem_packet(&packet)?);
             }
             ControlMessage::JoinData(envelope) => {
                 frame.push(PID_JOIN_DATA);
@@ -494,6 +484,10 @@ where
             ControlMessage::Address(packet) => {
                 frame.push(PID_ADDR);
                 frame.extend(encode_address_packet_payload(&packet));
+            }
+            ControlMessage::TcpSimOpen(packet) => {
+                frame.push(PID_TCP_SIM_OPEN);
+                frame.extend(encode_tcp_sim_open_packet_payload(&packet));
             }
             ControlMessage::Resource(packet) => {
                 frame.extend(
@@ -610,16 +604,9 @@ pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage
     if body.is_empty() {
         return Err(TransportError::Malformed("missing packet payload"));
     }
-    // Both IDs are present in C++'s typed packet table. C++ unpacks them
-    // before checking whether a handler is enabled, so malformed bodies
-    // remain fatal even when a valid packet would be ignored.
+    // League results are present in C++'s typed packet table and decoded
+    // before handler dispatch.
     match body[0] {
-        PID_TCP_SIM_OPEN => {
-            decode_address_packet_payload(&body[1..]).map_err(|_| {
-                TransportError::Malformed("invalid TCP simultaneous-open packet")
-            })?;
-            return Ok(None);
-        }
         PID_LEAGUE_ROUND_RESULTS => {
             return decode_league_round_results_payload(&body[1..])
                 .map(ControlMessage::LeagueRoundResults)
@@ -662,6 +649,9 @@ fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> 
         PID_ADDR => decode_address_packet_payload(&body[1..])
             .map(ControlMessage::Address)
             .map_err(TransportError::AddressDecode),
+        PID_TCP_SIM_OPEN => decode_tcp_sim_open_packet_payload(&body[1..])
+            .map(ControlMessage::TcpSimOpen)
+            .map_err(TransportError::TcpSimOpenDecode),
         PID_NET_RES_DISCOVER | PID_NET_RES_STATUS | PID_NET_RES_DERIVE | PID_NET_RES_REQUEST
         | PID_NET_RES_DATA => decode_resource_packet(body)
             .map(ControlMessage::Resource)
@@ -706,6 +696,24 @@ pub(crate) fn encode_complete_control_delivery_packet(
     let mut body = vec![PID_CONTROL_PKT, u8::from(delivery)];
     body.extend_from_slice(data);
     body
+}
+
+pub(crate) fn encode_complete_post_mortem_packet(
+    packet: &crate::PostMortemPacket,
+) -> Result<Vec<u8>, TransportError> {
+    let mut body = vec![PID_POST_MORTEM];
+    body.extend_from_slice(&packet.connection_id.to_ne_bytes());
+    body.extend_from_slice(&packet.packet_counter.to_ne_bytes());
+    let packet_count = u32::try_from(packet.packets.len())
+        .map_err(|_| TransportError::PostMortemPacketCountOutOfRange(packet.packets.len()))?;
+    body.extend_from_slice(&packet_count.to_ne_bytes());
+    for nested in &packet.packets {
+        let length = u32::try_from(nested.len())
+            .map_err(|_| TransportError::PostMortemPacketLengthOutOfRange(nested.len()))?;
+        encode_varint(length, &mut body);
+        body.extend_from_slice(nested);
+    }
+    Ok(body)
 }
 
 fn parse_ping(data: &[u8]) -> Result<PingPacket, TransportError> {
@@ -1313,7 +1321,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn known_cpp_packets_decode_or_skip_without_losing_following_tcp_frame() {
+    async fn known_cpp_packets_decode_without_losing_following_tcp_frame() {
         // Real C++ bodies: packed client 7 + TCP IPv6 address for
         // PID_TCPSimOpen, then a successful zero-player league result.
         let tcp_sim_open = [
@@ -1356,17 +1364,21 @@ mod tests {
         server.write_all(&frames).await.unwrap();
         let mut transport = ControlTransport::new(client);
 
-        assert!(matches!(
-            transport.read_packet().await.unwrap(),
-            InboundPacket::Ignored(PID_TCP_SIM_OPEN)
-        ));
-        let results = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            transport.read_message(),
-        )
-        .await
-        .expect("league results blocked the following frame")
-        .expect("valid league results disconnected the transport");
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::TcpSimOpen(TcpSimOpenPacket {
+                client_id: 7,
+                address: NetworkAddress::new(
+                    NetworkProtocol::Tcp,
+                    "[2001:db8::7]:11112".parse().unwrap(),
+                ),
+            })
+        );
+        let results =
+            tokio::time::timeout(std::time::Duration::from_secs(1), transport.read_message())
+                .await
+                .expect("league results blocked the following frame")
+                .expect("valid league results disconnected the transport");
         assert_eq!(
             results,
             ControlMessage::LeagueRoundResults(LeagueRoundResultsPacket {
@@ -1375,11 +1387,14 @@ mod tests {
                 players: Vec::new(),
             })
         );
-        assert_eq!(transport.read_message().await.unwrap(), ControlMessage::Ping(ping));
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Ping(ping)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn known_cpp_packet_exposes_a_skippable_outcome_before_the_next_message() {
+    async fn tcp_sim_open_exposes_a_typed_message_before_the_next_message() {
         let ping = PingPacket {
             sent_at: 0x1234_5678,
             packet_counter: 9,
@@ -1419,7 +1434,10 @@ mod tests {
 
         assert!(matches!(
             transport.read_packet().await.unwrap(),
-            InboundPacket::Ignored(PID_TCP_SIM_OPEN)
+            InboundPacket::Message(ControlMessage::TcpSimOpen(TcpSimOpenPacket {
+                client_id: 7,
+                ..
+            }))
         ));
         assert!(matches!(
             transport.read_packet().await.unwrap(),
@@ -1441,7 +1459,10 @@ mod tests {
         server.write_all(&frames).await.unwrap();
         let mut transport = ControlTransport::new(client);
 
-        assert_eq!(transport.read_message().await.unwrap(), ControlMessage::Ping(ping));
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Ping(ping)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1462,7 +1483,7 @@ mod tests {
             transport.read_packet().await.unwrap(),
             InboundPacket::Invalid {
                 packet_type: PID_TCP_SIM_OPEN,
-                error: TransportError::Malformed("invalid TCP simultaneous-open packet"),
+                error: TransportError::TcpSimOpenDecode(AddressPacketDecodeError::UnexpectedEof),
             }
         ));
         assert!(matches!(
@@ -1934,6 +1955,38 @@ mod tests {
 
         transport
             .send_message(ControlMessage::Address(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pid_tcp_sim_open_matches_cpp_tcp_frame_in_both_directions() {
+        let packet = TcpSimOpenPacket {
+            client_id: 7,
+            address: NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "[2001:db8::7]:11112".parse::<SocketAddr>().unwrap(),
+            ),
+        };
+        let frame = expect_frame(&[
+            0x14, 0x07, 0x01, b'[', b'2', b'0', b'0', b'1', b':', b'd', b'b', b'8', b':', b':',
+            b'7', b']', b':', b'1', b'1', b'1', b'1', b'2', 0x00,
+        ]);
+        let (client, mut server) = duplex(128);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::TcpSimOpen(packet)
+        );
+
+        transport
+            .send_message(ControlMessage::TcpSimOpen(packet))
             .await
             .unwrap();
         drop(transport);

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering},
-    Arc,
+    Arc, Mutex,
 };
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -34,6 +34,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_ROUTE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
+const CLIENT_MESH_PENDING_LIMIT: usize = 64;
 const HOST_CLIENT_ID: ClientId = 0;
 static RESOURCE_RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
 
@@ -145,6 +146,14 @@ impl Default for HostConfig {
     }
 }
 
+/// One resolved netpuncher endpoint and the host-advertised game ID for its
+/// address family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientMeshPuncherConfig {
+    pub address: SocketAddr,
+    pub game_id: u32,
+}
+
 /// Client metadata supplied during handshake.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -155,6 +164,14 @@ pub struct ClientConfig {
     pub bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates,
     pub local_system_path: Option<PathBuf>,
     pub local_resource_roots: Vec<PathBuf>,
+    /// TCP endpoint accepted for already joined client-to-client mesh routes.
+    /// `None` keeps the listener disabled for embedders that do not expose a
+    /// network endpoint.
+    pub mesh_tcp_bind_address: Option<SocketAddr>,
+    /// Reliable-UDP endpoint shared by outbound and inbound mesh routes.
+    pub mesh_udp_bind_address: Option<SocketAddr>,
+    /// Resolved per-family netpuncher endpoints advertised by the host.
+    pub mesh_punchers: Vec<ClientMeshPuncherConfig>,
 }
 
 impl ClientConfig {
@@ -167,6 +184,9 @@ impl ClientConfig {
             bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates::default(),
             local_system_path: None,
             local_resource_roots: Vec::new(),
+            mesh_tcp_bind_address: None,
+            mesh_udp_bind_address: None,
+            mesh_punchers: Vec::new(),
         }
     }
 
@@ -200,6 +220,24 @@ impl ClientConfig {
         self.local_resource_roots = roots.into_iter().map(Into::into).collect();
         self
     }
+
+    pub fn with_mesh_tcp_bind_address(mut self, address: SocketAddr) -> Self {
+        self.mesh_tcp_bind_address = Some(address);
+        self
+    }
+
+    pub fn with_mesh_udp_bind_address(mut self, address: SocketAddr) -> Self {
+        self.mesh_udp_bind_address = Some(address);
+        self
+    }
+
+    pub fn with_mesh_punchers(
+        mut self,
+        punchers: impl IntoIterator<Item = ClientMeshPuncherConfig>,
+    ) -> Self {
+        self.mesh_punchers = punchers.into_iter().collect();
+        self
+    }
 }
 
 fn default_client_resource_directory() -> PathBuf {
@@ -209,6 +247,25 @@ fn default_client_resource_directory() -> PathBuf {
     std::env::temp_dir()
         .join(format!("legacyclonk-{}", std::process::id()))
         .join("Network")
+}
+
+async fn bind_client_mesh_tcp_listener(bind_address: SocketAddr) -> io::Result<TcpListener> {
+    if !bind_address.ip().is_unspecified() {
+        return TcpListener::bind(bind_address).await;
+    }
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_only_v6(false)?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    let dual_stack_address = SocketAddr::from(([0_u16; 8], bind_address.port()));
+    socket.bind(&dual_stack_address.into())?;
+    socket.listen(128)?;
+    let listener = std::net::TcpListener::from(socket);
+    TcpListener::from_std(listener)
 }
 
 /// Keeps in-process session tests operational. The app explicitly disables
@@ -596,10 +653,11 @@ impl HostHandle {
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {
-        let _ = self.command_tx.send(HostCommand::Shutdown).await;
+        self.event_rx.take();
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        drop(self.command_tx);
         self.join_handle
             .await
             .map_err(|_| HostError::HostLoopGone)?;
@@ -657,7 +715,7 @@ impl From<ClientError> for ClientAttemptError {
 
 enum ClientDialStream {
     Tcp(TcpStream),
-    Udp(crate::ReliableUdpOwnedPeerStream),
+    Udp(crate::ReliableUdpPeerStream),
 }
 
 type ClientConnectFuture =
@@ -675,7 +733,11 @@ struct ClientDialRace {
 }
 
 impl ClientDialRace {
-    fn new(addresses: impl IntoIterator<Item = crate::NetworkAddress>) -> Self {
+    fn new(
+        addresses: impl IntoIterator<Item = crate::NetworkAddress>,
+        tcp_available: bool,
+        udp_handle: Option<crate::ReliableUdpSessionHandle>,
+    ) -> Self {
         Self {
             attempts: addresses
                 .into_iter()
@@ -686,18 +748,20 @@ impl ClientDialRace {
                     }
                     let endpoint = address.endpoint;
                     let future: ClientConnectFuture = match address.protocol {
-                        crate::NetworkProtocol::Tcp => Box::pin(async move {
-                            TcpStream::connect(endpoint).await.map(ClientDialStream::Tcp)
-                        }),
-                        crate::NetworkProtocol::Udp => Box::pin(async move {
-                            let bind_address = if endpoint.is_ipv4() {
-                                SocketAddr::from(([0, 0, 0, 0], 0))
-                            } else {
-                                SocketAddr::from(([0_u16; 8], 0))
-                            };
-                            let hub = crate::ReliableUdpSessionHub::bind(bind_address)?;
-                            hub.connect_owned(endpoint).await.map(ClientDialStream::Udp)
-                        }),
+                        crate::NetworkProtocol::Tcp => {
+                            if !tcp_available {
+                                return None;
+                            }
+                            Box::pin(async move {
+                                TcpStream::connect(endpoint).await.map(ClientDialStream::Tcp)
+                            })
+                        }
+                        crate::NetworkProtocol::Udp => {
+                            let handle = udp_handle.clone()?;
+                            Box::pin(async move {
+                                handle.connect(endpoint).await.map(ClientDialStream::Udp)
+                            })
+                        }
                         crate::NetworkProtocol::Unknown(_) => return None,
                     };
                     Some(ClientDialAttempt {
@@ -765,6 +829,183 @@ impl ClientDialRace {
             }
         }
     }
+}
+
+struct PreparedClientMesh {
+    tcp_listener: Option<TcpListener>,
+    udp_hub: Option<crate::ReliableUdpSessionHub>,
+    puncher_events: Option<mpsc::Receiver<crate::NetpuncherIoEvent>>,
+    puncher_init: Arc<Mutex<ClientPuncherInitState>>,
+}
+
+struct ClientPuncherInitState {
+    initializing: bool,
+    observations: Vec<SocketAddr>,
+}
+
+impl PreparedClientMesh {
+    fn udp_handle(&self) -> Option<crate::ReliableUdpSessionHandle> {
+        self.udp_hub
+            .as_ref()
+            .map(crate::ReliableUdpSessionHub::handle)
+    }
+}
+
+async fn prepare_client_mesh(
+    config: &ClientConfig,
+    require_udp: bool,
+) -> Result<PreparedClientMesh, ClientError> {
+    let mut first_bind_error = None;
+    let tcp_listener = match config.mesh_tcp_bind_address {
+        Some(bind_address) => match bind_client_mesh_tcp_listener(bind_address).await {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                first_bind_error = Some(io::Error::new(
+                    error.kind(),
+                    format!("failed to bind client mesh TCP at {bind_address}: {error}"),
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    let udp_bind_address = config.mesh_udp_bind_address.or_else(|| {
+        (require_udp || !config.mesh_punchers.is_empty())
+            .then_some(SocketAddr::from(([0_u16; 8], 0)))
+    });
+    let mut udp_hub = match udp_bind_address {
+        Some(bind_address) => match crate::ReliableUdpSessionHub::bind(bind_address) {
+            Ok(hub) => Some(hub),
+            Err(error) => {
+                first_bind_error.get_or_insert_with(|| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("failed to bind client mesh UDP at {bind_address}: {error}"),
+                    )
+                });
+                None
+            }
+        },
+        None => None,
+    };
+    let requested_transport = config.mesh_tcp_bind_address.is_some() || udp_bind_address.is_some();
+    if requested_transport && tcp_listener.is_none() && udp_hub.is_none() {
+        return Err(ClientError::Connect(first_bind_error.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no configured client network transport could be bound",
+            )
+        })));
+    }
+    let source_puncher_events = udp_hub
+        .as_mut()
+        .map(crate::ReliableUdpSessionHub::take_puncher_event_receiver);
+    let udp_handle = udp_hub
+        .as_ref()
+        .map(crate::ReliableUdpSessionHub::handle);
+    if let Some(handle) = udp_handle.as_ref() {
+        for puncher in &config.mesh_punchers {
+            let _ = handle
+                .init_puncher(puncher.address, crate::NetpuncherRole::Client)
+                .await;
+        }
+    }
+    let puncher_init = Arc::new(Mutex::new(ClientPuncherInitState {
+        initializing: true,
+        observations: Vec::new(),
+    }));
+    let puncher_events = match (source_puncher_events, udp_handle) {
+        (Some(mut source), Some(handle)) => {
+            let (forward_tx, forward_rx) = mpsc::channel(64);
+            let game_ids = crate::NetpuncherGameIds {
+                ipv4: config
+                    .mesh_punchers
+                    .iter()
+                    .find(|puncher| puncher.address.is_ipv4())
+                    .map_or(0, |puncher| puncher.game_id),
+                ipv6: config
+                    .mesh_punchers
+                    .iter()
+                    .find(|puncher| puncher.address.is_ipv6())
+                    .map_or(0, |puncher| puncher.game_id),
+            };
+            let pump_init = puncher_init.clone();
+            tokio::spawn(async move {
+                while let Some(event) = source.recv().await {
+                    match &event {
+                        crate::NetpuncherIoEvent::Connected {
+                            family,
+                            puncher_address,
+                            ..
+                        } => {
+                            let family = *family;
+                            let puncher_address = *puncher_address;
+                            let initializing = {
+                                let mut init = pump_init
+                                    .lock()
+                                    .expect("client puncher initialization lock poisoned");
+                                if init.initializing {
+                                    if let crate::NetpuncherIoEvent::Connected {
+                                        observed_address, ..
+                                    } = &event
+                                    {
+                                        init.observations.push(*observed_address);
+                                    }
+                                }
+                                init.initializing
+                            };
+                            if initializing {
+                                if let Some(packet) = crate::reduce_puncher_connect(
+                                    crate::NetpuncherRole::Client,
+                                    crate::NetpuncherRuntimeState::Initializing,
+                                    family,
+                                    game_ids,
+                                ) {
+                                    let _ = handle.send_puncher_packet(family, packet).await;
+                                }
+                            }
+                            if forward_tx.send(event).await.is_err() {
+                                let _ = handle.close_puncher(puncher_address).await;
+                                break;
+                            }
+                        }
+                        crate::NetpuncherIoEvent::Packet {
+                            puncher_address,
+                            packet: crate::NetpuncherPacket::AssignId { .. },
+                            ..
+                        } => {
+                            let _ = puncher_address;
+                        }
+                        crate::NetpuncherIoEvent::Packet {
+                            puncher_address,
+                            packet: crate::NetpuncherPacket::ClientRequest { .. },
+                            ..
+                        } if pump_init
+                            .lock()
+                            .expect("client puncher initialization lock poisoned")
+                            .initializing =>
+                        {
+                            let _ = puncher_address;
+                        }
+                        crate::NetpuncherIoEvent::Packet {
+                            puncher_address, ..
+                        } => {
+                            let _ = handle.close_puncher(*puncher_address).await;
+                        }
+                    }
+                }
+            });
+            Some(forward_rx)
+        }
+        (Some(source), None) => Some(source),
+        (None, _) => None,
+    };
+    Ok(PreparedClientMesh {
+        tcp_listener,
+        udp_hub,
+        puncher_events,
+        puncher_init,
+    })
 }
 
 /// Starts the multiplayer host loop.
@@ -884,19 +1125,29 @@ pub async fn connect_client_addresses(
     config: ClientConfig,
 ) -> Result<ClientHandle, ClientError> {
     let addresses = addresses.into_iter().collect::<Vec<_>>();
-    let secondary_tcp_addr = addresses
+    let mut secondary_tcp_addr = addresses
         .iter()
         .find(|address| {
             matches!(address.protocol, crate::NetworkProtocol::Tcp) && !address.is_ip_null()
         })
         .map(|address| address.endpoint);
-    let secondary_udp_addr = addresses
+    let mut secondary_udp_addr = addresses
         .iter()
         .find(|address| {
             matches!(address.protocol, crate::NetworkProtocol::Udp) && !address.is_ip_null()
         })
         .map(|address| address.endpoint);
-    let mut dials = ClientDialRace::new(addresses);
+    let mut client_mesh = prepare_client_mesh(&config, secondary_udp_addr.is_some()).await?;
+    let tcp_available = config.mesh_tcp_bind_address.is_none()
+        || client_mesh.tcp_listener.is_some();
+    if !tcp_available {
+        secondary_tcp_addr = None;
+    }
+    let udp_handle = client_mesh.udp_handle();
+    if udp_handle.is_none() {
+        secondary_udp_addr = None;
+    }
+    let mut dials = ClientDialRace::new(addresses, tcp_available, udp_handle);
     if dials.is_empty() {
         return Err(ClientError::Connect(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -925,6 +1176,7 @@ pub async fn connect_client_addresses(
                     None,
                     secondary_udp_addr,
                     None,
+                    &mut client_mesh,
                 )
                 .await
             }
@@ -938,6 +1190,7 @@ pub async fn connect_client_addresses(
                     None,
                     None,
                     secondary_tcp_addr,
+                    &mut client_mesh,
                 )
                 .await
             }
@@ -999,6 +1252,7 @@ async fn connect_client_from_inner_with_udp<F>(
 where
     F: Future<Output = Result<TcpStream, io::Error>>,
 {
+    let mut client_mesh = prepare_client_mesh(&config, secondary_udp_addr.is_some()).await?;
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection)
         .await
         .map_err(|_| {
@@ -1011,7 +1265,7 @@ where
     stream.set_nodelay(true).ok();
     let host_peer_addr = stream.peer_addr().ok();
 
-    connect_client_stream(
+    connect_client_stream_attempt(
         stream,
         host_peer_addr,
         crate::NetworkProtocol::Tcp,
@@ -1019,30 +1273,7 @@ where
         liveness,
         secondary_udp_addr,
         None,
-    )
-    .await
-}
-
-async fn connect_client_stream<S>(
-    stream: S,
-    host_peer_addr: Option<SocketAddr>,
-    host_protocol: crate::NetworkProtocol,
-    config: ClientConfig,
-    liveness: Option<ConnectionLivenessState>,
-    secondary_udp_addr: Option<SocketAddr>,
-    secondary_tcp_addr: Option<SocketAddr>,
-) -> Result<ClientHandle, ClientError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    connect_client_stream_attempt(
-        stream,
-        host_peer_addr,
-        host_protocol,
-        config,
-        liveness,
-        secondary_udp_addr,
-        secondary_tcp_addr,
+        &mut client_mesh,
     )
     .await
     .map_err(ClientAttemptError::into_error)
@@ -1056,6 +1287,7 @@ async fn connect_client_stream_attempt<S>(
     liveness: Option<ConnectionLivenessState>,
     secondary_udp_addr: Option<SocketAddr>,
     secondary_tcp_addr: Option<SocketAddr>,
+    client_mesh: &mut PreparedClientMesh,
 ) -> Result<ClientHandle, ClientAttemptError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1068,6 +1300,9 @@ where
         mut bootstrap_local_candidates,
         local_system_path,
         local_resource_roots,
+        mesh_tcp_bind_address: _,
+        mesh_udp_bind_address: _,
+        mesh_punchers: _,
     } = config;
     let wire_name = lc_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
         ClientError::Handshake("client name contains an interior NUL".to_string())
@@ -1139,6 +1374,11 @@ where
         ))
         .into());
     }
+    client_mesh
+        .puncher_init
+        .lock()
+        .expect("client puncher initialization lock poisoned")
+        .initializing = false;
     let existing_clients = JoinClientRegistrySnapshot {
         clients: vec![local_core],
         local_client_id: Some(-1),
@@ -1262,6 +1502,15 @@ where
         }
     }
     let client_id = join_data.client_id as ClientId;
+    let mesh_tcp_listener = client_mesh.tcp_listener.take();
+    let mesh_udp_hub = client_mesh.udp_hub.take();
+    let mesh_tcp_local_addr = mesh_tcp_listener
+        .as_ref()
+        .and_then(|listener| listener.local_addr().ok());
+    let mesh_udp_local_addr = mesh_udp_hub
+        .as_ref()
+        .map(crate::ReliableUdpSessionHub::local_addr);
+    let mesh_puncher_events = client_mesh.puncher_events.take();
     let mut client_addresses = join_data
         .parameters
         .clients
@@ -1281,6 +1530,30 @@ where
             packet.address,
         );
     }
+    let mesh_interface_endpoints = crate::client_mesh::client_mesh_os_interface_endpoints();
+    let mesh_interface_ids = mesh_interface_endpoints
+        .iter()
+        .filter_map(|endpoint| match endpoint {
+            SocketAddr::V6(endpoint)
+                if endpoint.ip().is_unicast_link_local() && endpoint.scope_id() != 0 =>
+            {
+                Some(endpoint.scope_id())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    for address in crate::client_mesh::client_mesh_local_addresses(
+        mesh_tcp_local_addr,
+        mesh_udp_local_addr,
+        mesh_interface_endpoints,
+    ) {
+        crate::append_received_address(
+            client_addresses.entry(join_data.client_id).or_default(),
+            address,
+        );
+    }
     if let Some(host_peer_addr) = host_peer_addr {
         let host_address = crate::NetworkAddress::new(host_protocol, host_peer_addr);
         crate::append_received_address(
@@ -1289,6 +1562,51 @@ where
                 .or_default(),
             host_address,
         );
+    }
+    let client_cores = join_data
+        .parameters
+        .clients
+        .clients
+        .iter()
+        .cloned()
+        .map(|core| (core.client_id, core))
+        .collect::<BTreeMap<_, _>>();
+    let mut mesh_peers = client_addresses
+        .keys()
+        .copied()
+        .map(|peer_id| (peer_id, crate::ClientMeshPeerState::new()))
+        .collect::<BTreeMap<_, _>>();
+    for (peer_id, addresses) in &client_addresses {
+        let peer = mesh_peers
+            .get_mut(peer_id)
+            .expect("address owner has mesh state");
+        for address in addresses {
+            peer.add_address(*address, Duration::ZERO);
+        }
+    }
+    let initial_puncher_observations = {
+        let mut observations = client_mesh
+            .puncher_init
+            .lock()
+            .expect("client puncher initialization lock poisoned");
+        std::mem::take(&mut observations.observations)
+    };
+    for observed_address in initial_puncher_observations {
+        let update = mesh_peers
+            .entry(join_data.client_id)
+            .or_default()
+            .add_address_from_puncher(
+                observed_address,
+                mesh_udp_local_addr.map_or(0, |address| address.port()),
+                mesh_tcp_local_addr.map_or(0, |address| address.port()),
+                Duration::ZERO,
+            );
+        for address in update.announcements {
+            let addresses = client_addresses.entry(join_data.client_id).or_default();
+            if !addresses.contains(&address) {
+                addresses.insert(0, address);
+            }
+        }
     }
     let address_announcements = client_addresses
         .iter()
@@ -1358,19 +1676,25 @@ where
     let connection_ids = Arc::new(AtomicU32::new(
         primary_local_connection_id.wrapping_add(1),
     ));
-    let mut udp_reconnect = udp_reconnect_addr.map(|addr| ClientUdpReconnect {
+    let mesh_udp_handle = mesh_udp_hub
+        .as_ref()
+        .map(crate::ReliableUdpSessionHub::handle);
+    let mut udp_reconnect = udp_reconnect_addr
+        .zip(mesh_udp_handle)
+        .map(|(addr, handle)| ClientUdpReconnect {
+            addr,
+            handle,
+            local_core: assigned_local_core.clone(),
+            expected_host_core: host_core.clone(),
+            password: password.clone(),
+            connection_ids: connection_ids.clone(),
+        });
+    let mut tcp_reconnect = tcp_reconnect_addr.map(|addr| ClientTcpReconnect {
         addr,
         local_core: assigned_local_core.clone(),
         expected_host_core: host_core.clone(),
         password: password.clone(),
         connection_ids: connection_ids.clone(),
-    });
-    let mut tcp_reconnect = tcp_reconnect_addr.map(|addr| ClientTcpReconnect {
-        addr,
-        local_core: assigned_local_core,
-        expected_host_core: host_core,
-        password,
-        connection_ids,
     });
     let pending_secondary = if secondary_udp_addr.is_some() {
         udp_reconnect.as_mut().map(ClientUdpReconnect::start)
@@ -1393,13 +1717,22 @@ where
         shutdown_rx,
         host_peer_addr,
         client_addresses,
+        client_cores,
+        mesh_peers,
+        assigned_local_core,
+        connection_ids,
+        mesh_interface_ids,
+        mesh_tcp_listener,
+        mesh_udp_hub,
+        mesh_puncher_events,
+        mesh_tcp_local_addr.map_or(0, |address| address.port()),
+        mesh_udp_local_addr.map_or(0, |address| address.port()),
         resource_state,
         udp_reconnect,
         pending_secondary,
         tcp_reconnect,
         pending_tcp,
     ));
-
     Ok(ClientHandle {
         command_tx,
         event_rx: Some(event_rx),
@@ -1419,13 +1752,534 @@ struct ConnectedClientRoute<S> {
 }
 
 type PendingClientRoute = tokio::task::JoinHandle<
-    Result<ConnectedClientRoute<crate::ReliableUdpOwnedPeerStream>, ClientError>,
+    Result<ConnectedClientRoute<crate::ReliableUdpPeerStream>, ClientError>,
 >;
 type PendingTcpClientRoute =
     tokio::task::JoinHandle<Result<ConnectedClientRoute<TcpStream>, ClientError>>;
 
+enum ConnectedMeshRoute {
+    Tcp {
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        peer_core: lc_engine::ClientCoreControlData,
+        route: ConnectedClientRoute<TcpStream>,
+    },
+    Udp {
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        peer_core: lc_engine::ClientCoreControlData,
+        route: ConnectedClientRoute<crate::ReliableUdpPeerStream>,
+    },
+}
+
+type MeshDialKey = (i32, u8, SocketAddr);
+
+struct MeshRouteCompletion {
+    dial_key: Option<MeshDialKey>,
+    result: Result<ConnectedMeshRoute, ClientError>,
+}
+
+async fn connect_mesh_tcp_route(
+    peer_id: ClientId,
+    addr: SocketAddr,
+    local_core: lc_engine::ClientCoreControlData,
+    expected_peer_core: lc_engine::ClientCoreControlData,
+    password: lc_engine::LegacyCString,
+    connection_id: u32,
+) -> Result<ConnectedMeshRoute, ClientError> {
+    let initiator_id = ClientId::try_from(local_core.client_id).unwrap_or(ClientId::MAX);
+    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .map_err(|_| {
+            ClientError::Connect(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "mesh TCP connection attempt timed out",
+            ))
+        })?
+        .map_err(ClientError::Connect)?;
+    stream.set_nodelay(true).ok();
+    let peer_addr = stream.peer_addr().map_err(ClientError::Connect)?;
+    let mut transport = crate::ControlTransport::new(stream);
+    let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
+        &mut transport,
+        crate::ConnectionRequest {
+            core: local_core,
+            build: CURRENT_GAME_BUILD,
+            password,
+            connection_id,
+        },
+        &expected_peer_core,
+    )
+    .await
+    .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    Ok(ConnectedMeshRoute::Tcp {
+        peer_id,
+        initiator_id,
+        peer_core: handshake.peer_core,
+        route: ConnectedClientRoute {
+            local_connection_id: handshake.local_connection_id,
+            remote_connection_id: handshake.remote_connection_id,
+            peer_addr,
+            transport,
+            liveness: handshake.liveness,
+        },
+    })
+}
+
+async fn connect_mesh_udp_route(
+    handle: crate::ReliableUdpSessionHandle,
+    peer_id: ClientId,
+    addr: SocketAddr,
+    local_core: lc_engine::ClientCoreControlData,
+    expected_peer_core: lc_engine::ClientCoreControlData,
+    password: lc_engine::LegacyCString,
+    connection_id: u32,
+) -> Result<ConnectedMeshRoute, ClientError> {
+    let initiator_id = ClientId::try_from(local_core.client_id).unwrap_or(ClientId::MAX);
+    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle.connect(addr))
+        .await
+        .map_err(|_| {
+            ClientError::Connect(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "mesh UDP connection attempt timed out",
+            ))
+        })?
+        .map_err(ClientError::Connect)?;
+    let peer_addr = stream.peer_addr();
+    let mut transport = crate::ControlTransport::new(stream);
+    let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
+        &mut transport,
+        crate::ConnectionRequest {
+            core: local_core,
+            build: CURRENT_GAME_BUILD,
+            password,
+            connection_id,
+        },
+        &expected_peer_core,
+    )
+    .await
+    .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    Ok(ConnectedMeshRoute::Udp {
+        peer_id,
+        initiator_id,
+        peer_core: handshake.peer_core,
+        route: ConnectedClientRoute {
+            local_connection_id: handshake.local_connection_id,
+            remote_connection_id: handshake.remote_connection_id,
+            peer_addr,
+            transport,
+            liveness: handshake.liveness,
+        },
+    })
+}
+
+async fn connect_mesh_tcp_socket_route(
+    peer_id: ClientId,
+    initiator_id: ClientId,
+    socket: tokio::net::TcpSocket,
+    addr: SocketAddr,
+    local_core: lc_engine::ClientCoreControlData,
+    expected_peer_core: lc_engine::ClientCoreControlData,
+    password: lc_engine::LegacyCString,
+    connection_id: u32,
+    delay: Duration,
+) -> Result<ConnectedMeshRoute, ClientError> {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.connect(addr))
+        .await
+        .map_err(|_| {
+            ClientError::Connect(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "simultaneous-open TCP connection attempt timed out",
+            ))
+        })?
+        .map_err(ClientError::Connect)?;
+    stream.set_nodelay(true).ok();
+    let peer_addr = stream.peer_addr().map_err(ClientError::Connect)?;
+    let mut transport = crate::ControlTransport::new(stream);
+    let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
+        &mut transport,
+        crate::ConnectionRequest {
+            core: local_core,
+            build: CURRENT_GAME_BUILD,
+            password,
+            connection_id,
+        },
+        &expected_peer_core,
+    )
+    .await
+    .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    Ok(ConnectedMeshRoute::Tcp {
+        peer_id,
+        initiator_id,
+        peer_core: handshake.peer_core,
+        route: ConnectedClientRoute {
+            local_connection_id: handshake.local_connection_id,
+            remote_connection_id: handshake.remote_connection_id,
+            peer_addr,
+            transport,
+            liveness: handshake.liveness,
+        },
+    })
+}
+
+fn bind_tcp_sim_open_socket(
+    observed_address: SocketAddr,
+) -> io::Result<(tokio::net::TcpSocket, SocketAddr)> {
+    let SocketAddr::V6(mut bind_address) = observed_address else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TCP simultaneous open requires an IPv6 puncher address",
+        ));
+    };
+    bind_address.set_port(0);
+    let socket = tokio::net::TcpSocket::new_v6()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(SocketAddr::V6(bind_address))?;
+    let bound_address = socket.local_addr()?;
+    Ok((socket, bound_address))
+}
+
+async fn accept_mesh_tcp_route(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    local_core: lc_engine::ClientCoreControlData,
+    canonical_peer_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
+    password: lc_engine::LegacyCString,
+    connection_id: u32,
+) -> Result<ConnectedMeshRoute, ClientError> {
+    stream.set_nodelay(true).ok();
+    let mut transport = crate::ControlTransport::new(stream);
+    let handshake = crate::connection_handshake::run_registered_peer_connection_handshake(
+        &mut transport,
+        crate::ConnectionRequest {
+            core: local_core,
+            build: CURRENT_GAME_BUILD,
+            password,
+            connection_id,
+        },
+        &canonical_peer_cores,
+    )
+    .await
+    .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    let peer_id = ClientId::try_from(handshake.peer_core.client_id).map_err(|_| {
+        ClientError::Handshake("mesh peer has a negative canonical client ID".to_string())
+    })?;
+    Ok(ConnectedMeshRoute::Tcp {
+        peer_id,
+        initiator_id: peer_id,
+        peer_core: handshake.peer_core,
+        route: ConnectedClientRoute {
+            local_connection_id: handshake.local_connection_id,
+            remote_connection_id: handshake.remote_connection_id,
+            peer_addr,
+            transport,
+            liveness: handshake.liveness,
+        },
+    })
+}
+
+async fn accept_mesh_udp_route(
+    stream: crate::ReliableUdpPeerStream,
+    local_core: lc_engine::ClientCoreControlData,
+    canonical_peer_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
+    password: lc_engine::LegacyCString,
+    connection_id: u32,
+) -> Result<ConnectedMeshRoute, ClientError> {
+    let peer_addr = stream.peer_addr();
+    let mut transport = crate::ControlTransport::new(stream);
+    let handshake = crate::connection_handshake::run_registered_peer_connection_handshake(
+        &mut transport,
+        crate::ConnectionRequest {
+            core: local_core,
+            build: CURRENT_GAME_BUILD,
+            password,
+            connection_id,
+        },
+        &canonical_peer_cores,
+    )
+    .await
+    .map_err(|error| ClientError::Handshake(error.to_string()))?;
+    let peer_id = ClientId::try_from(handshake.peer_core.client_id).map_err(|_| {
+        ClientError::Handshake("mesh peer has a negative canonical client ID".to_string())
+    })?;
+    Ok(ConnectedMeshRoute::Udp {
+        peer_id,
+        initiator_id: peer_id,
+        peer_core: handshake.peer_core,
+        route: ConnectedClientRoute {
+            local_connection_id: handshake.local_connection_id,
+            remote_connection_id: handshake.remote_connection_id,
+            peer_addr,
+            transport,
+            liveness: handshake.liveness,
+        },
+    })
+}
+
+async fn accept_optional_mesh_tcp(
+    listener: &mut Option<TcpListener>,
+) -> Option<io::Result<(TcpStream, SocketAddr)>> {
+    match listener {
+        Some(listener) => Some(listener.accept().await),
+        None => std::future::pending().await,
+    }
+}
+
+async fn accept_optional_mesh_udp(
+    hub: &mut Option<crate::ReliableUdpSessionHub>,
+) -> Option<io::Result<crate::ReliableUdpPeerStream>> {
+    match hub {
+        Some(hub) => Some(hub.accept().await),
+        None => std::future::pending().await,
+    }
+}
+
+async fn receive_optional_puncher_event(
+    events: &mut Option<mpsc::Receiver<crate::NetpuncherIoEvent>>,
+) -> Option<crate::NetpuncherIoEvent> {
+    match events {
+        Some(events) => events.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn spawn_mesh_dial(
+    pending: &mut tokio::task::JoinSet<MeshRouteCompletion>,
+    active_dials: &mut BTreeSet<MeshDialKey>,
+    peer_id: i32,
+    attempt: crate::ClientMeshDialAttempt,
+    client_cores: &BTreeMap<i32, lc_engine::ClientCoreControlData>,
+    local_core: &lc_engine::ClientCoreControlData,
+    connection_ids: &Arc<AtomicU32>,
+    interface_ids: &[u32],
+    udp_handle: Option<&crate::ReliableUdpSessionHandle>,
+) {
+    let Ok(peer_id_wire) = ClientId::try_from(peer_id) else {
+        return;
+    };
+    let Some(peer_core) = client_cores.get(&peer_id).cloned() else {
+        return;
+    };
+    let mut endpoints = vec![attempt.address.endpoint];
+    if let SocketAddr::V6(endpoint) = attempt.address.endpoint {
+        if endpoint.ip().is_unicast_link_local() {
+            endpoints = interface_ids
+                .iter()
+                .map(|interface_id| {
+                    let mut endpoint = endpoint;
+                    endpoint.set_scope_id(*interface_id);
+                    SocketAddr::V6(endpoint)
+                })
+                .collect();
+        }
+    }
+    match attempt.address.protocol {
+        crate::NetworkProtocol::Tcp => {
+            if endpoints.is_empty() {
+                return;
+            }
+            let dial_key = (
+                peer_id,
+                attempt.address.protocol.to_wire(),
+                attempt.address.endpoint,
+            );
+            if !active_dials.insert(dial_key) {
+                return;
+            }
+            let local_core = local_core.clone();
+            let connection_ids = connection_ids.clone();
+            pending.spawn(async move {
+                let mut last_error = None;
+                for endpoint in endpoints {
+                    let connection_id =
+                        connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
+                    match connect_mesh_tcp_route(
+                        peer_id_wire,
+                        endpoint,
+                        local_core.clone(),
+                        peer_core.clone(),
+                        lc_engine::LegacyCString::default(),
+                        connection_id,
+                    )
+                    .await
+                    {
+                        Ok(route) => {
+                            return MeshRouteCompletion {
+                                dial_key: Some(dial_key),
+                                result: Ok(route),
+                            };
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                MeshRouteCompletion {
+                    dial_key: Some(dial_key),
+                    result: Err(last_error.expect("nonempty mesh endpoint list failed")),
+                }
+            });
+        }
+        crate::NetworkProtocol::Udp => {
+            let Some(handle) = udp_handle.cloned() else {
+                return;
+            };
+            if endpoints.is_empty() {
+                return;
+            }
+            let dial_key = (
+                peer_id,
+                attempt.address.protocol.to_wire(),
+                attempt.address.endpoint,
+            );
+            if !active_dials.insert(dial_key) {
+                return;
+            }
+            let local_core = local_core.clone();
+            let connection_ids = connection_ids.clone();
+            pending.spawn(async move {
+                let mut last_error = None;
+                for endpoint in endpoints {
+                    let connection_id =
+                        connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
+                    match connect_mesh_udp_route(
+                        handle.clone(),
+                        peer_id_wire,
+                        endpoint,
+                        local_core.clone(),
+                        peer_core.clone(),
+                        lc_engine::LegacyCString::default(),
+                        connection_id,
+                    )
+                    .await
+                    {
+                        Ok(route) => {
+                            return MeshRouteCompletion {
+                                dial_key: Some(dial_key),
+                                result: Ok(route),
+                            };
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                MeshRouteCompletion {
+                    dial_key: Some(dial_key),
+                    result: Err(last_error.expect("nonempty mesh endpoint list failed")),
+                }
+            });
+        }
+        crate::NetworkProtocol::Unknown(_) => {}
+    }
+}
+
+fn maybe_initiate_tcp_simultaneous_open(
+    pending_sockets: &mut BTreeMap<i32, tokio::net::TcpSocket>,
+    pending_routes: usize,
+    routes: &mut ClientRouteManager,
+    local_core: &lc_engine::ClientCoreControlData,
+    peer_id: i32,
+    attempt: crate::ClientMeshDialAttempt,
+    local_puncher_address: Option<SocketAddr>,
+) {
+    if pending_routes + pending_sockets.len() >= CLIENT_MESH_PENDING_LIMIT {
+        return;
+    }
+    if !crate::client_mesh_tcp_sim_open_eligible(
+        local_core.client_id,
+        peer_id,
+        attempt.address,
+        pending_sockets.contains_key(&peer_id),
+    ) {
+        return;
+    }
+    let Some(local_puncher_address) = local_puncher_address else {
+        return;
+    };
+    let Ok((socket, bound_address)) = bind_tcp_sim_open_socket(local_puncher_address) else {
+        return;
+    };
+    pending_sockets.insert(peer_id, socket);
+    let Ok(peer_id_wire) = ClientId::try_from(peer_id) else {
+        return;
+    };
+    let packet = crate::TcpSimOpenPacket {
+        client_id: local_core.client_id,
+        address: crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, bound_address),
+    };
+    // Native retains the bound socket if the request cannot be sent, blocking
+    // repeated initiations until the peer object is destroyed.
+    let _ = routes.try_send_to(peer_id_wire, ControlMessage::TcpSimOpen(packet));
+}
+
+fn add_connected_mesh_route(route: ConnectedMeshRoute, routes: &mut ClientRouteManager) {
+    match route {
+        ConnectedMeshRoute::Tcp {
+            peer_id,
+            initiator_id,
+            peer_core: _,
+            route,
+        } => {
+            routes.add_peer_route(
+                peer_id,
+                initiator_id,
+                route.local_connection_id,
+                route.remote_connection_id,
+                crate::NetworkProtocol::Tcp,
+                Some(route.peer_addr),
+                route.transport,
+                route.liveness,
+            );
+        }
+        ConnectedMeshRoute::Udp {
+            peer_id,
+            initiator_id,
+            peer_core: _,
+            route,
+        } => {
+            routes.add_peer_route(
+                peer_id,
+                initiator_id,
+                route.local_connection_id,
+                route.remote_connection_id,
+                crate::NetworkProtocol::Udp,
+                Some(route.peer_addr),
+                route.transport,
+                route.liveness,
+            );
+        }
+    }
+}
+
+fn connected_mesh_route_matches_registry(
+    route: &ConnectedMeshRoute,
+    registry: &BTreeMap<i32, lc_engine::ClientCoreControlData>,
+) -> bool {
+    let (peer_id, peer_core) = match route {
+        ConnectedMeshRoute::Tcp {
+            peer_id,
+            peer_core,
+            ..
+        }
+        | ConnectedMeshRoute::Udp {
+            peer_id,
+            peer_core,
+            ..
+        } => (*peer_id, peer_core),
+    };
+    let Ok(peer_id) = i32::try_from(peer_id) else {
+        return false;
+    };
+    registry.get(&peer_id).is_some_and(|canonical| {
+        canonical.client_id == peer_core.client_id
+            && canonical.name == peer_core.name
+            && canonical.nick == peer_core.nick
+    })
+}
+
 struct ClientUdpReconnect {
     addr: SocketAddr,
+    handle: crate::ReliableUdpSessionHandle,
     local_core: lc_engine::ClientCoreControlData,
     expected_host_core: lc_engine::ClientCoreControlData,
     password: lc_engine::LegacyCString,
@@ -1438,6 +2292,7 @@ impl ClientUdpReconnect {
             .connection_ids
             .fetch_add(1, AtomicOrdering::Relaxed);
         tokio::spawn(connect_secondary_udp_route(
+            self.handle.clone(),
             self.addr,
             self.local_core.clone(),
             self.expected_host_core.clone(),
@@ -1472,7 +2327,7 @@ impl ClientTcpReconnect {
 
 async fn await_pending_client_route(
     pending: &mut Option<PendingClientRoute>,
-) -> Option<ConnectedClientRoute<crate::ReliableUdpOwnedPeerStream>> {
+) -> Option<ConnectedClientRoute<crate::ReliableUdpPeerStream>> {
     match pending.as_mut() {
         Some(task) => match task.await {
             Ok(Ok(route)) => Some(route),
@@ -1537,19 +2392,14 @@ async fn connect_secondary_tcp_route(
 }
 
 async fn connect_secondary_udp_route(
+    handle: crate::ReliableUdpSessionHandle,
     addr: SocketAddr,
     local_core: lc_engine::ClientCoreControlData,
     expected_host_core: lc_engine::ClientCoreControlData,
     password: lc_engine::LegacyCString,
     connection_id: u32,
-) -> Result<ConnectedClientRoute<crate::ReliableUdpOwnedPeerStream>, ClientError> {
-    let bind_address = if addr.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0_u16; 8], 0))
-    };
-    let hub = crate::ReliableUdpSessionHub::bind(bind_address).map_err(ClientError::Connect)?;
-    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, hub.connect_owned(addr))
+) -> Result<ConnectedClientRoute<crate::ReliableUdpPeerStream>, ClientError> {
+    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle.connect(addr))
         .await
         .map_err(|_| {
             ClientError::Connect(io::Error::new(
@@ -1708,6 +2558,20 @@ pub enum ClientCommand {
     GracefulPart {
         completion: oneshot::Sender<Result<(), String>>,
     },
+    #[cfg(test)]
+    InspectMeshPeers {
+        completion: oneshot::Sender<Vec<ClientId>>,
+    },
+    #[cfg(test)]
+    InspectMeshAddressCount {
+        peer_id: i32,
+        completion: oneshot::Sender<usize>,
+    },
+    #[cfg(test)]
+    ForceMeshAttempt {
+        peer_id: i32,
+        completion: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -1839,7 +2703,8 @@ impl ClientHandle {
             .map_err(|_| ClientError::ClientLoopGone)
     }
 
-    pub async fn graceful_part(self) -> Result<(), ClientError> {
+    pub async fn graceful_part(mut self) -> Result<(), ClientError> {
+        self.event_rx.take();
         let (completion, sent) = oneshot::channel();
         self.command_tx
             .send(ClientCommand::GracefulPart { completion })
@@ -1855,11 +2720,50 @@ impl ClientHandle {
         sent
     }
 
+    #[cfg(test)]
+    async fn mesh_peer_ids(&self) -> Vec<ClientId> {
+        let (completion, peers) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::InspectMeshPeers { completion })
+            .await
+            .expect("client loop accepts mesh inspection");
+        peers.await.expect("client loop returns mesh inspection")
+    }
+
+    #[cfg(test)]
+    async fn mesh_address_count(&self, peer_id: ClientId) -> usize {
+        let (completion, count) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::InspectMeshAddressCount {
+                peer_id: i32::try_from(peer_id).unwrap(),
+                completion,
+            })
+            .await
+            .expect("client loop accepts mesh-address inspection");
+        count
+            .await
+            .expect("client loop returns mesh-address inspection")
+    }
+
+    #[cfg(test)]
+    async fn force_mesh_attempt(&self, peer_id: ClientId) {
+        let (completion, forced) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::ForceMeshAttempt {
+                peer_id: i32::try_from(peer_id).unwrap(),
+                completion,
+            })
+            .await
+            .expect("client loop accepts forced mesh attempt");
+        forced.await.expect("client loop completes forced mesh attempt");
+    }
+
     pub async fn shutdown(mut self) -> Result<(), ClientError> {
-        let _ = self.command_tx.send(ClientCommand::Shutdown).await;
+        self.event_rx.take();
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        drop(self.command_tx);
         self.join_handle
             .await
             .map_err(|_| ClientError::ClientLoopGone)?;
@@ -1887,6 +2791,7 @@ impl HostOutboundSender {
         (Self { sender, retire }, receiver)
     }
 
+    #[cfg(test)]
     async fn send(
         &self,
         message: ControlMessage,
@@ -1894,18 +2799,18 @@ impl HostOutboundSender {
         self.sender.send(HostOutboundMessage::Message(message)).await
     }
 
-    async fn send_raw(
+    fn try_send_raw(
         &self,
         packet: Vec<u8>,
-    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
-        self.sender.send(HostOutboundMessage::Raw(packet)).await
+    ) -> Result<(), mpsc::error::TrySendError<HostOutboundMessage>> {
+        self.sender.try_send(HostOutboundMessage::Raw(packet))
     }
 
-    async fn close(
+    fn try_close(
         &self,
         reply: crate::ConnectionReply,
-    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
-        self.sender.send(HostOutboundMessage::Close(reply)).await
+    ) -> Result<(), mpsc::error::TrySendError<HostOutboundMessage>> {
+        self.sender.try_send(HostOutboundMessage::Close(reply))
     }
 
     fn try_send(
@@ -2699,23 +3604,9 @@ async fn send_host_message(
     state: &HostState,
     client_id: ClientId,
     traffic: ConnectionTrafficClass,
-    mut message: ControlMessage,
+    message: ControlMessage,
 ) -> bool {
-    loop {
-        let Some(outbound) = preferred_host_outbound(state, client_id, traffic) else {
-            return false;
-        };
-        match outbound.send(message).await {
-            Ok(()) => return true,
-            Err(error) => {
-                message = match error.0 {
-                    HostOutboundMessage::Message(message) => message,
-                    HostOutboundMessage::Raw(_) => unreachable!("sent a logical message"),
-                    HostOutboundMessage::Close(_) => unreachable!("sent a logical message"),
-                };
-            }
-        }
-    }
+    try_send_host_message(state, client_id, traffic, message)
 }
 
 async fn send_host_raw(
@@ -2728,10 +3619,18 @@ async fn send_host_raw(
         let Some(outbound) = preferred_host_outbound(state, client_id, traffic) else {
             return false;
         };
-        match outbound.send_raw(packet).await {
+        match outbound.try_send_raw(packet) {
             Ok(()) => return true,
-            Err(error) => {
-                packet = match error.0 {
+            Err(mpsc::error::TrySendError::Full(full)) => {
+                packet = match full {
+                    HostOutboundMessage::Raw(packet) => packet,
+                    HostOutboundMessage::Message(_) => unreachable!("sent a raw packet"),
+                    HostOutboundMessage::Close(_) => unreachable!("sent a raw packet"),
+                };
+                outbound.retire();
+            }
+            Err(mpsc::error::TrySendError::Closed(closed)) => {
+                packet = match closed {
                     HostOutboundMessage::Raw(packet) => packet,
                     HostOutboundMessage::Message(_) => unreachable!("sent a raw packet"),
                     HostOutboundMessage::Close(_) => unreachable!("sent a raw packet"),
@@ -2753,7 +3652,14 @@ fn try_send_host_message(
         };
         match outbound.try_send(message) {
             Ok(()) => return true,
-            Err(mpsc::error::TrySendError::Full(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(full)) => {
+                message = match full {
+                    HostOutboundMessage::Message(message) => message,
+                    HostOutboundMessage::Raw(_) => unreachable!("sent a logical message"),
+                    HostOutboundMessage::Close(_) => unreachable!("sent a logical message"),
+                };
+                outbound.retire();
+            }
             Err(mpsc::error::TrySendError::Closed(closed)) => {
                 message = match closed {
                     HostOutboundMessage::Message(message) => message,
@@ -2975,6 +3881,7 @@ async fn run_host(
 
     let (client_tx, mut client_rx) = mpsc::channel::<HostLoopMessage>(128);
     let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(32);
+    let mut route_tasks = tokio::task::JoinSet::<()>::new();
     let mut resync_timer = interval(state.config.resync_interval);
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
 
@@ -3012,6 +3919,7 @@ async fn run_host(
                         state.next_connection_id = state.next_connection_id.wrapping_add(1);
                         state.pending_route_peers.insert(connection_id, addr);
                         spawn_host_accept(
+                            &mut route_tasks,
                             stream,
                             addr,
                             state.config.local_core.clone(),
@@ -3039,6 +3947,7 @@ async fn run_host(
                         state.next_connection_id = state.next_connection_id.wrapping_add(1);
                         state.pending_route_peers.insert(connection_id, addr);
                         spawn_host_transport(
+                            &mut route_tasks,
                             stream,
                             addr,
                             crate::NetworkProtocol::Udp,
@@ -3061,6 +3970,9 @@ async fn run_host(
                         udp_hub.take();
                     }
                 }
+            }
+            completed = route_tasks.join_next(), if !route_tasks.is_empty() => {
+                let _ = completed;
             }
             Some(request) = admission_rx.recv() => {
                 handle_host_admission_request(request, &mut state).await;
@@ -3246,13 +4158,16 @@ async fn run_host(
         }
     }
 
+    client_rx.close();
+    admission_rx.close();
+    for route in state.accepted_routes.values() {
+        route.outbound.retire();
+    }
+    route_tasks.shutdown().await;
     for client_id in state.clients.keys() {
-        let _ = state
-            .event_tx
-            .send(HostEvent::ClientLeft {
-                client_id: *client_id,
-            })
-            .await;
+        let _ = state.event_tx.try_send(HostEvent::ClientLeft {
+            client_id: *client_id,
+        });
     }
     if let Some(hub) = udp_hub {
         let _ = hub.shutdown().await;
@@ -3260,6 +4175,7 @@ async fn run_host(
 }
 
 fn spawn_host_accept(
+    route_tasks: &mut tokio::task::JoinSet<()>,
     stream: TcpStream,
     addr: SocketAddr,
     local_core: lc_engine::ClientCoreControlData,
@@ -3275,6 +4191,7 @@ fn spawn_host_accept(
         return;
     }
     spawn_host_transport(
+        route_tasks,
         stream,
         addr,
         crate::NetworkProtocol::Tcp,
@@ -3286,6 +4203,7 @@ fn spawn_host_accept(
 }
 
 fn spawn_host_transport<S>(
+    route_tasks: &mut tokio::task::JoinSet<()>,
     stream: S,
     addr: SocketAddr,
     protocol: crate::NetworkProtocol,
@@ -3296,7 +4214,7 @@ fn spawn_host_transport<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    route_tasks.spawn(async move {
         let request = crate::ConnectionRequest {
             core: local_core,
             build: CURRENT_GAME_BUILD,
@@ -3864,7 +4782,7 @@ async fn handle_client_message(
     match message {
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
-                let _ = route.outbound.send(ControlMessage::Pong(packet)).await;
+                let _ = route.outbound.try_send(ControlMessage::Pong(packet));
             }
         }
         ControlMessage::Pong(_) => {}
@@ -3905,6 +4823,10 @@ async fn handle_client_message(
         ControlMessage::LeagueRoundResults(_) => {}
         ControlMessage::Address(packet) => {
             handle_received_host_address(client_id, packet, state).await;
+        }
+        ControlMessage::TcpSimOpen(_) => {
+            // Host-side simultaneous-open socket ownership is not part of the
+            // client mesh loop. The typed packet remains accepted/nonfatal.
         }
         ControlMessage::Resource(packet) => {
             let now_seconds = state.resource_epoch.elapsed().as_secs();
@@ -4075,9 +4997,19 @@ fn forward_selects(packet: &crate::ForwardPacket, client_id: i32) -> bool {
 }
 
 fn decentral_control_message(packet: &ControlPacket) -> Result<ControlMessage, TransportError> {
+    decentral_control_message_to_unconnected(packet, std::iter::empty())
+}
+
+fn decentral_control_message_to_unconnected(
+    packet: &ControlPacket,
+    directly_reached: impl IntoIterator<Item = ClientId>,
+) -> Result<ControlMessage, TransportError> {
     Ok(ControlMessage::ForwardRequest(crate::ForwardPacket {
         negative_list: true,
-        clients: Vec::new(),
+        clients: directly_reached
+            .into_iter()
+            .filter_map(|client_id| i32::try_from(client_id).ok())
+            .collect(),
         nested_packet: crate::transport::encode_complete_control_packet(packet)?,
     }))
 }
@@ -4407,13 +5339,12 @@ async fn handle_client_disconnected(
     }
     if is_secondary_route {
         if let Some(post_mortem) = post_mortem {
-            let _ = send_host_message(
+            let _ = try_send_host_message(
                 state,
                 client_id,
                 ConnectionTrafficClass::Message,
                 ControlMessage::PostMortem(post_mortem),
-            )
-            .await;
+            );
         }
         if let Some(reason) = reason {
             let _ = state
@@ -4432,13 +5363,12 @@ async fn handle_client_disconnected(
             client.peer_addr = peer_addr;
         }
         if let Some(post_mortem) = post_mortem {
-            let _ = send_host_message(
+            let _ = try_send_host_message(
                 state,
                 client_id,
                 ConnectionTrafficClass::Message,
                 ControlMessage::PostMortem(post_mortem),
-            )
-            .await;
+            );
         }
         if let Some(reason) = reason {
             let _ = state
@@ -4470,11 +5400,11 @@ async fn handle_client_disconnected(
             .event_tx
             .send(HostEvent::ClientConnectionFailed { client_id })
             .await;
+        let _ = state
+            .event_tx
+            .send(HostEvent::ClientLeft { client_id })
+            .await;
     }
-    let _ = state
-        .event_tx
-        .send(HostEvent::ClientLeft { client_id })
-        .await;
 
     if let Some(client) = disconnected {
         // Socket loss stops waiting for this peer's status acknowledgement,
@@ -5004,6 +5934,40 @@ fn authenticated_single_control(
     Ok(control)
 }
 
+fn control_requires_host_ingress(control: &lc_engine::ControlPacket) -> bool {
+    matches!(
+        control,
+        lc_engine::ControlPacket::ClientJoin(_)
+            | lc_engine::ControlPacket::ClientUpdate(_)
+            | lc_engine::ControlPacket::ClientRemove(_)
+            | lc_engine::ControlPacket::VoteEnd(_)
+            | lc_engine::ControlPacket::EliminatePlayer(_)
+            | lc_engine::ControlPacket::Synchronize(_)
+            | lc_engine::ControlPacket::RemovePlayer(_)
+            | lc_engine::ControlPacket::PlayerInfo(_)
+    )
+}
+
+fn validate_peer_control_packet(packet: &ControlPacket, peer_id: ClientId) -> Result<(), String> {
+    if packet.client_id() != peer_id {
+        return Err(format!(
+            "peer {peer_id} sent a control contribution for client {}",
+            packet.client_id()
+        ));
+    }
+    validate_control_envelope(packet).map_err(|error| format!("invalid control packet: {error}"))?;
+    validate_queued_control_authors(packet)?;
+    let frame = match crate::decode_control_packet(packet) {
+        Ok(frame) => frame,
+        Err(crate::LegacyControlError::UnsupportedPacket(_)) => return Ok(()),
+        Err(error) => return Err(format!("invalid control packet: {error}")),
+    };
+    if frame.controls.iter().any(control_requires_host_ingress) {
+        return Err("peer control contribution contains a host-authority control".to_string());
+    }
+    Ok(())
+}
+
 async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
     if state.pending_sync.is_empty() {
         return;
@@ -5145,7 +6109,9 @@ async fn close_removed_client_connections(client_id: ClientId, state: &mut HostS
         wrong_password: false,
     };
     for (_, outbound) in routes {
-        let _ = outbound.close(reply.clone()).await;
+        if outbound.try_close(reply.clone()).is_err() {
+            outbound.retire();
+        }
     }
     if removed_client.is_some() {
         let _ = state
@@ -5590,7 +6556,7 @@ where
 
 enum ClientRouteCommand {
     Message(ControlMessage),
-    Shutdown,
+    Flush(oneshot::Sender<()>),
 }
 
 #[derive(Clone)]
@@ -5610,6 +6576,9 @@ impl ClientRouteSender {
 }
 
 struct ClientRouteEntry {
+    peer_id: ClientId,
+    initiator_id: ClientId,
+    remote_connection_id: u32,
     protocol: crate::NetworkProtocol,
     peer_addr: Option<SocketAddr>,
     outbound: ClientRouteSender,
@@ -5634,13 +6603,20 @@ enum ClientRouteEvent {
 }
 
 enum ClientRouteRead {
-    Packet(crate::transport::InboundPacket, Option<SocketAddr>),
+    Packet {
+        peer_id: ClientId,
+        packet: crate::transport::InboundPacket,
+        peer_addr: Option<SocketAddr>,
+    },
     PingMeasured {
+        peer_id: ClientId,
         round_trip_ms: i32,
     },
     Disconnected {
+        peer_id: ClientId,
         protocol: crate::NetworkProtocol,
         routes_remaining: bool,
+        post_mortem: Option<crate::PostMortemPacket>,
         reason: Option<String>,
     },
 }
@@ -5653,7 +6629,9 @@ struct ClientRouteManager {
     closed_routes: crate::post_mortem::ClosedConnectionRouter,
     closed_route_peers: BTreeMap<u32, Option<SocketAddr>>,
     pending_post_mortems: BTreeMap<u32, crate::PostMortemPacket>,
-    replay_packets: VecDeque<(crate::transport::InboundPacket, Option<SocketAddr>)>,
+    peer_ping_ms: BTreeMap<ClientId, i32>,
+    replay_packets:
+        VecDeque<(ClientId, crate::transport::InboundPacket, Option<SocketAddr>)>,
 }
 
 impl ClientRouteManager {
@@ -5667,6 +6645,7 @@ impl ClientRouteManager {
             closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
             closed_route_peers: BTreeMap::new(),
             pending_post_mortems: BTreeMap::new(),
+            peer_ping_ms: BTreeMap::new(),
             replay_packets: VecDeque::new(),
         }
     }
@@ -5682,11 +6661,63 @@ impl ClientRouteManager {
     ) where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        self.add_peer_route(
+            HOST_CLIENT_ID,
+            HOST_CLIENT_ID,
+            local_connection_id,
+            remote_connection_id,
+            protocol,
+            peer_addr,
+            transport,
+            liveness,
+        );
+    }
+
+    fn add_peer_route<S>(
+        &mut self,
+        peer_id: ClientId,
+        initiator_id: ClientId,
+        local_connection_id: u32,
+        remote_connection_id: u32,
+        protocol: crate::NetworkProtocol,
+        peer_addr: Option<SocketAddr>,
+        transport: crate::ControlTransport<S>,
+        liveness: ConnectionLivenessState,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let route_rank = |initiator_id: ClientId, local_id: u32, remote_id: u32| {
+            (
+                initiator_id,
+                local_id.min(remote_id),
+                local_id.max(remote_id),
+            )
+        };
+        let new_rank = route_rank(initiator_id, local_connection_id, remote_connection_id);
+        let new_route_wins = !self.routes.iter().any(|(route_id, route)| {
+            route.peer_id == peer_id
+                && route.protocol == protocol
+                && !route.outbound.is_closed()
+                && route_rank(route.initiator_id, *route_id, route.remote_connection_id) <= new_rank
+        });
+        if new_route_wins {
+            for route in self.routes.values() {
+                if route.peer_id == peer_id
+                    && route.protocol == protocol
+                    && !route.outbound.is_closed()
+                {
+                    route.outbound.retire();
+                }
+            }
+        }
         let (sender, outbound_rx) = mpsc::channel(64);
         let (retire, retire_rx) = watch::channel(false);
         let replaced = self.routes.insert(
             local_connection_id,
             ClientRouteEntry {
+                peer_id,
+                initiator_id,
+                remote_connection_id,
                 protocol,
                 peer_addr,
                 outbound: ClientRouteSender { sender, retire },
@@ -5706,12 +6737,25 @@ impl ClientRouteManager {
         ));
         let replaced = self.tasks.insert(local_connection_id, task);
         debug_assert!(replaced.is_none());
+        if !new_route_wins {
+            // Run the deterministic loser through normal retirement so its
+            // inbound counter remains available for PostMortem recovery.
+            self.routes
+                .get(&local_connection_id)
+                .expect("new client route exists")
+                .outbound
+                .retire();
+        }
     }
 
-    fn preferred_route_id(&self, traffic: ConnectionTrafficClass) -> Option<u32> {
+    fn preferred_route_id(
+        &self,
+        peer_id: ClientId,
+        traffic: ConnectionTrafficClass,
+    ) -> Option<u32> {
         self.routes
             .iter()
-            .filter(|(_, route)| !route.outbound.is_closed())
+            .filter(|(_, route)| route.peer_id == peer_id && !route.outbound.is_closed())
             .min_by_key(|(route_id, route)| {
                 let protocol_rank = match (traffic, route.protocol) {
                     (ConnectionTrafficClass::Message, crate::NetworkProtocol::Udp)
@@ -5720,7 +6764,12 @@ impl ClientRouteManager {
                     | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Udp) => 1_u8,
                     _ => 2_u8,
                 };
-                (protocol_rank, **route_id)
+                (
+                    protocol_rank,
+                    route.initiator_id,
+                    (**route_id).min(route.remote_connection_id),
+                    (**route_id).max(route.remote_connection_id),
+                )
             })
             .map(|(route_id, _)| *route_id)
     }
@@ -5732,16 +6781,25 @@ impl ClientRouteManager {
             .retain(|route_id, _| closed_routes.contains(*route_id));
     }
 
-    async fn send_message(&mut self, mut message: ControlMessage) -> Result<(), TransportError> {
+    async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
+        self.try_send_to(HOST_CLIENT_ID, message)
+    }
+
+    #[cfg(test)]
+    async fn send_to(
+        &mut self,
+        peer_id: ClientId,
+        mut message: ControlMessage,
+    ) -> Result<(), TransportError> {
         let traffic = match &message {
             ControlMessage::Resource(packet) => resource_traffic_class(packet),
             _ => ConnectionTrafficClass::Message,
         };
         loop {
-            let Some(route_id) = self.preferred_route_id(traffic) else {
+            let Some(route_id) = self.preferred_route_id(peer_id, traffic) else {
                 return Err(TransportError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
-                    "client has no accepted transport route",
+                    "client has no accepted transport route to peer",
                 )));
             };
             let outbound = self
@@ -5759,15 +6817,208 @@ impl ClientRouteManager {
                 Err(error) => {
                     message = match error.0 {
                         ClientRouteCommand::Message(message) => message,
-                        ClientRouteCommand::Shutdown => unreachable!("sent a message command"),
+                        ClientRouteCommand::Flush(_) => {
+                            unreachable!("send_to only queues message commands")
+                        }
                     };
                 }
             }
         }
     }
 
-    fn recover_post_mortem(&mut self, packet: crate::PostMortemPacket) -> bool {
+    fn try_send_to(
+        &mut self,
+        peer_id: ClientId,
+        mut message: ControlMessage,
+    ) -> Result<(), TransportError> {
+        let traffic = match &message {
+            ControlMessage::Resource(packet) => resource_traffic_class(packet),
+            _ => ConnectionTrafficClass::Message,
+        };
+        loop {
+            let Some(route_id) = self.preferred_route_id(peer_id, traffic) else {
+                return Err(TransportError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "client has no accepted transport route to peer",
+                )));
+            };
+            let outbound = self
+                .routes
+                .get(&route_id)
+                .expect("selected client route exists")
+                .outbound
+                .clone();
+            match outbound
+                .sender
+                .try_send(ClientRouteCommand::Message(message))
+            {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Closed(command)) => {
+                    message = match command {
+                        ClientRouteCommand::Message(message) => message,
+                        ClientRouteCommand::Flush(_) => {
+                            unreachable!("try_send_to only queues message commands")
+                        }
+                    };
+                }
+                Err(mpsc::error::TrySendError::Full(command)) => {
+                    message = match command {
+                        ClientRouteCommand::Message(message) => message,
+                        ClientRouteCommand::Flush(_) => {
+                            unreachable!("try_send_to only queues message commands")
+                        }
+                    };
+                    outbound.retire();
+                }
+            }
+        }
+    }
+
+    async fn flush_to(&mut self, peer_id: ClientId) -> Result<(), TransportError> {
+        loop {
+            let Some(route_id) =
+                self.preferred_route_id(peer_id, ConnectionTrafficClass::Message)
+            else {
+                return Err(TransportError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "client has no accepted transport route to peer",
+                )));
+            };
+            let outbound = self
+                .routes
+                .get(&route_id)
+                .expect("selected client route exists")
+                .outbound
+                .clone();
+            let (completion, completed) = oneshot::channel();
+            match outbound
+                .sender
+                .try_send(ClientRouteCommand::Flush(completion))
+            {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => continue,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    outbound.retire();
+                    return Err(TransportError::Io(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "client route queue is full before graceful flush",
+                    )));
+                }
+            }
+            return match tokio::time::timeout(CLIENT_ROUTE_RETRY_INTERVAL, completed).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err(TransportError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "client route closed before flushing queued messages",
+                ))),
+                Err(_) => {
+                    outbound.retire();
+                    Err(TransportError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "client route timed out while flushing graceful departure",
+                    )))
+                }
+            };
+        }
+    }
+
+    fn mesh_connectivity(
+        &self,
+        peer_id: ClientId,
+        tcp_available: bool,
+        udp_available: bool,
+    ) -> crate::ClientMeshConnectivity {
+        let message_route = self.preferred_route_id(peer_id, ConnectionTrafficClass::Message);
+        let data_route = self.preferred_route_id(peer_id, ConnectionTrafficClass::Data);
+        match (message_route, data_route) {
+            (None, None) => {
+                crate::ClientMeshConnectivity::disconnected(tcp_available, udp_available)
+            }
+            (Some(message_route), Some(data_route)) if message_route != data_route => {
+                crate::ClientMeshConnectivity::distinct_routes(
+                    self.routes[&message_route].protocol,
+                    self.routes[&data_route].protocol,
+                    tcp_available,
+                    udp_available,
+                )
+            }
+            (Some(route), _) | (_, Some(route)) => crate::ClientMeshConnectivity::single_route(
+                self.routes[&route].protocol,
+                tcp_available,
+                udp_available,
+            ),
+        }
+    }
+
+    fn connected_peer_ids(&self) -> BTreeSet<ClientId> {
+        self.routes
+            .values()
+            .filter(|route| !route.outbound.is_closed())
+            .map(|route| route.peer_id)
+            .collect()
+    }
+
+    fn peer_ping_ms(&self, peer_id: ClientId) -> i32 {
+        self.peer_ping_ms.get(&peer_id).copied().unwrap_or(0)
+    }
+
+    fn retire_peer(&mut self, peer_id: ClientId) {
+        let route_ids = self
+            .routes
+            .iter()
+            .filter_map(|(route_id, route)| (route.peer_id == peer_id).then_some(*route_id))
+            .collect::<Vec<_>>();
+        for route_id in route_ids {
+            self.pending_post_mortems.remove(&route_id);
+            if let Some(route) = self.routes.remove(&route_id) {
+                route.outbound.retire();
+            }
+        }
+        self.peer_ping_ms.remove(&peer_id);
+        self.closed_routes.remove_client(peer_id);
+        self.closed_route_peers
+            .retain(|route_id, _| self.closed_routes.contains(*route_id));
+        self.replay_packets
+            .retain(|(replay_peer_id, _, _)| *replay_peer_id != peer_id);
+    }
+
+    fn retire_peer_gracefully(&mut self, peer_id: ClientId) {
+        for route in self.routes.values() {
+            if route.peer_id == peer_id {
+                route.outbound.retire();
+            }
+        }
+        self.peer_ping_ms.remove(&peer_id);
+    }
+
+    fn send_to_connected_peers(&mut self, message: ControlMessage) -> Vec<ClientId> {
+        let peer_ids = self
+            .connected_peer_ids()
+            .into_iter()
+            .filter(|peer_id| *peer_id != HOST_CLIENT_ID)
+            .collect::<Vec<_>>();
+        let mut sent = Vec::new();
+        for peer_id in peer_ids {
+            if self.try_send_to(peer_id, message.clone()).is_ok() {
+                sent.push(peer_id);
+            } else {
+                self.retire_peer_gracefully(peer_id);
+            }
+        }
+        sent
+    }
+
+    fn recover_post_mortem(
+        &mut self,
+        source_peer_id: ClientId,
+        packet: crate::PostMortemPacket,
+    ) -> bool {
         self.expire_closed_routes();
+        if source_peer_id != HOST_CLIENT_ID
+            && self.closed_routes.client_id(packet.connection_id) != Some(source_peer_id)
+        {
+            return false;
+        }
         let Some(replay) = self.closed_routes.recover(&packet) else {
             return false;
         };
@@ -5775,7 +7026,7 @@ impl ClientRouteManager {
         for nested_packet in replay.packets {
             let packet = match crate::transport::parse_complete_packet(&nested_packet) {
                 Ok(Some(ControlMessage::PostMortem(post_mortem))) => {
-                    self.handle_post_mortem(post_mortem);
+                    self.handle_post_mortem(source_peer_id, post_mortem);
                     continue;
                 }
                 Ok(Some(message)) => crate::transport::InboundPacket::Message(message),
@@ -5787,19 +7038,27 @@ impl ClientRouteManager {
                     error,
                 },
             };
-            self.replay_packets.push_back((packet, peer_addr));
+            self.replay_packets
+                .push_back((replay.client_id, packet, peer_addr));
         }
         true
     }
 
-    fn handle_post_mortem(&mut self, post_mortem: crate::PostMortemPacket) {
+    fn handle_post_mortem(
+        &mut self,
+        source_peer_id: ClientId,
+        post_mortem: crate::PostMortemPacket,
+    ) {
         let connection_id = post_mortem.connection_id;
-        if self.recover_post_mortem(post_mortem.clone()) {
+        if self.recover_post_mortem(source_peer_id, post_mortem.clone()) {
             return;
         }
         if let Some(outbound) = self
             .routes
             .get(&connection_id)
+            .filter(|route| {
+                source_peer_id == HOST_CLIENT_ID || route.peer_id == source_peer_id
+            })
             .map(|route| route.outbound.clone())
         {
             self.pending_post_mortems
@@ -5811,7 +7070,11 @@ impl ClientRouteManager {
     async fn read_event(&mut self) -> Result<ClientRouteRead, TransportError> {
         loop {
             if let Some(packet) = self.replay_packets.pop_front() {
-                return Ok(ClientRouteRead::Packet(packet.0, packet.1));
+                return Ok(ClientRouteRead::Packet {
+                    peer_id: packet.0,
+                    packet: packet.1,
+                    peer_addr: packet.2,
+                });
             }
             let Some(event) = self.event_rx.recv().await else {
                 return Err(TransportError::Io(io::Error::new(
@@ -5831,7 +7094,12 @@ impl ClientRouteManager {
                         ControlMessage::PostMortem(post_mortem),
                     ) = packet
                     {
-                        self.handle_post_mortem(post_mortem);
+                        let source_peer_id = self
+                            .routes
+                            .get(&route_id)
+                            .expect("checked route still exists")
+                            .peer_id;
+                        self.handle_post_mortem(source_peer_id, post_mortem);
                         continue;
                     }
                     if matches!(
@@ -5852,14 +7120,33 @@ impl ClientRouteManager {
                         }
                         continue;
                     }
-                    return Ok(ClientRouteRead::Packet(packet, peer_addr));
+                    let peer_id = self
+                        .routes
+                        .get(&route_id)
+                        .expect("checked route still exists")
+                        .peer_id;
+                    return Ok(ClientRouteRead::Packet {
+                        peer_id,
+                        packet,
+                        peer_addr,
+                    });
                 }
                 ClientRouteEvent::Packet { .. } => {}
                 ClientRouteEvent::PingMeasured {
                     route_id,
                     round_trip_ms,
                 } if self.routes.contains_key(&route_id) => {
-                    return Ok(ClientRouteRead::PingMeasured { round_trip_ms });
+                    let peer_id = self.routes[&route_id].peer_id;
+                    if self.preferred_route_id(peer_id, ConnectionTrafficClass::Message)
+                        != Some(route_id)
+                    {
+                        continue;
+                    }
+                    self.peer_ping_ms.insert(peer_id, round_trip_ms);
+                    return Ok(ClientRouteRead::PingMeasured {
+                        peer_id,
+                        round_trip_ms,
+                    });
                 }
                 ClientRouteEvent::PingMeasured { .. } => {}
                 ClientRouteEvent::Disconnected {
@@ -5868,25 +7155,47 @@ impl ClientRouteManager {
                     post_mortem,
                     reason,
                 } => {
+                    self.tasks.remove(&route_id);
                     let Some(route) = self.routes.remove(&route_id) else {
                         continue;
                     };
                     self.closed_routes
-                        .retain(route_id, HOST_CLIENT_ID, next_inbound_packet);
+                        .retain(route_id, route.peer_id, next_inbound_packet);
                     self.closed_route_peers.insert(route_id, route.peer_addr);
                     if let Some(post_mortem) = self.pending_post_mortems.remove(&route_id) {
-                        self.recover_post_mortem(post_mortem);
+                        self.recover_post_mortem(route.peer_id, post_mortem);
                     }
+                    let mut fallback_post_mortem = None;
                     if let Some(post_mortem) = post_mortem {
-                        if !self.routes.is_empty() {
-                            let _ = self
-                                .send_message(ControlMessage::PostMortem(post_mortem))
-                                .await;
+                        if self.preferred_route_id(
+                            route.peer_id,
+                            ConnectionTrafficClass::Message,
+                        ).is_some()
+                        {
+                            if self
+                                .try_send_to(
+                                    route.peer_id,
+                                    ControlMessage::PostMortem(post_mortem.clone()),
+                                )
+                                .is_err()
+                            {
+                                fallback_post_mortem = Some(post_mortem);
+                            }
+                        } else {
+                            fallback_post_mortem = Some(post_mortem);
                         }
                     }
                     return Ok(ClientRouteRead::Disconnected {
+                        peer_id: route.peer_id,
                         protocol: route.protocol,
-                        routes_remaining: !self.routes.is_empty(),
+                        routes_remaining: self
+                            .routes
+                            .values()
+                            .any(|remaining| {
+                                remaining.peer_id == route.peer_id
+                                    && !remaining.outbound.is_closed()
+                            }),
+                        post_mortem: fallback_post_mortem,
                         reason,
                     });
                 }
@@ -5900,7 +7209,9 @@ impl ClientRouteManager {
     ) -> Result<(crate::transport::InboundPacket, Option<SocketAddr>), TransportError> {
         loop {
             match self.read_event().await? {
-                ClientRouteRead::Packet(packet, peer_addr) => return Ok((packet, peer_addr)),
+                ClientRouteRead::Packet {
+                    packet, peer_addr, ..
+                } => return Ok((packet, peer_addr)),
                 ClientRouteRead::PingMeasured { .. } => {}
                 ClientRouteRead::Disconnected {
                     routes_remaining: true,
@@ -5920,7 +7231,9 @@ impl ClientRouteManager {
 
     async fn shutdown(&mut self) {
         // Unblock any route worker waiting to publish into a full event queue
-        // before asking it to drain its ordered outbound commands and stop.
+        // and interrupt a socket write before waiting for the task. Sending a
+        // Shutdown command through the bounded outbound queue can deadlock
+        // behind the write which shutdown is trying to cancel.
         self.event_rx.close();
         let senders = self
             .routes
@@ -5929,7 +7242,7 @@ impl ClientRouteManager {
             .collect::<Vec<_>>();
         self.routes.clear();
         for outbound in senders {
-            let _ = outbound.sender.send(ClientRouteCommand::Shutdown).await;
+            outbound.retire();
         }
         for (_, task) in std::mem::take(&mut self.tasks) {
             let _ = task.await;
@@ -5969,7 +7282,10 @@ async fn run_client_route<S>(
                             break Some(format!("send failed: {error}"));
                         }
                     }
-                    Some(ClientRouteCommand::Shutdown) | None => return,
+                    Some(ClientRouteCommand::Flush(completion)) => {
+                        let _ = completion.send(());
+                    }
+                    None => return,
                 }
             }
             packet = transport.read_packet() => {
@@ -6165,6 +7481,16 @@ async fn run_client_loop_with_addresses<S>(
         shutdown_rx,
         host_peer_addr,
         client_addresses,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        lc_engine::ClientCoreControlData::default(),
+        Arc::new(AtomicU32::new(1)),
+        Vec::new(),
+        None,
+        None,
+        None,
+        0,
+        0,
         resource_state,
         None,
         None,
@@ -6181,6 +7507,16 @@ async fn run_client_loop_with_routes(
     mut shutdown_rx: oneshot::Receiver<()>,
     host_peer_addr: Option<SocketAddr>,
     mut client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
+    mut client_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
+    mut mesh_peers: BTreeMap<i32, crate::ClientMeshPeerState>,
+    local_core: lc_engine::ClientCoreControlData,
+    connection_ids: Arc<AtomicU32>,
+    mesh_interface_ids: Vec<u32>,
+    mut mesh_tcp_listener: Option<TcpListener>,
+    mut mesh_udp_hub: Option<crate::ReliableUdpSessionHub>,
+    mut mesh_puncher_events: Option<mpsc::Receiver<crate::NetpuncherIoEvent>>,
+    mesh_tcp_port: u16,
+    mesh_udp_port: u16,
     mut resource_state: ClientResourceState,
     mut udp_reconnect: Option<ClientUdpReconnect>,
     mut pending_secondary: Option<PendingClientRoute>,
@@ -6194,6 +7530,14 @@ async fn run_client_loop_with_routes(
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
     let mut udp_retry_at = None::<tokio::time::Instant>;
     let mut tcp_retry_at = None::<tokio::time::Instant>;
+    let mesh_epoch = Instant::now();
+    let mut pending_mesh_routes = tokio::task::JoinSet::<MeshRouteCompletion>::new();
+    let mut active_mesh_dials = BTreeSet::<MeshDialKey>::new();
+    let mut pending_tcp_sim_open = BTreeMap::<i32, tokio::net::TcpSocket>::new();
+    let mesh_udp_handle = mesh_udp_hub
+        .as_ref()
+        .map(crate::ReliableUdpSessionHub::handle);
+    let mut mesh_udp_accept_enabled = mesh_udp_hub.is_some();
 
     for (core, path) in std::mem::take(&mut resource_state.initial_complete_resources) {
         let _ = event_tx
@@ -6286,11 +7630,127 @@ async fn run_client_loop_with_routes(
     'outer: loop {
         let has_pending_secondary = pending_secondary.is_some();
         let has_pending_tcp = pending_tcp.is_some();
+        let has_pending_mesh_route = !pending_mesh_routes.is_empty();
+        let mesh_tcp_available = mesh_tcp_listener.is_some();
+        let mesh_udp_available = mesh_udp_accept_enabled;
+        let can_accept_mesh_tcp = mesh_tcp_available
+            && pending_mesh_routes.len() < CLIENT_MESH_PENDING_LIMIT;
+        let can_accept_mesh_udp = mesh_udp_available
+            && pending_mesh_routes.len() < CLIENT_MESH_PENDING_LIMIT;
         let udp_retry_deadline = udp_retry_at.unwrap_or_else(tokio::time::Instant::now);
         let tcp_retry_deadline = tcp_retry_at.unwrap_or_else(tokio::time::Instant::now);
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => break,
+            completed = pending_mesh_routes.join_next(), if has_pending_mesh_route => {
+                match completed {
+                    Some(Ok(completion)) => {
+                        if let Some(dial_key) = completion.dial_key {
+                            active_mesh_dials.remove(&dial_key);
+                        }
+                        if let Ok(route) = completion.result {
+                            if connected_mesh_route_matches_registry(&route, &client_cores) {
+                                add_connected_mesh_route(route, &mut transport);
+                            }
+                        }
+                    }
+                    Some(Err(_)) => {}
+                    None => {}
+                }
+            }
+            puncher_event = receive_optional_puncher_event(&mut mesh_puncher_events) => {
+                let Some(puncher_event) = puncher_event else {
+                    mesh_puncher_events = None;
+                    continue;
+                };
+                if let crate::NetpuncherIoEvent::Connected {
+                    observed_address,
+                    ..
+                } = puncher_event
+                {
+                    let update = mesh_peers
+                        .entry(local_core.client_id)
+                        .or_default()
+                        .add_address_from_puncher(
+                            observed_address,
+                            mesh_udp_port,
+                            mesh_tcp_port,
+                            mesh_epoch.elapsed(),
+                        );
+                    for address in update.announcements {
+                        let addresses = client_addresses
+                            .entry(local_core.client_id)
+                            .or_default();
+                        if !addresses.contains(&address) {
+                            addresses.insert(0, address);
+                        }
+                        let packet = crate::AddressPacket {
+                            client_id: local_core.client_id,
+                            address,
+                        };
+                        let _ = transport
+                            .send_to_connected_peers(ControlMessage::Address(packet));
+                        let _ = transport
+                            .send_message(ControlMessage::Address(packet))
+                            .await;
+                    }
+                }
+            }
+            incoming = accept_optional_mesh_tcp(&mut mesh_tcp_listener), if can_accept_mesh_tcp => {
+                if let Some(Ok((stream, peer_addr))) = incoming {
+                    let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
+                    let mut known_peers = client_cores.clone();
+                    known_peers.remove(&local_core.client_id);
+                    let local_core = local_core.clone();
+                    pending_mesh_routes.spawn(async move {
+                        let result = accept_mesh_tcp_route(
+                            stream,
+                            peer_addr,
+                            local_core,
+                            known_peers,
+                            lc_engine::LegacyCString::default(),
+                            connection_id,
+                        )
+                        .await;
+                        MeshRouteCompletion {
+                            dial_key: None,
+                            result,
+                        }
+                    });
+                }
+            }
+            incoming = accept_optional_mesh_udp(&mut mesh_udp_hub), if can_accept_mesh_udp => {
+                match incoming {
+                    Some(Ok(stream)) => {
+                        let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
+                        let mut known_peers = client_cores.clone();
+                        known_peers.remove(&local_core.client_id);
+                        let local_core = local_core.clone();
+                        pending_mesh_routes.spawn(async move {
+                            let result = accept_mesh_udp_route(
+                                stream,
+                                local_core,
+                                known_peers,
+                                lc_engine::LegacyCString::default(),
+                                connection_id,
+                            )
+                            .await;
+                            MeshRouteCompletion {
+                                dial_key: None,
+                                result,
+                            }
+                        });
+                    }
+                    Some(Err(_)) => {
+                        mesh_udp_accept_enabled = false;
+                        udp_reconnect = None;
+                        if let Some(task) = pending_secondary.take() {
+                            task.abort();
+                        }
+                    }
+                    None => {}
+                }
+            }
             route = await_pending_client_route(&mut pending_secondary), if has_pending_secondary => {
                 pending_secondary.take();
                 if let Some(route) = route {
@@ -6360,13 +7820,21 @@ async fn run_client_loop_with_routes(
                             .await;
                         let forward_result = match raw_result {
                             Ok(()) => {
+                                let direct_peers = transport
+                                    .send_to_connected_peers(ControlMessage::ReadyCheck(packet));
                                 let nested_packet =
                                     crate::transport::encode_complete_ready_check_packet(packet);
+                                let mut excluded = vec![resource_state.host_peer_id];
+                                excluded.extend(
+                                    direct_peers
+                                        .into_iter()
+                                        .filter_map(|peer_id| i32::try_from(peer_id).ok()),
+                                );
                                 transport
                                     .send_message(ControlMessage::ForwardRequest(
                                         crate::ForwardPacket {
                                             negative_list: true,
-                                            clients: vec![resource_state.host_peer_id],
+                                            clients: excluded,
                                             nested_packet,
                                         },
                                     ))
@@ -6412,7 +7880,9 @@ async fn run_client_loop_with_routes(
                     ClientCommand::SubmitControl(packet) => {
                         let clone = packet.clone();
                         let message = if resource_state.control.mode == 0 {
-                            match decentral_control_message(&packet) {
+                            let direct_peers = transport
+                                .send_to_connected_peers(ControlMessage::Control(packet.clone()));
+                            match decentral_control_message_to_unconnected(&packet, direct_peers) {
                                 Ok(message) => message,
                                 Err(error) => {
                                     let _ = event_tx
@@ -6464,9 +7934,17 @@ async fn run_client_loop_with_routes(
                             delivery,
                             ControlDelivery::Direct | ControlDelivery::Private
                         ) {
+                            let direct_peers = transport
+                                .send_to_connected_peers(ControlMessage::Packet {
+                                    delivery,
+                                    data: data.clone(),
+                                });
                             ControlMessage::ForwardRequest(crate::ForwardPacket {
                                 negative_list: true,
-                                clients: Vec::new(),
+                                clients: direct_peers
+                                    .into_iter()
+                                    .filter_map(|peer_id| i32::try_from(peer_id).ok())
+                                    .collect(),
                                 nested_packet:
                                     crate::transport::encode_complete_control_delivery_packet(
                                         delivery, &data,
@@ -6524,7 +8002,7 @@ async fn run_client_loop_with_routes(
                         let _ = completion.send(result);
                     }
                     ClientCommand::GracefulPart { completion } => {
-                        let result = transport
+                        let result = match transport
                             .send_message(ControlMessage::ConnectionReply(
                                 crate::ConnectionReply {
                                     ok: false,
@@ -6536,15 +8014,122 @@ async fn run_client_loop_with_routes(
                                 },
                             ))
                             .await
-                            .map_err(|error| error.to_string());
+                        {
+                            Ok(()) => transport.flush_to(HOST_CLIENT_ID).await,
+                            Err(error) => Err(error),
+                        }
+                        .map_err(|error| error.to_string());
                         let _ = completion.send(result);
                         break;
+                    }
+                    #[cfg(test)]
+                    ClientCommand::InspectMeshPeers { completion } => {
+                        let peers = transport
+                            .connected_peer_ids()
+                            .into_iter()
+                            .filter(|peer_id| *peer_id != HOST_CLIENT_ID)
+                            .collect();
+                        let _ = completion.send(peers);
+                    }
+                    #[cfg(test)]
+                    ClientCommand::InspectMeshAddressCount {
+                        peer_id,
+                        completion,
+                    } => {
+                        let count = mesh_peers
+                            .get(&peer_id)
+                            .map_or(0, |peer| peer.addresses().len());
+                        let _ = completion.send(count);
+                    }
+                    #[cfg(test)]
+                    ClientCommand::ForceMeshAttempt {
+                        peer_id,
+                        completion,
+                    } => {
+                        if let (Ok(peer_id_wire), Some(peer)) =
+                            (ClientId::try_from(peer_id), mesh_peers.get_mut(&peer_id))
+                        {
+                            let connectivity = transport.mesh_connectivity(
+                                peer_id_wire,
+                                mesh_tcp_available,
+                                mesh_udp_available,
+                            );
+                            let now = peer.next_attempt_at().unwrap_or_else(|| mesh_epoch.elapsed());
+                            if let crate::ClientMeshConnectDecision::Dial(attempt) =
+                                peer.do_connect_attempt(now, connectivity)
+                            {
+                                spawn_mesh_dial(
+                                    &mut pending_mesh_routes,
+                                    &mut active_mesh_dials,
+                                    peer_id,
+                                    attempt,
+                                    &client_cores,
+                                    &local_core,
+                                    &connection_ids,
+                                    &mesh_interface_ids,
+                                    mesh_udp_handle.as_ref(),
+                                );
+                            }
+                        }
+                        let _ = completion.send(());
                     }
                     ClientCommand::Shutdown => break,
                 }
             }
             _ = resource_timer.tick() => {
                 transport.expire_closed_routes();
+                let mesh_now = mesh_epoch.elapsed();
+                let due_peers = mesh_peers
+                    .iter()
+                    .filter_map(|(peer_id, peer)| {
+                        (*peer_id != local_core.client_id
+                            && *peer_id != resource_state.host_peer_id
+                            && peer.scheduled_attempt_due(mesh_now))
+                        .then_some(*peer_id)
+                    })
+                    .collect::<Vec<_>>();
+                for peer_id in due_peers {
+                    let Ok(peer_id_wire) = ClientId::try_from(peer_id) else {
+                        continue;
+                    };
+                    let connectivity = transport.mesh_connectivity(
+                        peer_id_wire,
+                        mesh_tcp_available,
+                        mesh_udp_available,
+                    );
+                    let attempt = mesh_peers.get_mut(&peer_id).and_then(|peer| {
+                        match peer.do_connect_attempt(mesh_now, connectivity) {
+                            crate::ClientMeshConnectDecision::Dial(attempt) => Some(attempt),
+                            crate::ClientMeshConnectDecision::NotDue { .. }
+                            | crate::ClientMeshConnectDecision::Backoff { .. } => None,
+                        }
+                    });
+                    if let Some(attempt) = attempt {
+                        let local_puncher_address = mesh_peers
+                            .get(&local_core.client_id)
+                            .and_then(crate::ClientMeshPeerState::ipv6_address_from_puncher);
+                        maybe_initiate_tcp_simultaneous_open(
+                            &mut pending_tcp_sim_open,
+                            pending_mesh_routes.len(),
+                            &mut transport,
+                            &local_core,
+                            peer_id,
+                            attempt,
+                            local_puncher_address,
+                        );
+                        spawn_mesh_dial(
+                            &mut pending_mesh_routes,
+                            &mut active_mesh_dials,
+                            peer_id,
+                            attempt,
+                            &client_cores,
+                            &local_core,
+                            &connection_ids,
+                            &mesh_interface_ids,
+                            mesh_udp_handle.as_ref(),
+                        );
+                    }
+                }
                 let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
                 if let Some(backend) = resource_state.backend.as_mut() {
                     let mut random = resource_safe_random;
@@ -6595,22 +8180,31 @@ async fn run_client_loop_with_routes(
                 }
             }
             route_event = transport.read_event() => {
-                let (packet, ingress_peer_addr) = match route_event {
-                    Ok(ClientRouteRead::Packet(packet, ingress_peer_addr)) => {
-                        (packet, ingress_peer_addr)
-                    }
-                    Ok(ClientRouteRead::PingMeasured { round_trip_ms }) => {
-                        let _ = event_tx
-                            .send(ClientEvent::PingMeasured { round_trip_ms })
-                            .await;
+                let (ingress_peer_id, packet, ingress_peer_addr) = match route_event {
+                    Ok(ClientRouteRead::Packet {
+                        peer_id,
+                        packet,
+                        peer_addr,
+                    }) => (peer_id, packet, peer_addr),
+                    Ok(ClientRouteRead::PingMeasured {
+                        peer_id,
+                        round_trip_ms,
+                    }) => {
+                        if peer_id == HOST_CLIENT_ID {
+                            let _ = event_tx
+                                .send(ClientEvent::PingMeasured { round_trip_ms })
+                                .await;
+                        }
                         continue;
                     }
                     Ok(ClientRouteRead::Disconnected {
+                        peer_id,
                         protocol,
                         routes_remaining,
+                        post_mortem,
                         reason,
                     }) => {
-                        if !routes_remaining {
+                        if peer_id == HOST_CLIENT_ID && !routes_remaining {
                             let _ = event_tx
                                 .send(ClientEvent::Disconnected {
                                     reason: Some(reason.unwrap_or_else(|| {
@@ -6620,14 +8214,38 @@ async fn run_client_loop_with_routes(
                                 .await;
                             break;
                         }
-                        match protocol {
-                            crate::NetworkProtocol::Udp if pending_secondary.is_none() => {
+                        if let Some(post_mortem) = post_mortem {
+                            if peer_id != HOST_CLIENT_ID {
+                                if let Ok(peer_id) = i32::try_from(peer_id) {
+                                    if let Ok(nested_packet) =
+                                        crate::transport::encode_complete_post_mortem_packet(
+                                            &post_mortem,
+                                        )
+                                    {
+                                        let _ = transport.try_send_to(
+                                            HOST_CLIENT_ID,
+                                            ControlMessage::ForwardRequest(
+                                                crate::ForwardPacket {
+                                                    negative_list: false,
+                                                    clients: vec![peer_id],
+                                                    nested_packet,
+                                                },
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        match (peer_id, protocol) {
+                            (HOST_CLIENT_ID, crate::NetworkProtocol::Udp)
+                                if pending_secondary.is_none() => {
                                 if let Some(reconnect) = udp_reconnect.as_mut() {
                                     pending_secondary = Some(reconnect.start());
                                     udp_retry_at = None;
                                 }
                             }
-                            crate::NetworkProtocol::Tcp if pending_tcp.is_none() => {
+                            (HOST_CLIENT_ID, crate::NetworkProtocol::Tcp)
+                                if pending_tcp.is_none() => {
                                 if let Some(reconnect) = tcp_reconnect.as_mut() {
                                     pending_tcp = Some(reconnect.start());
                                     tcp_retry_at = None;
@@ -6660,11 +8278,15 @@ async fn run_client_loop_with_routes(
                         error,
                     } => {
                         let _ = packet_type;
+                        if ingress_peer_id != HOST_CLIENT_ID {
+                            transport.retire_peer(ingress_peer_id);
+                            continue;
+                        }
                         Err(error)
                     }
                 };
                 let result = match result {
-                    Ok(ControlMessage::Forward(packet)) => {
+                    Ok(ControlMessage::Forward(packet)) if ingress_peer_id == HOST_CLIENT_ID => {
                         let local_client_id = resource_state.catalog.local_client_id();
                         if !forward_selects(&packet, local_client_id) {
                             continue;
@@ -6672,7 +8294,8 @@ async fn run_client_loop_with_routes(
                         match crate::transport::parse_complete_packet(&packet.nested_packet) {
                             Ok(Some(message)) => Ok(message),
                             Ok(None) => {
-                                let packet_type = packet.nested_packet[0];
+                                let packet_type =
+                                    packet.nested_packet.first().copied().unwrap_or_default();
                                 let _ = event_tx
                                     .send(ClientEvent::UnhandledPacket { packet_type })
                                     .await;
@@ -6698,6 +8321,8 @@ async fn run_client_loop_with_routes(
                     // Pong packets. A nested forwarded Pong has no route-local
                     // round trip to measure here.
                     Ok(ControlMessage::Pong(_)) => {}
+                    Ok(ControlMessage::ConnectionRequest(_))
+                        if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::ConnectionRequest(_)) => {
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
@@ -6706,6 +8331,13 @@ async fn run_client_loop_with_routes(
                             .await;
                         break;
                     }
+                    Ok(ControlMessage::ConnectionReply(reply))
+                        if ingress_peer_id != HOST_CLIENT_ID && !reply.ok =>
+                    {
+                        transport.retire_peer(ingress_peer_id);
+                    }
+                    Ok(ControlMessage::ConnectionReply(_))
+                        if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
@@ -6724,6 +8356,12 @@ async fn run_client_loop_with_routes(
                             .await;
                         break;
                     }
+                    Ok(ControlMessage::Forward(_)) if ingress_peer_id != HOST_CLIENT_ID => {
+                        // PID_Fwd is a host routing envelope. A direct peer
+                        // cannot nominate another route's source.
+                    }
+                    Ok(ControlMessage::ForwardRequest(_))
+                        if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::ForwardRequest(_)) | Ok(ControlMessage::Forward(_)) => {
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
@@ -6736,11 +8374,15 @@ async fn run_client_loop_with_routes(
                     }
                     // ClientRouteManager consumes and replays every matching
                     // post-mortem envelope before this logical packet loop.
-                    Ok(ControlMessage::PostMortem(_)) => {}
+                    Ok(ControlMessage::PostMortem(packet)) => {
+                        transport.handle_post_mortem(HOST_CLIENT_ID, packet);
+                    }
                     // Admission consumes the only valid GS_Init JoinData.
                     // C++ merely logs/ignores later packets rather than
                     // disconnecting (src/C4Network2.cpp:1574-1580).
                     Ok(ControlMessage::JoinData(_)) => {}
+                    Ok(ControlMessage::LeagueRoundResults(_))
+                        if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::LeagueRoundResults(packet)) => {
                         let _ = event_tx
                             .send(ClientEvent::LeagueRoundResults { packet })
@@ -6754,14 +8396,65 @@ async fn run_client_loop_with_routes(
                             .or(host_peer_addr)
                             .map(|peer| packet.announcement_for_peer(peer))
                             .unwrap_or(packet);
+                        let mesh_now = mesh_epoch.elapsed();
+                        let Ok(peer_id_wire) = ClientId::try_from(packet.client_id) else {
+                            continue;
+                        };
+                        let connectivity = transport.mesh_connectivity(
+                            peer_id_wire,
+                            mesh_tcp_available,
+                            mesh_udp_available,
+                        );
+                        let mesh_peer = mesh_peers
+                            .entry(packet.client_id)
+                            .or_insert_with(crate::ClientMeshPeerState::new);
+                        mesh_peer.add_address(packet.address, mesh_now);
+                        let attempt = if packet.client_id != local_core.client_id
+                            && packet.client_id != resource_state.host_peer_id
+                        {
+                            match mesh_peer.do_connect_attempt(mesh_now, connectivity) {
+                                crate::ClientMeshConnectDecision::Dial(attempt) => Some(attempt),
+                                crate::ClientMeshConnectDecision::NotDue { .. }
+                                | crate::ClientMeshConnectDecision::Backoff { .. } => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(attempt) = attempt {
+                            let local_puncher_address = mesh_peers
+                                .get(&local_core.client_id)
+                                .and_then(crate::ClientMeshPeerState::ipv6_address_from_puncher);
+                            maybe_initiate_tcp_simultaneous_open(
+                                &mut pending_tcp_sim_open,
+                                pending_mesh_routes.len(),
+                                &mut transport,
+                                &local_core,
+                                packet.client_id,
+                                attempt,
+                                local_puncher_address,
+                            );
+                            spawn_mesh_dial(
+                                &mut pending_mesh_routes,
+                                &mut active_mesh_dials,
+                                packet.client_id,
+                                attempt,
+                                &client_cores,
+                                &local_core,
+                                &connection_ids,
+                                &mesh_interface_ids,
+                                mesh_udp_handle.as_ref(),
+                            );
+                        }
                         let insertion = crate::append_received_address(
                             client_addresses.entry(packet.client_id).or_default(),
                             packet.address,
                         );
                         if matches!(insertion, crate::AddressInsertion::Added { .. }) {
-                            // A newly learned address is echoed over the
-                            // preferred message route; duplicate suppression
-                            // keeps the logical address set stable.
+                            // C++ re-announces a newly learned address to each
+                            // directly connected logical client. Duplicate
+                            // suppression keeps every ordered set stable.
+                            let _ = transport
+                                .send_to_connected_peers(ControlMessage::Address(packet));
                             if let Err(error) = transport
                                 .send_message(ControlMessage::Address(packet))
                                 .await
@@ -6776,6 +8469,104 @@ async fn run_client_loop_with_routes(
                                 break;
                             }
                         }
+                    }
+                    Ok(ControlMessage::TcpSimOpen(packet)) => {
+                        if packet.client_id == local_core.client_id
+                            || !matches!(packet.address.protocol, crate::NetworkProtocol::Tcp)
+                        {
+                            continue;
+                        }
+                        let Ok(peer_id) = ClientId::try_from(packet.client_id) else {
+                            continue;
+                        };
+                        if ingress_peer_id != HOST_CLIENT_ID && ingress_peer_id != peer_id {
+                            transport.retire_peer(ingress_peer_id);
+                            continue;
+                        }
+                        let Some(peer_core) = client_cores.get(&packet.client_id).cloned() else {
+                            continue;
+                        };
+                        let has_bound_socket =
+                            pending_tcp_sim_open.contains_key(&packet.client_id);
+                        if pending_mesh_routes.len() + pending_tcp_sim_open.len()
+                            >= CLIENT_MESH_PENDING_LIMIT
+                            && !has_bound_socket
+                        {
+                            continue;
+                        }
+
+                        let (socket, initiator_id, delay) = if let Some(socket) =
+                            pending_tcp_sim_open.remove(&packet.client_id)
+                        {
+                            (
+                                socket,
+                                ClientId::try_from(local_core.client_id)
+                                    .unwrap_or(ClientId::MAX),
+                                Duration::ZERO,
+                            )
+                        } else {
+                            let local_puncher_address = mesh_peers
+                                .get(&local_core.client_id)
+                                .and_then(crate::ClientMeshPeerState::ipv6_address_from_puncher);
+                            let Some(local_puncher_address) = local_puncher_address else {
+                                continue;
+                            };
+                            let Ok((socket, bound_address)) =
+                                bind_tcp_sim_open_socket(local_puncher_address)
+                            else {
+                                continue;
+                            };
+                            pending_tcp_sim_open.insert(packet.client_id, socket);
+                            let response = crate::TcpSimOpenPacket {
+                                client_id: local_core.client_id,
+                                address: crate::NetworkAddress::new(
+                                    crate::NetworkProtocol::Tcp,
+                                    bound_address,
+                                ),
+                            };
+                            if transport
+                                .try_send_to(peer_id, ControlMessage::TcpSimOpen(response))
+                                .is_err()
+                            {
+                                continue;
+                            }
+                            let socket = pending_tcp_sim_open
+                                .remove(&packet.client_id)
+                                .expect("successful response retains bound socket");
+                            let delay_ms = (transport.peer_ping_ms(peer_id) / 2).clamp(0, 10);
+                            (
+                                socket,
+                                peer_id,
+                                Duration::from_millis(delay_ms as u64),
+                            )
+                        };
+                        let connection_id =
+                            connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
+                        let endpoint = packet.address.endpoint;
+                        let local_core = local_core.clone();
+                        pending_mesh_routes.spawn(async move {
+                            let result = connect_mesh_tcp_socket_route(
+                                peer_id,
+                                initiator_id,
+                                socket,
+                                endpoint,
+                                local_core,
+                                peer_core,
+                                lc_engine::LegacyCString::default(),
+                                connection_id,
+                                delay,
+                            )
+                            .await;
+                            MeshRouteCompletion {
+                                dial_key: None,
+                                result,
+                            }
+                        });
+                    }
+                    Ok(ControlMessage::Resource(_)) if ingress_peer_id != HOST_CLIENT_ID => {
+                        // Peer resource serving/fanout is a separate protocol
+                        // path. Do not attribute a peer packet to the host's
+                        // resource catalog.
                     }
                     Ok(ControlMessage::Resource(packet)) => {
                         let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
@@ -6834,9 +8625,11 @@ async fn run_client_loop_with_routes(
                             }
                         }
                     }
+                    Ok(ControlMessage::Status(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::Status(status)) => {
                         let _ = event_tx.send(ClientEvent::Status(status)).await;
                     }
+                    Ok(ControlMessage::StatusAck(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::StatusAck(status)) => {
                         if status.state == NETWORK_STATE_GO {
                             let current_tick = Tick::try_from(status.target_tick).unwrap_or_else(
@@ -6909,6 +8702,7 @@ async fn run_client_loop_with_routes(
                         }
                         let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
                     }
+                    Ok(ControlMessage::LobbyCountdown(_)) if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::LobbyCountdown(packet)) => {
                         let _ = event_tx
                             .send(ClientEvent::LobbyCountdown { packet })
@@ -6927,6 +8721,12 @@ async fn run_client_loop_with_routes(
                         // (src/C4Network2.cpp:982-991).
                     }
                     Ok(ControlMessage::Control(packet)) => {
+                        if ingress_peer_id != HOST_CLIENT_ID
+                            && validate_peer_control_packet(&packet, ingress_peer_id).is_err()
+                        {
+                            transport.retire_peer(ingress_peer_id);
+                            continue;
+                        }
                         let key = (packet.client_id(), packet.tick());
                         if !received_controls.insert(key) {
                             continue;
@@ -6961,10 +8761,27 @@ async fn run_client_loop_with_routes(
                         // (src/C4Network2Players.cpp:405-411).
                     }
                     Ok(ControlMessage::Packet { delivery, data }) => {
+                        let authenticated_peer_control = if ingress_peer_id != HOST_CLIENT_ID {
+                            let Ok(expected_author) = i32::try_from(ingress_peer_id) else {
+                                continue;
+                            };
+                            match authenticated_single_control(&data, expected_author) {
+                                Ok(control) if !control_requires_host_ingress(&control) => {
+                                    Some(control)
+                                }
+                                Err(_) => continue,
+                                Ok(_) => continue,
+                            }
+                        } else {
+                            None
+                        };
                         match delivery {
                             ControlDelivery::Direct | ControlDelivery::Private => {
                                 let mut local_data = data;
-                                if let Ok(mut control) = decode_control_entry_payload(&local_data) {
+                                let decoded = authenticated_peer_control
+                                    .map(Ok)
+                                    .unwrap_or_else(|| decode_control_entry_payload(&local_data));
+                                if let Ok(mut control) = decoded {
                                     let local_sources =
                                         if let lc_engine::ControlPacket::PlayerInfo(info) =
                                             &mut control
@@ -7005,12 +8822,23 @@ async fn run_client_loop_with_routes(
                                             break;
                                         }
                                     };
-                                    apply_client_membership(
+                                    let removed_peer = apply_client_membership(
                                         &mut client_addresses,
+                                        &mut client_cores,
+                                        &mut mesh_peers,
                                         &mut resource_state.catalog,
                                         resource_state.backend.as_mut(),
                                         &control,
                                     );
+                                    if let Some(peer_id) = removed_peer {
+                                        transport.retire_peer(peer_id);
+                                        if let Ok(peer_id) = i32::try_from(peer_id) {
+                                            pending_tcp_sim_open.remove(&peer_id);
+                                            active_mesh_dials.retain(|(active_peer, _, _)| {
+                                                *active_peer != peer_id
+                                            });
+                                        }
+                                    }
                                     for packet in ready {
                                         let _ = event_tx
                                             .send(ClientEvent::Ready { packet })
@@ -7027,7 +8855,10 @@ async fn run_client_loop_with_routes(
                             ControlDelivery::Queue
                             | ControlDelivery::Sync
                             | ControlDelivery::Decide => {
-                                match decode_control_entry_payload(&data) {
+                                let decoded = authenticated_peer_control
+                                    .map(Ok)
+                                    .unwrap_or_else(|| decode_control_entry_payload(&data));
+                                match decoded {
                                     Ok(control) => pending_sync.push(control),
                                     Err(error) => {
                                         let _ = event_tx
@@ -7043,6 +8874,7 @@ async fn run_client_loop_with_routes(
                             }
                         }
                     }
+                    Ok(ControlMessage::ExecSync { .. }) if ingress_peer_id != HOST_CLIENT_ID => {}
                     Ok(ControlMessage::ExecSync { control_tick }) => {
                         if pending_sync.is_empty() {
                             // Temporary compatibility for the session's
@@ -7068,12 +8900,23 @@ async fn run_client_loop_with_routes(
                                         break 'outer;
                                     }
                                 };
-                                apply_client_membership(
+                                let removed_peer = apply_client_membership(
                                     &mut client_addresses,
+                                    &mut client_cores,
+                                    &mut mesh_peers,
                                     &mut resource_state.catalog,
                                     resource_state.backend.as_mut(),
                                     control,
                                 );
+                                if let Some(peer_id) = removed_peer {
+                                    transport.retire_peer(peer_id);
+                                    if let Ok(peer_id) = i32::try_from(peer_id) {
+                                        pending_tcp_sim_open.remove(&peer_id);
+                                        active_mesh_dials.retain(|(active_peer, _, _)| {
+                                            *active_peer != peer_id
+                                        });
+                                    }
+                                }
                                 for packet in ready {
                                     let _ = event_tx
                                         .send(ClientEvent::Ready { packet })
@@ -7090,10 +8933,28 @@ async fn run_client_loop_with_routes(
                     }
                     Ok(ControlMessage::Request { from_tick }) => {
                         let resend = backlog.fulfill_request(from_tick);
+                        if ingress_peer_id != HOST_CLIENT_ID {
+                            let mut failed = false;
+                            for packet in resend {
+                                if transport
+                                    .try_send_to(
+                                        ingress_peer_id,
+                                        ControlMessage::Control(packet),
+                                    )
+                                    .is_err()
+                                {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                            if failed {
+                                transport.retire_peer_gracefully(ingress_peer_id);
+                            }
+                            continue;
+                        }
                         for packet in resend {
                             if let Err(error) = transport
-                                .send_message(ControlMessage::Control(packet))
-                                .await
+                                .try_send_to(ingress_peer_id, ControlMessage::Control(packet))
                             {
                                 let _ = event_tx
                                     .send(ClientEvent::Disconnected {
@@ -7103,6 +8964,9 @@ async fn run_client_loop_with_routes(
                                 break 'outer;
                             }
                         }
+                    }
+                    Err(_) if ingress_peer_id != HOST_CLIENT_ID => {
+                        transport.retire_peer(ingress_peer_id);
                     }
                     Err(error) => {
                         let _ = event_tx
@@ -7124,7 +8988,12 @@ async fn run_client_loop_with_routes(
         task.abort();
         let _ = task.await;
     }
+    pending_mesh_routes.shutdown().await;
     transport.shutdown().await;
+    drop(mesh_puncher_events.take());
+    if let Some(hub) = mesh_udp_hub.take() {
+        let _ = hub.shutdown().await;
+    }
 }
 
 async fn dispatch_client_resource_actions(
@@ -7200,22 +9069,36 @@ async fn dispatch_client_resource_events(
 
 fn apply_client_membership(
     client_addresses: &mut BTreeMap<i32, Vec<crate::NetworkAddress>>,
+    client_cores: &mut BTreeMap<i32, lc_engine::ClientCoreControlData>,
+    mesh_peers: &mut BTreeMap<i32, crate::ClientMeshPeerState>,
     resource_catalog: &mut crate::ResourceCatalog,
     resource_backend: Option<&mut crate::ResourceTransferBackend>,
     control: &lc_engine::ControlPacket,
-) {
+) -> Option<ClientId> {
     match control {
-        lc_engine::ControlPacket::ClientJoin(join) => {
+        lc_engine::ControlPacket::ClientJoin(join)
+            if join.by_client == HOST_CLIENT_ID as i32 =>
+        {
             client_addresses.entry(join.core.client_id).or_default();
+            mesh_peers
+                .entry(join.core.client_id)
+                .or_insert_with(crate::ClientMeshPeerState::new);
+            client_cores.insert(join.core.client_id, join.core.clone());
+            None
         }
-        lc_engine::ControlPacket::ClientRemove(remove) => {
+        lc_engine::ControlPacket::ClientRemove(remove)
+            if remove.by_client == HOST_CLIENT_ID as i32 =>
+        {
             client_addresses.remove(&remove.client_id);
+            client_cores.remove(&remove.client_id);
+            mesh_peers.remove(&remove.client_id);
             resource_catalog.remove_at_client(remove.client_id);
             if let Some(backend) = resource_backend {
                 backend.remove_at_client(remove.client_id);
             }
+            ClientId::try_from(remove.client_id).ok()
         }
-        _ => {}
+        _ => None,
     }
 }
 
@@ -7243,6 +9126,72 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    #[tokio::test]
+    async fn client_mesh_warms_puncher_and_sends_family_server_request_before_host_join() {
+        let mut puncher = crate::ReliableUdpSessionHub::bind(SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        )))
+        .unwrap();
+        let puncher_address = puncher.local_addr();
+        let config = ClientConfig::new("Client", ParticipantKind::Player)
+            .with_mesh_udp_bind_address(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .with_mesh_punchers([ClientMeshPuncherConfig {
+                address: puncher_address,
+                game_id: 0x1122_3344,
+            }]);
+
+        let mut prepared = prepare_client_mesh(&config, false).await.unwrap();
+        let local_address = prepared.udp_hub.as_ref().unwrap().local_addr();
+        let mut puncher_stream = timeout(EVENT_WAIT, puncher.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut header = [0_u8; 5];
+        timeout(EVENT_WAIT, puncher_stream.read_exact(&mut header))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(header[0], 0xff);
+        let payload_len = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+        let mut payload = vec![0_u8; payload_len];
+        puncher_stream.read_exact(&mut payload).await.unwrap();
+        assert_eq!(
+            payload,
+            crate::encode_netpuncher_packet(&crate::NetpuncherPacket::ServerRequest {
+                id: 0x1122_3344,
+            })
+        );
+        assert_eq!(
+            prepared
+                .puncher_init
+                .lock()
+                .expect("puncher initialization lock")
+                .observations
+                .as_slice(),
+            [local_address]
+        );
+        assert_eq!(
+            timeout(
+                EVENT_WAIT,
+                prepared.puncher_events.as_mut().unwrap().recv()
+            )
+            .await
+            .unwrap(),
+            Some(crate::NetpuncherIoEvent::Connected {
+                family: crate::NetpuncherAddressFamily::Ipv4,
+                puncher_address,
+                observed_address: local_address,
+            })
+        );
+
+        drop(puncher_stream);
+        if let Some(hub) = prepared.udp_hub.take() {
+            hub.shutdown().await.unwrap();
+        }
+        puncher.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8622,6 +10571,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_route_manager_peer_try_send_never_waits_on_a_full_route_queue() {
+        let (client_stream, _peer_stream) = duplex(1);
+        let mut routes = ClientRouteManager::new();
+        routes.add_peer_route(
+            7,
+            7,
+            1,
+            11,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(client_stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        let message = ControlMessage::Packet {
+            delivery: ControlDelivery::Direct,
+            data: vec![0x55; 1_024],
+        };
+
+        let error = (0..128)
+            .find_map(|_| routes.try_send_to(7, message.clone()).err())
+            .expect("bounded peer route queue never reported backpressure");
+        assert!(matches!(
+            error,
+            TransportError::Io(ref error) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert!(routes.routes[&1].outbound.is_closed());
+
+        timeout(EVENT_WAIT, routes.shutdown())
+            .await
+            .expect("backpressured peer route did not shut down");
+    }
+
+    #[tokio::test]
+    async fn client_route_manager_retires_the_deterministic_crossed_route_loser() {
+        let (winner_stream, winner_peer) = duplex(1_024);
+        let mut winner_peer = crate::ControlTransport::new(winner_peer);
+        let (loser_stream, _loser_peer) = duplex(1_024);
+        let mut routes = ClientRouteManager::new();
+        routes.add_peer_route(
+            9,
+            7,
+            10,
+            20,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(winner_stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        routes.add_peer_route(
+            9,
+            8,
+            11,
+            21,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(loser_stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, routes.read_event()).await.unwrap().unwrap(),
+            ClientRouteRead::Disconnected {
+                peer_id: 9,
+                protocol: crate::NetworkProtocol::Tcp,
+                routes_remaining: true,
+                ..
+            }
+        ));
+        assert!(routes.closed_routes.contains(11));
+        let countdown = crate::LobbyCountdownPacket::new(3);
+        routes
+            .send_to(9, ControlMessage::LobbyCountdown(countdown))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(EVENT_WAIT, winner_peer.read_message())
+                .await
+                .unwrap()
+                .unwrap(),
+            ControlMessage::LobbyCountdown(countdown)
+        );
+
+        routes.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn last_peer_route_disconnect_surfaces_post_mortem_for_host_fallback() {
+        let (client_stream, peer_stream) = duplex(2_048);
+        let mut peer = crate::ControlTransport::new(peer_stream);
+        let mut routes = ClientRouteManager::new();
+        routes.add_peer_route(
+            9,
+            9,
+            10,
+            20,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(client_stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        let countdown = crate::LobbyCountdownPacket::new(4);
+        routes
+            .send_to(9, ControlMessage::LobbyCountdown(countdown))
+            .await
+            .unwrap();
+        assert_eq!(peer.read_message().await.unwrap(), ControlMessage::LobbyCountdown(countdown));
+        drop(peer);
+
+        let event = timeout(EVENT_WAIT, routes.read_event()).await.unwrap().unwrap();
+        let ClientRouteRead::Disconnected {
+            peer_id: 9,
+            routes_remaining: false,
+            post_mortem: Some(post_mortem),
+            ..
+        } = event
+        else {
+            panic!("last peer route did not surface its recovery backlog");
+        };
+        assert_eq!(post_mortem.connection_id, 20);
+        assert_eq!(post_mortem.packets.len(), 1);
+
+        routes.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn client_route_manager_retires_an_asymmetric_udp_reconnect_request() {
         let (tcp_client, _tcp_peer) = duplex(1024);
         let (udp_client, udp_peer) = duplex(1024);
@@ -8800,15 +10874,182 @@ mod tests {
         let mut routes = ClientRouteManager::new();
         routes.closed_routes.retain(1, HOST_CLIENT_ID, 0);
         routes.closed_routes.retain(2, HOST_CLIENT_ID, 0);
-        routes.handle_post_mortem(outer);
+        routes.handle_post_mortem(HOST_CLIENT_ID, outer);
 
-        let Some((crate::transport::InboundPacket::Message(message), _)) =
+        let Some((HOST_CLIENT_ID, crate::transport::InboundPacket::Message(message), _)) =
             routes.replay_packets.pop_front()
         else {
             panic!("nested post-mortem suffix was not replayed");
         };
         assert_eq!(message, ControlMessage::LobbyCountdown(countdown));
         assert!(routes.replay_packets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mesh_peer_post_mortem_cannot_retire_or_replay_as_the_host_route() {
+        let (host_client, _host_peer) = duplex(512);
+        let mut routes = ClientRouteManager::new();
+        routes.add_route(
+            1,
+            11,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(host_client),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        routes.closed_routes.retain(3, HOST_CLIENT_ID, 0);
+        let forged_live = crate::PostMortemPacket {
+            connection_id: 1,
+            packet_counter: 0,
+            packets: Vec::new(),
+        };
+        let forged_closed = crate::PostMortemPacket {
+            connection_id: 3,
+            packet_counter: 0,
+            packets: Vec::new(),
+        };
+
+        routes.handle_post_mortem(7, forged_live);
+        routes.handle_post_mortem(7, forged_closed);
+
+        assert!(routes.routes.contains_key(&1));
+        assert!(routes.pending_post_mortems.is_empty());
+        assert!(routes.closed_routes.contains(3));
+        assert!(routes.replay_packets.is_empty());
+        routes.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn host_relayed_post_mortem_recovers_the_registered_peer_route() {
+        let countdown = crate::LobbyCountdownPacket::new(8);
+        let (writer, mut reader) = duplex(512);
+        let mut encoder = crate::ControlTransport::new(writer);
+        encoder
+            .send_message(ControlMessage::LobbyCountdown(countdown))
+            .await
+            .unwrap();
+        let mut header = [0_u8; 5];
+        reader.read_exact(&mut header).await.unwrap();
+        let mut complete_packet =
+            vec![0; u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize];
+        reader.read_exact(&mut complete_packet).await.unwrap();
+
+        let mut routes = ClientRouteManager::new();
+        routes.closed_routes.retain(3, 9, 0);
+        routes.handle_post_mortem(
+            HOST_CLIENT_ID,
+            crate::PostMortemPacket {
+                connection_id: 3,
+                packet_counter: 1,
+                packets: vec![complete_packet],
+            },
+        );
+
+        let Some((9, crate::transport::InboundPacket::Message(message), _)) =
+            routes.replay_packets.pop_front()
+        else {
+            panic!("trusted host relay did not recover the peer packet");
+        };
+        assert_eq!(message, ControlMessage::LobbyCountdown(countdown));
+    }
+
+    #[tokio::test]
+    async fn client_route_shutdown_interrupts_a_blocked_write_and_full_command_queue() {
+        let (client_stream, _peer_stream) = duplex(1);
+        let mut routes = ClientRouteManager::new();
+        routes.add_route(
+            1,
+            11,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(client_stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        let outbound = routes.routes[&1].outbound.clone();
+        for _ in 0..64 {
+            let _ = outbound.sender.try_send(ClientRouteCommand::Message(
+                ControlMessage::Packet {
+                    delivery: ControlDelivery::Direct,
+                    data: vec![0x55; 1_024],
+                },
+            ));
+        }
+        tokio::task::yield_now().await;
+
+        timeout(EVENT_WAIT, routes.shutdown())
+            .await
+            .expect("route shutdown remained blocked behind socket output");
+    }
+
+    #[tokio::test]
+    async fn host_handle_shutdown_bypasses_full_command_and_event_queues() {
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        command_tx.send(HostCommand::Shutdown).await.unwrap();
+        let (event_tx, event_rx) = mpsc::channel(1);
+        event_tx
+            .send(HostEvent::StatusCommitted(status))
+            .await
+            .unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let join_handle = tokio::spawn(async move {
+            let _ = event_tx
+                .send(HostEvent::StatusCommitted(status))
+                .await;
+            let _ = shutdown_rx.await;
+        });
+        let handle = HostHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle,
+            udp_local_addr: None,
+        };
+
+        timeout(EVENT_WAIT, handle.shutdown())
+            .await
+            .expect("host handle shutdown waited on a bounded queue")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_handle_shutdown_bypasses_full_command_and_event_queues() {
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        command_tx.send(ClientCommand::Shutdown).await.unwrap();
+        let (event_tx, event_rx) = mpsc::channel(1);
+        event_tx
+            .send(ClientEvent::Status(status))
+            .await
+            .unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let join_handle = tokio::spawn(async move {
+            let _ = event_tx
+                .send(ClientEvent::Status(status))
+                .await;
+            let _ = shutdown_rx.await;
+        });
+        let handle = ClientHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle,
+            client_id: 1,
+            join_data: None,
+        };
+
+        timeout(EVENT_WAIT, handle.shutdown())
+            .await
+            .expect("client handle shutdown waited on a bounded queue")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -11465,6 +13706,49 @@ mod tests {
     }
 
     #[test]
+    fn mesh_peer_cannot_author_host_membership_controls() {
+        let remove = EngineControlPacket::ClientRemove(lc_engine::ClientRemoveControlData {
+            client_id: 3,
+            reason: lc_engine::LegacyCString::default(),
+            by_client: 7,
+        });
+        let direct = encode_control_entry_payload(&remove).expect("encode ClientRemove");
+        let authenticated =
+            authenticated_single_control(&direct, 7).expect("embedded peer author matches");
+        assert!(control_requires_host_ingress(&authenticated));
+
+        let queued = encode_control_packet(&LegacyControlFrame {
+            client_id: 7,
+            tick: 12,
+            timestamp_ms: 0,
+            controls: vec![remove],
+        })
+        .expect("encode queued ClientRemove");
+        assert!(validate_peer_control_packet(&queued, 7)
+            .expect_err("peer membership control must be rejected")
+            .contains("host-authority"));
+    }
+
+    #[test]
+    fn mesh_peer_control_contribution_must_use_the_ingress_client_id() {
+        let queued = encode_control_packet(&LegacyControlFrame {
+            client_id: 8,
+            tick: 12,
+            timestamp_ms: 0,
+            controls: vec![EngineControlPacket::PlayerControl(PlayerControlData {
+                player: 1,
+                command: 2,
+                data: 3,
+                by_client: 8,
+            })],
+        })
+        .expect("encode peer contribution");
+
+        assert!(validate_peer_control_packet(&queued, 8).is_ok());
+        assert!(validate_peer_control_packet(&queued, 7).is_err());
+    }
+
+    #[test]
     fn scenario_player_init_authenticates_the_selecting_client() {
         // PID_ControlPkt rejects a non-host packet whose embedded ByClient
         // differs from the authenticated connection (src/C4GameControlNetwork.cpp:478-490).
@@ -13881,7 +16165,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn established_host_link_ignores_cpp_tcp_sim_open_frame() {
+    async fn established_host_link_accepts_cpp_tcp_sim_open_frame_without_disconnect() {
         let (client_stream, mut host_stream) = duplex(512);
         let (command_tx, command_rx) = mpsc::channel(4);
         let (event_tx, mut event_rx) = mpsc::channel(4);
@@ -13909,10 +16193,6 @@ mod tests {
         host.send_message(ControlMessage::Status(status))
             .await
             .unwrap();
-        assert!(matches!(
-            timeout(EVENT_WAIT, event_rx.recv()).await,
-            Ok(Some(ClientEvent::UnhandledPacket { packet_type: 0x14 }))
-        ));
         match timeout(EVENT_WAIT, event_rx.recv()).await {
             Ok(Some(ClientEvent::Status(received))) => assert_eq!(received, status),
             Ok(Some(ClientEvent::Disconnected { reason })) => {
@@ -13969,7 +16249,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn accepted_host_reports_tcp_sim_open_and_keeps_the_connection() {
+    async fn accepted_host_decodes_tcp_sim_open_and_keeps_the_connection() {
         let (host_stream, mut client_stream) = duplex(512);
         let (outbound_tx, outbound_rx) = mpsc::channel(4);
         let (_retire_tx, retire_rx) = watch::channel(false);
@@ -14001,9 +16281,17 @@ mod tests {
 
         assert!(matches!(
             timeout(EVENT_WAIT, host_rx.recv()).await.unwrap(),
-            Some(HostLoopMessage::UnhandledPacket {
-                client_id: Some(7),
-                packet_type: 0x14,
+            Some(HostLoopMessage::ClientMessage {
+                connection_id: 3,
+                client_id: 7,
+                message: ControlMessage::TcpSimOpen(crate::TcpSimOpenPacket {
+                    client_id: 7,
+                    address: crate::NetworkAddress {
+                        protocol: crate::NetworkProtocol::Tcp,
+                        ..
+                    },
+                }),
+                ..
             })
         ));
 
@@ -14387,6 +16675,230 @@ mod tests {
             i32::try_from(beta.client_id()).unwrap()
         );
         assert_eq!(join.core.name.as_bytes(), b"Beta");
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_rust_clients_form_a_known_peer_tcp_mesh_and_keep_host_forwarding_as_fallback() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mesh_bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        let alpha = connect_client(
+            addr,
+            ClientConfig::new("Alpha", ParticipantKind::Player)
+                .with_mesh_tcp_bind_address(mesh_bind),
+        )
+        .await
+        .unwrap();
+        let mut beta = connect_client(
+            addr,
+            ClientConfig::new("Beta", ParticipantKind::Player)
+                .with_mesh_tcp_bind_address(mesh_bind),
+        )
+        .await
+        .unwrap();
+
+        // Each live PID_Addr invokes DoConnectAttempt. The leading wildcard
+        // address is intentionally undialable and enters the native 10-second
+        // backoff before the following interface address becomes eligible.
+        // Invoke that already-recorded due attempt directly so this socket
+        // integration test does not spend ten wall-clock seconds sleeping.
+        timeout(EVENT_WAIT, async {
+            loop {
+                if alpha.mesh_address_count(beta.client_id()).await >= 2
+                    && beta.mesh_address_count(alpha.client_id()).await >= 2
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host did not propagate both clients' mesh addresses");
+        beta.force_mesh_attempt(alpha.client_id()).await;
+        tokio::task::yield_now().await;
+
+        let deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            let alpha_connected = alpha.mesh_peer_ids().await.contains(&beta.client_id());
+            let beta_connected = beta.mesh_peer_ids().await.contains(&alpha.client_id());
+            if alpha_connected && beta_connected {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "clients did not establish their direct known-peer route"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(host.accepted_routes().await.len(), 2);
+
+        let mut beta_events = beta.take_event_receiver();
+        let alpha_id = alpha.client_id();
+        let data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData {
+                player: i32::try_from(alpha_id).unwrap(),
+                command: 0x44,
+                data: 0x55,
+                by_client: i32::try_from(alpha_id).unwrap(),
+            },
+        ))
+        .unwrap();
+        alpha
+            .submit_packet(ControlDelivery::Direct, data.clone())
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct {
+                    delivery: ControlDelivery::Direct,
+                    data: received,
+                }) if received == data => break,
+                Some(_) => continue,
+                None => panic!("beta event stream ended before direct mesh delivery"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct {
+                    client_id,
+                    delivery: ControlDelivery::Direct,
+                    data: received,
+                }) if client_id == alpha_id && received == data => break,
+                Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                }) if client_id == alpha_id => panic!("mesh fallback failed: {error}"),
+                Some(_) => continue,
+                None => panic!("host event stream ended before mesh fallback"),
+            }
+        }
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), beta_events.recv()).await {
+            assert!(
+                !matches!(
+                    event,
+                    ClientEvent::Direct {
+                        delivery: ControlDelivery::Direct,
+                        data: ref received,
+                    } if *received == data
+                ),
+                "host fallback duplicated a directly delivered mesh packet"
+            );
+        }
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_rust_clients_form_a_known_peer_udp_mesh_and_keep_host_forwarding_as_fallback() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mesh_bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        let alpha = connect_client(
+            addr,
+            ClientConfig::new("Alpha", ParticipantKind::Player)
+                .with_mesh_udp_bind_address(mesh_bind),
+        )
+        .await
+        .unwrap();
+        let mut beta = connect_client(
+            addr,
+            ClientConfig::new("Beta", ParticipantKind::Player)
+                .with_mesh_udp_bind_address(mesh_bind),
+        )
+        .await
+        .unwrap();
+
+        timeout(EVENT_WAIT, async {
+            loop {
+                if alpha.mesh_address_count(beta.client_id()).await >= 2
+                    && beta.mesh_address_count(alpha.client_id()).await >= 2
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host did not propagate both clients' UDP mesh addresses");
+        beta.force_mesh_attempt(alpha.client_id()).await;
+
+        let deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            let alpha_connected = alpha.mesh_peer_ids().await.contains(&beta.client_id());
+            let beta_connected = beta.mesh_peer_ids().await.contains(&alpha.client_id());
+            if alpha_connected && beta_connected {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "clients did not establish their direct known-peer UDP route"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(host.accepted_routes().await.len(), 2);
+
+        let mut beta_events = beta.take_event_receiver();
+        let alpha_id = alpha.client_id();
+        let data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData {
+                player: i32::try_from(alpha_id).unwrap(),
+                command: 0x66,
+                data: 0x77,
+                by_client: i32::try_from(alpha_id).unwrap(),
+            },
+        ))
+        .unwrap();
+        alpha
+            .submit_packet(ControlDelivery::Direct, data.clone())
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct {
+                    delivery: ControlDelivery::Direct,
+                    data: received,
+                }) if received == data => break,
+                Some(_) => continue,
+                None => panic!("beta event stream ended before direct UDP mesh delivery"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct {
+                    client_id,
+                    delivery: ControlDelivery::Direct,
+                    data: received,
+                }) if client_id == alpha_id && received == data => break,
+                Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                }) if client_id == alpha_id => panic!("UDP mesh fallback failed: {error}"),
+                Some(_) => continue,
+                None => panic!("host event stream ended before UDP mesh fallback"),
+            }
+        }
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), beta_events.recv()).await {
+            assert!(
+                !matches!(
+                    event,
+                    ClientEvent::Direct {
+                        delivery: ControlDelivery::Direct,
+                        data: ref received,
+                    } if *received == data
+                ),
+                "host fallback duplicated a directly delivered UDP mesh packet"
+            );
+        }
 
         alpha.shutdown().await.unwrap();
         beta.shutdown().await.unwrap();

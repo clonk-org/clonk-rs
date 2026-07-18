@@ -4,6 +4,7 @@ mod advertise;
 mod connection_handshake;
 mod connection_liveness;
 mod client_bootstrap;
+mod client_mesh;
 mod client_player_resource;
 mod control;
 mod forward_packet;
@@ -38,9 +39,10 @@ mod udp_runtime;
 mod udp_session;
 
 pub use address_packet::{
-    append_received_address, decode_address_packet_payload, encode_address_packet_payload,
-    AddressInsertion, AddressPacket, AddressPacketDecodeError, NetworkAddress, NetworkProtocol,
-    PID_ADDR,
+    append_received_address, decode_address_packet_payload, decode_tcp_sim_open_packet_payload,
+    encode_address_packet_payload, encode_tcp_sim_open_packet_payload, AddressInsertion,
+    AddressPacket, AddressPacketDecodeError, NetworkAddress, NetworkProtocol, TcpSimOpenPacket,
+    PID_ADDR, PID_TCP_SIM_OPEN,
 };
 pub use admission::{
     AdmissionDecision, ClientAdmission, ConnectionAction, ConnectionStatus, HostAdmission,
@@ -69,6 +71,12 @@ pub use client_bootstrap::{
     plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
     ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
     ClientBootstrapResourceSource,
+};
+pub use client_mesh::{
+    client_mesh_local_addresses, client_mesh_puncher_variants,
+    client_mesh_tcp_sim_open_eligible, ClientMeshAddressState, ClientMeshConnectDecision,
+    ClientMeshConnectivity, ClientMeshDialAttempt, ClientMeshPeerState, ClientMeshPuncherUpdate,
+    CLIENT_MESH_CONNECT_ATTEMPTS, CLIENT_MESH_CONNECT_BACKOFF, CLIENT_MESH_CONNECT_INTERVAL,
 };
 pub use client_player_resource::{
     publish_client_player_resource, ClientPlayerResourcePublication, ClientPlayerResourceRequest,
@@ -185,8 +193,9 @@ pub use search::{
 };
 pub use session::{
     connect_client, connect_client_addresses, connect_dual_client, connect_udp_client, start_host,
-    ClientCommand, ClientConfig, ClientError, ClientEvent, ClientHandle, HostCommand, HostConfig,
-    HostError, HostEvent, HostHandle, HostJoinSnapshot, HostedResourceFile, BROADCAST_CLIENT_ID,
+    ClientCommand, ClientConfig, ClientError, ClientEvent, ClientHandle, ClientMeshPuncherConfig,
+    HostCommand, HostConfig, HostError, HostEvent, HostHandle, HostJoinSnapshot,
+    HostedResourceFile, BROADCAST_CLIENT_ID,
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{

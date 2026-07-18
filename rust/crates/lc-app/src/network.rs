@@ -21,9 +21,10 @@ use lc_engine::{
 use lc_network::{
     connect_client_addresses, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
-    ClientHandle, ClientId, ClientPlayerResourceRequest, ControlDelivery, ControlPacket,
-    HostConfig, HostEvent, HostHandle, HostJoinSnapshot, LegacyControlFrame, LegacyControlSet,
-    NetworkAddress, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
+    ClientHandle, ClientId, ClientMeshPuncherConfig, ClientPlayerResourceRequest, ControlDelivery,
+    ControlPacket, HostConfig, HostEvent, HostHandle, HostJoinSnapshot, LegacyControlFrame,
+    LegacyControlSet, NetpuncherGameIds, NetworkAddress, NetworkProtocol, NetworkStatus,
+    ParticipantKind, Tick,
 };
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -60,10 +61,19 @@ pub struct ClientSettings {
     pub local_system_path: Option<PathBuf>,
     pub local_resource_roots: Vec<PathBuf>,
     pub league_transport: lc_network::LeagueHttpTransportConfig,
+    pub mesh_tcp_bind_address: Option<SocketAddr>,
+    pub mesh_udp_bind_address: Option<SocketAddr>,
+    pub netpuncher_address: Option<String>,
+    pub netpuncher_game_ids: NetpuncherGameIds,
 }
 
 impl ClientSettings {
     pub fn new(server_addr: SocketAddr, player_name: impl Into<String>) -> Self {
+        let wildcard = if server_addr.is_ipv4() {
+            SocketAddr::from(([0, 0, 0, 0], 0))
+        } else {
+            SocketAddr::from(([0_u16; 8], 0))
+        };
         Self {
             server_addresses: vec![
                 NetworkAddress::new(NetworkProtocol::Tcp, server_addr),
@@ -75,6 +85,10 @@ impl ClientSettings {
             local_system_path: None,
             local_resource_roots: Vec::new(),
             league_transport: lc_network::LeagueHttpTransportConfig::default(),
+            mesh_tcp_bind_address: Some(wildcard),
+            mesh_udp_bind_address: Some(wildcard),
+            netpuncher_address: None,
+            netpuncher_game_ids: NetpuncherGameIds { ipv4: 0, ipv6: 0 },
         }
     }
 
@@ -89,6 +103,77 @@ impl ClientSettings {
     pub fn with_password(mut self, password: lc_engine::LegacyCString) -> Self {
         self.password = password;
         self
+    }
+
+    pub fn with_netpuncher(
+        mut self,
+        address: impl Into<String>,
+        game_ids: NetpuncherGameIds,
+    ) -> Self {
+        let address = address.into();
+        self.netpuncher_address = (!address.is_empty()).then_some(address);
+        self.netpuncher_game_ids = game_ids;
+        self
+    }
+}
+
+async fn resolve_client_mesh_punchers(
+    address: Option<&str>,
+    game_ids: NetpuncherGameIds,
+) -> Vec<ClientMeshPuncherConfig> {
+    let Some(address) = address.map(str::trim).filter(|address| !address.is_empty()) else {
+        return Vec::new();
+    };
+    let default_port_host = address
+        .strip_prefix('[')
+        .and_then(|address| address.strip_suffix(']'))
+        .unwrap_or(address);
+    let has_explicit_port = address.parse::<SocketAddr>().is_ok()
+        || (default_port_host.parse::<std::net::IpAddr>().is_err()
+            && address
+                .rsplit_once(':')
+                .is_some_and(|(_, port)| port.parse::<u16>().is_ok()));
+    let resolved: std::io::Result<Vec<_>> = if has_explicit_port {
+        tokio::net::lookup_host(address)
+            .await
+            .map(Iterator::collect)
+    } else {
+        tokio::net::lookup_host((default_port_host, 11_115))
+            .await
+            .map(Iterator::collect)
+    };
+    let Ok(resolved) = resolved else {
+        return Vec::new();
+    };
+    let mut have_ipv4 = false;
+    let mut have_ipv6 = false;
+    resolved
+        .into_iter()
+        .filter_map(|address| {
+            let (seen, game_id) = if address.is_ipv4() {
+                (&mut have_ipv4, game_ids.ipv4)
+            } else {
+                (&mut have_ipv6, game_ids.ipv6)
+            };
+            if *seen {
+                return None;
+            }
+            *seen = true;
+            Some(ClientMeshPuncherConfig { address, game_id })
+        })
+        .collect()
+}
+
+fn client_join_protocol_enabled(
+    address: &NetworkAddress,
+    tcp_enabled: bool,
+    udp_enabled: bool,
+) -> bool {
+    match address.protocol {
+        NetworkProtocol::Tcp => tcp_enabled,
+        NetworkProtocol::Udp => udp_enabled,
+        NetworkProtocol::Unknown(_) => false,
+        _ => false,
     }
 }
 
@@ -3135,6 +3220,7 @@ async fn run_host_worker(
         Ok(())
     }
     .await;
+    drop(host_events);
 
     if let (Some(runtime), Some(reference)) =
         (league_runtime.as_ref(), latest_league_reference.take())
@@ -3308,14 +3394,36 @@ async fn run_client_worker(
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
     let league_transport = settings.league_transport.clone();
+    let tcp_enabled = settings.mesh_tcp_bind_address.is_some();
+    let udp_enabled = settings.mesh_udp_bind_address.is_some();
+    let mesh_punchers = if udp_enabled {
+        resolve_client_mesh_punchers(
+            settings.netpuncher_address.as_deref(),
+            settings.netpuncher_game_ids,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
     let mut client_config = ClientConfig::new(player_name.clone(), ParticipantKind::Player)
         .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)
-        .with_local_resource_roots(settings.local_resource_roots);
+        .with_local_resource_roots(settings.local_resource_roots)
+        .with_mesh_punchers(mesh_punchers);
+    if let Some(bind_address) = settings.mesh_tcp_bind_address {
+        client_config = client_config.with_mesh_tcp_bind_address(bind_address);
+    }
+    if let Some(bind_address) = settings.mesh_udp_bind_address {
+        client_config = client_config.with_mesh_udp_bind_address(bind_address);
+    }
     if let Some(system_path) = settings.local_system_path {
         client_config = client_config.with_local_system_path(system_path);
     }
-    let mut client = match connect_client_addresses(settings.server_addresses, client_config).await {
+    let server_addresses = settings
+        .server_addresses
+        .into_iter()
+        .filter(|address| client_join_protocol_enabled(address, tcp_enabled, udp_enabled));
+    let mut client = match connect_client_addresses(server_addresses, client_config).await {
         Ok(client) => client,
         Err(lc_network::ClientError::WrongPassword { message }) => {
             let startup_error = NetworkStartError::WrongPassword { message };
@@ -3720,6 +3828,7 @@ async fn run_client_worker(
                         }
                     }
                     NetworkCommand::GracefulPart { completion } => {
+                        drop(client_events);
                         match client.graceful_part().await {
                             Ok(()) => {
                                 let _ = completion.send(Ok(()));
@@ -3747,6 +3856,7 @@ async fn run_client_worker(
         }
     }
 
+    drop(client_events);
     client.shutdown().await.ok();
     Ok(())
 }
@@ -4381,6 +4491,81 @@ mod tests {
         assert!(bodies[2]
             .windows(b"Action=End".len())
             .any(|window| window == b"Action=End"));
+    }
+
+    #[tokio::test]
+    async fn client_puncher_resolution_applies_default_port_and_family_game_id() {
+        let resolved = resolve_client_mesh_punchers(
+            Some("127.0.0.1"),
+            NetpuncherGameIds {
+                ipv4: 0x1234,
+                ipv6: 0x5678,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            resolved,
+            vec![ClientMeshPuncherConfig {
+                address: "127.0.0.1:11115".parse().unwrap(),
+                game_id: 0x1234,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn client_puncher_resolution_preserves_explicit_port_and_zero_id() {
+        let resolved = resolve_client_mesh_punchers(
+            Some("127.0.0.1:21115"),
+            NetpuncherGameIds { ipv4: 0, ipv6: 0 },
+        )
+        .await;
+
+        assert_eq!(
+            resolved,
+            vec![ClientMeshPuncherConfig {
+                address: "127.0.0.1:21115".parse().unwrap(),
+                game_id: 0,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn client_puncher_resolution_accepts_bracketed_ipv6_without_a_port() {
+        let resolved = resolve_client_mesh_punchers(
+            Some("[::1]"),
+            NetpuncherGameIds {
+                ipv4: 0,
+                ipv6: 0x9abc,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            resolved,
+            vec![ClientMeshPuncherConfig {
+                address: "[::1]:11115".parse().unwrap(),
+                game_id: 0x9abc,
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_zero_port_removes_that_protocol_from_host_join_attempts() {
+        let endpoint = SocketAddr::from(([127, 0, 0, 1], 11_112));
+        let addresses = [
+            NetworkAddress::new(NetworkProtocol::Tcp, endpoint),
+            NetworkAddress::new(NetworkProtocol::Udp, endpoint),
+            NetworkAddress::new(NetworkProtocol::Unknown(9), endpoint),
+        ];
+
+        assert_eq!(
+            addresses
+                .into_iter()
+                .filter(|address| client_join_protocol_enabled(address, false, true))
+                .collect::<Vec<_>>(),
+            [NetworkAddress::new(NetworkProtocol::Udp, endpoint)]
+        );
     }
 
     fn message_control(by_client: i32) -> MessageControlData {
