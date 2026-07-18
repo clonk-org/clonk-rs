@@ -16445,6 +16445,7 @@ impl GameApp {
             cursor_atlas,
             hud_graphics,
         );
+        graphics.inherit_liquid_animation_cycle(&self.graphics);
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
         graphics.set_liquid_animation(liquid_animation);
@@ -34957,7 +34958,7 @@ impl GameApp {
 
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
-        self.graphics = GraphicsSystem::new(
+        let mut graphics = GraphicsSystem::new(
             width,
             height,
             self.fallback_ground,
@@ -34967,6 +34968,8 @@ impl GameApp {
             self.assets.cursor_atlas(),
             self.assets.hud_graphics(),
         );
+        graphics.inherit_liquid_animation_cycle(&self.graphics);
+        self.graphics = graphics;
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
         self.graphics
@@ -36908,7 +36911,7 @@ impl GameApp {
         let hud_graphics = self.current_hud_graphics();
         let game_palette = self.current_game_palette();
         let liquid_animation = self.current_liquid_animation();
-        self.graphics = GraphicsSystem::new(
+        let mut graphics = GraphicsSystem::new(
             width,
             height,
             self.fallback_ground,
@@ -36918,6 +36921,8 @@ impl GameApp {
             cursor_atlas,
             hud_graphics,
         );
+        graphics.inherit_liquid_animation_cycle(&self.graphics);
+        self.graphics = graphics;
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
         self.graphics.set_game_palette(game_palette);

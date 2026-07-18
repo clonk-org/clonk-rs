@@ -2230,19 +2230,20 @@ struct LandscapeRenderCache {
     pixels: Vec<u8>,
 }
 
-struct LiquidAnimation {
-    image: ImageData,
+#[derive(Clone, Copy)]
+struct LiquidAnimationCycle {
     values: [f32; 3],
 }
 
-impl LiquidAnimation {
-    fn new(image: ImageData) -> Self {
+impl Default for LiquidAnimationCycle {
+    fn default() -> Self {
         Self {
-            image,
             values: [-0.2, 0.0, 0.2],
         }
     }
+}
 
+impl LiquidAnimationCycle {
     /// Advances the process-presentation cycle once per landscape blit, as
     /// StdGL::BlitLandscape does independently of the synchronized game tick.
     fn advance(&mut self) -> [f32; 3] {
@@ -2362,9 +2363,12 @@ pub struct GraphicsSystem {
     /// clone anchors COW ancestry, allowing changed rectangles to patch the
     /// RGBA bytes without rebuilding the complete landscape.
     landscape_cache: Option<LandscapeRenderCache>,
-    /// Optional Graphics.c4g/Liquid.png shader input and its presentation-only
-    /// call cycle. The density plane supplies C++'s separate alpha mask.
-    liquid_animation: Option<LiquidAnimation>,
+    /// Optional Graphics.c4g/Liquid.png shader input. The density plane
+    /// supplies C++'s separate alpha mask.
+    liquid_animation_image: Option<ImageData>,
+    /// CStdGL::BlitLandscape keeps this cycle in a function-static array, so
+    /// renderer rebuilds and graphics-resource swaps must not reset it.
+    liquid_animation_cycle: LiquidAnimationCycle,
     /// Presentation-only `SafeRandom` stream. C++ deliberately keeps this
     /// outside the synchronized game RNG; DrawBolt consumes it while drawing.
     presentation_rng: SafeRng,
@@ -2432,7 +2436,8 @@ impl GraphicsSystem {
             material_textures: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
             landscape_cache: None,
-            liquid_animation: None,
+            liquid_animation_image: None,
+            liquid_animation_cycle: LiquidAnimationCycle::default(),
             presentation_rng: SafeRng::default(),
             active_fog_map: None,
             fog_suppression_depth: 0,
@@ -2483,7 +2488,13 @@ impl GraphicsSystem {
 
     /// Installs the opt-in Graphics.c4g liquid-animation noise texture.
     pub fn set_liquid_animation(&mut self, image: Option<ImageData>) {
-        self.liquid_animation = image.map(LiquidAnimation::new);
+        self.liquid_animation_image = image;
+    }
+
+    /// Carries CStdGL's process-presentation cycle across an app-owned
+    /// [`GraphicsSystem`] rebuild without exposing or synchronizing it.
+    pub fn inherit_liquid_animation_cycle(&mut self, previous: &Self) {
+        self.liquid_animation_cycle = previous.liquid_animation_cycle;
     }
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
@@ -4818,9 +4829,9 @@ impl GraphicsSystem {
                 |x, y| (x, y),
             )
         });
-        let liquid_animation = self.liquid_animation.as_mut().map(|animation| {
-            let modulation = animation.advance();
-            (animation.image.clone(), modulation)
+        let liquid_animation = self.liquid_animation_image.as_ref().map(|image| {
+            let modulation = self.liquid_animation_cycle.advance();
+            (image.clone(), modulation)
         });
         let Some(cache) = self.landscape_cache.as_mut() else {
             return false;
@@ -4870,7 +4881,12 @@ impl GraphicsSystem {
                         || prepare_sprite_fragment(color, None, None, pixel_blit),
                         |(image, modulation)| {
                             let delta =
-                                LiquidAnimation::delta_at(image, world_x, world_y, *modulation);
+                                LiquidAnimationCycle::delta_at(
+                                    image,
+                                    world_x,
+                                    world_y,
+                                    *modulation,
+                                );
                             prepare_liquid_animation_fragment(color, delta, pixel_blit)
                         },
                     );
@@ -19891,19 +19907,93 @@ mod tests {
 
     #[test]
     fn liquid_animation_uses_stdgl_call_cycle_and_wrap() {
-        let mut animation = LiquidAnimation::new(ImageData::new(
-            1,
-            1,
-            vec![255, 128, 0, 255],
-        ));
-        let first = animation.advance();
-        let expected = [-0.15 / 3.0, 0.05 / 3.0, 0.25 / 3.0];
-        for (actual, expected) in first.into_iter().zip(expected) {
-            assert!((actual - expected).abs() < f32::EPSILON);
+        let mut animation = LiquidAnimationCycle::default();
+        let mut samples = Vec::new();
+        for call in 1..=46 {
+            let modulation = animation.advance();
+            if matches!(call, 1 | 2 | 3 | 14 | 18 | 22 | 46) {
+                samples.push((call, modulation.map(f32::to_bits)));
+            }
+        }
+        assert_eq!(
+            samples,
+            [
+                (1, [0xbd4c_cccd, 0x3c88_8889, 0x3daa_aaab]),
+                (2, [0xbd08_8889, 0x3d08_8889, 0x3dcc_cccd]),
+                (3, [0xbc88_888a, 0x3d4c_cccd, 0x3daa_aaab]),
+                (14, [0x3d08_888b, 0xbd08_8890, 0xbdcc_cccd]),
+                (18, [0xbd08_888b, 0xbdcc_cccd, 0xbd08_8889]),
+                (22, [0xbdcc_cccd, 0xbd08_8889, 0x3d08_8888]),
+                (46, [0xbdcc_cccd, 0xbd08_8889, 0x3d08_8888]),
+            ]
+        );
+    }
+
+    #[test]
+    fn liquid_animation_cycle_survives_texture_swaps_and_renderer_rebuilds() {
+        let make_graphics = || {
+            GraphicsSystem::new(
+                1,
+                1,
+                1,
+                "Liquid phase",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            )
+        };
+        let image = || ImageData::new(1, 1, vec![255, 128, 0, 255]);
+        let mut original = make_graphics();
+        original.set_liquid_animation(Some(image()));
+        assert_eq!(
+            original
+                .liquid_animation_cycle
+                .advance()
+                .map(f32::to_bits),
+            [0xbd4c_cccd, 0x3c88_8889, 0x3daa_aaab]
+        );
+
+        original.set_liquid_animation(None);
+        let paused = original.liquid_animation_cycle.values;
+        original.set_liquid_animation(Some(image()));
+        assert_eq!(original.liquid_animation_cycle.values, paused);
+
+        let mut rebuilt = make_graphics();
+        rebuilt.inherit_liquid_animation_cycle(&original);
+        rebuilt.set_liquid_animation(Some(image()));
+        assert_eq!(
+            rebuilt
+                .liquid_animation_cycle
+                .advance()
+                .map(f32::to_bits),
+            [0xbd08_8889, 0x3d08_8889, 0x3dcc_cccd]
+        );
+    }
+
+    #[test]
+    fn liquid_animation_adds_then_clamps_before_vertex_modulation() {
+        let blit = SpriteBlitState {
+            mode: 0,
+            modulation: Some(0x0080_8080),
+            fog_modulation: None,
+        };
+        let PreparedSpriteFragment::Shader { rgb, alpha } =
+            prepare_liquid_animation_fragment(Color::opaque(230, 102, 26), 0.2, blit)
+        else {
+            panic!("liquid animation must retain float shader channels");
+        };
+        assert_eq!(alpha, 255);
+        for (actual, expected) in rgb.into_iter().zip([128.0, 76.8, 38.650_98]) {
+            assert!((actual - expected).abs() < 0.000_01);
         }
 
-        animation.values = [0.9; 3];
-        assert_eq!(animation.advance(), [-0.1; 3]);
+        let PreparedSpriteFragment::Shader { rgb, .. } =
+            prepare_liquid_animation_fragment(Color::opaque(10, 20, 30), -0.2, blit)
+        else {
+            panic!("liquid animation must retain float shader channels");
+        };
+        assert_eq!(rgb, [0.0; 3]);
     }
 
     #[test]
