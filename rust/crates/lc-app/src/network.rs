@@ -783,6 +783,7 @@ impl TestNetworkCommands {
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
     JoinData(lc_network::JoinDataEnvelope),
+    LeagueRoundResults(lc_network::LeagueRoundResultsPacket),
     LobbyCountdown(lc_network::LobbyCountdownPacket),
     ReadyCheck(lc_network::ReadyCheckPacket),
     StatusRequested(NetworkStatus),
@@ -2645,11 +2646,7 @@ async fn handle_client_event(
             let _ = event_tx.send(NetworkEvent::ResourceDeriveUnsupported { core });
         }
         ClientEvent::LeagueRoundResults { packet } => {
-            tracing::debug!(
-                success = packet.success,
-                players = packet.players.len(),
-                "received league round results from host"
-            );
+            let _ = event_tx.send(NetworkEvent::LeagueRoundResults(packet));
         }
         ClientEvent::UnhandledPacket { packet_type } => {
             let status = format!("{packet_type:02x}");
@@ -4611,6 +4608,50 @@ mod tests {
             event_rx.recv().expect("ready-check event"),
             NetworkEvent::ReadyCheck(packet)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_league_round_results_are_forwarded_to_the_app_unchanged() {
+        let packet = lc_network::LeagueRoundResultsPacket {
+            success: true,
+            result_string: lc_engine::LegacyCString::from_bytes(b"Result:\xe4".to_vec()).unwrap(),
+            players: vec![lc_network::LeagueRoundResultsPlayer {
+                player_info_id: 17,
+                total_playing_time: 1_234,
+                settlement_score_old: -2,
+                settlement_score_new: 300,
+                league_score_new: 1_500,
+                league_score_gain: 25,
+                league_rank_new: 3,
+                league_rank_symbol_new: 9,
+                league_progress_data: lc_engine::LegacyCString::from_bytes(b"A=1\xff".to_vec())
+                    .unwrap(),
+                status: lc_network::LeagueRoundPlayerStatus::Won,
+            }],
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+
+        handle_client_event(
+            ClientEvent::LeagueRoundResults {
+                packet: packet.clone(),
+            },
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward league round results");
+
+        assert_eq!(
+            event_rx.recv().expect("league round-results event"),
+            NetworkEvent::LeagueRoundResults(packet)
+        );
+        assert!(matches!(
+            telemetry_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

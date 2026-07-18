@@ -204,6 +204,31 @@ mod tests {
     }
 
     #[test]
+    fn league_round_results_count_uses_cpp_signed_pack_at_64() {
+        let player = LeagueRoundResultsPlayer {
+            player_info_id: 0,
+            total_playing_time: 0,
+            settlement_score_old: 0,
+            settlement_score_new: 0,
+            league_score_new: 0,
+            league_score_gain: 0,
+            league_rank_new: 0,
+            league_rank_symbol_new: 0,
+            league_progress_data: LegacyCString::default(),
+            status: LeagueRoundPlayerStatus::Unknown,
+        };
+        let packet = LeagueRoundResultsPacket {
+            success: false,
+            result_string: LegacyCString::default(),
+            players: vec![player; 64],
+        };
+
+        let payload = encode_league_round_results_payload(&packet).unwrap();
+        assert_eq!(&payload[..4], &[0x00, 0x00, 0x40, 0x00]);
+        assert_eq!(decode_league_round_results_payload(&payload), Ok(packet));
+    }
+
+    #[test]
     fn league_round_results_decode_matches_cpp_bounds_and_trailing_tolerance() {
         let mut trailing = vec![0x00, b'\x80', 0x00, 0x00, 0xaa];
         assert_eq!(

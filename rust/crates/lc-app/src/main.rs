@@ -22756,6 +22756,7 @@ impl GameApp {
                     let boundary = match &event {
                         NetworkEvent::PeerConnected { client_id: 0, .. } => None,
                         NetworkEvent::JoinData(_) => Some("join data"),
+                        NetworkEvent::LeagueRoundResults(_) => Some("league round results"),
                         NetworkEvent::ReadyCheck(_) => Some("ready check"),
                         NetworkEvent::StatusRequested(_) => Some("status request"),
                         NetworkEvent::StatusCommitted(_) => Some("status commit"),
@@ -22860,6 +22861,16 @@ impl GameApp {
                         self.client_material_resource_groups = None;
                         self.pending_network_join_data = Some(join_data);
                         self.acknowledge_initial_lobby_status_if_ready();
+                    }
+                    NetworkEvent::LeagueRoundResults(packet) => {
+                        // The typed packet is retained at the application
+                        // boundary. Applying league score/rank fields awaits
+                        // their representation in RoundResultsState.
+                        tracing::debug!(
+                            success = packet.success,
+                            player_count = packet.players.len(),
+                            "received league round results; application deferred"
+                        );
                     }
                     NetworkEvent::ReadyCheck(packet) => {
                         if packet.data.vote_requested() {
