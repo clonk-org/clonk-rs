@@ -165,6 +165,22 @@ impl ControlCoordinator {
         self.current_tick
     }
 
+    /// Moves the ready cursor to the first control tick that has not executed.
+    /// Runtime mode changes use the final status-barrier tick to discard
+    /// join-era gaps before decentralized packing resumes.
+    pub fn advance_to(&mut self, next_tick: Tick) -> Vec<ReadyBatch> {
+        if next_tick <= self.current_tick {
+            return Vec::new();
+        }
+        self.current_tick = next_tick;
+        for state in self.clients.values_mut() {
+            state.pending.retain(|tick, _| *tick >= next_tick);
+        }
+        let ready = self.collect_ready();
+        self.enforce_backlog();
+        ready
+    }
+
     pub fn backlog_limit(&self) -> usize {
         self.backlog_limit
     }
@@ -438,6 +454,24 @@ mod tests {
         assert_eq!(batch.tick(), 0);
         assert_eq!(batch.packets().len(), 2);
         assert_eq!(coord.current_tick(), 1);
+    }
+
+    #[test]
+    fn advancing_to_live_tick_releases_buffered_contributions() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(1).unwrap();
+        coord.register_client(2).unwrap();
+        coord.ingest(packet(1, 12, b"old")).unwrap();
+        coord.ingest(packet(1, 137, b"a")).unwrap();
+        let outcome = coord.ingest(packet(2, 137, b"b")).unwrap();
+        assert!(outcome.ready.is_empty());
+
+        let ready = coord.advance_to(137);
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].tick(), 137);
+        assert_eq!(coord.current_tick(), 138);
+        assert!(!coord.clients[&1].pending.contains_key(&12));
     }
 
     #[test]

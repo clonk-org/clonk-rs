@@ -1305,8 +1305,25 @@ impl ClientControlState {
         Ok(state)
     }
 
-    fn set_mode(&mut self, mode: i32) {
+    fn change_mode(
+        &mut self,
+        mode: i32,
+        current_tick: Tick,
+    ) -> Result<(bool, Vec<ControlPacket>), String> {
+        if self.mode == mode {
+            return Ok((false, Vec::new()));
+        }
         self.mode = mode;
+        let ready = self.coordinator.advance_to(current_tick);
+        for pending in self.pending_unregistered.values_mut() {
+            pending.retain(|tick, _| *tick >= current_tick);
+        }
+        let ready = if mode == 0 {
+            Self::aggregate(ready)?
+        } else {
+            Vec::new()
+        };
+        Ok((true, ready))
     }
 
     fn register(&mut self, client_id: ClientId) -> Result<Vec<ControlPacket>, String> {
@@ -1419,6 +1436,9 @@ impl ClientControlState {
             return Ok(Vec::new());
         }
         validate_control_envelope(&packet).map_err(|error| error.to_string())?;
+        if packet.tick() < self.coordinator.current_tick() {
+            return Ok(Vec::new());
+        }
         Ok(vec![packet])
     }
 
@@ -1815,6 +1835,7 @@ struct HostState {
     config: HostConfig,
     coordinator: ControlCoordinator,
     backlog: ControlBacklog,
+    local_control_backlog: ControlBacklog,
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
     accepted_routes: BTreeMap<u32, AcceptedConnectionRoute>,
@@ -1978,6 +1999,7 @@ async fn run_host(
     let mut state = HostState {
         coordinator,
         backlog: ControlBacklog::new(backlog_limit),
+        local_control_backlog: ControlBacklog::new(backlog_limit),
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
         accepted_routes: BTreeMap::new(),
@@ -2872,6 +2894,14 @@ fn forward_selects(packet: &crate::ForwardPacket, client_id: i32) -> bool {
     }
 }
 
+fn decentral_control_message(packet: &ControlPacket) -> Result<ControlMessage, TransportError> {
+    Ok(ControlMessage::ForwardRequest(crate::ForwardPacket {
+        negative_list: true,
+        clients: Vec::new(),
+        nested_packet: crate::transport::encode_complete_control_packet(packet)?,
+    }))
+}
+
 async fn report_forward_error(source: ClientId, error: String, state: &HostState) {
     let _ = state
         .event_tx
@@ -3314,6 +3344,9 @@ async fn ingest_control(
             })
             .await;
         return;
+    }
+    if ingress == ControlIngress::Local {
+        state.local_control_backlog.record_packet(&packet);
     }
     // A host's own DoInput broadcasts before AddCtrl in CNM_Decentral. A raw
     // network PID_Control goes straight to HandleControl and is only stored;
@@ -3870,6 +3903,82 @@ fn apply_ready_check_to_host_state(packet: ReadyCheckPacket, state: &mut HostSta
     }
 }
 
+fn contiguous_client_controls(
+    backlog: &ControlBacklog,
+    client_id: ClientId,
+    from_tick: Tick,
+) -> Vec<ControlPacket> {
+    let mut expected_tick = from_tick;
+    let mut contiguous = Vec::new();
+    for (tick, packets) in backlog.packets_from(from_tick) {
+        if tick != expected_tick {
+            break;
+        }
+        let Some(packet) = packets
+            .into_iter()
+            .find(|packet| packet.client_id() == client_id)
+        else {
+            break;
+        };
+        contiguous.push(packet);
+        expected_tick = expected_tick.saturating_add(1);
+    }
+    contiguous
+}
+
+fn contiguous_complete_controls(
+    backlog: &ControlBacklog,
+    from_tick: Tick,
+) -> Result<Vec<ControlPacket>, String> {
+    let mut expected_tick = from_tick;
+    let mut contiguous = Vec::new();
+    for (tick, packets) in backlog.packets_from(from_tick) {
+        if tick != expected_tick {
+            break;
+        }
+        contiguous.push(
+            aggregate_control_packets_for_tick(tick, &packets)
+                .map_err(|error| format!("failed to aggregate control tick {tick}: {error}"))?,
+        );
+        expected_tick = expected_tick.saturating_add(1);
+    }
+    Ok(contiguous)
+}
+
+async fn apply_host_control_mode(mode: i32, state: &mut HostState) {
+    if state.control_mode == mode {
+        return;
+    }
+    state.control_mode = mode;
+    let Ok(from_tick) = Tick::try_from(state.status_barrier.status.target_tick) else {
+        return;
+    };
+    let packets = match mode {
+        0 => contiguous_client_controls(
+            &state.local_control_backlog,
+            HOST_CLIENT_ID,
+            from_tick,
+        ),
+        1 => match contiguous_complete_controls(&state.backlog, from_tick) {
+            Ok(packets) => packets,
+            Err(error) => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: None,
+                        error,
+                    })
+                    .await;
+                return;
+            }
+        },
+        _ => Vec::new(),
+    };
+    for packet in packets {
+        broadcast_control(&packet, state).await;
+    }
+}
+
 async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostState) {
     let mut committed = false;
     for effect in effects {
@@ -3879,7 +3988,7 @@ async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostStat
             | BarrierEffect::StopControl
             | BarrierEffect::SweepUnjoinedPlayers
             | BarrierEffect::StartControl => {}
-            BarrierEffect::SetControlMode(mode) => state.control_mode = mode,
+            BarrierEffect::SetControlMode(mode) => apply_host_control_mode(mode, state).await,
             BarrierEffect::BroadcastStatus(status) => {
                 broadcast_status(status, false, state).await;
             }
@@ -4091,6 +4200,28 @@ async fn run_client_loop<S>(
     .await;
 }
 
+async fn replay_client_controls<S>(
+    transport: &mut crate::ControlTransport<S>,
+    backlog: &ControlBacklog,
+    control: &mut ClientControlState,
+    local_client_id: ClientId,
+    from_tick: Tick,
+) -> Result<Vec<ControlPacket>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut ready = Vec::new();
+    for packet in contiguous_client_controls(backlog, local_client_id, from_tick) {
+        let message = decentral_control_message(&packet).map_err(|error| error.to_string())?;
+        transport
+            .send_message(message)
+            .await
+            .map_err(|error| error.to_string())?;
+        ready.extend(control.ingest_contribution(packet)?);
+    }
+    Ok(ready)
+}
+
 async fn run_client_loop_with_addresses<S>(
     mut transport: crate::ControlTransport<S>,
     mut commands: mpsc::Receiver<ClientCommand>,
@@ -4274,14 +4405,8 @@ async fn run_client_loop_with_addresses<S>(
                     ClientCommand::SubmitControl(packet) => {
                         let clone = packet.clone();
                         let message = if resource_state.control.mode == 0 {
-                            match crate::transport::encode_complete_control_packet(&packet) {
-                                Ok(nested_packet) => {
-                                    ControlMessage::ForwardRequest(crate::ForwardPacket {
-                                        negative_list: true,
-                                        clients: Vec::new(),
-                                        nested_packet,
-                                    })
-                                }
+                            match decentral_control_message(&packet) {
+                                Ok(message) => message,
                                 Err(error) => {
                                     let _ = event_tx
                                         .send(ClientEvent::Disconnected {
@@ -4677,7 +4802,73 @@ async fn run_client_loop_with_addresses<S>(
                     }
                     Ok(ControlMessage::StatusAck(status)) => {
                         if status.state == NETWORK_STATE_GO {
-                            resource_state.control.set_mode(status.control_mode);
+                            let current_tick = Tick::try_from(status.target_tick).unwrap_or_else(
+                                |_| resource_state.control.coordinator.current_tick(),
+                            );
+                            let mode_change = resource_state
+                                .control
+                                .change_mode(status.control_mode, current_tick);
+                            let (changed, mut ready) = match mode_change {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    let _ = event_tx
+                                        .send(ClientEvent::Disconnected {
+                                            reason: Some(format!(
+                                                "control-mode change failed: {error}"
+                                            )),
+                                        })
+                                        .await;
+                                    break;
+                                }
+                            };
+                            if changed && status.control_mode == 0 {
+                                let has_current_control = backlog
+                                    .packets_from(current_tick)
+                                    .first()
+                                    .is_some_and(|(tick, _)| *tick == current_tick);
+                                if has_current_control {
+                                    let local_client_id = match ClientId::try_from(
+                                        resource_state.catalog.local_client_id(),
+                                    ) {
+                                        Ok(client_id) => client_id,
+                                        Err(_) => {
+                                            let _ = event_tx
+                                                .send(ClientEvent::Disconnected {
+                                                    reason: Some(
+                                                        "control-mode change has no local client ID"
+                                                            .to_string(),
+                                                    ),
+                                                })
+                                                .await;
+                                            break;
+                                        }
+                                    };
+                                    match replay_client_controls(
+                                        &mut transport,
+                                        &backlog,
+                                        &mut resource_state.control,
+                                        local_client_id,
+                                        current_tick,
+                                    )
+                                    .await
+                                    {
+                                        Ok(replayed_ready) => ready.extend(replayed_ready),
+                                        Err(error) => {
+                                            let _ = event_tx
+                                                .send(ClientEvent::Disconnected {
+                                                    reason: Some(format!(
+                                                        "control-mode replay failed: {error}"
+                                                    )),
+                                                })
+                                                .await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            for packet in ready {
+                                let _ = event_tx.send(ClientEvent::Ready { packet }).await;
+                            }
                         }
                         let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
                     }
@@ -5026,7 +5217,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        resource_state.control.set_mode(0);
+        resource_state.control.change_mode(0, 0).unwrap();
         resource_state.control.register(0).unwrap();
         resource_state.control.register(1).unwrap();
         let client_handle = tokio::spawn(run_client_loop_with_addresses(
@@ -5206,7 +5397,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut resource_state = ClientResourceState::empty();
         resource_state.catalog.set_local_client_id(1);
-        resource_state.control.set_mode(0);
+        resource_state.control.change_mode(0, 0).unwrap();
         resource_state.control.register(0).unwrap();
         resource_state.control.register(1).unwrap();
         let client_handle = tokio::spawn(run_client_loop_with_addresses(
@@ -10344,6 +10535,170 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn central_host_replays_contiguous_local_controls_after_decentral_commit() {
+        // SetCtrlMode(CNM_Decentral) runs only after the final StatusAck and
+        // resends the host's own stored controls from ControlTick until the
+        // first gap (src/C4Network2.cpp:2062-2110;
+        // src/C4GameControlNetwork.cpp:360-374).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        config.initial_status.control_mode = 1;
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut client, client_id) = raw_client_transport(addr, b"Alice").await;
+        activate_joined_client(&host, &mut host_events, client_id).await;
+        drain_raw_client(&mut client).await;
+        acknowledge_raw_status(
+            &mut client,
+            &mut host_events,
+            client_id,
+            NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 1,
+                target_tick: -1,
+            },
+        )
+        .await;
+        drain_raw_client(&mut client).await;
+
+        let first = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
+        let after_gap = legacy_packet(HOST_CLIENT_ID, 2, 0x13);
+        host.submit_local_control(first.clone()).await.unwrap();
+        host.submit_local_control(after_gap.clone()).await.unwrap();
+
+        let decentral = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        host.change_status(decentral).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+                ControlMessage::Status(status) if status == decentral => break,
+                _ => continue,
+            }
+        }
+        client
+            .send_message(ControlMessage::StatusAck(decentral))
+            .await
+            .unwrap();
+        host.status_reached().await.unwrap();
+
+        let mut saw_final_ack = false;
+        loop {
+            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+                ControlMessage::StatusAck(status) if status == decentral => {
+                    saw_final_ack = true;
+                }
+                ControlMessage::Control(packet) if packet == first => {
+                    assert!(saw_final_ack, "control replay preceded the final StatusAck");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(
+            timeout(Duration::from_millis(100), async {
+                loop {
+                    if matches!(
+                        client.read_message().await,
+                        Ok(ControlMessage::Control(packet)) if packet == after_gap
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .is_err(),
+            "decentral replay crossed the first missing control tick"
+        );
+
+        drop(client);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decentral_host_replays_complete_controls_after_central_commit() {
+        // SetCtrlMode(CNM_Central) follows the final StatusAck and the host
+        // resends stored complete C4ClientIDAll controls, not one participant's
+        // contribution (src/C4Network2.cpp:2062-2110;
+        // src/C4GameControlNetwork.cpp:360-374).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut client, client_id) = raw_client_transport(addr, b"Alice").await;
+        activate_joined_client(&host, &mut host_events, client_id).await;
+        drain_raw_client(&mut client).await;
+        acknowledge_raw_status(
+            &mut client,
+            &mut host_events,
+            client_id,
+            NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 0,
+                target_tick: -1,
+            },
+        )
+        .await;
+        drain_raw_client(&mut client).await;
+
+        let host_packet = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
+        host.submit_local_control(host_packet.clone()).await.unwrap();
+        assert!(raw_client_received_control(
+            &mut client,
+            &host_packet,
+            EVENT_WAIT,
+        )
+        .await);
+        let client_packet = legacy_packet(client_id, 0, 0x21);
+        client
+            .send_message(ControlMessage::Control(client_packet))
+            .await
+            .unwrap();
+        let complete = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(complete.client_id(), BROADCAST_CLIENT_ID);
+        assert_eq!(control_commands(&complete), vec![0x11, 0x21]);
+        drain_raw_client(&mut client).await;
+
+        let central = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        host.change_status(central).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+                ControlMessage::Status(status) if status == central => break,
+                _ => continue,
+            }
+        }
+        client
+            .send_message(ControlMessage::StatusAck(central))
+            .await
+            .unwrap();
+        host.status_reached().await.unwrap();
+
+        let mut saw_final_ack = false;
+        loop {
+            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+                ControlMessage::StatusAck(status) if status == central => {
+                    saw_final_ack = true;
+                }
+                ControlMessage::Control(packet) if packet == complete => {
+                    assert!(saw_final_ack, "control replay preceded the final StatusAck");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        drop(client);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn higher_client_status_ack_retargets_real_tcp_barrier_before_commit() {
         // CheckStatusReached replaces a client's requested target with its
         // current control tick. HandleStatusAck must rebroadcast that higher
@@ -12459,6 +12814,134 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn central_to_decentral_switch_fast_forwards_and_replays_own_controls() {
+        // The final GO acknowledgement carries Game.Control.ControlTick, the
+        // first unexecuted tick. SetCtrlMode then rebroadcasts contiguous own
+        // control from that tick before resuming (pristine C++
+        // src/C4Network2.cpp:2062-2110;
+        // src/C4GameControlNetwork.cpp:360-374).
+        let (client_stream, host_stream) = duplex(4096);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        resource_state.control.register(0).unwrap();
+        resource_state.control.register(1).unwrap();
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let live_tick = 137;
+
+        let central_history = legacy_packet(BROADCAST_CLIENT_ID, live_tick - 1, 0x10);
+        host_transport
+            .send_message(ControlMessage::Control(central_history.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::Ready { packet })) if packet == central_history
+        ));
+
+        let local_packets = [
+            legacy_packet(1, live_tick, 0x21),
+            legacy_packet(1, live_tick + 1, 0x22),
+            legacy_packet(1, live_tick + 3, 0x24),
+        ];
+        for packet in &local_packets {
+            command_tx
+                .send(ClientCommand::SubmitControl(packet.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                timeout(EVENT_WAIT, host_transport.read_message())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                ControlMessage::Control(packet.clone())
+            );
+        }
+
+        let decentral = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: i32::try_from(live_tick).unwrap(),
+        };
+        host_transport
+            .send_message(ControlMessage::StatusAck(decentral))
+            .await
+            .unwrap();
+        for packet in &local_packets[..2] {
+            assert_eq!(
+                timeout(EVENT_WAIT, host_transport.read_message())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                decentral_control_message(packet).unwrap()
+            );
+        }
+        assert!(
+            timeout(Duration::from_millis(50), host_transport.read_message())
+                .await
+                .is_err(),
+            "mode replay crossed the first missing control tick"
+        );
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::StatusAck(status))) if status == decentral
+        ));
+
+        host_transport
+            .send_message(ControlMessage::Control(legacy_packet(
+                0, live_tick, 0x11,
+            )))
+            .await
+            .unwrap();
+        let aggregate = match timeout(EVENT_WAIT, event_rx.recv()).await.unwrap() {
+            Some(ClientEvent::Ready { packet }) => packet,
+            other => panic!("expected live decentralized aggregate, got {other:?}"),
+        };
+        assert_eq!(aggregate.tick(), live_tick);
+        assert_eq!(control_commands(&aggregate), vec![0x11, 0x21]);
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[test]
+    fn central_replay_does_not_repeat_a_locally_assembled_tick() {
+        let mut control = ClientControlState::central(0);
+        control.register(0).unwrap();
+        control.register(1).unwrap();
+        control.change_mode(0, 37).unwrap();
+        assert!(control
+            .ingest_contribution(legacy_packet(0, 37, 0x11))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            control
+                .ingest_contribution(legacy_packet(1, 37, 0x21))
+                .unwrap()
+                .len(),
+            1
+        );
+        control.change_mode(1, 37).unwrap();
+
+        assert!(control
+            .accept_network(legacy_packet(BROADCAST_CLIENT_ID, 37, 0x31))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn decentral_client_waits_for_every_active_contribution_before_ready() {
         // In CNM_Decentral every client broadcasts and stores its own
         // contribution, but CheckCompleteCtrl exposes only the locally packed
@@ -12837,6 +13320,37 @@ mod tests {
             }
             if body == expected {
                 return true;
+            }
+        }
+    }
+
+    async fn acknowledge_raw_status(
+        transport: &mut crate::ControlTransport<TcpStream>,
+        events: &mut mpsc::Receiver<HostEvent>,
+        client_id: ClientId,
+        status: NetworkStatus,
+    ) {
+        transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .expect("send raw status acknowledgement");
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::StatusAck {
+                    client_id: source,
+                    status: received,
+                })) if source == client_id && received == status => break,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before raw status acknowledgement"),
+                Err(_) => panic!("timed out waiting for raw status acknowledgement"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, transport.read_message()).await {
+                Ok(Ok(ControlMessage::StatusAck(received))) if received == status => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => panic!("raw client failed while waiting for StatusAck: {error}"),
+                Err(_) => panic!("timed out waiting for host StatusAck"),
             }
         }
     }

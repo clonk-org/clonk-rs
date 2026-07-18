@@ -29,7 +29,9 @@ impl ControlBacklog {
     pub fn record_packet(&mut self, packet: &ControlPacket) {
         let tick = packet.tick();
         let entry = self.entries.entry(tick).or_default();
-        entry.insert(packet.client_id(), packet.clone());
+        entry
+            .entry(packet.client_id())
+            .or_insert_with(|| packet.clone());
         self.trim();
     }
 
@@ -223,6 +225,15 @@ mod tests {
             packet(2, 6, b"d"),
         ];
         assert_eq!(replay, expected);
+    }
+
+    #[test]
+    fn backlog_duplicate_keeps_the_first_control() {
+        let mut backlog = ControlBacklog::new(8);
+        backlog.record_packet(&packet(1, 5, b"first"));
+        backlog.record_packet(&packet(1, 5, b"replacement"));
+
+        assert_eq!(backlog.fulfill_request(5), vec![packet(1, 5, b"first")]);
     }
 
     #[test]
