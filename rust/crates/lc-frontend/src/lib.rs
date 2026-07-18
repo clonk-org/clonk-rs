@@ -22,6 +22,7 @@ pub mod scoreboard;
 pub mod startup_about_dlg;
 pub mod startup_netdlg;
 pub mod startup_options_dlg;
+pub mod startup_plrproperties;
 pub mod startup_plrsel;
 pub mod startup_scensel;
 #[cfg(test)]

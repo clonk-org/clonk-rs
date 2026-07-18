@@ -181,7 +181,8 @@ use serde::{
 use sha1::{Digest, Sha1};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
-    StartupPlayerFile, delete_player_file, discover_player_files, persist_activations,
+    PlayerImageWrite, SavedStartupPlayer, StartupPlayerFile, delete_player_file,
+    discover_player_files, persist_activations, save_player_properties,
 };
 use time::{OffsetDateTime, macros::format_description};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -398,6 +399,12 @@ const SUPPLEMENTAL_STARTUP_DIALOG_IMAGES: &[&str] = &[
     "Menu.png",
     "Options.png",
     "Control.png",
+    // C4StartupPlrPropertiesDlg's default portrait pool.
+    "Portrait1.png",
+    "Portrait2.png",
+    "Portrait3.png",
+    "Portrait4.png",
+    "Portrait5.png",
 ];
 
 struct RuntimeConfig {
@@ -3850,6 +3857,21 @@ impl FrontendAssets {
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             player: self.dialog_image("Player.png")?,
         })
+    }
+
+    fn plrprop_assets(
+        &self,
+    ) -> Option<lc_frontend::startup_plrproperties::PlayerPropertiesAssets> {
+        Some(
+            lc_frontend::startup_plrproperties::PlayerPropertiesAssets {
+                background: self.dialog_image("StartupPlrPropBG.png")?,
+                caption: self.dialog_image("GUICaption.png")?,
+                button: self.dialog_image("GUIButton.png")?,
+                button_down: self.dialog_image("GUIButtonDown.png")?,
+                button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
+                control_types: self.dialog_image("StartupPlrCtrlType.png"),
+            },
+        )
     }
 
     fn dialog_image(&self, name: &str) -> Option<ImageData> {
@@ -8612,6 +8634,69 @@ fn initial_network_team_assignment(
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupPlayerPropertiesOrigin {
+    SelectionNew,
+    SelectionEdit {
+        path: PathBuf,
+        was_activated: bool,
+    },
+}
+
+struct PendingStartupPlayerProperties {
+    origin: StartupPlayerPropertiesOrigin,
+    controller: lc_frontend::startup_plrproperties::PlayerPropertiesController,
+}
+
+fn startup_player_big_icon(portrait: &ImageData, color_dw: u32) -> ImageData {
+    let colored = lc_frontend::hud::colorize_by_owner(
+        portrait,
+        Color::opaque(
+            ((color_dw >> 16) & 0xff) as u8,
+            ((color_dw >> 8) & 0xff) as u8,
+            (color_dw & 0xff) as u8,
+        ),
+    );
+    resize_startup_player_image(&colored, 64)
+}
+
+fn resize_startup_player_image(image: &ImageData, maximum: u32) -> ImageData {
+    let width = image.width().max(1);
+    let height = image.height().max(1);
+    let largest = width.max(height);
+    if largest <= maximum {
+        return image.clone();
+    }
+    let resized_width = (u64::from(width) * u64::from(maximum) / u64::from(largest))
+        .max(1) as u32;
+    let resized_height = (u64::from(height) * u64::from(maximum) / u64::from(largest))
+        .max(1) as u32;
+    let mut pixels = vec![0; resized_width as usize * resized_height as usize * 4];
+    for y in 0..resized_height {
+        let source_y = (u64::from(y) * u64::from(height) / u64::from(resized_height)) as u32;
+        for x in 0..resized_width {
+            let source_x =
+                (u64::from(x) * u64::from(width) / u64::from(resized_width)) as u32;
+            let source = ((source_y * width + source_x) * 4) as usize;
+            let target = ((y * resized_width + x) * 4) as usize;
+            pixels[target..target + 4].copy_from_slice(&image.pixels()[source..source + 4]);
+        }
+    }
+    ImageData::new(resized_width, resized_height, pixels)
+}
+
+fn startup_player_image_write(
+    update: &lc_frontend::startup_plrproperties::PlayerImageUpdate,
+) -> PlayerImageWrite {
+    match update {
+        lc_frontend::startup_plrproperties::PlayerImageUpdate::Keep => PlayerImageWrite::Keep,
+        lc_frontend::startup_plrproperties::PlayerImageUpdate::Replace(image) => {
+            PlayerImageWrite::Replace(image.clone())
+        }
+        lc_frontend::startup_plrproperties::PlayerImageUpdate::Clear => PlayerImageWrite::Clear,
+    }
+}
+
 /// Player-owned `C4MainMenu` state keyed by `C4Player::Number`
 /// (`C4Player.h:85`).
 #[derive(Default)]
@@ -8756,6 +8841,7 @@ struct GameApp {
     /// template when advertising could not bind.
     advertised_game_reference: Option<lc_network::HostGameReference>,
     startup_player_dialog: Option<lc_frontend::startup_plrsel::PlrSelController>,
+    startup_player_properties_dialog: Option<PendingStartupPlayerProperties>,
     startup_player_files: Vec<StartupPlayerFile>,
     startup_player_models: Vec<lc_frontend::startup_plrsel::PlrSelPlayer>,
     startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
@@ -9887,8 +9973,6 @@ enum ClassicStartupAction {
     OptionsProgramFocus(lc_frontend::startup_options_dlg::OptionsProgramFocusTarget),
     NetworkRefresh,
     NetworkDirectJoin { address: String },
-    PlayerNew,
-    PlayerProperties { index: usize },
     PlayerCrew { index: usize },
 }
 
@@ -16772,6 +16856,7 @@ impl GameApp {
             network_game_advertiser: None,
             advertised_game_reference: None,
             startup_player_dialog: None,
+            startup_player_properties_dialog: None,
             startup_player_files,
             startup_player_models,
             startup_options_dialog: None,
@@ -17530,6 +17615,10 @@ impl GameApp {
                 dialog.resize(width as i32, height as i32);
                 dialog.pointer_left();
             }
+            if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                pending.controller.resize(width as i32, height as i32);
+                pending.controller.pointer_left();
+            }
             if let (Some(dialog), Some(fonts), Some(book)) = (
                 self.startup_options_dialog.as_mut(),
                 self.assets.clonk_fonts.as_deref(),
@@ -17986,6 +18075,18 @@ impl GameApp {
             self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        if self.startup_player_properties_dialog.is_some() {
+            let mut encoded = [0_u8; 4];
+            let text = character.encode_utf8(&mut encoded);
+            let actions = self
+                .startup_player_properties_dialog
+                .as_mut()
+                .map(|pending| pending.controller.handle_text_input(text))
+                .unwrap_or_default();
+            self.process_startup_player_properties_actions(actions);
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.game_option_input_dialog.is_some() && self.context_menu.is_none() {
@@ -18487,6 +18588,9 @@ impl GameApp {
             self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        if self.startup_player_properties_dialog.is_some() {
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -19829,6 +19933,29 @@ impl GameApp {
         let input_dialog_release_latched =
             state == ElementState::Released && self.game_option_input_consumed_keys.remove(&key);
         if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if self.startup_player_properties_dialog.is_some() {
+            let actions = if state == ElementState::Pressed
+                && matches!(key, VirtualKeyCode::Back | VirtualKeyCode::Delete)
+            {
+                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                    pending.controller.delete_name_char();
+                }
+                Vec::new()
+            } else if let Some(gui_key) = map_key_code(key) {
+                self.startup_player_properties_dialog
+                    .as_mut()
+                    .map(|pending| match state {
+                        ElementState::Pressed => pending.controller.handle_key_down(gui_key),
+                        ElementState::Released => pending.controller.handle_key_up(gui_key),
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            self.process_startup_player_properties_actions(actions);
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.handle_definition_selector_key(key, state)? {
@@ -25145,7 +25272,9 @@ impl GameApp {
                 self.handle_gamepad_button(slot, button, state)?;
             }
             GamepadEvent::Clear { .. } => {
-                if self.classic_host_lobby_active() {
+                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                    pending.controller.pointer_left();
+                } else if self.classic_host_lobby_active() {
                     self.cancel_classic_host_lobby_interaction();
                 } else if self.mode == AppMode::Menu
                     && self.startup_view == StartupView::ScenarioBrowser
@@ -25162,7 +25291,24 @@ impl GameApp {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
-            GamepadEvent::GuiButton { .. } => {}
+            GamepadEvent::GuiButton { class, state, .. } => {
+                if self.startup_player_properties_dialog.is_some() {
+                    let key = match class {
+                        GuiButtonClass::Low => KeyCode::Enter,
+                        GuiButtonClass::High => KeyCode::Escape,
+                    };
+                    let actions = self
+                        .startup_player_properties_dialog
+                        .as_mut()
+                        .map(|pending| match state {
+                            ElementState::Pressed => pending.controller.handle_key_down(key),
+                            ElementState::Released => pending.controller.handle_key_up(key),
+                        })
+                        .unwrap_or_default();
+                    self.process_startup_player_properties_actions(actions);
+                    self.mark_menu_dirty();
+                }
+            }
             GamepadEvent::Action {
                 slot,
                 action,
@@ -25181,6 +25327,9 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        if self.startup_player_properties_dialog.is_some() {
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -25228,6 +25377,25 @@ impl GameApp {
                 button,
                 state,
             });
+        }
+        if self.startup_player_properties_dialog.is_some() {
+            let key = match button {
+                ControlButton::Left => KeyCode::Left,
+                ControlButton::Right => KeyCode::Right,
+                ControlButton::Up => KeyCode::Up,
+                ControlButton::Down => KeyCode::Down,
+            };
+            let actions = self
+                .startup_player_properties_dialog
+                .as_mut()
+                .map(|pending| match state {
+                    ElementState::Pressed => pending.controller.handle_key_down(key),
+                    ElementState::Released => pending.controller.handle_key_up(key),
+                })
+                .unwrap_or_default();
+            self.process_startup_player_properties_actions(actions);
+            self.mark_menu_dirty();
+            return Ok(());
         }
         if self.definition_selector.is_some() {
             return self.handle_definition_selector_gamepad_event(GamepadEvent::Direction {
@@ -25421,6 +25589,26 @@ impl GameApp {
                 state,
             });
         }
+        if self.startup_player_properties_dialog.is_some() {
+            let key = match action {
+                GamepadActionType::Select => Some(KeyCode::Enter),
+                GamepadActionType::Cancel => Some(KeyCode::Escape),
+                GamepadActionType::MenuToggle => None,
+            };
+            let actions = key
+                .and_then(|key| {
+                    self.startup_player_properties_dialog
+                        .as_mut()
+                        .map(|pending| match state {
+                            ElementState::Pressed => pending.controller.handle_key_down(key),
+                            ElementState::Released => pending.controller.handle_key_up(key),
+                        })
+                })
+                .unwrap_or_default();
+            self.process_startup_player_properties_actions(actions);
+            self.mark_menu_dirty();
+            return Ok(());
+        }
         if self.definition_selector.is_some() {
             return Ok(());
         }
@@ -25553,6 +25741,15 @@ impl GameApp {
             self.main_menu_state.note_pointer_position(Some(point));
         }
         if self.handle_message_dialog_pointer_move(point) {
+            return Ok(());
+        }
+        if self.startup_player_properties_dialog.is_some() {
+            let actions = self
+                .startup_player_properties_dialog
+                .as_mut()
+                .map(|pending| pending.controller.handle_pointer_move(point))
+                .unwrap_or_default();
+            self.process_startup_player_properties_actions(actions);
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -26078,6 +26275,9 @@ impl GameApp {
         if !self.message_dialogs.is_empty() {
             return Ok(());
         }
+        if self.startup_player_properties_dialog.is_some() {
+            return Ok(());
+        }
         if self.definition_selector.is_some() {
             return Ok(());
         }
@@ -26170,6 +26370,9 @@ impl GameApp {
         if self
             .consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Other)
         {
+            return Ok(());
+        }
+        if self.startup_player_properties_dialog.is_some() && self.message_dialogs.is_empty() {
             return Ok(());
         }
         if self.game_option_input_dialog.is_some()
@@ -26884,6 +27087,24 @@ impl GameApp {
         if self.handle_message_dialog_pointer_button(button_state)? {
             return Ok(());
         }
+        if self.startup_player_properties_dialog.is_some() {
+            let point = self
+                .startup_player_properties_dialog
+                .as_ref()
+                .and_then(|pending| pending.controller.pointer_position());
+            let actions = point
+                .and_then(|point| {
+                    self.startup_player_properties_dialog
+                        .as_mut()
+                        .map(|pending| match button_state {
+                            ElementState::Pressed => pending.controller.handle_pointer_down(point),
+                            ElementState::Released => pending.controller.handle_pointer_up(point),
+                        })
+                })
+                .unwrap_or_default();
+            self.process_startup_player_properties_actions(actions);
+            return Ok(());
+        }
         if self.definition_selector.is_some() {
             let layout = self.definition_selector_layout();
             let point = self
@@ -27318,6 +27539,24 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.startup_player_properties_dialog.is_some() {
+            self.mark_menu_dirty();
+            let actions = self
+                .startup_player_properties_dialog
+                .as_mut()
+                .map(|pending| match phase {
+                    TouchPhase::Started => pending.controller.handle_pointer_down(position),
+                    TouchPhase::Moved => pending.controller.handle_pointer_move(position),
+                    TouchPhase::Ended => pending.controller.handle_pointer_up(position),
+                    TouchPhase::Cancelled => {
+                        pending.controller.pointer_left();
+                        Vec::new()
+                    }
+                })
+                .unwrap_or_default();
+            self.process_startup_player_properties_actions(actions);
+            return Ok(());
+        }
         if self.definition_selector.is_some() {
             self.mark_menu_dirty();
             let layout = self.definition_selector_layout();
@@ -27726,6 +27965,10 @@ impl GameApp {
             dialog.state.pointer_left();
             let sounds = dialog.state.take_sound_events();
             self.play_message_dialog_sound_events(sounds);
+            return;
+        }
+        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+            pending.controller.pointer_left();
             return;
         }
         if self.definition_selector.is_some() {
@@ -29629,9 +29872,7 @@ impl GameApp {
                     AppContextMenuCommand::StartupPlayer(
                         PlrSelPlayerContextCommand::PlayerProperties(index),
                     ) => {
-                        return Err(classic_startup_action_error(
-                            ClassicStartupAction::PlayerProperties { index },
-                        ));
+                        self.open_existing_startup_player_properties(index);
                     }
                     AppContextMenuCommand::StartupPlayer(
                         PlrSelPlayerContextCommand::DeletePlayer(index),
@@ -30008,6 +30249,299 @@ impl GameApp {
         self.mark_menu_dirty();
     }
 
+    fn new_startup_player_properties_controller(
+        &self,
+        color_index: usize,
+        portrait_index: usize,
+    ) -> lc_frontend::startup_plrproperties::PlayerPropertiesController {
+        use lc_frontend::startup_plrproperties::{PLAYER_COLORS, PlayerPropertiesController};
+
+        let color_index = color_index % 8;
+        let mut player = PlayerFile::default();
+        player.pref_color = color_index as i32;
+        player.pref_color_dw = PLAYER_COLORS[color_index];
+        player.pref_control = 0;
+        player.pref_control_style = true;
+        player.pref_auto_context_menu = true;
+        let comment = load_runtime_language_table(self.app_paths.as_ref())
+            .ok()
+            .and_then(|table| table.entries.get("IDS_PLR_NEWCOMMENT").cloned())
+            .unwrap_or_else(|| "I'm new.".to_string());
+        let portrait = self
+            .assets
+            .dialog_image(&format!("Portrait{}.png", portrait_index % 5 + 1))
+            .or_else(|| {
+                (1..=5).find_map(|index| {
+                    self.assets
+                        .dialog_image(&format!("Portrait{index}.png"))
+                })
+            });
+        let big_icon = portrait
+            .as_ref()
+            .map(|portrait| startup_player_big_icon(portrait, player.pref_color_dw));
+        let mut controller = PlayerPropertiesController::new_player(
+            player,
+            comment,
+            portrait.map(|portrait| resize_startup_player_image(&portrait, 150)),
+            big_icon,
+        );
+        controller.resize(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        controller
+    }
+
+    fn open_new_startup_player_properties(&mut self) {
+        self.close_context_menu_silently();
+        let controller = self.new_startup_player_properties_controller(
+            classic_safe_random(8),
+            classic_safe_random(5),
+        );
+        self.startup_player_properties_dialog = Some(PendingStartupPlayerProperties {
+            origin: StartupPlayerPropertiesOrigin::SelectionNew,
+            controller,
+        });
+        self.status_text.clear();
+        self.mark_menu_dirty();
+    }
+
+    fn open_existing_startup_player_properties(&mut self, index: usize) {
+        let Some((path, was_activated, player, comment, portrait, big_icon)) = self
+            .startup_player_files
+            .get(index)
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    entry.render_model.activated,
+                    entry.player_file.clone(),
+                    entry.render_model.comment.clone(),
+                    entry.render_model.portrait.clone(),
+                    entry.render_model.big_icon.clone(),
+                )
+            })
+        else {
+            tracing::error!(index, "player-properties action references a stale row");
+            return;
+        };
+        self.close_context_menu_silently();
+        let mut controller =
+            lc_frontend::startup_plrproperties::PlayerPropertiesController::edit_player(
+                index, player, comment, portrait, big_icon,
+            );
+        controller.resize(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        self.startup_player_properties_dialog = Some(PendingStartupPlayerProperties {
+            origin: StartupPlayerPropertiesOrigin::SelectionEdit {
+                path,
+                was_activated,
+            },
+            controller,
+        });
+        self.status_text.clear();
+        self.mark_menu_dirty();
+    }
+
+    fn process_startup_player_properties_actions(
+        &mut self,
+        actions: Vec<lc_frontend::startup_plrproperties::PlayerPropertiesAction>,
+    ) {
+        use lc_frontend::startup_plrproperties::PlayerPropertiesAction;
+
+        for action in actions {
+            match action {
+                PlayerPropertiesAction::Cancel => {
+                    self.startup_player_properties_dialog = None;
+                    self.status_text.clear();
+                    self.mark_menu_dirty();
+                }
+                PlayerPropertiesAction::ChoosePicture => {
+                    self.choose_next_startup_player_picture();
+                }
+                PlayerPropertiesAction::Submit => self.save_open_startup_player_properties(),
+            }
+        }
+    }
+
+    fn choose_next_startup_player_picture(&mut self) {
+        let Some((current, color)) = self
+            .startup_player_properties_dialog
+            .as_ref()
+            .map(|pending| {
+                (
+                    pending.controller.portrait_preview().cloned(),
+                    pending.controller.player().pref_color_dw,
+                )
+            })
+        else {
+            return;
+        };
+        let portraits = (1..=5)
+            .filter_map(|index| self.assets.dialog_image(&format!("Portrait{index}.png")))
+            .collect::<Vec<_>>();
+        if portraits.is_empty() {
+            if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                pending.controller.set_validation_error(Some(
+                    "No stock player portraits are available".to_string(),
+                ));
+            }
+            return;
+        }
+        let current_index = current
+            .as_ref()
+            .and_then(|current| portraits.iter().position(|portrait| portrait == current));
+        let portrait = portraits[(current_index.map_or(0, |index| index + 1)) % portraits.len()]
+            .clone();
+        let portrait = resize_startup_player_image(&portrait, 150);
+        let big_icon = startup_player_big_icon(&portrait, color);
+        if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+            pending.controller.replace_images(portrait, big_icon);
+            pending.controller.clear_validation_error();
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn save_open_startup_player_properties(&mut self) {
+        let Some((origin, player, comment, portrait, mut big_icon)) = self
+            .startup_player_properties_dialog
+            .as_ref()
+            .map(|pending| {
+                (
+                    pending.origin.clone(),
+                    pending.controller.player().clone(),
+                    pending.controller.comment().to_string(),
+                    startup_player_image_write(pending.controller.portrait_update()),
+                    startup_player_image_write(pending.controller.big_icon_update()),
+                )
+            })
+        else {
+            return;
+        };
+        if let (PlayerImageWrite::Replace(portrait), PlayerImageWrite::Replace(_)) =
+            (&portrait, &big_icon)
+        {
+            big_icon = PlayerImageWrite::Replace(startup_player_big_icon(
+                portrait,
+                player.pref_color_dw,
+            ));
+        }
+        let existing_path = match &origin {
+            StartupPlayerPropertiesOrigin::SelectionNew => None,
+            StartupPlayerPropertiesOrigin::SelectionEdit { path, .. } => Some(path.as_path()),
+        };
+        let result = self
+            .app_paths
+            .as_ref()
+            .ok_or_else(|| "application paths are unavailable".to_string())
+            .and_then(|paths| {
+                save_player_properties(
+                    paths,
+                    existing_path,
+                    &player,
+                    &comment,
+                    &portrait,
+                    &big_icon,
+                )
+                .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(saved) => self.finish_startup_player_properties_save(saved, origin),
+            Err(error) => {
+                tracing::error!(%error, "failed to save startup player properties");
+                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                    pending.controller.set_validation_error(Some(error.clone()));
+                }
+                self.status_text = error;
+                self.mark_menu_dirty();
+            }
+        }
+    }
+
+    fn finish_startup_player_properties_save(
+        &mut self,
+        saved: SavedStartupPlayer,
+        origin: StartupPlayerPropertiesOrigin,
+    ) {
+        let previous_activations = self
+            .startup_player_files
+            .iter()
+            .map(|player| (player.file_name.clone(), player.render_model.activated))
+            .collect::<Vec<_>>();
+        let Some(paths) = self.app_paths.as_ref() else {
+            self.startup_player_properties_dialog = None;
+            self.status_text = "Player saved, but application paths are unavailable".to_string();
+            self.mark_menu_dirty();
+            return;
+        };
+        let mut players = match discover_player_files(paths) {
+            Ok(players) => players,
+            Err(error) => {
+                tracing::error!(%error, "failed to refresh startup players after save");
+                self.startup_player_properties_dialog = None;
+                self.status_text = format!("Player saved, but the list could not be refreshed: {error}");
+                self.mark_menu_dirty();
+                return;
+            }
+        };
+        let is_saved = |player: &StartupPlayerFile| {
+            player.path == saved.path
+                || player.file_name.eq_ignore_ascii_case(&saved.file_name)
+        };
+        let saved_index = players.iter().position(|player| is_saved(player));
+        for player in &mut players {
+            let activated = if is_saved(player) {
+                match &origin {
+                    StartupPlayerPropertiesOrigin::SelectionNew => true,
+                    StartupPlayerPropertiesOrigin::SelectionEdit { was_activated, .. } => {
+                        *was_activated
+                    }
+                }
+            } else {
+                previous_activations
+                    .iter()
+                    .find(|(reference, _)| reference.eq_ignore_ascii_case(&player.file_name))
+                    .is_some_and(|(_, activated)| *activated)
+            };
+            player.set_activated(activated);
+        }
+        let persistence_error = persist_activations(&paths.config_file(), &players).err();
+        self.startup_player_models = players
+            .iter()
+            .map(|player| player.render_model.clone())
+            .collect();
+        self.startup_player_files = players;
+        self.selected_player_file = saved_index
+            .and_then(|index| self.startup_player_files.get(index))
+            .filter(|player| player.render_model.activated)
+            .or_else(|| {
+                self.startup_player_files
+                    .iter()
+                    .find(|player| player.render_model.activated)
+            })
+            .map(|player| player.player_file.clone());
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_player_count(self.startup_player_models.len());
+            dialog.set_player_activations(
+                self.startup_player_models
+                    .iter()
+                    .map(|player| player.activated)
+                    .collect(),
+            );
+            dialog.set_selected_index(saved_index);
+        }
+        self.startup_player_properties_dialog = None;
+        self.refresh_participants_label();
+        if let Some(error) = persistence_error {
+            tracing::error!(%error, "failed to refresh participants after player save");
+            self.status_text = format!("Player saved, but participant selection failed: {error}");
+        } else {
+            self.status_text.clear();
+        }
+        self.mark_menu_dirty();
+    }
+
     fn process_player_dialog_actions(
         &mut self,
         actions: Vec<lc_frontend::startup_plrsel::PlrSelAction>,
@@ -30019,9 +30553,7 @@ impl GameApp {
                 PlrSelAction::SelectionChanged(_) | PlrSelAction::FocusChanged(_) => {}
                 PlrSelAction::Back => self.show_main_menu(),
                 PlrSelAction::NewPlayer => {
-                    return Err(classic_startup_action_error(
-                        ClassicStartupAction::PlayerNew,
-                    ));
+                    self.open_new_startup_player_properties();
                 }
                 PlrSelAction::ActivationChanged { index, activated } => {
                     let selected_before = self
@@ -30082,9 +30614,7 @@ impl GameApp {
                     self.open_startup_player_delete_dialog(index, true)?;
                 }
                 PlrSelAction::PlayerProperties(index) => {
-                    return Err(classic_startup_action_error(
-                        ClassicStartupAction::PlayerProperties { index },
-                    ));
+                    self.open_existing_startup_player_properties(index);
                 }
                 PlrSelAction::ShowCrew(index) => {
                     return Err(classic_startup_action_error(
@@ -31721,6 +32251,7 @@ impl GameApp {
 
     fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
         self.close_context_menu_silently();
+        self.startup_player_properties_dialog = None;
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
@@ -31845,6 +32376,7 @@ impl GameApp {
 
     fn open_player_selection_dialog(&mut self) {
         self.close_context_menu_silently();
+        self.startup_player_properties_dialog = None;
         let mut dialog =
             lc_frontend::startup_plrsel::PlrSelController::new(self.startup_player_models.len());
         dialog.set_player_activations(
@@ -31959,6 +32491,7 @@ impl GameApp {
         self.running_chat = None;
         self.message_input_history.clear();
         self.close_context_menu_silently();
+        self.startup_player_properties_dialog = None;
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
         self.game_option_input_pointer_capture = None;
@@ -35778,6 +36311,7 @@ impl GameApp {
                     && self.main_menu_state.participants_tooltip_pending();
                 let cache_eligible = !ordered_native
                     && self.context_menu.is_none()
+                    && self.startup_player_properties_dialog.is_none()
                     && self.game_option_input_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
@@ -35817,6 +36351,9 @@ impl GameApp {
                     &mut self.menu_state,
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
+                    self.startup_player_properties_dialog
+                        .as_ref()
+                        .map(|pending| &pending.controller),
                     &self.startup_player_models,
                     base_context_menu,
                     context_menu_open,
@@ -41111,6 +41648,9 @@ fn render_startup_frame(
     scenario_menu: &mut MenuState,
     network_dialog: Option<&lc_frontend::startup_netdlg::NetDlgController>,
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
+    player_properties: Option<
+        &lc_frontend::startup_plrproperties::PlayerPropertiesController,
+    >,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
     context_menu_open: bool,
@@ -41277,9 +41817,20 @@ fn render_startup_frame(
                         book.as_ref(),
                         player_models,
                         dialog,
-                        !context_menu_open,
+                        !context_menu_open && player_properties.is_none(),
                         Some(startup_gamma()),
                     );
+                    if let (Some(properties), Some(properties_assets)) =
+                        (player_properties, assets.plrprop_assets())
+                    {
+                        lc_frontend::startup_plrproperties::PlayerPropertiesScreen::render(
+                            surface,
+                            &properties_assets,
+                            fonts,
+                            properties,
+                            Some(startup_gamma()),
+                        );
+                    }
                     true
                 }
                 _ => false,
@@ -62291,46 +62842,49 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.network.is_none());
 
         app.open_player_selection_dialog();
-        for (action, expected) in [
-            (
-                lc_frontend::startup_plrsel::PlrSelAction::NewPlayer,
-                ClassicStartupAction::PlayerNew,
-            ),
-            (
-                lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties(3),
-                ClassicStartupAction::PlayerProperties { index: 3 },
-            ),
-            (
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::NewPlayer,
+        ])
+        .expect("new-player properties are implemented");
+        assert!(app.startup_player_properties_dialog.is_some());
+        app.startup_player_properties_dialog = None;
+
+        let error = app
+            .process_player_dialog_actions(vec![
                 lc_frontend::startup_plrsel::PlrSelAction::ShowCrew(4),
-                ClassicStartupAction::PlayerCrew { index: 4 },
-            ),
-        ] {
-            let error = app
-                .process_player_dialog_actions(vec![action])
-                .expect_err("player child is not ported");
-            assert_engine_parity_boundary(error, ClassicParityBoundary::StartupAction(expected));
-            assert!(app.status_text.is_empty());
-            assert!(app.message_dialogs.is_empty());
-        }
+            ])
+            .expect_err("player crew is not ported");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerCrew { index: 4 }),
+        );
+        assert!(app.status_text.is_empty());
+        assert!(app.message_dialogs.is_empty());
     }
 
     #[test]
-    fn player_properties_context_closes_and_clicks_before_typed_boundary() {
+    fn player_properties_context_closes_and_opens_the_editor() {
         let mut app = new_classic_menu_app(640, 480);
-        app.startup_player_models
-            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
-                name: "Context Player".to_string(),
-                activated: false,
-                big_icon: None,
-                portrait: None,
-                color_dw: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                comment: String::new(),
-            });
+        let model = lc_frontend::startup_plrsel::PlrSelPlayer {
+            name: "Context Player".to_string(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 0xff,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: String::new(),
+        };
+        app.startup_player_files.push(StartupPlayerFile {
+            path: PathBuf::from("Context Player.c4p"),
+            file_name: "Context Player.c4p".to_string(),
+            player_file: PlayerFile::default(),
+            render_model: model.clone(),
+        });
+        app.startup_player_models.push(model);
         app.open_player_selection_dialog();
         let layout = lc_frontend::startup_plrsel::plrsel_layout(640, 480);
         app.startup_player_dialog
@@ -62347,8 +62901,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let before_models = app.startup_player_models.len();
         let before_files = app.startup_player_files.len();
 
-        let error = app
-            .process_context_menu_outcome(ContextMenuOutcome {
+        app.process_context_menu_outcome(ContextMenuOutcome {
                 captured: true,
                 pass_through: false,
                 focus_suppressed: true,
@@ -62360,18 +62913,236 @@ public func Grant(password) { return GainMissionAccess(password); }
                     )),
                 ],
             })
-            .expect_err("Properties callback reaches the typed boundary");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
-                index: 0,
-            }),
-        );
+            .expect("Properties callback opens the editor");
         assert!(app.context_menu.is_none());
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.mode()),
+            Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
+        ));
         assert!(app.status_text.is_empty());
         assert!(app.message_dialogs.is_empty());
         assert_eq!(app.startup_player_models.len(), before_models);
         assert_eq!(app.startup_player_files.len(), before_files);
+    }
+
+    #[test]
+    fn new_player_properties_defaults_match_classic_choices() {
+        let mut app = new_classic_menu_app(640, 480);
+        let portrait = ImageData::new(
+            150,
+            150,
+            [0_u8, 0, 255, 255]
+                .into_iter()
+                .cycle()
+                .take(150 * 150 * 4)
+                .collect(),
+        );
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .insert("Portrait5.png".to_string(), portrait);
+
+        let controller = app.new_startup_player_properties_controller(7, 4);
+        let player = controller.player();
+        assert_eq!(player.name, "Neuling");
+        assert_eq!(controller.comment(), "I'm new.");
+        assert_eq!(player.pref_color, 7);
+        assert_eq!(player.pref_color_dw, 0xf08050);
+        assert_eq!(player.pref_control, 0);
+        assert!(player.pref_mouse);
+        assert!(player.pref_control_style);
+        assert!(player.pref_auto_context_menu);
+        assert_eq!(
+            controller
+                .portrait_preview()
+                .map(|image| (image.width(), image.height())),
+            Some((150, 150))
+        );
+        assert!(controller.big_icon_preview().is_some_and(|image| {
+            image.width() <= 64 && image.height() <= 64
+        }));
+    }
+
+    #[test]
+    fn player_properties_save_refreshes_selection_and_renamed_participant() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let player_root = user_data.path().join("Players");
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            player_root.to_string_lossy(),
+        );
+        fs::create_dir_all(paths.config_file().parent().expect("config parent"))
+            .expect("create config parent");
+        config.save(paths.config_file()).expect("save config");
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .insert(
+                "Portrait1.png".to_string(),
+                ImageData::new(1, 1, vec![0, 0, 255, 255]),
+            );
+        app.open_player_selection_dialog();
+        app.open_new_startup_player_properties();
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("new editor")
+            .controller
+            .set_name("");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+        assert!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .and_then(|pending| pending.controller.validation_error())
+                .is_some(),
+            "invalid OK keeps the editor open with a warning"
+        );
+        assert!(app.startup_player_files.is_empty());
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("new editor")
+            .controller
+            .set_name("Created");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        let created = player_root.join("Created.c4p");
+        assert!(created.is_file());
+        let created_group = Group::open(&created).expect("open created player");
+        assert!(created_group.read_file("Player.txt").is_ok());
+        assert!(created_group.read_file("Portrait.png").is_ok());
+        assert!(created_group.read_file("BigIcon.png").is_ok());
+        assert!(app.startup_player_properties_dialog.is_none());
+        assert_eq!(app.startup_player_files.len(), 1);
+        assert!(app.startup_player_files[0].render_model.activated);
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.selected_index()),
+            Some(0)
+        );
+        assert_eq!(
+            app.selected_player_file.as_ref().map(|player| player.name.as_str()),
+            Some("Created")
+        );
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload config")
+                .get_in(Some("General"), "Participants"),
+            Some(created.to_string_lossy().as_ref())
+        );
+
+        app.open_existing_startup_player_properties(0);
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("edit editor")
+            .controller
+            .set_name("Renamed");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+        let renamed = player_root.join("Renamed.c4p");
+        assert!(!created.exists());
+        assert!(renamed.is_file());
+        assert_eq!(app.startup_player_files[0].player_file.name, "Renamed");
+        assert!(app.startup_player_files[0].render_model.activated);
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload renamed config")
+                .get_in(Some("General"), "Participants"),
+            Some(renamed.to_string_lossy().as_ref())
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn player_new_properties_enter_f2_and_insert_open_the_modal() {
+        let mut app = new_classic_menu_app(640, 480);
+        let model = lc_frontend::startup_plrsel::PlrSelPlayer {
+            name: "Entry Player".to_string(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 0xff,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: "entry".to_string(),
+        };
+        app.startup_player_files.push(StartupPlayerFile {
+            path: PathBuf::from("Entry Player.c4p"),
+            file_name: "Entry Player.c4p".to_string(),
+            player_file: PlayerFile {
+                name: "Entry Player".to_string(),
+                ..PlayerFile::default()
+            },
+            render_model: model.clone(),
+        });
+        app.startup_player_models.push(model);
+        app.open_player_selection_dialog();
+
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::NewPlayer,
+        ])
+        .expect("New opens editor");
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.mode()),
+            Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::New)
+        ));
+        let mut frame = vec![0; 640 * 480 * 4];
+        app.render(&mut frame)
+            .expect("the player-properties modal renders over selection");
+        app.startup_player_properties_dialog = None;
+
+        for key in [
+            VirtualKeyCode::Return,
+            VirtualKeyCode::F2,
+        ] {
+            app.handle_key(key, ElementState::Pressed)
+                .expect("existing-player shortcut opens editor");
+            assert!(matches!(
+                app.startup_player_properties_dialog
+                    .as_ref()
+                    .map(|pending| pending.controller.mode()),
+                Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
+            ));
+            app.startup_player_properties_dialog = None;
+            app.handle_key(key, ElementState::Released)
+                .expect("release shortcut");
+        }
+
+        app.handle_key(VirtualKeyCode::Insert, ElementState::Pressed)
+            .expect("Insert opens new-player editor");
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.mode()),
+            Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::New)
+        ));
     }
 
     #[test]
@@ -62834,20 +63605,26 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.handle_key(VirtualKeyCode::F5, ElementState::Released)
             .expect("release Logo+F5");
 
-        app.startup_player_models
-            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
-                name: "Shortcut Player".to_string(),
-                activated: false,
-                big_icon: None,
-                portrait: None,
-                color_dw: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                comment: String::new(),
-            });
+        let shortcut_model = lc_frontend::startup_plrsel::PlrSelPlayer {
+            name: "Shortcut Player".to_string(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 0xff,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: String::new(),
+        };
+        app.startup_player_files.push(StartupPlayerFile {
+            path: PathBuf::from("Shortcut Player.c4p"),
+            file_name: "Shortcut Player.c4p".to_string(),
+            player_file: PlayerFile::default(),
+            render_model: shortcut_model.clone(),
+        });
+        app.startup_player_models.push(shortcut_model);
         app.open_player_selection_dialog();
         for (modifiers, key) in [
             (ModifiersState::ALT, VirtualKeyCode::Insert),
@@ -62863,15 +63640,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.message_dialogs.is_empty());
         assert!(app.status_text.is_empty());
         app.keyboard_modifiers = ModifiersState::LOGO;
-        let error = app
-            .handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-            .expect_err("Logo+F2 retains the classic Properties shortcut");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
-                index: 0,
-            }),
-        );
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("Logo+F2 retains the classic Properties shortcut");
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.mode()),
+            Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
+        ));
     }
 
     #[test]
@@ -68446,20 +69222,26 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("release network Back");
         assert_eq!(app.startup_view, StartupView::MainMenu);
 
-        app.startup_player_models
-            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
-                name: "Test Player".to_string(),
-                activated: false,
-                big_icon: None,
-                portrait: None,
-                color_dw: 0,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                comment: String::new(),
-            });
+        let test_player = lc_frontend::startup_plrsel::PlrSelPlayer {
+            name: "Test Player".to_string(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 0xff,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: String::new(),
+        };
+        app.startup_player_files.push(StartupPlayerFile {
+            path: user_data.path().join("Test Player.c4p"),
+            file_name: "Test Player.c4p".to_string(),
+            player_file: PlayerFile::default(),
+            render_model: test_player.clone(),
+        });
+        app.startup_player_models.push(test_player);
         click_main_button(&mut app, 2);
         assert_eq!(app.startup_view, StartupView::PlayerSelection);
         let player_layout = lc_frontend::startup_plrsel::plrsel_layout(1280, 720);
@@ -68475,16 +69257,19 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("release first player-row click");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press player row again");
-        let error = app
-            .handle_mouse_button(ElementState::Released)
-            .expect_err("double-click reaches typed Properties boundary");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
-                index: 0,
-            }),
-        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("double-click opens Properties");
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.mode()),
+            Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 0 })
+        ));
         assert!(app.status_text.is_empty());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("cancel player Properties");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release cancel");
         let player_back = player_layout.buttons[0];
         let player_point = PhysicalPosition::new(
             f64::from(player_back.x + player_back.w / 2),
@@ -69626,16 +70411,15 @@ public func Grant(password) { return GainMissionAccess(password); }
             f64::from(properties.y + 1),
         ))
         .expect("hover Properties");
-        let error = app
-            .handle_mouse_button(ElementState::Pressed)
-            .expect_err("activate Properties on left-down");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
-                index: 1,
-            }),
-        );
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate Properties on left-down");
         assert!(app.context_menu.is_none());
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.mode()),
+            Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::Edit { index: 1 })
+        ));
         assert!(app.message_dialogs.is_empty());
         assert!(app.status_text.is_empty());
         assert_eq!(
@@ -69645,6 +70429,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.handle_mouse_button(ElementState::Released)
             .expect("swallow Properties activation release");
         assert_eq!(app.context_menu_pointer_capture, None);
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close Properties");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release Properties close");
 
         open_on_row(&mut app, 1);
         let delete = app
