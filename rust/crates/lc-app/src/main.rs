@@ -6587,12 +6587,13 @@ impl SoundResolver {
         let terms = SoundSearchTerms::new(name);
         if let Some(pattern) = terms.wildcard_pattern.as_deref() {
             let mut matches = Vec::new();
+            let mut seen_file_names = HashSet::new();
             for library in self.scenario.iter().chain(self.global.iter()) {
-                matches.extend(
-                    library
-                        .wildcard_match_indices(pattern)
-                        .map(|entry_index| (library, entry_index)),
-                );
+                for entry_index in library.wildcard_match_indices(pattern) {
+                    if seen_file_names.insert(library.entries[entry_index].file_name.as_str()) {
+                        matches.push((library, entry_index));
+                    }
+                }
             }
             if matches.is_empty() {
                 return None;
@@ -6645,7 +6646,7 @@ impl SoundResolver {
         let label = format!("definition::{}", definition_id);
         let libs = collect_sound_libraries_from_group(group, label);
         if !libs.is_empty() {
-            self.global.extend(libs);
+            self.global.splice(0..0, libs);
         }
     }
 }
@@ -46911,20 +46912,26 @@ func Award()
     #[test]
     fn wildcard_sound_resolution_spans_scenario_global_and_definitions() {
         let (_dir, resolver) = wildcard_sound_resolver_fixture();
+        let resolved = (0..3)
+            .map(|selected| {
+                resolver
+                    .resolve_entry_with_random("Blast*", |range| {
+                        assert_eq!(range, 3, "every resolved library contributes a match");
+                        selected
+                    })
+                    .expect("selected wildcard sound")
+                    .load_audio()
+                    .expect("sound bytes")
+            })
+            .collect::<HashSet<_>>();
         let expected = [
-            b"scenario blast".as_slice(),
-            b"global blast".as_slice(),
-            b"definition blast".as_slice(),
-        ];
-        for (selected, expected) in expected.into_iter().enumerate() {
-            let resolved = resolver
-                .resolve_entry_with_random("Blast*", |range| {
-                    assert_eq!(range, 3, "every resolved library contributes a match");
-                    selected
-                })
-                .expect("selected wildcard sound");
-            assert_eq!(resolved.load_audio().expect("sound bytes"), expected);
-        }
+            b"scenario blast".to_vec(),
+            b"global blast".to_vec(),
+            b"definition blast".to_vec(),
+        ]
+        .into_iter()
+        .collect::<HashSet<_>>();
+        assert_eq!(resolved, expected);
 
         let exact = resolver
             .resolve_entry_with_random("Blast2", |_| {
@@ -46932,6 +46939,82 @@ func Award()
             })
             .expect("exact global sound");
         assert_eq!(exact.load_audio().expect("exact sound bytes"), b"global blast");
+    }
+
+    #[test]
+    fn definition_sound_overrides_global_while_scenario_remains_first() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Sound.c4g");
+        let first_definition = dir.path().join("Objects.c4d");
+        let second_definition = dir.path().join("MoreObjects.c4d");
+        let scenario = dir.path().join("Override.c4s");
+        for path in [&global, &first_definition, &second_definition, &scenario] {
+            fs::create_dir_all(path).expect("create sound group");
+        }
+        fs::write(global.join("Clang.wav"), b"global clang").expect("write global sound");
+        fs::write(first_definition.join("CLANG.WAV"), b"first definition clang")
+            .expect("write first definition sound");
+        fs::write(second_definition.join("clang.wav"), b"second definition clang")
+            .expect("write second definition sound");
+        fs::write(scenario.join("ClAnG.WaV"), b"scenario clang")
+            .expect("write scenario sound");
+
+        let mut resolver = SoundResolver {
+            global: collect_sound_libraries_for_path(&global),
+            scenario: Vec::new(),
+            scenario_root: None,
+            registered_definitions: HashSet::new(),
+        };
+        assert_eq!(
+            resolver
+                .resolve_entry("Clang")
+                .expect("global sample resolves")
+                .load_audio()
+                .expect("read global sample"),
+            b"global clang"
+        );
+
+        let first_group = Group::open(&first_definition).expect("open first definition group");
+        resolver.register_definition_group("CLNK", &first_group);
+        assert_eq!(
+            resolver
+                .resolve_entry("Clang")
+                .expect("definition sample overrides global")
+                .load_audio()
+                .expect("read definition sample"),
+            b"first definition clang"
+        );
+
+        let second_group = Group::open(&second_definition).expect("open second definition group");
+        resolver.register_definition_group("MORE", &second_group);
+        assert_eq!(
+            resolver
+                .resolve_entry("Clang")
+                .expect("later definition sample overrides earlier definition")
+                .load_audio()
+                .expect("read later definition sample"),
+            b"second definition clang"
+        );
+
+        assert!(resolver.configure_scenario(Some(&scenario)));
+        assert_eq!(
+            resolver
+                .resolve_entry("Clang")
+                .expect("scenario sample overrides definition")
+                .load_audio()
+                .expect("read scenario sample"),
+            b"scenario clang"
+        );
+        let wildcard = resolver
+            .resolve_entry_with_random("Clang.???", |range| {
+                assert_eq!(range, 1, "shadowed filenames are one C++ sample");
+                0
+            })
+            .expect("scenario wildcard sample overrides shadowed definitions and global");
+        assert_eq!(
+            wildcard.load_audio().expect("read wildcard sample"),
+            b"scenario clang"
+        );
     }
 
     #[test]
