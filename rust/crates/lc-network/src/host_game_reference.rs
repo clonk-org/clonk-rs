@@ -88,6 +88,21 @@ impl HostGameReference {
         Self::new(summary, self.metadata.clone(), parameters)
     }
 
+    /// Rebuilds the reference after a control-mode policy change.
+    ///
+    /// `C4Network2Reference::InitLocal` copies the current control mode into
+    /// its independent display projection. Keeping this mutation explicit
+    /// prevents a later parameter/runtime replacement from advertising the
+    /// stale pre-league mode.
+    pub fn replacing_control_mode(
+        &self,
+        control_mode: i32,
+    ) -> Result<Self, HostGameReferenceError> {
+        let mut summary = self.summary.clone();
+        summary.control_mode = control_mode;
+        Self::new(summary, self.metadata.clone(), self.parameters.clone())
+    }
+
     /// Rebuild the fields refreshed by `C4Network2Reference::InitLocal`
     /// while a game is live. Per-player league performance remains untouched
     /// until the game-over branch below.

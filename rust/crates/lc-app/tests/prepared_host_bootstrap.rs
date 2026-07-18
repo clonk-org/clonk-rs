@@ -59,6 +59,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
             max_load_file_size: 100 * 1024 * 1024,
             no_runtime_join: true,
         },
+        league: None,
     })
     .unwrap();
 
@@ -600,6 +601,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
                 max_load_file_size: 100 * 1024 * 1024,
                 no_runtime_join: true,
             },
+            league: None,
         },
         &mut oracle,
     )
@@ -961,6 +963,7 @@ fn prepare_with_names(
             max_load_file_size: 100 * 1024 * 1024,
             no_runtime_join: true,
         },
+        league: None,
     })
 }
 

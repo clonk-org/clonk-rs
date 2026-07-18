@@ -9,7 +9,7 @@ use crate::{
     PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_USER,
     PlayerInfoUpdateRequest, ScenarioError, player_file::PlayerFile,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Process-local services used by C4TeamList while assigning initial players.
 /// One object owns both operations because generated team colors can consume
@@ -2515,6 +2515,31 @@ impl ControlPlayerInfoRegistry {
         entries.into_iter().collect()
     }
 
+    /// Applies the league server's projected-gain list by global player-info
+    /// ID and returns one clean direct-update packet per changed owner.
+    pub fn apply_league_projected_gains(
+        &mut self,
+        gains: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Vec<PlayerInfoControlData> {
+        let mut first_gain_by_id = HashMap::new();
+        for (player_id, gain) in gains {
+            first_gain_by_id.entry(player_id).or_insert(gain);
+        }
+        let mut touched_clients = HashSet::new();
+        for client in &mut self.clients {
+            for player in &mut client.players {
+                let Some(&gain) = first_gain_by_id.get(&player.id) else {
+                    continue;
+                };
+                if player.league_projected_gain != gain {
+                    player.league_projected_gain = gain;
+                    touched_clients.insert(client.client_id);
+                }
+            }
+        }
+        self.client_packets(&touched_clients)
+    }
+
     pub fn client_id_for_info(&self, info_id: i32) -> Option<i32> {
         self.clients.iter().find_map(|client| {
             client
@@ -3431,6 +3456,48 @@ mod tests {
             registry.league_scores_snapshot(),
             vec![(2, -20), (5, 0), (9, 90)]
         );
+    }
+
+    #[test]
+    fn league_projected_gains_match_global_ids_and_return_changed_owners_once() {
+        let mut unchanged = player(10);
+        unchanged.league_projected_gain = 3;
+        let mut first_changed = player(11);
+        first_changed.league_projected_gain = -1;
+        let mut second_changed = player(20);
+        second_changed.league_projected_gain = 1;
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL | CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            players: vec![unchanged, first_changed],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 7,
+            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![second_changed],
+            ..Default::default()
+        });
+
+        let updates = registry.apply_league_projected_gains([
+            (20, 8),
+            (999, 44),
+            (10, 3),
+            (11, 5),
+            (11, 99),
+        ]);
+
+        assert_eq!(registry.get(10).unwrap().league_projected_gain, 3);
+        assert_eq!(registry.get(11).unwrap().league_projected_gain, 5);
+        assert_eq!(registry.get(20).unwrap().league_projected_gain, 8);
+        assert_eq!(
+            updates.iter().map(|packet| packet.client_id).collect::<Vec<_>>(),
+            vec![4, 7]
+        );
+        assert!(updates
+            .iter()
+            .all(|packet| packet.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED == 0));
     }
 
     #[test]

@@ -35294,7 +35294,9 @@ func ControlUpSingle()
                 league_progress_data: None,
                 league_performance: 0,
                 custom_evaluation_strings: "First note   Second note".to_string(),
+                ..RoundResultsPlayerState::default()
             }],
+            ..RoundResultsState::default()
         };
         engine.round_results = expected.clone();
 
@@ -65225,6 +65227,7 @@ func OnOwnerChanged()
                     league_progress_data: Some(vec![b'P', 0xff]),
                     league_performance: 0,
                     custom_evaluation_strings: "Keep this".to_string(),
+                    ..RoundResultsPlayerState::default()
                 },
             ]
         );

@@ -130,7 +130,7 @@ pub use player::{
     PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
 pub use record::{Playback, PlaybackError, Recorder, Recording};
-pub use round_results::{RoundResultsPlayerState, RoundResultsState};
+pub use round_results::{LeagueRoundResultUpdate, RoundResultsPlayerState, RoundResultsState};
 pub use scenario::{
     InitialNetworkScenarioMetadata, InitialNetworkTeam, InitialNetworkTeamDistribution,
     InitialNetworkTeamMetadata, LegacyC4SVal, PlayerStart, Scenario,
@@ -21277,8 +21277,7 @@ impl Engine {
                     score_old,
                     score_new: Some(score_new),
                     league_progress_data,
-                    league_performance: 0,
-                    custom_evaluation_strings: String::new(),
+                    ..RoundResultsPlayerState::default()
                 }),
             }
         }
@@ -22329,6 +22328,18 @@ impl Engine {
         }
         scores.retain(|_, score| *score != 0);
         self.player_info_league_scores = Rc::new(scores);
+    }
+
+    /// Applies the league server's final evaluation to persistent round
+    /// results without overwriting live PlayerInfo's pre-round score/rank.
+    pub fn evaluate_league_round_results(
+        &mut self,
+        success: bool,
+        result_message: Vec<u8>,
+        players: impl IntoIterator<Item = LeagueRoundResultUpdate>,
+    ) {
+        self.round_results
+            .evaluate_league(success, result_message, players);
     }
 
     /// Close the process-local query input and build its synchronized answer
@@ -24545,8 +24556,7 @@ impl Engine {
                     score_old,
                     score_new: Some(score_new),
                     league_progress_data,
-                    league_performance: 0,
-                    custom_evaluation_strings: String::new(),
+                    ..RoundResultsPlayerState::default()
                 });
             }
         }

@@ -8,7 +8,7 @@ use lc_resources::LanguagePacks;
 
 use crate::prepared_host_bootstrap::{
     prepare_host_bootstrap, PrepareHostBootstrapError, PreparedHostBootstrap,
-    PreparedHostBootstrapConfig, PreparedHostBootstrapSpec,
+    PreparedHostBootstrapConfig, PreparedHostBootstrapSpec, PreparedLeagueHostConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,7 @@ pub struct NetworkHostPreparation {
     pub netpuncher_address: String,
     pub player_sources: Vec<HostInitialResourceSource>,
     pub config: PreparedHostBootstrapConfig,
+    pub league: Option<PreparedLeagueHostConfig>,
 }
 
 impl NetworkHostPreparation {
@@ -53,6 +54,7 @@ impl NetworkHostPreparation {
             netpuncher_address: &self.netpuncher_address,
             player_sources: &self.player_sources,
             config: self.config,
+            league: self.league.as_ref(),
         })
     }
 }

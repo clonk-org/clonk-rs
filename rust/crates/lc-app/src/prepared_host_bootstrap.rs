@@ -27,7 +27,8 @@ use lc_network::{
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
     InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
-    JoinTeamListSnapshot, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
+    JoinTeamListSnapshot, LeagueHttpTransportConfig, LeagueStartResponse, NETWORK_STATE_GO,
+    NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
     NETWORK_STATE_NONE, NETWORK_STATE_PAUSE, NetworkAddress, NetworkGameReference, NetworkProtocol,
     NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership, compose_initial_network_dynamic,
     fill_scenario_derived_join_parameters, join_team_list_snapshot, publish_host_initial_resources,
@@ -52,6 +53,15 @@ pub struct PreparedHostBootstrapConfig {
     pub auto_frame_skip: bool,
     pub max_load_file_size: u32,
     pub no_runtime_join: bool,
+}
+
+/// League service inputs frozen before the host socket is opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedLeagueHostConfig {
+    pub endpoint: String,
+    pub transport: LeagueHttpTransportConfig,
+    pub update_period_secs: i64,
+    pub league_server_signup: bool,
 }
 
 /// Every process-global input used by the supported preparation path.
@@ -91,6 +101,7 @@ pub struct PreparedHostBootstrapSpec<'a> {
     /// `Config.AtExeRelativePath` wire spellings.
     pub player_sources: &'a [HostInitialResourceSource],
     pub config: PreparedHostBootstrapConfig,
+    pub league: Option<&'a PreparedLeagueHostConfig>,
 }
 
 /// Admission facts retained separately from the still-closed `HostConfig`.
@@ -208,6 +219,8 @@ pub struct PreparedHostBootstrap {
     reference_icon: i32,
     reference_comment: LegacyCString,
     netpuncher_address: LegacyCString,
+    league: Option<PreparedLeagueHostConfig>,
+    stream_address: LegacyCString,
     local_player_resources: Vec<(NetworkResourceCore, PathBuf)>,
     lifetime: Arc<PreparedHostLifetime>,
 }
@@ -241,6 +254,52 @@ impl PreparedHostBootstrap {
 
     pub fn admission(&self) -> PreparedHostAdmission {
         self.admission
+    }
+
+    pub fn league_config(&self) -> Option<&PreparedLeagueHostConfig> {
+        self.league.as_ref()
+    }
+
+    pub fn stream_address(&self) -> &LegacyCString {
+        &self.stream_address
+    }
+
+    /// Applies the validated Start reply before either admission or the
+    /// initial reference becomes visible. Native changes the synchronized
+    /// parameters and forces only Async (2) to Central (1).
+    pub fn apply_league_start_response(
+        &mut self,
+        response: &LeagueStartResponse,
+    ) -> Result<(), PrepareHostBootstrapError> {
+        let max_players = (response.max_players != 0)
+            .then(|| usize::try_from(response.max_players))
+            .transpose()
+            .map_err(|_| PrepareHostBootstrapError::MaxPlayersOutOfRange(response.max_players))?;
+        let parameters = &mut self
+            .host_config
+            .initial_join_snapshot
+            .as_mut()
+            .ok_or(PrepareHostBootstrapError::MissingJoinSnapshot)?
+            .parameters;
+        parameters.league = response.league.clone();
+        if let Some(seed) = response.seed {
+            parameters.random_seed = seed;
+        }
+        if response.league.is_empty() {
+            parameters.league_address = LegacyCString::default();
+            self.stream_address = LegacyCString::default();
+        } else {
+            self.stream_address = response.stream_to.clone();
+            if self.host_config.initial_status.control_mode == 2 {
+                self.host_config.initial_status.control_mode = 1;
+            }
+        }
+        if let Some(max_players) = max_players {
+            parameters.max_players = response.max_players;
+            self.host_config.max_players = max_players;
+            self.admission.max_players = response.max_players;
+        }
+        Ok(())
     }
 
     pub fn start_time(&self) -> i32 {
@@ -435,6 +494,8 @@ pub enum PrepareHostBootstrapError {
     UnixSecondsOutOfRange { field: &'static str, value: i64 },
     #[error("scenario max-player value {0} cannot be represented by HostConfig")]
     MaxPlayersOutOfRange(i32),
+    #[error("the prepared host has no initial JoinData snapshot")]
+    MissingJoinSnapshot,
     #[error("scenario metadata could not be prepared: {0}")]
     Scenario(#[from] ScenarioError),
     #[error("scenario metadata could not be adapted: {0}")]
@@ -455,6 +516,16 @@ extern "C" {
 /// Serializes every main-thread-style transaction over C's process-global
 /// `rand()` stream. Loader, audio, and team assignment all share this owner.
 pub(crate) static CLASSIC_SAFE_RANDOM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn league_checksum_start() -> u32 {
+    let _guard = CLASSIC_SAFE_RANDOM_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // C4LeagueClient uses `rand() | rand() << 16` before each request.
+    let low = unsafe { c_rand() } as u32;
+    let high = unsafe { c_rand() } as u32;
+    low | high.wrapping_shl(16)
+}
 
 fn format_generated_team_name(template: &LegacyCString, id: i32) -> LegacyCString {
     let id = id.to_string();
@@ -703,7 +774,11 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         rules: Vec::new(),
         goals: Vec::new(),
         league: LegacyCString::default(),
-        league_address: LegacyCString::default(),
+        league_address: spec
+            .league
+            .filter(|league| league.league_server_signup)
+            .map(|league| legacy_string(&league.endpoint))
+            .unwrap_or_default(),
         title: legacy_string(spec.scenario_title),
         scenario: NetworkResourceCore::default(),
         game_resources: Vec::new(),
@@ -877,6 +952,8 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         reference_icon: scenario_metadata.icon,
         reference_comment: legacy_string(spec.network_comment),
         netpuncher_address: legacy_string(spec.netpuncher_address),
+        league: spec.league.cloned(),
+        stream_address: LegacyCString::default(),
         local_player_resources,
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
@@ -939,6 +1016,120 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
 mod definition_root_graphics_tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn league_prepared_host(control_mode: i32) -> PreparedHostBootstrap {
+        let mut host_config = HostConfig::default();
+        host_config.initial_status.control_mode = control_mode;
+        let parameters = &mut host_config
+            .initial_join_snapshot
+            .as_mut()
+            .expect("default host JoinData")
+            .parameters;
+        parameters.random_seed = 77;
+        parameters.max_players = 8;
+        parameters.league_address = legacy_string("https://league.example/");
+        PreparedHostBootstrap {
+            host_config,
+            admission: PreparedHostAdmission {
+                max_players: 8,
+                no_runtime_join: false,
+            },
+            start_time: 1,
+            initial_host_player_info_control: PlayerInfoControlData::default(),
+            runtime_team_metadata: InitialNetworkTeamMetadata {
+                active: false,
+                custom: false,
+                allow_hostility_change: true,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 0,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Free,
+                team_colors: false,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 0,
+                teams: Vec::new(),
+            },
+            scenario_wire_name: LegacyCString::default(),
+            scenario_origin: String::new(),
+            dynamic_wire_name: LegacyCString::default(),
+            reference_icon: 0,
+            reference_comment: LegacyCString::default(),
+            netpuncher_address: LegacyCString::default(),
+            league: Some(PreparedLeagueHostConfig {
+                endpoint: "https://league.example/".to_string(),
+                transport: LeagueHttpTransportConfig::default(),
+                update_period_secs: 120,
+                league_server_signup: true,
+            }),
+            stream_address: legacy_string("old-stream"),
+            local_player_resources: Vec::new(),
+            lifetime: Arc::new(PreparedHostLifetime {
+                temporary_files: Vec::new(),
+                scenario: Mutex::new(None),
+                host_launched: AtomicBool::new(false),
+                initial_player_info_installed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    #[test]
+    fn league_start_applies_nonempty_overrides_and_forces_only_async_central() {
+        let mut prepared = league_prepared_host(2);
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: legacy_string("Gold League"),
+                stream_to: legacy_string("https://stream.example/upload?"),
+                seed: None,
+                max_players: 0,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start response");
+
+        let parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        assert_eq!(parameters.league.as_bytes(), b"Gold League");
+        assert_eq!(parameters.random_seed, 77, "absent Seed retains the old value");
+        assert_eq!(parameters.max_players, 8, "zero MaxPlayers is no override");
+        assert_eq!(prepared.admission().max_players(), 8);
+        assert_eq!(prepared.host_config().initial_status.control_mode, 1);
+        assert_eq!(
+            prepared.stream_address().as_bytes(),
+            b"https://stream.example/upload?"
+        );
+    }
+
+    #[test]
+    fn empty_start_league_clears_addresses_and_applies_zero_seed_and_capacity() {
+        let mut prepared = league_prepared_host(2);
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: LegacyCString::default(),
+                stream_to: legacy_string("ignored-stream"),
+                seed: Some(0),
+                max_players: 4,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start response");
+
+        let parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        assert!(parameters.league_address.is_empty());
+        assert!(prepared.stream_address().is_empty());
+        assert_eq!(parameters.random_seed, 0);
+        assert_eq!(parameters.max_players, 4);
+        assert_eq!(prepared.host_config().max_players, 4);
+        assert_eq!(prepared.admission().max_players(), 4);
+        assert_eq!(prepared.host_config().initial_status.control_mode, 2);
+    }
 
     #[test]
     fn generated_team_name_formats_resource_percent_and_c4_name_limit() {
@@ -1005,6 +1196,9 @@ fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHo
     validate_network_name("host network nick", spec.host_nick, true)?;
     validate_ascii_text("network comment", spec.network_comment, true)?;
     validate_ascii_text("netpuncher address", spec.netpuncher_address, true)?;
+    if let Some(league) = spec.league {
+        validate_ascii_text("league server address", &league.endpoint, false)?;
+    }
     for (field, value) in [
         ("game start", spec.start_unix_seconds),
         ("parameter seed", spec.random_seed_unix_seconds),

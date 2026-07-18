@@ -4670,6 +4670,11 @@ fn client_settings_for_paths(
     paths: Option<&AppPaths>,
 ) -> ClientSettings {
     let mut settings = ClientSettings::new(server_addr, player_name);
+    let query = load_reference_query_settings(paths);
+    settings.league_transport = lc_network::LeagueHttpTransportConfig {
+        language_charset: query.language_charset,
+        language_sequence: query.language_sequence,
+    };
     if let Some(paths) = paths {
         settings.resource_directory = paths.cache_dir().join("Network");
         settings.local_system_path = Some(paths.system_group_path().to_path_buf());
@@ -14888,6 +14893,24 @@ fn build_network_host_preparation(
     if network_comment.is_ascii() && network_comment.len() > 256 {
         network_comment.truncate(256);
     }
+    let master_server_signup = app.scenario_game_options.values().master_server_signup;
+    let league_server_signup = app.scenario_game_options.values().league_server_signup;
+    let league = (master_server_signup || league_server_signup).then(|| {
+        let server = load_network_search_settings(app.app_paths.as_ref());
+        prepared_host_bootstrap::PreparedLeagueHostConfig {
+            endpoint: server.master_server_url,
+            transport: lc_network::LeagueHttpTransportConfig {
+                language_charset: raw_value("General", "LanguageCharset").unwrap_or_default(),
+                language_sequence: raw_value("General", "LanguageEx")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| {
+                        startup_language_sequence(app.app_paths.as_ref()).join(",")
+                    }),
+            },
+            update_period_secs: i64::from(integer("Network", "MasterReferencePeriod", 120)),
+            league_server_signup,
+        }
+    });
 
     Ok(NetworkHostPreparation {
         scenario_path,
@@ -14917,6 +14940,7 @@ fn build_network_host_preparation(
             max_load_file_size,
             no_runtime_join: boolean("Network", "NoRuntimeJoin", true),
         },
+        league,
     })
 }
 
@@ -23449,6 +23473,10 @@ impl GameApp {
                     continue;
                 }
                 if self.classic_host_lobby_active() {
+                    if let NetworkEvent::LeagueUpdate(response) = &event {
+                        self.apply_league_update_response(response.clone());
+                        continue;
+                    }
                     let player_info_event = matches!(
                         &event,
                         NetworkEvent::PlayerInfoUpdateRequest { .. }
@@ -23465,6 +23493,7 @@ impl GameApp {
                         NetworkEvent::PeerConnected { client_id: 0, .. } => None,
                         NetworkEvent::JoinData(_) => Some("join data"),
                         NetworkEvent::LeagueRoundResults(_) => Some("league round results"),
+                        NetworkEvent::LeagueUpdate(_) => Some("league update"),
                         NetworkEvent::ReadyCheck(_) => Some("ready check"),
                         NetworkEvent::StatusRequested(_) => Some("status request"),
                         NetworkEvent::StatusCommitted(_) => Some("status commit"),
@@ -23478,6 +23507,9 @@ impl GameApp {
                         NetworkEvent::DirectControl(_) => Some("direct player/resource control"),
                         NetworkEvent::PeerConnected { .. } => Some("remote client row"),
                         NetworkEvent::PeerDisconnected { .. } => Some("client removal"),
+                        NetworkEvent::PeerConnectionFailed { .. } => {
+                            Some("client connection failure")
+                        }
                         NetworkEvent::ResourceAction(_) => Some("resource action"),
                         NetworkEvent::ResourceComplete { .. } => Some("resource completion"),
                         NetworkEvent::ResourceLoadFailed { .. } => Some("resource load failure"),
@@ -23596,14 +23628,10 @@ impl GameApp {
                         self.acknowledge_initial_lobby_status_if_ready();
                     }
                     NetworkEvent::LeagueRoundResults(packet) => {
-                        // The typed packet is retained at the application
-                        // boundary. Applying league score/rank fields awaits
-                        // their representation in RoundResultsState.
-                        tracing::debug!(
-                            success = packet.success,
-                            player_count = packet.players.len(),
-                            "received league round results; application deferred"
-                        );
+                        self.apply_league_round_results_packet(&packet);
+                    }
+                    NetworkEvent::LeagueUpdate(response) => {
+                        self.apply_league_update_response(response);
                     }
                     NetworkEvent::ReadyCheck(packet) => {
                         if packet.data.vote_requested() {
@@ -23826,6 +23854,10 @@ impl GameApp {
                             // A lost host cannot receive a graceful ConnRe;
                             // C4Network2 clears directly into ChangeToLocal
                             // (C4Network2.cpp:1786-1817).
+                            self.report_league_disconnect(
+                                local_client_id,
+                                lc_network::LeagueDisconnectReason::ConnectionFailed,
+                            );
                             self.change_network_control_to_local(local_client_id);
                         }
                         match reason {
@@ -23841,6 +23873,14 @@ impl GameApp {
                                 tracing::info!(%client_id, "network client disconnected");
                                 self.status_text = format!("Client {client_id} left the lobby");
                             }
+                        }
+                    }
+                    NetworkEvent::PeerConnectionFailed { client_id } => {
+                        if let Ok(client_id) = i32::try_from(client_id) {
+                            self.report_league_disconnect(
+                                client_id,
+                                lc_network::LeagueDisconnectReason::ConnectionFailed,
+                            );
                         }
                     }
                     NetworkEvent::ResourceAction(action) => {
@@ -23887,6 +23927,86 @@ impl GameApp {
         Ok(())
     }
 
+    fn apply_league_round_results_packet(
+        &mut self,
+        packet: &lc_network::LeagueRoundResultsPacket,
+    ) {
+        self.engine.evaluate_league_round_results(
+            packet.success,
+            packet.result_string.as_bytes().to_vec(),
+            packet.players.iter().map(|result| lc_engine::LeagueRoundResultUpdate {
+                player_info_id: result.player_info_id,
+                league_score_new: result.league_score_new,
+                league_score_gain: result.league_score_gain,
+                league_rank_new: result.league_rank_new,
+                league_rank_symbol_new: result.league_rank_symbol_new,
+                league_progress_data: result.league_progress_data.as_bytes().to_vec(),
+            }),
+        );
+        self.snapshot.round_results = self.engine.snapshot().round_results;
+        tracing::info!(
+            success = packet.success,
+            player_count = packet.players.len(),
+            result = %packet.result_string.to_string_lossy(),
+            "applied league round results"
+        );
+    }
+
+    fn apply_league_update_response(&mut self, response: lc_network::LeagueUpdateResponse) {
+        let updates = self.control_player_infos.apply_league_projected_gains(
+            response
+                .player_infos
+                .players
+                .iter()
+                .map(|player| (player.id, player.league_projected_gain)),
+        );
+        if updates.is_empty() {
+            return;
+        }
+        if let Some(network) = self.network.as_ref() {
+            for update in updates {
+                if let Err(error) = network.broadcast_player_info(update) {
+                    tracing::error!(%error, "failed to broadcast league projected gains");
+                }
+            }
+        }
+        self.publish_current_host_player_infos();
+    }
+
+    fn report_league_disconnect(
+        &self,
+        client_id: i32,
+        reason: lc_network::LeagueDisconnectReason,
+    ) {
+        if !self.network_is_league
+            || self.mode != AppMode::Running
+            || self.snapshot.game_over
+        {
+            return;
+        }
+        let (_, clients) = self.control_player_infos.retained_rows_snapshot();
+        let Some((_, flags, players)) = clients
+            .into_iter()
+            .find(|(id, _, players)| *id == client_id && players.iter().any(|p| p.is_joined()))
+        else {
+            return;
+        };
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.report_league_disconnect(
+            reason,
+            lc_network::ClientPlayerInfosSnapshot {
+                client_id,
+                flags,
+                players,
+            },
+            lc_network::LeagueFbidRegistry::new(),
+        ) {
+            tracing::error!(%error, client_id, "failed to queue league disconnect report");
+        }
+    }
+
     fn handle_sync_check(&mut self, packet: SyncCheckPacket) {
         if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return;
@@ -23924,6 +24044,10 @@ impl GameApp {
             // mismatch; C4Network2::Clear then invokes ChangeToLocal rather
             // than sending a graceful removal or aborting the round
             // (C4Control.cpp:469-519; C4Network2.cpp:746-789).
+            self.report_league_disconnect(
+                local_client_id,
+                lc_network::LeagueDisconnectReason::Desync,
+            );
             self.change_network_control_to_local(local_client_id);
         }
         self.status_text = "Network desync detected; disconnected from host".to_string();
@@ -27765,7 +27889,7 @@ impl GameApp {
             rows,
         );
         let mut values = staged.options.clone();
-        values.lobby_is_league = false;
+        values.lobby_is_league = initial_network_is_league(Some(mode));
         values.selector_fair_crew_constraint = FairCrewConstraint::Free;
         values.lobby_fair_crew_forced = staged.lobby.fair_crew_forced;
         values.fair_crew = staged.lobby.fair_crew;
@@ -27815,7 +27939,27 @@ impl GameApp {
         self.startup_network_connection = None;
         self.mark_menu_dirty();
         match result {
-            Ok((mode, manager)) => {
+            Ok((mut mode, mut manager)) => {
+                if let Some(response) = manager.take_league_start_response() {
+                    if let NetworkMode::Host(HostSettings {
+                        prepared: Some(prepared),
+                        ..
+                    }) = &mut mode
+                    {
+                        if let Err(error) = prepared.apply_league_start_response(&response) {
+                            self.status_text =
+                                format!("Unable to apply league registration: {error}");
+                            self.mode = AppMode::Menu;
+                            self.restore_startup_fonts();
+                            return;
+                        }
+                    }
+                    if response.max_players != 0 {
+                        if let Some(staged) = self.staged_network_host_scenario.as_mut() {
+                            staged.lobby.max_players = response.max_players;
+                        }
+                    }
+                }
                 if purpose == Some(StartupNetworkPurpose::Join) {
                     self.pending_network_join = None;
                 }
@@ -31094,6 +31238,11 @@ impl GameApp {
                 }
             }
         }
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network.invalidate_league_reference() {
+                tracing::error!(%error, "failed to invalidate league reference");
+            }
+        }
     }
 
     /// C++ stores `Game.PlayerInfos` as a reference to
@@ -32517,11 +32666,26 @@ impl GameApp {
             // than releasing its listener at the lobby boundary.
             self.publish_running_host_reference();
         }
+        self.tick_league_update_at(now);
         Ok(status_reached == RuntimeStatusReachOutcome::Reported
             || lobby_countdown_changed
             || ready_check_changed
             || vote_timeout_changed
             || after != before)
+    }
+
+    fn tick_league_update_at(&self, now: i64) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        let (Some(network), Some(reference)) =
+            (self.network.as_ref(), self.advertised_game_reference.clone())
+        else {
+            return;
+        };
+        if let Err(error) = network.update_league_reference(now, reference) {
+            tracing::error!(%error, "failed to queue league reference update");
+        }
     }
 
     fn tick_host_league_vote_timeout_at(&mut self, now: i64) -> bool {
@@ -32776,6 +32940,26 @@ impl GameApp {
         for player_info_id in winner_info_ids {
             self.control_player_infos.mark_winner(player_info_id);
         }
+        self.finish_recording();
+        self.game_over_handled = true;
+        self.publish_game_over_host_reference();
+        let league_result = if self.network_is_league {
+            match (self.network.as_ref(), self.advertised_game_reference.clone()) {
+                (Some(network), Some(reference)) => match network.end_league(reference, None) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to finish league game");
+                        None
+                    }
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(packet) = league_result {
+            self.apply_league_round_results_packet(&packet);
+        }
         // C4GameOverDlg::OnShown hides the scoreboard and closes each
         // player's fullscreen C4MainMenu before evaluation becomes
         // interactive. The synchronized object/cursor menu survives
@@ -32816,9 +33000,6 @@ impl GameApp {
         } else {
             format!("{scenario_title}: {}", dialog.subtitle())
         };
-        self.finish_recording();
-        self.game_over_handled = true;
-        self.publish_game_over_host_reference();
         self.status_text = status_message;
         self.game_over_dialog = Some(dialog);
         Ok(())
@@ -36829,9 +37010,9 @@ impl GameApp {
             }));
         }
         let options = self.scenario_game_options.values().clone();
-        if options.league_server_signup || !parameters.league().is_empty() {
+        if !parameters.league().is_empty() {
             return Err(classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
-                detail: "league lobby parameter resolution is not implemented".to_string(),
+                detail: "embedded league lobby parameters are not implemented".to_string(),
             }));
         }
         let lobby_languages = classic_loader_language_sequence(paths).map_err(|error| {
@@ -55873,7 +56054,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn staged_host_prebind_rejects_unrepresentable_model_and_missing_resource() {
+    fn staged_host_prebind_accepts_league_signup_and_rejects_missing_resource() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated host preflight user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
@@ -55889,7 +56070,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         };
         app.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, league);
-        let error = app
+        let staged = app
             .prepare_network_host_scenario(
                 {
                     let mut scenario = FrontendScenario::fallback();
@@ -55901,13 +56082,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                     definition_root: None,
                 },
             )
-            .err()
-            .expect("league model is outside the bounded host slice");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model { detail }))
-                if detail.contains("league")
-        ));
+            .expect("league signup is represented by the lifecycle driver");
+        assert!(staged.options.league_server_signup);
         assert!(app.network.is_none());
         assert!(app.startup_network_connection.is_none());
 
@@ -56468,6 +56644,52 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.status_text.is_empty());
         assert!(app.network_lobby.is_none());
 
+        app.control_player_infos.replace_snapshot(
+            7,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 7,
+                    color: 0x00ff_0000,
+                    original_color: 0x00ff_0000,
+                    league_projected_gain: -1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        events
+            .send(NetworkEvent::LeagueUpdate(lc_network::LeagueUpdateResponse {
+                player_infos: lc_network::ClientPlayerInfosSnapshot {
+                    client_id: -1,
+                    flags: 0,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 7,
+                        league_projected_gain: 4,
+                        ..Default::default()
+                    }],
+                },
+                ..Default::default()
+            }))
+            .expect("queue lobby league update");
+        app.process_network_events()
+            .expect("league update remains valid in the classic lobby");
+        assert_eq!(
+            app.control_player_infos
+                .get(7)
+                .unwrap()
+                .league_projected_gain,
+            4
+        );
+        let league_broadcasts = commands.take_broadcast_player_infos();
+        let [league_info] = league_broadcasts.as_slice() else {
+            panic!("expected one projected-gain PlayerInfo broadcast");
+        };
+        assert_eq!(league_info.client_id, 0);
+        assert_eq!(league_info.players.len(), 1);
+        assert_eq!(league_info.players[0].id, 7);
+        assert_eq!(league_info.players[0].league_projected_gain, 4);
+
         events
             .send(NetworkEvent::PlayerInfoUpdateRequest {
                 origin: 1,
@@ -56487,7 +56709,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("classic lobby admits PlayerInfo requests");
         let broadcasts = commands.take_broadcast_player_infos();
         let [info] = broadcasts.as_slice() else {
-            panic!("expected one authoritative PlayerInfo broadcast");
+            panic!("expected one authoritative PlayerInfo broadcast, got {broadcasts:?}");
         };
         events
             .send(NetworkEvent::PreexecutedPlayerInfoEcho {
@@ -65218,6 +65440,11 @@ public func Grant(password) { return GainMissionAccess(password); }
         let preparation =
             build_network_host_preparation(&app, &scenario).expect("prepare host inputs");
 
+        let publication = preparation
+            .league
+            .as_ref()
+            .expect("master-server signup creates a lifecycle client");
+        assert!(!publication.league_server_signup);
         assert_eq!(
             preparation
                 .player_sources
@@ -72184,6 +72411,229 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .get(&41),
             Some(&Some(b"retained-progress".to_vec()))
         );
+    }
+
+    #[test]
+    fn league_update_applies_projected_gains_and_directly_rebroadcasts_owners() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        app.control_player_infos.replace_snapshot(
+            20,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 10,
+                        league_projected_gain: 1,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 4,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 20,
+                        league_projected_gain: 2,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+        );
+        let response = lc_network::LeagueUpdateResponse {
+            player_infos: lc_network::ClientPlayerInfosSnapshot {
+                client_id: -1,
+                flags: 0,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 20,
+                        league_projected_gain: 7,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 10,
+                        league_projected_gain: 1,
+                        ..Default::default()
+                    },
+                ],
+            },
+            ..lc_network::LeagueUpdateResponse::default()
+        };
+        event_tx
+            .send(NetworkEvent::LeagueUpdate(response.clone()))
+            .expect("queue league Update reply");
+
+        app.process_network_events().expect("apply league Update");
+
+        assert_eq!(
+            app.control_player_infos
+                .get(20)
+                .unwrap()
+                .league_projected_gain,
+            7
+        );
+        let (broadcasts, invalidations) = commands.take_league_update_effects();
+        assert_eq!(
+            broadcasts
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
+            vec![4]
+        );
+        assert_eq!(invalidations, 1);
+
+        event_tx
+            .send(NetworkEvent::LeagueUpdate(response))
+            .expect("queue unchanged league Update reply");
+        app.process_network_events()
+            .expect("ignore unchanged league Update");
+        assert_eq!(commands.take_league_update_effects(), (Vec::new(), 0));
+    }
+
+    #[test]
+    fn league_round_result_packet_applies_persistent_evaluation_fields() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.control_player_infos.replace_snapshot(
+            10,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 10,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let packet = lc_network::LeagueRoundResultsPacket {
+            success: true,
+            result_string: lc_engine::LegacyCString::from_bytes(b"evaluated".to_vec()).unwrap(),
+            players: vec![lc_network::LeagueRoundResultsPlayer {
+                player_info_id: 10,
+                total_playing_time: 90,
+                settlement_score_old: 11,
+                settlement_score_new: 12,
+                league_score_new: 80,
+                league_score_gain: 5,
+                league_rank_new: 3,
+                league_rank_symbol_new: 4,
+                league_progress_data: lc_engine::LegacyCString::from_bytes(
+                    b"progress".to_vec(),
+                )
+                .unwrap(),
+                status: lc_network::LeagueRoundPlayerStatus::Won,
+            }],
+        };
+        event_tx
+            .send(NetworkEvent::LeagueRoundResults(packet))
+            .expect("queue league result packet");
+
+        app.process_network_events().expect("apply league result packet");
+
+        let info = app.control_player_infos.get(10).unwrap();
+        assert_eq!(
+            (info.league_score, info.league_rank, info.league_rank_symbol),
+            (0, 0, 0),
+            "EvaluateLeague does not overwrite live PlayerInfo"
+        );
+        let engine_snapshot = app.engine.snapshot();
+        assert_eq!(engine_snapshot.round_results.league_success, Some(true));
+        assert_eq!(
+            engine_snapshot.round_results.league_result_message.as_deref(),
+            Some(&b"evaluated"[..])
+        );
+        let result = engine_snapshot
+            .round_results
+            .players
+            .iter()
+            .find(|result| result.player_info_id == 10)
+            .unwrap();
+        assert_eq!((result.score_old, result.score_new), (-1, None));
+        assert_eq!(
+            (
+                result.league_score_new,
+                result.league_score_gain,
+                result.league_rank_new,
+                result.league_rank_symbol_new,
+            ),
+            (80, 5, 3, 4)
+        );
+        assert_eq!(result.league_progress_data.as_deref(), Some(&b"progress"[..]));
+    }
+
+    #[test]
+    fn league_host_and_client_report_the_correct_connection_failure_players() {
+        let joined = |id| lc_engine::ControlPlayerInfoEntry {
+            id,
+            flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+            ..Default::default()
+        };
+
+        let mut host = new_running_sandbox_app();
+        let (manager, event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        host.network = Some(manager);
+        host.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        host.network_is_league = true;
+        host.control_player_infos.replace_snapshot(
+            41,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 8,
+                players: vec![joined(41)],
+                ..Default::default()
+            }],
+        );
+        let host_report = std::thread::spawn(move || commands.complete_league_disconnect_report());
+        event_tx
+            .send(NetworkEvent::PeerConnectionFailed { client_id: 8 })
+            .expect("queue host route loss");
+        host.process_network_events().expect("report host route loss");
+        let (reason, players) = host_report
+            .join()
+            .expect("join host report worker")
+            .expect("host sent report");
+        assert_eq!(reason, lc_network::LeagueDisconnectReason::ConnectionFailed);
+        assert_eq!(players.client_id, 8);
+        assert_eq!(players.players[0].id, 41);
+
+        let mut client = new_running_sandbox_app();
+        let (manager, event_tx, commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(7);
+        client.network = Some(manager);
+        client.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        client.network_is_league = true;
+        client.control_player_infos.replace_snapshot(
+            55,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![joined(55)],
+                ..Default::default()
+            }],
+        );
+        let client_report =
+            std::thread::spawn(move || commands.complete_league_disconnect_report());
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: 0,
+                reason: Some("lost".to_string()),
+            })
+            .expect("queue client host loss");
+        client
+            .process_network_events()
+            .expect("report client host loss");
+        let (reason, players) = client_report
+            .join()
+            .expect("join client report worker")
+            .expect("client sent report");
+        assert_eq!(reason, lc_network::LeagueDisconnectReason::ConnectionFailed);
+        assert_eq!(players.client_id, 7);
+        assert_eq!(players.players[0].id, 55);
     }
 
     #[test]
@@ -95809,6 +96259,7 @@ protected func InputCallback(string answer, int player)
                     league_progress_data: None,
                     league_performance: 0,
                     custom_evaluation_strings: String::new(),
+                    ..lc_engine::RoundResultsPlayerState::default()
                 },
                 lc_engine::RoundResultsPlayerState {
                     player_info_id: 99,
@@ -95818,6 +96269,7 @@ protected func InputCallback(string answer, int player)
                     league_progress_data: None,
                     league_performance: 0,
                     custom_evaluation_strings: "wrong runtime-number join".into(),
+                    ..lc_engine::RoundResultsPlayerState::default()
                 },
             ],
             ..lc_engine::RoundResultsState::default()

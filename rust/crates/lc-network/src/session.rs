@@ -339,6 +339,12 @@ pub enum HostEvent {
     ClientLeft {
         client_id: ClientId,
     },
+    /// The final accepted route for a logical client was lost unexpectedly.
+    /// Controlled synchronized removal, host shutdown, and loss of a route
+    /// with a surviving fallback do not emit this event.
+    ClientConnectionFailed {
+        client_id: ClientId,
+    },
     JoinDataNeeded {
         client_id: ClientId,
         current_control_tick: Tick,
@@ -381,6 +387,7 @@ pub enum HostCommand {
     SubmitLocal(ControlPacket),
     SubmitLobbyCountdown(LobbyCountdownPacket),
     SubmitReadyCheck(ReadyCheckPacket),
+    BroadcastLeagueRoundResults(crate::LeagueRoundResultsPacket),
     SubmitPacket {
         delivery: ControlDelivery,
         data: Vec<u8>,
@@ -455,6 +462,18 @@ impl HostHandle {
     ) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::SubmitLobbyCountdown(packet))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Broadcasts the host's final league result packet to every connected
+    /// logical client as `PID_LeagueRoundResults`.
+    pub async fn broadcast_league_round_results(
+        &self,
+        packet: crate::LeagueRoundResultsPacket,
+    ) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::BroadcastLeagueRoundResults(packet))
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -3157,6 +3176,9 @@ async fn run_host(
                         apply_ready_check_to_host_state(packet, &mut state);
                         broadcast_ready_check(packet, None, &mut state).await;
                     }
+                    HostCommand::BroadcastLeagueRoundResults(packet) => {
+                        broadcast_league_round_results(packet, &mut state).await;
+                    }
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
                     HostCommand::PublishJoinSnapshot(snapshot) => {
@@ -4435,6 +4457,16 @@ async fn handle_client_disconnected(
         }
     }
 
+    if removed_logical_client {
+        // C4Network2::OnClientDisconnect reports the league disconnect before
+        // scheduling the synchronized client removal. This event is separate
+        // from ClientLeft so controlled removal and host teardown cannot be
+        // mistaken for a failed connection.
+        let _ = state
+            .event_tx
+            .send(HostEvent::ClientConnectionFailed { client_id })
+            .await;
+    }
     let _ = state
         .event_tx
         .send(HostEvent::ClientLeft { client_id })
@@ -5172,6 +5204,21 @@ async fn broadcast_lobby_countdown(packet: LobbyCountdownPacket, state: &mut Hos
             client_id,
             ConnectionTrafficClass::Message,
             ControlMessage::LobbyCountdown(packet),
+        )
+        .await;
+    }
+}
+
+async fn broadcast_league_round_results(
+    packet: crate::LeagueRoundResultsPacket,
+    state: &mut HostState,
+) {
+    for client_id in host_target_client_ids(state, None) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::LeagueRoundResults(packet.clone()),
         )
         .await;
     }
@@ -7704,6 +7751,75 @@ mod tests {
 
         drop(client);
         host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_broadcasts_league_round_results_to_every_logical_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut alice, _) = raw_client_transport(address, b"Alice").await;
+        let (mut bob, _) = raw_client_transport(address, b"Bob").await;
+        drain_raw_client(&mut alice).await;
+        drain_raw_client(&mut bob).await;
+        let packet = crate::LeagueRoundResultsPacket {
+            success: true,
+            result_string: lc_engine::LegacyCString::from_bytes(b"Counted".to_vec()).unwrap(),
+            players: vec![crate::LeagueRoundResultsPlayer {
+                player_info_id: 17,
+                total_playing_time: 900,
+                settlement_score_old: 2,
+                settlement_score_new: 4,
+                league_score_new: 120,
+                league_score_gain: 7,
+                league_rank_new: 3,
+                league_rank_symbol_new: 2,
+                league_progress_data: lc_engine::LegacyCString::from_bytes(b"p=2".to_vec())
+                    .unwrap(),
+                status: crate::LeagueRoundPlayerStatus::Won,
+            }],
+        };
+
+        host.broadcast_league_round_results(packet.clone())
+            .await
+            .unwrap();
+
+        let expected = ControlMessage::LeagueRoundResults(packet);
+        assert!(raw_client_received_message(&mut alice, &expected, EVENT_WAIT).await);
+        assert!(raw_client_received_message(&mut bob, &expected, EVENT_WAIT).await);
+
+        drop(alice);
+        drop(bob);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_shutdown_does_not_report_a_client_connection_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (client, client_id) = raw_client_transport(address, b"Alice").await;
+        while host_events.try_recv().is_ok() {}
+
+        host.shutdown().await.unwrap();
+
+        let mut saw_left = false;
+        while let Some(event) = host_events.recv().await {
+            match event {
+                HostEvent::ClientLeft { client_id: left } if left == client_id => {
+                    saw_left = true;
+                }
+                HostEvent::ClientConnectionFailed { client_id: failed }
+                    if failed == client_id =>
+                {
+                    panic!("orderly host shutdown emitted ClientConnectionFailed")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_left, "host shutdown did not surface the ordinary leave");
+        drop(client);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -12131,7 +12247,8 @@ mod tests {
         // network client (src/C4Network2Client.cpp:104-119,457-465).
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
         let (mut canonical, client_id) = raw_client_transport(addr, b"Alice").await;
         let mut secondary =
             raw_existing_client_transport(addr, client_id, 29, b"Alice").await;
@@ -12147,6 +12264,7 @@ mod tests {
         .await
         .expect("both routes were not retained");
         assert_eq!(host.connected_clients().await, vec![client_id]);
+        while host_events.try_recv().is_ok() {}
 
         let remove = EngineControlPacket::ClientRemove(lc_engine::ClientRemoveControlData {
             client_id: i32::try_from(client_id).unwrap(),
@@ -12176,6 +12294,16 @@ mod tests {
 
         assert!(host.accepted_routes().await.is_empty());
         assert!(host.connected_clients().await.is_empty());
+        while let Ok(event) = host_events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::ClientConnectionFailed { client_id: failed }
+                        if failed == client_id
+                ),
+                "synchronized removal was reported as a failed connection"
+            );
+        }
         host.shutdown().await.unwrap();
     }
 
@@ -12329,9 +12457,21 @@ mod tests {
         }
 
         alice.shutdown().await.unwrap();
+        let mut connection_failed = false;
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
-                Some(HostEvent::ClientLeft { client_id }) if client_id == alice_id => break,
+                Some(HostEvent::ClientConnectionFailed { client_id })
+                    if client_id == alice_id =>
+                {
+                    connection_failed = true;
+                }
+                Some(HostEvent::ClientLeft { client_id }) if client_id == alice_id => {
+                    assert!(
+                        connection_failed,
+                        "final route loss did not emit ClientConnectionFailed first"
+                    );
+                    break;
+                }
                 Some(_) => continue,
                 None => panic!("host event stream ended before Alice left"),
             }
@@ -12712,6 +12852,11 @@ mod tests {
             match event {
                 HostEvent::ClientLeft { client_id } if client_id == canonical_id => {
                     panic!("secondary disconnect emitted ClientLeft for the logical client")
+                }
+                HostEvent::ClientConnectionFailed { client_id }
+                    if client_id == canonical_id =>
+                {
+                    panic!("secondary disconnect emitted ClientConnectionFailed")
                 }
                 HostEvent::SyncScheduled { controls, .. }
                     if controls.iter().any(|control| matches!(
@@ -18179,6 +18324,7 @@ mod tests {
                 // transport error; tolerate it like ClientLeft. A real failure
                 // still trips the timeout because Ready never arrives.
                 Ok(Some(HostEvent::ClientLeft { .. }))
+                | Ok(Some(HostEvent::ClientConnectionFailed { .. }))
                 | Ok(Some(HostEvent::UnhandledPacket { .. }))
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
                 Ok(Some(HostEvent::Direct { .. }))

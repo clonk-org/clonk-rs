@@ -18,6 +18,16 @@ pub struct RoundResultsPlayerState {
     pub score_old: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_new: Option<i32>,
+    /// League score on the server after this round; `-1` is unknown.
+    #[serde(default = "invalid_score", skip_serializing_if = "is_invalid_score")]
+    pub league_score_new: i32,
+    /// League score change awarded for this round.
+    #[serde(default = "invalid_score", skip_serializing_if = "is_invalid_score")]
+    pub league_score_gain: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub league_rank_new: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub league_rank_symbol_new: i32,
     /// Progress bytes copied from the linked C4PlayerInfo at evaluation time.
     /// This result-owned copy is persisted independently from later changes
     /// to the live player-info row.
@@ -46,6 +56,10 @@ impl Default for RoundResultsPlayerState {
             total_playing_time: 0,
             score_old: invalid_score(),
             score_new: None,
+            league_score_new: invalid_score(),
+            league_score_gain: 0,
+            league_rank_new: 0,
+            league_rank_symbol_new: 0,
             league_progress_data: None,
             league_performance: 0,
             custom_evaluation_strings: String::new(),
@@ -83,6 +97,13 @@ pub struct RoundResultsState {
         with = "lc_script::c4_string_serde"
     )]
     pub custom_evaluation_strings: String,
+    /// Result of the league backend evaluation. `None` means no league reply
+    /// has been applied; `Some(false)` is a completed league error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub league_success: Option<bool>,
+    /// Raw legacy result text paired with `league_success`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub league_result_message: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub players: Vec<RoundResultsPlayerState>,
 }
@@ -95,6 +116,8 @@ impl RoundResultsState {
             && !self.hide_settlement_score
             && self.league_performance == 0
             && self.custom_evaluation_strings.is_empty()
+            && self.league_success.is_none()
+            && self.league_result_message.is_none()
             && self.players.is_empty()
     }
 
@@ -153,6 +176,41 @@ impl RoundResultsState {
         self.players[index].league_performance = score;
     }
 
+    /// Applies `C4RoundResults::EvaluateLeague`: retain the network result and
+    /// copy only the server-owned league fields into each existing/local
+    /// round-result row. Settlement score and playing time remain local.
+    pub fn evaluate_league(
+        &mut self,
+        success: bool,
+        result_message: Vec<u8>,
+        players: impl IntoIterator<Item = LeagueRoundResultUpdate>,
+    ) {
+        if self.league_success.is_none() {
+            self.league_success = Some(success);
+            self.league_result_message = Some(result_message);
+        }
+        for update in players {
+            let index = self
+                .players
+                .iter()
+                .position(|player| player.player_info_id == update.player_info_id)
+                .unwrap_or_else(|| {
+                    let index = self.players.len();
+                    self.players.push(RoundResultsPlayerState {
+                        player_info_id: update.player_info_id,
+                        ..RoundResultsPlayerState::default()
+                    });
+                    index
+                });
+            let player = &mut self.players[index];
+            player.league_score_new = update.league_score_new;
+            player.league_score_gain = update.league_score_gain;
+            player.league_rank_new = update.league_rank_new;
+            player.league_rank_symbol_new = update.league_rank_symbol_new;
+            player.league_progress_data = Some(update.league_progress_data);
+        }
+    }
+
     /// C4RoundResultsPlayer::CompileFunc omits its temporary performance
     /// field. Save-state construction must therefore clear it even when the
     /// in-memory state is restored directly without a JSON round trip.
@@ -168,6 +226,16 @@ impl RoundResultsState {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeagueRoundResultUpdate {
+    pub player_info_id: i32,
+    pub league_score_new: i32,
+    pub league_score_gain: i32,
+    pub league_rank_new: i32,
+    pub league_rank_symbol_new: i32,
+    pub league_progress_data: Vec<u8>,
 }
 
 const fn invalid_score() -> i32 {
@@ -201,12 +269,63 @@ mod tests {
         assert_eq!(player.total_playing_time, 0);
         assert_eq!(player.score_old, -1);
         assert_eq!(player.score_new, None);
+        assert_eq!(player.league_score_new, -1);
+        assert_eq!(player.league_score_gain, 0);
         assert_eq!(player.league_performance, 0);
         assert!(player.custom_evaluation_strings.is_empty());
 
-        let decoded: RoundResultsPlayerState = serde_json::from_str("{}")
+        let mut decoded: RoundResultsPlayerState = serde_json::from_str("{}")
             .unwrap_or_else(|error| panic!("default player result parses: {error}"));
+        // CompileFunc defaults a missing GameScore to -1 even though the C++
+        // constructor initializes a fresh in-memory result to zero.
+        assert_eq!(decoded.league_score_gain, -1);
+        decoded.league_score_gain = 0;
         assert_eq!(decoded, player);
+
+        let encoded = serde_json::to_value(&player)
+            .unwrap_or_else(|error| panic!("fresh player result serializes: {error}"));
+        assert_eq!(encoded.get("league_score_gain"), Some(&serde_json::json!(0)));
+    }
+
+    #[test]
+    fn league_evaluation_preserves_local_settlement_fields_and_persists_server_fields() {
+        let mut results = RoundResultsState {
+            players: vec![RoundResultsPlayerState {
+                player_info_id: 7,
+                total_playing_time: 90,
+                score_old: 10,
+                score_new: Some(12),
+                ..RoundResultsPlayerState::default()
+            }],
+            ..RoundResultsState::default()
+        };
+        results.evaluate_league(
+            true,
+            b"evaluated".to_vec(),
+            [LeagueRoundResultUpdate {
+                player_info_id: 7,
+                league_score_new: 80,
+                league_score_gain: -5,
+                league_rank_new: 3,
+                league_rank_symbol_new: 4,
+                league_progress_data: b"progress".to_vec(),
+            }],
+        );
+
+        assert_eq!(results.league_success, Some(true));
+        assert_eq!(results.league_result_message.as_deref(), Some(&b"evaluated"[..]));
+        let player = &results.players[0];
+        assert_eq!((player.total_playing_time, player.score_old, player.score_new), (90, 10, Some(12)));
+        assert_eq!(
+            (
+                player.league_score_new,
+                player.league_score_gain,
+                player.league_rank_new,
+                player.league_rank_symbol_new,
+            ),
+            (80, -5, 3, 4)
+        );
+        assert_eq!(player.league_progress_data.as_deref(), Some(&b"progress"[..]));
     }
 
     #[test]

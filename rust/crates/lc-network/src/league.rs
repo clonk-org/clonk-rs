@@ -294,6 +294,75 @@ pub fn encode_league_end_request(
     finish_reference_request(request, reference, checksum_start)
 }
 
+/// Reason sent with `C4LA_ReportDisconnect`.
+///
+/// The native INI writer elides `Unknown`, its default value, and uses the
+/// two identifiers below for the actionable reasons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LeagueDisconnectReason {
+    #[default]
+    Unknown,
+    ConnectionFailed,
+    Desync,
+}
+
+impl LeagueDisconnectReason {
+    fn cpp_identifier(self) -> Option<&'static [u8]> {
+        match self {
+            Self::Unknown => None,
+            Self::ConnectionFailed => Some(b"ConnectionFailed"),
+            Self::Desync => Some(b"Desync"),
+        }
+    }
+}
+
+/// Builds the exact `C4LA_ReportDisconnect` request for one client's players.
+///
+/// Unlike Update and End, the native client permits an empty CSID here: a
+/// joined client may need to report the host before it has received a session
+/// identifier. Every joined, non-removed player is emitted, while FBID is
+/// optional and looked up by the player's byte-preserving league account.
+pub fn encode_league_report_disconnect_request(
+    csid: &LegacyCString,
+    reason: LeagueDisconnectReason,
+    player_infos: &ClientPlayerInfosSnapshot,
+    fbids: &LeagueFbidRegistry,
+    checksum_start: u32,
+) -> Result<Vec<u8>, LeagueChecksumError> {
+    let mut request = b"[Request]\r\nAction=ReportDisconnect\r\n".to_vec();
+    push_raw_field(&mut request, b"CSID", csid);
+    request.extend_from_slice(b"Checksum=-----\r\n");
+    if let Some(reason) = reason.cpp_identifier() {
+        request.extend_from_slice(b"Reason=");
+        request.extend_from_slice(reason);
+        request.extend_from_slice(b"\r\n");
+    }
+
+    request.extend_from_slice(b"\r\n[PlayerInfos]\r\n");
+    for player in &player_infos.players {
+        if player.flags & PLAYER_INFO_FLAG_JOINED == 0
+            || player.flags & PLAYER_INFO_FLAG_REMOVED != 0
+        {
+            continue;
+        }
+        request.extend_from_slice(b"\r\n  [Player]\r\n  ID=");
+        request.extend_from_slice(player.id.to_string().as_bytes());
+        request.extend_from_slice(b"\r\n");
+        if let Some(fbid) = fbids.get(&player.league_account) {
+            request.extend_from_slice(b"  FBID=");
+            request.extend_from_slice(fbid.as_bytes());
+            request.extend_from_slice(b"\r\n");
+        }
+    }
+    solve_league_checksum(&mut request, checksum_start)?;
+    Ok(request)
+}
+
+/// Decodes the common response returned for `ReportDisconnect`.
+pub fn decode_league_report_disconnect_response(input: &[u8]) -> LeagueAuthResponse {
+    decode_league_auth_response(input)
+}
+
 fn finish_reference_request(
     mut request: Vec<u8>,
     reference: &HostGameReference,
@@ -1553,9 +1622,9 @@ fn parse_round_results_player(
 /// authentication state.  This registry mirrors the semantics of
 /// `C4LeagueFBIDList`: inserting a new FBID replaces any previous mapping for
 /// the account and removal is a no-op if the entry does not exist.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeagueFbidRegistry {
-    entries: HashMap<String, String>,
+    entries: HashMap<LegacyCString, LegacyCString>,
 }
 
 impl LeagueFbidRegistry {
@@ -1572,20 +1641,20 @@ impl LeagueFbidRegistry {
     }
 
     /// Associates `account` with `fbid`, replacing any previous value.
-    pub fn insert(&mut self, account: impl Into<String>, fbid: impl Into<String>) {
-        self.entries.insert(account.into(), fbid.into());
+    pub fn insert(&mut self, account: LegacyCString, fbid: LegacyCString) {
+        self.entries.insert(account, fbid);
     }
 
     /// Removes the FBID associated with `account`.
     ///
     /// Returns `true` if an entry was present.
-    pub fn remove(&mut self, account: &str) -> bool {
+    pub fn remove(&mut self, account: &LegacyCString) -> bool {
         self.entries.remove(account).is_some()
     }
 
     /// Looks up the FBID registered for `account`.
-    pub fn get(&self, account: &str) -> Option<&str> {
-        self.entries.get(account).map(|value| value.as_str())
+    pub fn get(&self, account: &LegacyCString) -> Option<&LegacyCString> {
+        self.entries.get(account)
     }
 
     /// Returns the number of tracked accounts.
@@ -1603,17 +1672,19 @@ impl LeagueFbidRegistry {
 mod tests {
     use super::{
         decode_league_auth_response, decode_league_end_response, decode_league_join_response,
-        decode_league_start_response, decode_league_update_response, encode_league_auth_request,
+        decode_league_report_disconnect_response, decode_league_start_response,
+        decode_league_update_response, encode_league_auth_request,
         encode_league_auth_request_head, encode_league_join_request_head,
-        encode_league_player_info_section, solve_league_checksum, LeagueAuthRequestHead,
-        LeagueFbidRegistry, LeagueHostSession, LeagueHttpPostTransport, LeagueHttpTransportConfig,
+        encode_league_player_info_section, encode_league_report_disconnect_request,
+        solve_league_checksum, LeagueAuthRequestHead, LeagueDisconnectReason, LeagueFbidRegistry,
+        LeagueHostSession, LeagueHttpPostTransport, LeagueHttpTransportConfig,
         LeagueHttpTransportError, LeagueJoinRequestHead, LeagueResponseDecodeError,
     };
-    use crate::LeagueRoundPlayerStatus;
+    use crate::{ClientPlayerInfosSnapshot, LeagueRoundPlayerStatus};
     use lc_engine::{
         ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
         CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED,
-        PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
+        PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1667,6 +1738,104 @@ CSID=session-\x80\r\n\
 AUID=auth_id\r\n\
 Checksum=-----\r\n"
         );
+    }
+
+    #[test]
+    fn report_disconnect_request_matches_cpp_sections_and_filters_players() {
+        // ReportDisconnect inserts Request and PlayerInfos as top-level
+        // siblings. DisconnectData emits only joined/non-removed players and
+        // looks up each optional FBID by its league-account bytes
+        // (src/C4League.cpp:74-89,247-286,483-497).
+        let alice_account = legacy(b"A\x80");
+        let bob_account = legacy(b"Bob");
+        let mut fbids = LeagueFbidRegistry::new();
+        fbids.insert(alice_account.clone(), legacy(b"feedback-\x81"));
+        let players = ClientPlayerInfosSnapshot {
+            client_id: 7,
+            flags: 0,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    flags: PLAYER_INFO_FLAG_JOINED,
+                    id: 17,
+                    league_account: alice_account,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    flags: PLAYER_INFO_FLAG_JOINED,
+                    id: 18,
+                    league_account: bob_account,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    flags: PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED,
+                    id: 19,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 20,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let request = encode_league_report_disconnect_request(
+            &legacy(b"session-\x82"),
+            LeagueDisconnectReason::ConnectionFailed,
+            &players,
+            &fbids,
+            0x1234_5678,
+        )
+        .expect("disconnect checksum has a C++ candidate");
+        let checksum = request
+            .windows(b"Checksum=".len())
+            .position(|window| window == b"Checksum=")
+            .map(|offset| offset + b"Checksum=".len())
+            .expect("encoded request has checksum");
+        let mut layout = request;
+        layout[checksum..checksum + 5].copy_from_slice(b"-----");
+        assert_eq!(
+            layout,
+            b"[Request]\r\n\
+Action=ReportDisconnect\r\n\
+CSID=session-\x82\r\n\
+Checksum=-----\r\n\
+Reason=ConnectionFailed\r\n\
+\r\n\
+[PlayerInfos]\r\n\
+\r\n\
+\x20\x20[Player]\r\n\
+\x20\x20ID=17\r\n\
+\x20\x20FBID=feedback-\x81\r\n\
+\r\n\
+\x20\x20[Player]\r\n\
+\x20\x20ID=18\r\n"
+        );
+    }
+
+    #[test]
+    fn report_disconnect_allows_empty_csid_and_elides_unknown_reason() {
+        let request = encode_league_report_disconnect_request(
+            &LegacyCString::default(),
+            LeagueDisconnectReason::Unknown,
+            &ClientPlayerInfosSnapshot {
+                client_id: 4,
+                flags: 0,
+                players: Vec::new(),
+            },
+            &LeagueFbidRegistry::new(),
+            0,
+        )
+        .expect("disconnect checksum has a C++ candidate");
+
+        assert!(!request.windows(5).any(|window| window == b"CSID"));
+        assert!(!request.windows(6).any(|window| window == b"Reason"));
+        assert!(request.ends_with(b"\r\n[PlayerInfos]\r\n"));
+
+        let response = decode_league_report_disconnect_response(
+            b"[Response]\r\nStatus=Success\r\nMessage=Recorded\r\n",
+        );
+        assert!(response.is_success());
+        assert_eq!(response.message.as_bytes(), b"Recorded");
     }
 
     #[test]
@@ -2212,54 +2381,57 @@ Name=\"P\\200\"\r\n"
     #[test]
     fn insert_and_lookup_round_trip() {
         let mut registry = LeagueFbidRegistry::new();
-        registry.insert("Alice", "FBID-123");
-        registry.insert("Bob", "FBID-456");
+        registry.insert(legacy(b"Alice"), legacy(b"FBID-123"));
+        registry.insert(legacy(b"Bob"), legacy(b"FBID-456"));
 
         assert_eq!(registry.len(), 2);
-        assert_eq!(registry.get("Alice"), Some("FBID-123"));
-        assert_eq!(registry.get("Bob"), Some("FBID-456"));
-        assert!(registry.get("Eve").is_none());
+        assert_eq!(registry.get(&legacy(b"Alice")), Some(&legacy(b"FBID-123")));
+        assert_eq!(registry.get(&legacy(b"Bob")), Some(&legacy(b"FBID-456")));
+        assert!(registry.get(&legacy(b"Eve")).is_none());
     }
 
     #[test]
     fn replacing_existing_account_overwrites_value() {
         let mut registry = LeagueFbidRegistry::new();
-        registry.insert("Alice", "FBID-123");
-        registry.insert("Alice", "FBID-999");
+        registry.insert(legacy(b"A\x80"), legacy(b"FBID-\x81"));
+        registry.insert(legacy(b"A\x80"), legacy(b"FBID-\xff"));
 
         assert_eq!(registry.len(), 1);
-        assert_eq!(registry.get("Alice"), Some("FBID-999"));
+        assert_eq!(
+            registry.get(&legacy(b"A\x80")),
+            Some(&legacy(b"FBID-\xff"))
+        );
     }
 
     #[test]
     fn removing_unknown_account_is_a_noop() {
         let mut registry = LeagueFbidRegistry::new();
-        registry.insert("Alice", "FBID-123");
-        assert!(!registry.remove("Bob"));
+        registry.insert(legacy(b"Alice"), legacy(b"FBID-123"));
+        assert!(!registry.remove(&legacy(b"Bob")));
         assert_eq!(registry.len(), 1);
-        assert_eq!(registry.get("Alice"), Some("FBID-123"));
+        assert_eq!(registry.get(&legacy(b"Alice")), Some(&legacy(b"FBID-123")));
     }
 
     #[test]
     fn removal_drops_entry() {
         let mut registry = LeagueFbidRegistry::new();
-        registry.insert("Alice", "FBID-123");
-        registry.insert("Bob", "FBID-456");
+        registry.insert(legacy(b"Alice"), legacy(b"FBID-123"));
+        registry.insert(legacy(b"Bob"), legacy(b"FBID-456"));
 
-        assert!(registry.remove("Alice"));
-        assert_eq!(registry.get("Alice"), None);
+        assert!(registry.remove(&legacy(b"Alice")));
+        assert_eq!(registry.get(&legacy(b"Alice")), None);
         assert_eq!(registry.len(), 1);
     }
 
     #[test]
     fn clear_removes_all_entries() {
         let mut registry = LeagueFbidRegistry::new();
-        registry.insert("Alice", "FBID-123");
-        registry.insert("Bob", "FBID-456");
+        registry.insert(legacy(b"Alice"), legacy(b"FBID-123"));
+        registry.insert(legacy(b"Bob"), legacy(b"FBID-456"));
         registry.clear();
 
         assert!(registry.is_empty());
-        assert_eq!(registry.get("Alice"), None);
-        assert_eq!(registry.get("Bob"), None);
+        assert_eq!(registry.get(&legacy(b"Alice")), None);
+        assert_eq!(registry.get(&legacy(b"Bob")), None);
     }
 }

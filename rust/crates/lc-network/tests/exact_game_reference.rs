@@ -137,6 +137,25 @@ fn cpp_reference_serializes_the_complete_game_parameters_snapshot_in_compile_ord
 }
 
 #[test]
+fn replacing_control_mode_refreshes_the_reference_projection() {
+    let reference =
+        HostGameReference::new(fixture_summary(), fixture_metadata(), complete_parameters())
+            .unwrap();
+
+    let central = reference.replacing_control_mode(1).unwrap();
+
+    assert_eq!(central.summary().control_mode, 1);
+    assert_eq!(central.parameters(), reference.parameters());
+    let encoded = encode_host_game_reference_response(&central).unwrap();
+    assert!(encoded
+        .windows(b"CtrlMode=1\r\n".len())
+        .any(|window| window == b"CtrlMode=1\r\n"));
+    assert!(!encoded
+        .windows(b"CtrlMode=2\r\n".len())
+        .any(|window| window == b"CtrlMode=2\r\n"));
+}
+
+#[test]
 fn cpp_league_host_requests_append_the_exact_reference_after_the_request_head() {
     // C4LeagueClient::{Start,Update,End} insert the complete Reference as a
     // sibling after Request and solve the checksum over both sections

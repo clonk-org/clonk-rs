@@ -108,12 +108,13 @@ pub use initial_network_parameters::{
 };
 pub use league::{
     decode_league_auth_response, decode_league_end_response, decode_league_join_response,
-    decode_league_start_response, decode_league_update_response, encode_league_auth_request,
-    encode_league_auth_request_head, encode_league_end_request, encode_league_join_request,
-    encode_league_join_request_head, encode_league_player_info_section,
+    decode_league_report_disconnect_response, decode_league_start_response,
+    decode_league_update_response, encode_league_auth_request, encode_league_auth_request_head,
+    encode_league_end_request, encode_league_join_request, encode_league_join_request_head,
+    encode_league_player_info_section, encode_league_report_disconnect_request,
     encode_league_start_request, encode_league_update_request, solve_league_checksum,
-    LeagueAuthRequestHead, LeagueAuthResponse, LeagueChecksumError, LeagueEndRecord,
-    LeagueEndResponse, LeagueFbidRegistry, LeagueHeartbeat, LeagueHostSession,
+    LeagueAuthRequestHead, LeagueAuthResponse, LeagueChecksumError, LeagueDisconnectReason,
+    LeagueEndRecord, LeagueEndResponse, LeagueFbidRegistry, LeagueHeartbeat, LeagueHostSession,
     LeagueHttpPostTransport, LeagueHttpTransportConfig, LeagueHttpTransportError,
     LeagueJoinRequestHead, LeagueJoinResponse, LeaguePlayerInfoEncodeError,
     LeagueReferenceRequestEncodeError, LeagueResponseDecodeError, LeagueStartResponse,
