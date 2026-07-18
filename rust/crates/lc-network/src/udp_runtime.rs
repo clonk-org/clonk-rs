@@ -230,6 +230,17 @@ impl ReliableUdpPeer {
         let Some(kind) = reliable_udp_packet_kind(wire) else {
             return ReliableUdpStep::default();
         };
+        // This runtime always negotiates MCM_NoMC. Ignore stray multicast
+        // payload/check traffic before it can mutate either receive window or
+        // apply multicast-group acknowledgements to this peer's direct queue.
+        if wire[0] & 0x80 != 0
+            && matches!(
+                kind,
+                ReliableUdpPacketKind::Data | ReliableUdpPacketKind::Check
+            )
+        {
+            return ReliableUdpStep::default();
+        }
         let mut step = ReliableUdpStep::default();
         if wire.len() >= 5 {
             let packet_number = u32::from_ne_bytes(
@@ -1238,6 +1249,104 @@ mod tests {
         assert_eq!(
             canonical_reliable_udp_peer_address(reliable_udp_send_address(a_address)),
             a_address
+        );
+    }
+
+    #[test]
+    fn multicast_offer_gets_one_no_multicast_conn_ok() {
+        let local_address = address(1, 11_111);
+        let peer_address = address(2, 22_222);
+        let mut endpoint = ReliableUdpEndpointCore::new_at(Duration::ZERO);
+
+        let initial = endpoint.connect_at(peer_address, Duration::ZERO);
+        assert_eq!(initial.datagrams.len(), 1);
+        assert_eq!(
+            decode_reliable_udp_connect(&initial.datagrams[0].payload)
+                .unwrap()
+                .expect("outbound Conn is valid")
+                .multicast_address,
+            None
+        );
+
+        let mut offer = ReliableUdpConnect::unicast(0, local_address);
+        offer.multicast_address = Some(SocketAddr::V6(SocketAddrV6::new(
+            "ff3e:40:2001:db8::1234".parse().unwrap(),
+            11_113,
+            0,
+            0,
+        )));
+        let response = endpoint.receive_at(
+            peer_address,
+            &encode_reliable_udp_connect(&offer),
+            Duration::ZERO,
+        );
+
+        assert_eq!(response.datagrams.len(), 1);
+        assert_eq!(response.datagrams[0].payload[0], 0x03);
+        assert_eq!(
+            decode_reliable_udp_connect_ok(&response.datagrams[0].payload)
+                .unwrap()
+                .multicast_mode,
+            ReliableUdpMulticastMode::NoMulticast
+        );
+        assert!(matches!(
+            response.events.as_slice(),
+            [ReliableUdpEvent::Connected { peer, .. }] if *peer == peer_address
+        ));
+        assert_eq!(
+            endpoint.peer_status(peer_address),
+            Some(ReliableUdpPeerStatus::Working)
+        );
+    }
+
+    #[test]
+    fn no_multicast_peer_ignores_flagged_data_and_check_without_mutating_direct_stream() {
+        let (_, peer_address, mut endpoint, _) = handshake_pair();
+        endpoint
+            .send_packet(peer_address, b"queued direct packet")
+            .unwrap();
+        assert_eq!(endpoint.outgoing_packet_count(peer_address), Some(1));
+
+        let mut flagged_data = encode_reliable_udp_data_fragments(0, b"stray multicast packet")
+            .unwrap()
+            .remove(0);
+        flagged_data[0] |= 0x80;
+        assert_eq!(
+            endpoint.receive_at(peer_address, &flagged_data, Duration::ZERO),
+            ReliableUdpStep::default()
+        );
+
+        let mut flagged_check = encode_reliable_udp_check(&ReliableUdpCheck {
+            packet_number: 7,
+            next_expected_packet_number: 1,
+            next_expected_multicast_packet_number: 0,
+            missing_packet_numbers: vec![0],
+            missing_multicast_packet_numbers: Vec::new(),
+        })
+        .unwrap();
+        flagged_check[0] |= 0x80;
+        assert_eq!(
+            endpoint.receive_at(peer_address, &flagged_check, Duration::ZERO),
+            ReliableUdpStep::default()
+        );
+        assert_eq!(endpoint.outgoing_packet_count(peer_address), Some(1));
+        assert_eq!(
+            endpoint.peer_status(peer_address),
+            Some(ReliableUdpPeerStatus::Working)
+        );
+
+        let direct_data = encode_reliable_udp_data_fragments(0, b"direct still starts at zero")
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            endpoint.receive_at(peer_address, &direct_data, Duration::ZERO),
+            ReliableUdpStep {
+                datagrams: Vec::new(),
+                events: vec![ReliableUdpEvent::Packet {
+                    peer: peer_address,
+                    payload: b"direct still starts at zero".to_vec(),
+                }],
+            }
         );
     }
 
