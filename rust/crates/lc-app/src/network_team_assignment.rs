@@ -128,18 +128,22 @@ impl NetworkTeamAssignmentState {
         player_infos: &mut ControlPlayerInfoRegistry,
         request: PlayerInfoUpdateRequest,
         max_players: usize,
+        by_host: bool,
+        has_or_will_have_lobby: bool,
         restore_players: &[ControlPlayerInfoEntry],
-    ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
+    ) -> Result<Option<PlayerInfoAdmission>, NetworkTeamControlError> {
         let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
             self.generated_team_name_template.clone(),
         );
-        player_infos.admit_remote_request_with_runtime_teams_and_attributes(
+        Ok(player_infos.admit_request_with_teams_and_attributes(
             request,
             max_players,
             &mut self.teams,
+            by_host,
+            has_or_will_have_lobby,
             restore_players,
             &mut oracle,
-        )
+        )?)
     }
 }
 

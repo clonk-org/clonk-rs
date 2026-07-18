@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
@@ -520,6 +521,19 @@ impl TestNetworkCommands {
                     )));
                     let _ = direct_ready.send(());
                 }
+                Ok(NetworkCommand::BroadcastPreexecutedPlayerInfo {
+                    info,
+                    join_players_on_echo,
+                }) => {
+                    order.push("player-info");
+                    player_infos.push(info.clone());
+                    let _ = event_tx.send(NetworkEvent::PreexecutedPlayerInfoEcho {
+                        original: info.clone(),
+                        info,
+                        join_players_on_echo,
+                    });
+                    let _ = direct_ready.send(());
+                }
                 Ok(NetworkCommand::SubmitJoinPlayer { tick, join }) => {
                     order.push("join-player");
                     joins.push((tick, join));
@@ -668,8 +682,28 @@ impl TestNetworkCommands {
     pub(crate) fn take_broadcast_player_infos(&mut self) -> Vec<PlayerInfoControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
-            if let NetworkCommand::BroadcastPlayerInfo(info) = command {
-                submitted.push(info);
+            match command {
+                NetworkCommand::BroadcastPlayerInfo(info)
+                | NetworkCommand::BroadcastPreexecutedPlayerInfo { info, .. } => {
+                    submitted.push(info)
+                }
+                _ => {}
+            }
+        }
+        submitted
+    }
+
+    pub(crate) fn take_preexecuted_player_infos(
+        &mut self,
+    ) -> Vec<(PlayerInfoControlData, Vec<lc_engine::ControlPlayerInfoEntry>)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::BroadcastPreexecutedPlayerInfo {
+                info,
+                join_players_on_echo,
+            } = command
+            {
+                submitted.push((info, join_players_on_echo));
             }
         }
         submitted
@@ -692,7 +726,10 @@ impl TestNetworkCommands {
         let mut snapshots = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
-                NetworkCommand::BroadcastPlayerInfo(info) => player_infos.push(info),
+                NetworkCommand::BroadcastPlayerInfo(info)
+                | NetworkCommand::BroadcastPreexecutedPlayerInfo { info, .. } => {
+                    player_infos.push(info)
+                }
                 NetworkCommand::PublishJoinSnapshot { snapshot } => snapshots.push(snapshot),
                 _ => {}
             }
@@ -982,6 +1019,11 @@ pub enum NetworkEvent {
         request: lc_network::PlayerInfoUpdateRequest,
         by_host: bool,
     },
+    PreexecutedPlayerInfoEcho {
+        original: PlayerInfoControlData,
+        info: PlayerInfoControlData,
+        join_players_on_echo: Vec<lc_engine::ControlPlayerInfoEntry>,
+    },
     ReadyTick {
         tick: Tick,
         controls: Vec<NetworkControl>,
@@ -1049,6 +1091,15 @@ pub enum NetworkControl {
 }
 
 #[derive(Debug)]
+enum PlayerInfoEchoProvenance {
+    Normal,
+    Preexecuted {
+        original: PlayerInfoControlData,
+        join_players_on_echo: Vec<lc_engine::ControlPlayerInfoEntry>,
+    },
+}
+
+#[derive(Debug)]
 enum NetworkCommand {
     PublishPlayerResource {
         request: ClientPlayerResourceRequest,
@@ -1060,6 +1111,10 @@ enum NetworkCommand {
     },
     SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
     BroadcastPlayerInfo(PlayerInfoControlData),
+    BroadcastPreexecutedPlayerInfo {
+        info: PlayerInfoControlData,
+        join_players_on_echo: Vec<lc_engine::ControlPlayerInfoEntry>,
+    },
     SubmitJoinPlayer {
         tick: Tick,
         join: JoinPlayerControlData,
@@ -1645,6 +1700,24 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting PlayerInfo broadcasts"))
     }
 
+    pub fn broadcast_preexecuted_player_info(
+        &self,
+        mut info: PlayerInfoControlData,
+        join_players_on_echo: Vec<lc_engine::ControlPlayerInfoEntry>,
+    ) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may broadcast PlayerInfo"));
+        }
+        info.by_client = i32::try_from(HOST_CLIENT_ID)
+            .map_err(|_| anyhow!("host client id exceeds the PlayerInfo wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::BroadcastPreexecutedPlayerInfo {
+                info,
+                join_players_on_echo,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting PlayerInfo broadcasts"))
+    }
+
     pub fn submit_join_player(&self, tick: Tick, mut join: JoinPlayerControlData) -> Result<()> {
         if self.local_client_id != HOST_CLIENT_ID {
             return Err(anyhow!("only the network host may submit JoinPlayer"));
@@ -2092,6 +2165,7 @@ async fn run_host_worker(
     });
     let mut host_events = host.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(HOST_CLIENT_ID);
+    let mut player_info_echo_provenance = VecDeque::new();
 
     loop {
         tokio::select! {
@@ -2102,6 +2176,7 @@ async fn run_host_worker(
                         local_owner,
                         &event_tx,
                         &telemetry_tx,
+                        &mut player_info_echo_provenance,
                     ).await?,
                     None => {
                         return Err(anyhow!("host event stream ended"));
@@ -2134,6 +2209,20 @@ async fn run_host_worker(
                     }
                     NetworkCommand::BroadcastPlayerInfo(info) => {
                         send_player_info_from_host(&host, info, &event_tx).await?;
+                        player_info_echo_provenance.push_back(PlayerInfoEchoProvenance::Normal);
+                    }
+                    NetworkCommand::BroadcastPreexecutedPlayerInfo {
+                        info,
+                        join_players_on_echo,
+                    } => {
+                        let original = info.clone();
+                        send_player_info_from_host(&host, info, &event_tx).await?;
+                        player_info_echo_provenance.push_back(
+                            PlayerInfoEchoProvenance::Preexecuted {
+                                original,
+                                join_players_on_echo,
+                            },
+                        );
                     }
                     NetworkCommand::SubmitJoinPlayer { tick, join } => {
                         frame_builder.record_control(
@@ -2332,6 +2421,7 @@ async fn handle_host_event(
     local_owner: i32,
     event_tx: &Sender<NetworkEvent>,
     _telemetry_tx: &SyncSender<NetworkEvent>,
+    player_info_echo_provenance: &mut VecDeque<PlayerInfoEchoProvenance>,
 ) -> Result<()> {
     match event {
         HostEvent::StatusChanged(status) => {
@@ -2424,8 +2514,36 @@ async fn handle_host_event(
                 .unwrap_or_default();
             let _ = event_tx.send(NetworkEvent::Error(format!("{prefix}{error}")));
         }
-        HostEvent::Direct { delivery, data, .. } => {
-            handle_direct_packet(delivery, data, event_tx)?;
+        HostEvent::Direct {
+            client_id,
+            delivery,
+            data,
+        } => {
+            let player_info = (client_id == lc_network::BROADCAST_CLIENT_ID)
+                .then(|| decode_control_entry_payload(&data).ok())
+                .flatten()
+                .and_then(|control| match control {
+                    lc_engine::ControlPacket::PlayerInfo(info) => Some(info),
+                    _ => None,
+                });
+            let provenance = player_info
+                .as_ref()
+                .and_then(|_| player_info_echo_provenance.pop_front());
+            match provenance {
+                Some(PlayerInfoEchoProvenance::Preexecuted {
+                    original,
+                    join_players_on_echo,
+                }) => {
+                    let _ = event_tx.send(NetworkEvent::PreexecutedPlayerInfoEcho {
+                        original,
+                        info: player_info.expect("preexecuted provenance belongs to PlayerInfo"),
+                        join_players_on_echo,
+                    });
+                }
+                Some(PlayerInfoEchoProvenance::Normal) | None => {
+                    handle_direct_packet(delivery, data, event_tx)?;
+                }
+            }
         }
         HostEvent::ExecSync { .. } => {
             // Synchronized-control execution is not surfaced yet.
@@ -2559,7 +2677,8 @@ async fn run_client_worker(
                             .await?;
                         }
                     }
-                    NetworkCommand::BroadcastPlayerInfo(_) => {
+                    NetworkCommand::BroadcastPlayerInfo(_)
+                    | NetworkCommand::BroadcastPreexecutedPlayerInfo { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to broadcast authoritative PlayerInfo".to_string(),
                         ));
@@ -4922,12 +5041,14 @@ mod tests {
         };
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
 
         handle_host_event(
             HostEvent::StatusChanged(status),
             0,
             &event_tx,
             &telemetry_tx,
+            &mut player_info_echo_provenance,
         )
         .await
         .expect("forward requested status");
@@ -4947,12 +5068,14 @@ mod tests {
         };
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
 
         handle_host_event(
             HostEvent::StatusCommitted(status),
             0,
             &event_tx,
             &telemetry_tx,
+            &mut player_info_echo_provenance,
         )
         .await
         .expect("forward committed status");
@@ -4971,12 +5094,14 @@ mod tests {
         let packet = lc_network::LobbyCountdownPacket::new(5);
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
 
         handle_host_event(
             HostEvent::LobbyCountdown { packet },
             0,
             &event_tx,
             &telemetry_tx,
+            &mut player_info_echo_provenance,
         )
         .await
         .expect("forward host lobby countdown");
@@ -5011,12 +5136,14 @@ mod tests {
         };
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
 
         handle_host_event(
             HostEvent::ReadyCheck { packet },
             0,
             &event_tx,
             &telemetry_tx,
+            &mut player_info_echo_provenance,
         )
         .await
         .expect("forward ready check");
@@ -5254,12 +5381,14 @@ mod tests {
         };
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
 
         handle_host_event(
             HostEvent::LobbyCountdown { packet: countdown },
             0,
             &event_tx,
             &telemetry_tx,
+            &mut player_info_echo_provenance,
         )
         .await
         .expect("forward host countdown");
@@ -5286,6 +5415,7 @@ mod tests {
             0,
             &event_tx,
             &telemetry_tx,
+            &mut player_info_echo_provenance,
         )
         .await
         .expect("forward host ready toggle");
@@ -5414,6 +5544,72 @@ mod tests {
         };
         assert_eq!(actual, info);
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_player_info_does_not_consume_preexecuted_broadcast_provenance() {
+        let info = PlayerInfoControlData {
+            client_id: 3,
+            by_client: 0,
+            ..Default::default()
+        };
+        let payload = lc_network::encode_control_entry_payload(
+            &lc_engine::ControlPacket::PlayerInfo(info.clone()),
+        )
+        .expect("encode direct PlayerInfo payload");
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut provenance = VecDeque::from([PlayerInfoEchoProvenance::Preexecuted {
+            original: info.clone(),
+            join_players_on_echo: vec![lc_engine::ControlPlayerInfoEntry {
+                id: 41,
+                ..Default::default()
+            }],
+        }]);
+
+        handle_host_event(
+            HostEvent::Direct {
+                client_id: 7,
+                delivery: lc_network::ControlDelivery::Direct,
+                data: payload.clone(),
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut provenance,
+        )
+        .await
+        .expect("handle remote PlayerInfo");
+        handle_host_event(
+            HostEvent::Direct {
+                client_id: lc_network::BROADCAST_CLIENT_ID,
+                delivery: lc_network::ControlDelivery::Direct,
+                data: payload,
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut provenance,
+        )
+        .await
+        .expect("handle preexecuted PlayerInfo loopback");
+
+        assert_eq!(
+            event_rx.recv().expect("remote direct event"),
+            NetworkEvent::DirectControl(NetworkControl::PlayerInfo(info.clone()))
+        );
+        assert_eq!(
+            event_rx.recv().expect("preexecuted loopback event"),
+            NetworkEvent::PreexecutedPlayerInfoEcho {
+                original: info.clone(),
+                info,
+                join_players_on_echo: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    ..Default::default()
+                }],
+            }
+        );
+        assert!(provenance.is_empty());
     }
 
     #[test]

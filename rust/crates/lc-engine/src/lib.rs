@@ -96,7 +96,7 @@ pub use control::{
     VOTE_TYPE_CANCEL, VOTE_TYPE_KICK, VOTE_TYPE_NONE, VOTE_TYPE_PAUSE,
 };
 pub use control_execution::{
-    assign_initial_host_player_teams, assign_initial_offline_player_teams,
+    AdmittedPlayerTeamUpdate, assign_initial_host_player_teams, assign_initial_offline_player_teams,
     generate_default_initial_team, prepare_join_player_config, resolve_remote_embedded_player_data,
     ControlClientRegistry, ControlClientState, ControlPlayerInfoRegistry,
     InitialHostTeamAssignmentOracle, JoinPlayerPreparation, PlayerInfoAdmission,
@@ -18985,6 +18985,35 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Applies the immediate live-player half of `C4Team::AddPlayer` for an
+    /// already-joined PlayerInfo row. This deliberately bypasses
+    /// SetPlayerTeam callbacks, hostility changes, and team-home-base sync.
+    #[doc(hidden)]
+    pub fn apply_admitted_player_team_update(
+        &mut self,
+        info_id: i32,
+        team: i32,
+        color: Option<u32>,
+    ) -> Result<bool, EngineError> {
+        let Some(player_id) = self
+            .players
+            .values()
+            .find(|player| player.player_info_id() == info_id)
+            .map(Player::id)
+        else {
+            return Ok(false);
+        };
+        self.players
+            .get_mut(&player_id)
+            .expect("the selected runtime player remains present")
+            .set_team(Some(team));
+        if let Some(color) = color {
+            self.set_player_color(player_id, color)?;
+        }
+        self.recheck_runtime_team_memberships();
+        Ok(true)
     }
 
     pub fn teams(&self) -> &[TeamInfo] {
@@ -59648,6 +59677,55 @@ mod internal_player_script_control_parity {
             })
             .expect("host may eliminate a remote-owned player"));
         assert_eq!(engine.player(2).unwrap().status(), PlayerStatus::Eliminated);
+    }
+
+    #[test]
+    fn admitted_joined_player_team_update_applies_add_player_side_effects_only() {
+        let old_color = RgbColor::new(0x12, 0x34, 0x56);
+        let new_color = 0x0000_c800;
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "One", 0x0012_3456).with_player_ids(vec![41]),
+            TeamInfo::new(2, "Two", new_color),
+        ]);
+        engine
+            .register_player(
+                PlayerConfig::new(4, "Joined")
+                    .with_player_info_id(41)
+                    .with_team(Some(1))
+                    .with_color(Some(old_color)),
+            )
+            .expect("joined player registers");
+        engine
+            .register_definition(
+                Definition::from_script("OWND", "Owned", "")
+                    .expect("owned-object definition compiles"),
+            )
+            .expect("owned-object definition registers");
+        let owned = engine
+            .spawn_object(
+                SpawnConfig::new("OWND")
+                    .with_owner(4)
+                    .with_color(0xaa12_3456),
+            )
+            .expect("owned object spawns");
+
+        assert!(
+            engine
+                .apply_admitted_player_team_update(41, 2, Some(new_color))
+                .expect("live AddPlayer update applies")
+        );
+
+        assert_eq!(engine.player(4).unwrap().team(), Some(2));
+        assert_eq!(engine.player(4).unwrap().color(), Some(RgbColor::new(0, 0xc8, 0)));
+        assert!(engine.teams()[0].player_ids.is_empty());
+        assert_eq!(engine.teams()[1].player_ids, vec![41]);
+        let owned_index = engine.find_object_index(owned).expect("owned object remains live");
+        assert_eq!(engine.objects[owned_index].state.color, 0xaa00_c800);
+        let missing_applied = engine
+            .apply_admitted_player_team_update(99, 1, None)
+            .expect("a missing joined player is a native-style no-op");
+        assert!(!missing_applied);
     }
 
     #[test]
