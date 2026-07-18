@@ -1514,8 +1514,16 @@ pub fn draw_energy_bar(
     hud: &HudGraphics,
     viewport: SurfaceRect,
     energy_fraction: f32,
+    show_portraits: bool,
 ) {
-    draw_energy_bar_with_gamma(surface, hud, viewport, energy_fraction, None);
+    draw_energy_bar_with_gamma(
+        surface,
+        hud,
+        viewport,
+        energy_fraction,
+        show_portraits,
+        None,
+    );
 }
 
 pub(crate) fn draw_energy_bar_with_gamma(
@@ -1523,6 +1531,7 @@ pub(crate) fn draw_energy_bar_with_gamma(
     hud: &HudGraphics,
     viewport: SurfaceRect,
     energy_fraction: f32,
+    show_portraits: bool,
     gamma: Option<&GammaRamp>,
 ) {
     draw_bar(
@@ -1531,6 +1540,7 @@ pub(crate) fn draw_energy_bar_with_gamma(
         viewport,
         HudBarKind::Energy,
         0,
+        show_portraits,
         |height| {
             let fraction = energy_fraction.clamp(0.0, 1.0);
             height - (fraction * height as f32).round() as i32
@@ -1550,8 +1560,19 @@ pub fn draw_level_bar(
     slot: u32,
     level: i32,
     range: i32,
+    show_portraits: bool,
 ) {
-    draw_level_bar_with_gamma(surface, hud, viewport, kind, slot, level, range, None);
+    draw_level_bar_with_gamma(
+        surface,
+        hud,
+        viewport,
+        kind,
+        slot,
+        level,
+        range,
+        show_portraits,
+        None,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1563,16 +1584,26 @@ pub(crate) fn draw_level_bar_with_gamma(
     slot: u32,
     level: i32,
     range: i32,
+    show_portraits: bool,
     gamma: Option<&GammaRamp>,
 ) {
-    draw_bar(surface, hud, viewport, kind, slot, |height| {
-        let bounded = if range > 0 {
-            level.clamp(0, range)
-        } else {
-            0
-        };
-        height - (i64::from(bounded) * i64::from(height) / i64::from(range.max(1))) as i32
-    }, gamma);
+    draw_bar(
+        surface,
+        hud,
+        viewport,
+        kind,
+        slot,
+        show_portraits,
+        |height| {
+            let bounded = if range > 0 {
+                level.clamp(0, range)
+            } else {
+                0
+            };
+            height - (i64::from(bounded) * i64::from(height) / i64::from(range.max(1))) as i32
+        },
+        gamma,
+    );
 }
 
 fn draw_bar(
@@ -1581,6 +1612,7 @@ fn draw_bar(
     viewport: SurfaceRect,
     kind: HudBarKind,
     slot: u32,
+    show_portraits: bool,
     y_bar_for_height: impl FnOnce(i32) -> i32,
     gamma: Option<&GammaRamp>,
 ) {
@@ -1598,8 +1630,9 @@ fn draw_bar(
     if vp_height <= 2 * SYMBOL_SIZE + 2 * SYMBOL_BORDER {
         return;
     }
-    // iYOff = 10 with portraits shown (src/C4Viewport.cpp:927).
-    let y_off = 10;
+    // iYOff = Config.Graphics.ShowPortraits ? 10 : 0
+    // (src/C4Viewport.cpp:927).
+    let y_off = if show_portraits { 10 } else { 0 };
     let x = viewport.x + SYMBOL_BORDER + slot as i32 * (cell_w as i32 + 1);
     let y = viewport.y + SYMBOL_SIZE + 2 * SYMBOL_BORDER + y_off;
     let height = vp_height - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE - y_off;
@@ -2757,7 +2790,7 @@ mod tests {
     }
 
     #[test]
-    fn energy_bar_draws_filled_column_from_the_bottom() {
+    fn energy_bar_tracks_portrait_offset_and_draws_filled_column_from_the_bottom() {
         // DrawEnergyLevelEx: rows below yBar sample the filled column 0,
         // rows above the empty column 1 (src/C4Facet.cpp:334-389).
         let mut target = surface(40, 200);
@@ -2773,7 +2806,7 @@ mod tests {
             ..HudGraphics::default()
         };
         let viewport = SurfaceRect::new(0, 0, 40, 200);
-        draw_energy_bar(&mut target, &hud, viewport, 0.5);
+        draw_energy_bar(&mut target, &hud, viewport, 0.5, true);
         // Bar spans y = 55 .. 55 + (200 - 95) = 160; yBar at half.
         let bar_top = SYMBOL_SIZE + 2 * SYMBOL_BORDER + 10;
         let bar_height = 200 - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE - 10;
@@ -2788,6 +2821,33 @@ mod tests {
             Some(Color::opaque(200, 0, 0)),
             "bottom of a half-full bar is filled"
         );
+
+        let mut without_portraits = surface(40, 200);
+        draw_energy_bar(&mut without_portraits, &hud, viewport, 0.5, false);
+        let portraitless_top = SYMBOL_SIZE + 2 * SYMBOL_BORDER;
+        let portraitless_height = 200 - 3 * SYMBOL_BORDER - 2 * SYMBOL_SIZE;
+        assert_eq!(
+            without_portraits.get_pixel(x, (portraitless_top - 1) as u32),
+            Some(Color::opaque(0, 0, 0)),
+            "the row above the portraitless bar stays untouched"
+        );
+        assert_eq!(
+            without_portraits.get_pixel(x, portraitless_top as u32),
+            Some(Color::opaque(60, 60, 60)),
+            "disabling portraits moves the bar top up ten pixels"
+        );
+        assert_eq!(
+            without_portraits.get_pixel(x, (portraitless_top + portraitless_height - 1) as u32),
+            Some(Color::opaque(200, 0, 0)),
+            "the portraitless bar keeps the portraits-on bottom edge"
+        );
+        assert_eq!(
+            without_portraits.get_pixel(x, (portraitless_top + portraitless_height) as u32),
+            Some(Color::opaque(0, 0, 0)),
+            "the row below the bar stays untouched"
+        );
+        assert_eq!(portraitless_height, bar_height + 10);
+        assert_eq!(portraitless_top + portraitless_height, bar_top + bar_height);
     }
 
     #[test]

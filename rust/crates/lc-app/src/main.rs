@@ -33468,8 +33468,9 @@ impl GameApp {
                 players,
                 game_time_seconds: self.game_time_seconds(),
                 message_board_line: self.message_board_line(),
-                // Config.Graphics.ShowCommands/ShowCommandKeys from the
-                // Display menu (src/C4Config.cpp:449-450).
+                // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
+                // from the Display menu (src/C4Config.cpp:448-450).
+                show_portraits: self.display_flags.portraits,
                 show_commands: self.display_flags.show_commands,
                 show_command_keys: self.display_flags.show_command_keys,
             };
@@ -48886,6 +48887,7 @@ func Award()
             1,
             crew.breath,
             crew.breath_capacity,
+            true,
         );
 
         let painted = surface

@@ -1982,6 +1982,9 @@ pub struct GraphicsOverlay<'a> {
     /// The current message board log line (C4MessageBoard LogBuffer tail,
     /// src/C4MessageBoard.cpp:271-303).
     pub message_board_line: Option<String>,
+    /// `Config.Graphics.ShowPortraits` (src/C4Config.cpp:448) — shifts the
+    /// viewport bars down ten pixels when portraits are enabled.
+    pub show_portraits: bool,
     /// `Config.Graphics.ShowCommands` (src/C4Config.cpp:449) — gates the
     /// per-viewport command rows (src/C4Viewport.cpp:948).
     pub show_commands: bool,
@@ -2308,8 +2311,9 @@ pub struct GraphicsSystem {
     hud_players: Vec<PlayerOverlay>,
     game_time_seconds: u64,
     message_board_line: Option<String>,
-    /// `Config.Graphics.ShowCommands` / `ShowCommandKeys`
-    /// (src/C4Config.cpp:449-450, default true).
+    /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
+    /// (src/C4Config.cpp:448-450, default true).
+    show_portraits: bool,
     show_commands: bool,
     show_command_keys: bool,
     /// Debug FRAME/STATUS lines; `None` hides them (default HUD).
@@ -2398,6 +2402,7 @@ impl GraphicsSystem {
             hud_players: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
+            show_portraits: true,
             show_commands: true,
             show_command_keys: true,
             debug_hud_text: None,
@@ -3061,6 +3066,7 @@ impl GraphicsSystem {
         self.hud_players = overlay.players.clone();
         self.game_time_seconds = overlay.game_time_seconds;
         self.message_board_line = overlay.message_board_line.clone();
+        self.show_portraits = overlay.show_portraits;
         self.show_commands = overlay.show_commands;
         self.show_command_keys = overlay.show_command_keys;
         self.debug_hud_text = overlay
@@ -7227,6 +7233,7 @@ impl GraphicsSystem {
                         &self.hud_graphics,
                         rect,
                         crew.energy_fraction,
+                        self.show_portraits,
                         gamma,
                     );
                     bar_slot += 1;
@@ -7242,6 +7249,7 @@ impl GraphicsSystem {
                         bar_slot,
                         crew.magic_energy / MAGIC_PHYSICAL_FACTOR,
                         crew.magic_capacity / MAGIC_PHYSICAL_FACTOR,
+                        self.show_portraits,
                         gamma,
                     );
                     bar_slot += 1;
@@ -7258,6 +7266,7 @@ impl GraphicsSystem {
                         bar_slot,
                         crew.breath,
                         crew.breath_capacity,
+                        self.show_portraits,
                         gamma,
                     );
                 }
@@ -15852,9 +15861,11 @@ mod tests {
             players: Vec::new(),
             game_time_seconds: 61,
             message_board_line: Some("Player join: Test".to_string()),
+            show_portraits: false,
             show_commands: true,
             show_command_keys: true,
         });
+        assert!(!graphics.show_portraits);
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
         // Rendering with overlay state must not panic; without an
@@ -15920,6 +15931,7 @@ mod tests {
             }],
             game_time_seconds: 0,
             message_board_line: None,
+            show_portraits: true,
             show_commands: true,
             show_command_keys: true,
         });
@@ -18726,6 +18738,7 @@ mod tests {
             players,
             game_time_seconds: 0,
             message_board_line: None,
+            show_portraits: true,
             show_commands: true,
             show_command_keys: true,
         });
@@ -18886,6 +18899,7 @@ mod tests {
             players,
             game_time_seconds: 0,
             message_board_line: None,
+            show_portraits: true,
             show_commands: true,
             show_command_keys: true,
         });
@@ -18947,6 +18961,36 @@ mod tests {
             graphics.surface().get_pixel(breath_x, bar_bottom_y as u32),
             Some(standard_gamma_color(Color::opaque(0, 0, 220))),
             "partial breath uses filled source column 4 immediately after energy"
+        );
+
+        let portraitless_top_y = hud::SYMBOL_SIZE + 2 * hud::SYMBOL_BORDER;
+        let energy_color = standard_gamma_color(Color::opaque(220, 0, 0));
+        assert_ne!(
+            graphics
+                .surface()
+                .get_pixel(energy_x, portraitless_top_y as u32),
+            Some(energy_color),
+            "portraits-on retains the ten-pixel gap above the energy bar"
+        );
+        let players = graphics.hud_players.clone();
+        graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            players,
+            game_time_seconds: 0,
+            message_board_line: None,
+            show_portraits: false,
+            show_commands: true,
+            show_command_keys: true,
+        });
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+        assert_eq!(
+            graphics
+                .surface()
+                .get_pixel(energy_x, portraitless_top_y as u32),
+            Some(energy_color),
+            "the overlay portrait flag moves the energy bar up ten pixels"
         );
 
         graphics.hud_players[0].crew[0].magic_energy = 1_000;
