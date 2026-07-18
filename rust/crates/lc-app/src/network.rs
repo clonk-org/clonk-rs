@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -536,34 +537,48 @@ impl ClientStatusState {
 
 const CLIENT_ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_millis(5_000);
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum LocalClientActivation {
+    #[default]
+    Deactivated,
+    Activated,
+    Observer,
+}
+
 #[derive(Debug, Default)]
 struct ClientActivationState {
     armed: bool,
     status_reached: bool,
-    current_frame: i32,
     last_request_at: Option<tokio::time::Instant>,
+    local: LocalClientActivation,
 }
 
 impl ClientActivationState {
     fn arm_for_queued_player_info(&mut self, request: &lc_network::PlayerInfoUpdateRequest) {
         if request.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL != 0
             && !request.players.is_empty()
+            && self.local == LocalClientActivation::Deactivated
         {
             self.armed = true;
         }
     }
 
-    fn status_reached(&mut self, current_frame: i32) {
+    fn arm_for_queued_control(&mut self) {
+        if self.local == LocalClientActivation::Deactivated {
+            self.armed = true;
+        }
+    }
+
+    fn can_finalize(&self) -> bool {
+        self.local == LocalClientActivation::Activated
+    }
+
+    fn status_reached(&mut self) {
         self.status_reached = true;
-        self.current_frame = current_frame;
     }
 
     fn status_requested(&mut self) {
         self.status_reached = false;
-    }
-
-    fn refresh_frame(&mut self, current_frame: i32) {
-        self.current_frame = current_frame;
     }
 
     fn mark_requested(&mut self, now: tokio::time::Instant) {
@@ -574,22 +589,43 @@ impl ClientActivationState {
         &mut self,
         local_client_id: i32,
         update: &lc_engine::ClientUpdateControlData,
-    ) {
-        let activates = update.update_type == lc_engine::CLIENT_UPDATE_ACTIVATE && update.data != 0;
-        let observes = update.update_type == lc_engine::CLIENT_UPDATE_SET_OBSERVER;
-        if update.by_client == 0 && update.client_id == local_client_id && (activates || observes) {
-            self.armed = false;
-            self.last_request_at = None;
+    ) -> bool {
+        if update.by_client != 0 || update.client_id != local_client_id {
+            return false;
         }
+        let became_activated = match update.update_type {
+            lc_engine::CLIENT_UPDATE_ACTIVATE if update.data != 0 => {
+                let changed = self.local != LocalClientActivation::Activated;
+                self.local = LocalClientActivation::Activated;
+                changed
+            }
+            lc_engine::CLIENT_UPDATE_ACTIVATE => {
+                self.local = LocalClientActivation::Deactivated;
+                return false;
+            }
+            lc_engine::CLIENT_UPDATE_SET_OBSERVER => {
+                self.local = LocalClientActivation::Observer;
+                false
+            }
+            _ => return false,
+        };
+        self.armed = false;
+        self.last_request_at = None;
+        became_activated
     }
 
-    fn request_tick_if_due(&self, now: tokio::time::Instant) -> Option<i32> {
-        (self.armed
+    fn request_tick_if_due(
+        &self,
+        now: tokio::time::Instant,
+        current_frame: i32,
+    ) -> Option<i32> {
+        (self.local == LocalClientActivation::Deactivated
+            && self.armed
             && self.status_reached
             && self
                 .last_request_at
                 .is_none_or(|last| now >= last + CLIENT_ACTIVATION_RETRY_INTERVAL))
-        .then_some(self.current_frame)
+        .then_some(current_frame)
     }
 
     fn next_retry_at(&self) -> Option<tokio::time::Instant> {
@@ -605,6 +641,7 @@ impl ClientActivationState {
 #[derive(Debug)]
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
+    current_frame: Arc<AtomicI32>,
     event_rx: Receiver<NetworkEvent>,
     telemetry_rx: Receiver<NetworkEvent>,
     worker: Option<thread::JoinHandle<()>>,
@@ -1590,9 +1627,14 @@ impl ControlFrameAccumulator {
         }
     }
 
-    fn record_control(&mut self, tick: Tick, control: lc_engine::ControlPacket, timestamp: u64) {
+    fn record_control(
+        &mut self,
+        tick: Tick,
+        control: lc_engine::ControlPacket,
+        timestamp: u64,
+    ) -> bool {
         if self.last_sent_tick.is_some_and(|last| tick <= last) {
-            return;
+            return false;
         }
         if self.current_tick != Some(tick) {
             self.controls.clear();
@@ -1600,6 +1642,15 @@ impl ControlFrameAccumulator {
         }
         self.controls.push(control);
         self.last_timestamp = Some(timestamp);
+        true
+    }
+
+    fn rebase_pending_to_first_activated_tick(&mut self, tick: Tick) {
+        if !self.controls.is_empty()
+            && self.last_sent_tick.is_none_or(|last| last < tick)
+        {
+            self.current_tick = Some(tick);
+        }
     }
 
     fn finalize_tick(&mut self, tick: Tick) -> Option<LegacyControlFrame> {
@@ -1656,6 +1707,7 @@ impl NetworkManager {
         let (local_id_tx, local_id_rx) =
             mpsc::channel::<std::result::Result<NetworkWorkerReady, NetworkStartError>>();
         let netpuncher_state = Arc::new(Mutex::new(NetworkNetpuncherState::default()));
+        let current_frame = Arc::new(AtomicI32::new(0));
         let thread_name = match mode {
             WorkerMode::Host { .. } => "lc-network-host",
             WorkerMode::Client { .. } => "lc-network-client",
@@ -1665,6 +1717,7 @@ impl NetworkManager {
             .spawn({
                 let event_tx = event_tx.clone();
                 let worker_netpuncher_state = netpuncher_state.clone();
+                let worker_current_frame = current_frame.clone();
                 move || {
                     let runtime = RuntimeBuilder::new_multi_thread()
                         .enable_all()
@@ -1677,6 +1730,7 @@ impl NetworkManager {
                         telemetry_tx,
                         local_id_tx,
                         worker_netpuncher_state,
+                        worker_current_frame,
                     )) {
                         let _ = event_tx.send(NetworkEvent::Error(format!("{err:?}")));
                     }
@@ -1700,6 +1754,7 @@ impl NetworkManager {
         let league_runtime_available = ready.league_runtime_available;
         Ok(Self {
             command_tx,
+            current_frame,
             event_rx,
             telemetry_rx,
             worker: Some(worker),
@@ -1710,6 +1765,13 @@ impl NetworkManager {
             league_start_response: ready.league_start_response,
             league_runtime_available,
         })
+    }
+
+    /// Publish the live game frame for background network timers. C++ reads
+    /// `Game.FrameCounter` when each activation retry is built, so the worker
+    /// must not reuse the frame from the input that armed the first request.
+    pub fn refresh_current_frame(&self, current_frame: i32) {
+        self.current_frame.store(current_frame, Ordering::Relaxed);
     }
 
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
@@ -2483,6 +2545,7 @@ impl NetworkManager {
         (
             Self {
                 command_tx,
+                current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
                 worker: None,
@@ -2507,6 +2570,7 @@ impl NetworkManager {
         (
             Self {
                 command_tx,
+                current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
                 worker: None,
@@ -2536,6 +2600,7 @@ impl NetworkManager {
         (
             Self {
                 command_tx,
+                current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
                 worker: None,
@@ -3068,6 +3133,7 @@ async fn run_worker(
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
+    current_frame: Arc<AtomicI32>,
 ) -> Result<()> {
     match mode {
         WorkerMode::Host {
@@ -3097,6 +3163,7 @@ async fn run_worker(
                 telemetry_tx,
                 local_id_tx,
                 netpuncher_state,
+                current_frame,
             )
             .await
         }
@@ -3828,6 +3895,7 @@ async fn run_client_worker(
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
+    current_frame_source: Arc<AtomicI32>,
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
     let league_transport = settings.league_transport.clone();
@@ -3898,6 +3966,7 @@ async fn run_client_worker(
     let mut client_status = ClientStatusState::default();
     client_status.receive_request(initial_status);
     let mut client_activation = ClientActivationState::default();
+    let mut rebase_pending_on_activation = false;
 
     loop {
         let activation_retry_at = client_activation.next_retry_at();
@@ -4042,6 +4111,7 @@ async fn run_client_worker(
                                 &client,
                                 &mut client_activation,
                                 tokio::time::Instant::now(),
+                                current_frame_source.load(Ordering::Relaxed),
                             )
                             .await?;
                         }
@@ -4126,24 +4196,37 @@ async fn run_client_worker(
                         ));
                     }
                     NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
-                        frame_builder.record_control(
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
                             tick,
                             lc_engine::ControlPacket::InitScenarioPlayer(selection),
-                            current_millis(),
-                        );
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitSurrenderPlayer { tick, surrender } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
-                        frame_builder.record_control(
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
                             tick,
                             lc_engine::ControlPacket::SurrenderPlayer(surrender),
-                            current_millis(),
-                        );
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitInternalPlayerScript { tick, control } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
-                        frame_builder.record_control(tick, control, current_millis());
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
+                            tick,
+                            control,
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitMessage(message) => {
                         let data = encode_control_entry_payload(
@@ -4187,45 +4270,63 @@ async fn run_client_worker(
                         ));
                     }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
-                            frame_builder.record_control(tick, control, current_millis());
+                            record_client_control(
+                                &client,
+                                &mut client_activation,
+                                &mut frame_builder,
+                                &current_frame_source,
+                                tick,
+                                control,
+                            )
+                            .await?;
                         }
                     }
                     NetworkCommand::SubmitPlayerCommand { tick, command } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
-                        frame_builder.record_control(
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
                             tick,
                             lc_engine::ControlPacket::PlayerCommand(command),
-                            current_millis(),
-                        );
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitPlayerSelect { tick, selection } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
-                        frame_builder.record_control(
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
                             tick,
                             lc_engine::ControlPacket::PlayerSelect(selection),
-                            current_millis(),
-                        );
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitScript { tick, script } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
-                        frame_builder.record_control(
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
                             tick,
                             lc_engine::ControlPacket::Script(script),
-                            current_millis(),
-                        );
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitMessageBoardAnswer { tick, answer } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
-                        frame_builder.record_control(
+                        record_client_control(
+                            &client,
+                            &mut client_activation,
+                            &mut frame_builder,
+                            &current_frame_source,
                             tick,
                             lc_engine::ControlPacket::MessageBoardAnswer(answer),
-                            current_millis(),
-                        );
+                        )
+                        .await?;
                     }
                     NetworkCommand::SubmitSyncCheck { tick, check } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
                         frame_builder.record_control(
                             tick,
                             lc_engine::ControlPacket::SyncCheck(check),
@@ -4233,7 +4334,12 @@ async fn run_client_worker(
                         );
                     }
                     NetworkCommand::FinalizeTick { tick } => {
-                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        if !client_activation.can_finalize() {
+                            continue;
+                        }
+                        if std::mem::take(&mut rebase_pending_on_activation) {
+                            frame_builder.rebase_pending_to_first_activated_tick(tick);
+                        }
                         if let Some(frame) = frame_builder.finalize_tick(tick) {
                             send_frame_to_client(&client, frame, &event_tx).await?;
                         }
@@ -4278,17 +4384,19 @@ async fn run_client_worker(
                             client_status.restore_request(expected, status);
                             return Err(anyhow!("client status acknowledgement failed: {err}"));
                         }
-                        client_activation.status_reached(current_frame);
+                        current_frame_source.store(current_frame, Ordering::Relaxed);
+                        client_activation.status_reached();
                         request_client_activation_if_due(
                             &client,
                             &mut client_activation,
                             tokio::time::Instant::now(),
+                            current_frame,
                         )
                         .await?;
                     }
                     NetworkCommand::ClientUpdateExecuted(update) => {
                         if let Ok(local_client_id) = i32::try_from(client_id) {
-                            client_activation
+                            rebase_pending_on_activation |= client_activation
                                 .apply_executed_client_update(local_client_id, &update);
                         }
                     }
@@ -4314,6 +4422,7 @@ async fn run_client_worker(
                     &client,
                     &mut client_activation,
                     tokio::time::Instant::now(),
+                    current_frame_source.load(Ordering::Relaxed),
                 )
                 .await?;
             }
@@ -4337,8 +4446,9 @@ async fn request_client_activation_if_due(
     client: &ClientHandle,
     activation: &mut ClientActivationState,
     now: tokio::time::Instant,
+    current_frame: i32,
 ) -> Result<()> {
-    let Some(tick) = activation.request_tick_if_due(now) else {
+    let Some(tick) = activation.request_tick_if_due(now, current_frame) else {
         return Ok(());
     };
     client
@@ -4349,8 +4459,25 @@ async fn request_client_activation_if_due(
     Ok(())
 }
 
-fn frame_tick_to_i32(tick: Tick) -> i32 {
-    i32::try_from(tick).unwrap_or(i32::MAX)
+async fn record_client_control(
+    client: &ClientHandle,
+    activation: &mut ClientActivationState,
+    frame_builder: &mut ControlFrameAccumulator,
+    current_frame_source: &AtomicI32,
+    tick: Tick,
+    control: lc_engine::ControlPacket,
+) -> Result<()> {
+    if !frame_builder.record_control(tick, control, current_millis()) {
+        return Ok(());
+    }
+    activation.arm_for_queued_control();
+    request_client_activation_if_due(
+        client,
+        activation,
+        tokio::time::Instant::now(),
+        current_frame_source.load(Ordering::Relaxed),
+    )
+    .await
 }
 
 fn announce_connected_client(
@@ -5422,6 +5549,7 @@ mod tests {
                 telemetry_tx,
                 local_id_tx,
                 test_netpuncher_state(),
+                Arc::new(AtomicI32::new(0)),
             )
             .await
         });
@@ -5482,6 +5610,7 @@ mod tests {
                 telemetry_tx,
                 local_id_tx,
                 test_netpuncher_state(),
+                Arc::new(AtomicI32::new(0)),
             )
             .await
         });
@@ -5693,6 +5822,7 @@ mod tests {
                 telemetry_tx,
                 local_id_tx,
                 test_netpuncher_state(),
+                Arc::new(AtomicI32::new(0)),
             )
             .await
         });
@@ -5764,6 +5894,210 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_worker_rebases_deactivated_presend_input_to_first_activated_tick() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let address = listener.local_addr().expect("host address");
+        let host_config = HostConfig::default();
+        let expected_status = NetworkStatus {
+            target_tick: host_config
+                .initial_join_snapshot
+                .as_ref()
+                .expect("default JoinData")
+                .dynamic_tick,
+            ..host_config.initial_status
+        };
+        let mut host = start_host(listener, host_config).await.expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let temporary = tempfile::tempdir().expect("temporary client resource directory");
+        let mut settings = ClientSettings::new(address, "Alice");
+        settings.resource_directory = temporary.path().join("Network");
+        let (command_tx, command_rx) = tokio_mpsc::channel(32);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            let mut command_rx = command_rx;
+            run_client_worker(
+                settings,
+                3,
+                &mut command_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+                Arc::new(AtomicI32::new(0)),
+            )
+            .await
+        });
+        let ready = local_id_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("client worker readiness timeout")
+            .expect("client worker readiness");
+        let client_id = ready.local_client_id;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("client join timeout")
+            {
+                Some(HostEvent::ClientJoined {
+                    client_id: joined, ..
+                }) if joined == client_id => break,
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("transport error before queued input: {error}")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before client join"),
+            }
+        }
+
+        command_tx
+            .send(NetworkCommand::AcknowledgeRequestedStatus {
+                status: expected_status,
+                current_control_tick: expected_status.target_tick,
+                current_frame: 41,
+            })
+            .await
+            .expect("queue reached status");
+        command_tx
+            .send(NetworkCommand::SubmitLocal {
+                owner: 3,
+                event: ControlEvent::Press(ControlButton::Right),
+                tick: 2,
+            })
+            .await
+            .expect("queue inactive input");
+        command_tx
+            .send(NetworkCommand::FinalizeTick { tick: 0 })
+            .await
+            .expect("probe inactive finalization");
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("activation request timeout")
+            {
+                Some(HostEvent::ActivationRequest {
+                    client_id: requested,
+                    tick,
+                    ..
+                }) if requested == client_id => {
+                    assert_eq!(tick, 41);
+                    break;
+                }
+                Some(HostEvent::Ready { .. }) => {
+                    panic!("deactivated client emitted a control contribution")
+                }
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("inactive input caused a transport error: {error}")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before activation request"),
+            }
+        }
+
+        let host_frame = |tick| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id: HOST_CLIENT_ID,
+                tick,
+                timestamp_ms: 0,
+                controls: Vec::new(),
+            })
+            .expect("encode host control")
+        };
+        host.submit_local_control(host_frame(0))
+            .await
+            .expect("advance host-only tick");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("host-only control timeout")
+            {
+                Some(HostEvent::Ready { packet }) if packet.tick() == 0 => break,
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("host-only tick failed: {error}")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before host-only tick"),
+            }
+        }
+
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: i32::try_from(client_id).expect("client ID fits i32"),
+            data: 1,
+            by_client: i32::try_from(HOST_CLIENT_ID).expect("host ID fits i32"),
+        };
+        host.submit_packet(
+            ControlDelivery::Sync,
+            encode_control_entry_payload(&lc_engine::ControlPacket::ClientUpdate(update.clone()))
+                .expect("encode activation control"),
+        )
+        .await
+        .expect("submit activation control");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("activation execution timeout")
+            {
+                Some(HostEvent::SyncScheduled { controls, .. })
+                    if controls == vec![lc_engine::ControlPacket::ClientUpdate(update.clone())] =>
+                {
+                    break;
+                }
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("activation control failed: {error}")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before activation execution"),
+            }
+        }
+        command_tx
+            .send(NetworkCommand::ClientUpdateExecuted(update))
+            .await
+            .expect("report executed activation");
+        command_tx
+            .send(NetworkCommand::FinalizeTick { tick: 1 })
+            .await
+            .expect("finalize first activated tick");
+        host.submit_local_control(host_frame(1))
+            .await
+            .expect("complete first activated tick");
+
+        let packet = loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("activated control timeout")
+            {
+                Some(HostEvent::Ready { packet }) if packet.tick() == 1 => break packet,
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("activated input failed: {error}")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before activated input"),
+            }
+        };
+        let frame = decode_control_packet(&packet).expect("decode complete activated tick");
+        assert!(frame.controls.iter().any(|control| matches!(
+            control,
+            lc_engine::ControlPacket::PlayerControl(data)
+                if data.by_client == i32::try_from(client_id).unwrap()
+                    && data.command == i32::from(COM_RIGHT)
+        )));
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop client worker");
+        worker
+            .await
+            .expect("join client worker")
+            .expect("client worker exits cleanly");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_join_flow_worker_uses_every_address_and_supplied_password() {
         let closed = TcpListener::bind("127.0.0.1:0")
             .await
@@ -5801,6 +6135,7 @@ mod tests {
                 telemetry_tx,
                 local_id_tx,
                 test_netpuncher_state(),
+                Arc::new(AtomicI32::new(0)),
             )
             .await
         });
@@ -6425,10 +6760,55 @@ mod tests {
         let now = tokio::time::Instant::now();
 
         activation.arm_for_queued_player_info(&request);
-        assert_eq!(activation.request_tick_if_due(now), None);
+        assert_eq!(activation.request_tick_if_due(now, 40), None);
 
-        activation.status_reached(41);
-        assert_eq!(activation.request_tick_if_due(now), Some(41));
+        activation.status_reached();
+        assert_eq!(activation.request_tick_if_due(now, 41), Some(41));
+    }
+
+    #[test]
+    fn queued_control_arms_only_a_deactivated_non_observer_client() {
+        let mut activation = ClientActivationState::default();
+        let now = tokio::time::Instant::now();
+        activation.status_reached();
+
+        activation.arm_for_queued_control();
+        assert_eq!(activation.request_tick_if_due(now, 123), Some(123));
+        assert!(!activation.can_finalize());
+
+        let activate = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 7,
+            data: 1,
+            by_client: 0,
+        };
+        activation.apply_executed_client_update(7, &activate);
+        activation.arm_for_queued_control();
+        assert_eq!(activation.request_tick_if_due(now, 124), None);
+        assert!(activation.can_finalize());
+
+        activation.apply_executed_client_update(
+            7,
+            &lc_engine::ClientUpdateControlData {
+                data: 0,
+                ..activate.clone()
+            },
+        );
+        activation.arm_for_queued_control();
+        assert_eq!(activation.request_tick_if_due(now, 125), Some(125));
+        assert!(!activation.can_finalize());
+
+        activation.apply_executed_client_update(
+            7,
+            &lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                data: 1,
+                ..activate
+            },
+        );
+        activation.arm_for_queued_control();
+        assert_eq!(activation.request_tick_if_due(now, 126), None);
+        assert!(!activation.can_finalize());
     }
 
     #[test]
@@ -6446,18 +6826,21 @@ mod tests {
         };
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request);
-        activation.status_reached(41);
+        activation.status_reached();
         activation.mark_requested(first_sent_at);
-        activation.refresh_frame(52);
 
         assert_eq!(
             activation.request_tick_if_due(
-                first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL - Duration::from_millis(1)
+                first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL - Duration::from_millis(1),
+                51,
             ),
             None
         );
         assert_eq!(
-            activation.request_tick_if_due(first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL),
+            activation.request_tick_if_due(
+                first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL,
+                52,
+            ),
             Some(52)
         );
     }
@@ -6476,16 +6859,15 @@ mod tests {
         };
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request);
-        activation.status_reached(41);
+        activation.status_reached();
         activation.mark_requested(first_sent_at);
 
         activation.status_requested();
-        activation.refresh_frame(60);
         let overdue = first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL;
-        assert_eq!(activation.request_tick_if_due(overdue), None);
+        assert_eq!(activation.request_tick_if_due(overdue, 60), None);
 
-        activation.status_reached(61);
-        assert_eq!(activation.request_tick_if_due(overdue), Some(61));
+        activation.status_reached();
+        assert_eq!(activation.request_tick_if_due(overdue, 61), Some(61));
     }
 
     #[test]
@@ -6503,7 +6885,7 @@ mod tests {
         };
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request);
-        activation.status_reached(41);
+        activation.status_reached();
         activation.mark_requested(first_sent_at);
         let retry_at = first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL;
 
@@ -6528,7 +6910,7 @@ mod tests {
             },
         ] {
             activation.apply_executed_client_update(7, &update);
-            assert_eq!(activation.request_tick_if_due(retry_at), Some(41));
+            assert_eq!(activation.request_tick_if_due(retry_at, 41), Some(41));
         }
 
         activation.apply_executed_client_update(
@@ -6540,7 +6922,7 @@ mod tests {
                 by_client: 0,
             },
         );
-        assert_eq!(activation.request_tick_if_due(retry_at), None);
+        assert_eq!(activation.request_tick_if_due(retry_at, 41), None);
     }
 
     #[test]
@@ -6555,10 +6937,10 @@ mod tests {
             players: Vec::new(),
         };
         activation.arm_for_queued_player_info(&request);
-        activation.status_reached(41);
+        activation.status_reached();
 
         assert_eq!(
-            activation.request_tick_if_due(tokio::time::Instant::now()),
+            activation.request_tick_if_due(tokio::time::Instant::now(), 41),
             None
         );
     }
@@ -6576,7 +6958,7 @@ mod tests {
         };
         let first_sent_at = tokio::time::Instant::now();
         activation.arm_for_queued_player_info(&request);
-        activation.status_reached(41);
+        activation.status_reached();
         activation.mark_requested(first_sent_at);
 
         activation.apply_executed_client_update(
@@ -6590,7 +6972,10 @@ mod tests {
         );
 
         assert_eq!(
-            activation.request_tick_if_due(first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL),
+            activation.request_tick_if_due(
+                first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL,
+                41,
+            ),
             None
         );
     }
@@ -8547,5 +8932,36 @@ mod tests {
             .finalize_tick(3)
             .expect("finalize advances to next tick");
         assert!(frame.controls.is_empty());
+    }
+
+    #[test]
+    fn accumulator_rebases_all_held_input_to_the_first_activated_tick() {
+        let control = control_packet_for_event(1, ControlEvent::Press(ControlButton::Right), 1)
+            .expect("build control packet");
+        for queued_tick in [9, 15] {
+            let mut held = ControlFrameAccumulator::new(1);
+            assert!(held.record_control(queued_tick, control.clone(), 30));
+            held.rebase_pending_to_first_activated_tick(13);
+            let frame = held
+                .finalize_tick(13)
+                .expect("activation tick emits held input");
+            assert_eq!(frame.tick, 13);
+            assert_eq!(frame.controls, vec![control.clone()]);
+        }
+
+        let mut ordinarily_scheduled = ControlFrameAccumulator::new(1);
+        assert!(ordinarily_scheduled.record_control(15, control.clone(), 40));
+        assert!(ordinarily_scheduled
+            .finalize_tick(13)
+            .expect("earlier empty contribution")
+            .controls
+            .is_empty());
+        assert_eq!(
+            ordinarily_scheduled
+                .finalize_tick(15)
+                .expect("future input keeps its tick")
+                .controls,
+            vec![control]
+        );
     }
 }

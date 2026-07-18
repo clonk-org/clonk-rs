@@ -6054,6 +6054,12 @@ async fn ingest_control(packet: ControlPacket, ingress: ControlIngress, state: &
                 schedule_missing(missing, state);
             }
         }
+        Err(crate::ControlError::UnknownClient(_)) if ingress == ControlIngress::Network => {
+            // HandleControl accepts network control independently of the
+            // activated client list. Rust cannot use that contribution in the
+            // active coordinator yet, but a valid early packet is not a
+            // transport error and must not create per-tick error noise.
+        }
         Err(error) => {
             let _ = state
                 .event_tx
@@ -19293,6 +19299,112 @@ mod tests {
             vec![0x66, 0x22],
             "HandleControl ignores iByClientID and retains the first contribution for a slot"
         );
+
+        drop(client);
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_silently_ignores_valid_control_from_an_unregistered_client() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let (mut client, client_id) = raw_client_transport(addr, b"inactive-control").await;
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await {
+                Ok(Some(HostEvent::ClientJoined {
+                    client_id: joined, ..
+                })) if joined == client_id => break,
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("transport error before inactive control: {error}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before client join"),
+                Err(_) => panic!("timed out waiting for client join"),
+            }
+        }
+
+        for tick in 0..=1 {
+            client
+                .send_message(ControlMessage::Control(legacy_packet(
+                    client_id,
+                    tick,
+                    0x60 + i32::try_from(tick).unwrap(),
+                )))
+                .await
+                .expect("submit inactive control");
+        }
+        raw_client_ping_barrier(&mut client).await;
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
+            .await
+            .expect("submit host control");
+
+        let ready = loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await {
+                Ok(Some(HostEvent::Ready { packet })) => break packet,
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("valid inactive control became a transport error: {error}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before host-only control"),
+                Err(_) => panic!("timed out waiting for host-only control"),
+            }
+        };
+        assert_eq!(ready.tick(), 0);
+        assert_eq!(control_commands(&ready), vec![0x11]);
+
+        drop(client);
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_still_rejects_malformed_control_from_an_unregistered_client() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let (mut client, client_id) = raw_client_transport(addr, b"inactive-malformed").await;
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await {
+                Ok(Some(HostEvent::ClientJoined {
+                    client_id: joined, ..
+                })) if joined == client_id => break,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before client join"),
+                Err(_) => panic!("timed out waiting for client join"),
+            }
+        }
+
+        client
+            .send_message(ControlMessage::Control(
+                ControlPacket::builder(client_id, 0).payload(vec![0x42]),
+            ))
+            .await
+            .expect("submit malformed inactive control");
+        raw_client_ping_barrier(&mut client).await;
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await {
+                Ok(Some(HostEvent::TransportError {
+                    client_id: Some(source),
+                    error,
+                })) if source == client_id => {
+                    assert!(error.contains("invalid control packet"));
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before validation error"),
+                Err(_) => panic!("timed out waiting for malformed-control validation"),
+            }
+        }
 
         drop(client);
         host.shutdown().await.expect("host shutdown");

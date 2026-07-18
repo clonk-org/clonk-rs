@@ -20385,6 +20385,10 @@ impl GameApp {
             .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
     }
 
+    fn current_network_input_frame(&self) -> i32 {
+        i32::try_from(self.engine.frame()).unwrap_or(i32::MAX)
+    }
+
     fn expected_network_control_tick(&self) -> Tick {
         self.network_control_clock
             .and_then(|clock| Tick::try_from(clock.current_tick()).ok())
@@ -33002,6 +33006,9 @@ impl GameApp {
 
     fn update(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        if let Some(network) = self.network.as_ref() {
+            network.refresh_current_frame(self.current_network_input_frame());
+        }
         if self.mode == AppMode::Loading && self.loading_state.is_some() {
             self.poll_loading()?;
             self.guard_classic_global_gui_bootstrap()?;
@@ -33119,6 +33126,9 @@ impl GameApp {
                     .engine
                     .tick()
                     .map_err(map_runtime_flash_producer_engine_error)?;
+                if let Some(network) = self.network.as_ref() {
+                    network.refresh_current_frame(self.current_network_input_frame());
+                }
                 self.apply_game_goal_menu_requests();
                 // Requests made by simulation scripts belong to a later
                 // control tick, never to the frame that just executed them.
