@@ -16045,6 +16045,8 @@ pub enum AudioCommand {
         name: String,
         target: Option<ObjectId>,
     },
+    /// Positive C4 `SoundLevel`: update any live matching instance in place,
+    /// or start a loop when the frontend has no such instance.
     SetSoundVolume {
         name: String,
         target: Option<ObjectId>,

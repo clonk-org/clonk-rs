@@ -42149,16 +42149,21 @@ impl AudioRegistry {
         multiple: bool,
         custom_falloff: Option<i32>,
     ) {
+        let key = AudioInstanceKey {
+            name: normalize_sound_name(name),
+            target,
+        };
+        // A preceding positive SoundLevel has not yet been resolved against
+        // frontend channels. Emit later Sound commands so a failed fallback
+        // can retry, but do not speculate loop state when the frontend may
+        // suppress them against an existing one-shot.
+        let defer_loop_state = self.has_pending_sound_level(&key);
         if !looped {
             if let Some(target) = target {
                 self.attached_targets.insert(target);
             }
         }
-        if looped && !multiple {
-            let key = AudioInstanceKey {
-                name: normalize_sound_name(name),
-                target,
-            };
+        if looped && !multiple && !defer_loop_state {
             if self.looping.contains_key(&key) {
                 return;
             }
@@ -42169,11 +42174,7 @@ impl AudioRegistry {
                     custom_falloff,
                 },
             );
-        } else if looped {
-            let key = AudioInstanceKey {
-                name: normalize_sound_name(name),
-                target,
-            };
+        } else if looped && !defer_loop_state {
             self.looping.insert(
                 key,
                 AudioInstance {
@@ -42191,6 +42192,31 @@ impl AudioRegistry {
             multiple,
             custom_falloff,
         });
+    }
+
+    fn has_pending_sound_level(&self, key: &AudioInstanceKey) -> bool {
+        self.events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                AudioCommand::SetSoundVolume {
+                    name,
+                    target,
+                    ..
+                } if normalize_sound_name(name) == key.name && *target == key.target => Some(true),
+                AudioCommand::StopSound { name, target }
+                    if normalize_sound_name(name) == key.name && *target == key.target =>
+                {
+                    Some(false)
+                }
+                AudioCommand::DetachObjectSounds { target, .. }
+                    if key.target == Some(*target) =>
+                {
+                    Some(false)
+                }
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     pub(crate) fn note_attached_sound(&mut self, target: ObjectId) {
@@ -42265,13 +42291,25 @@ impl AudioRegistry {
 
     pub(crate) fn sound_level(&mut self, name: &str, target: Option<ObjectId>, volume: u8) {
         if volume == 0 {
-            if self.is_playing(name, target) {
-                self.stop_sound(name, target);
-            }
+            // C4 SoundLevel always attempts StopSoundEffect for a nonpositive
+            // level. The frontend owns prior-frame one-shot lifetime, so the
+            // engine must not suppress this command from its looping-only map.
+            self.stop_sound(name, target);
             return;
         }
         if !self.set_volume(name, target, volume, None) {
-            self.play_sound(name, target, volume, true, false, None);
+            // The frontend is authoritative for live one-shots. It resolves
+            // this command atomically: update any matching live instance, or
+            // start a loop only when none exists. Do not speculate a looping
+            // entry here; doing so creates a phantom when a one-shot matched.
+            if let Some(target) = target {
+                self.attached_targets.insert(target);
+            }
+            self.events.push(AudioCommand::SetSoundVolume {
+                name: name.to_string(),
+                target,
+                volume,
+            });
         }
     }
 
@@ -54377,13 +54415,10 @@ func Announce()
         assert_eq!(
             outcome.audio.events,
             vec![
-                AudioCommand::PlaySound {
+                AudioCommand::SetSoundVolume {
                     name: "Global".into(),
                     target: None,
                     volume: 50,
-                    looped: true,
-                    multiple: false,
-                    custom_falloff: None,
                 },
                 AudioCommand::PlaySound {
                     name: "Shot".into(),
@@ -54399,8 +54434,73 @@ func Announce()
                 },
             ]
         );
-        assert!(outcome.audio.state.is_looping("Global", None));
+        assert!(
+            !outcome.audio.state.is_looping("Global", None),
+            "frontend arbitration must not speculate a loop before it sees live channels"
+        );
         assert!(!outcome.audio.state.is_playing("Shot", Some(target)));
+    }
+
+    #[test]
+    fn sound_level_controls_prior_frame_one_shots_without_phantom_loops() {
+        let mut audio = AudioRegistry::new();
+        audio.play_sound("VolumeShot", None, 100, false, false, None);
+        audio.play_sound("StopShot", None, 100, false, false, None);
+        assert_eq!(audio.take_events().len(), 2, "one-shots leave the frame");
+
+        audio.sound_level("VolumeShot", None, 50);
+        audio.sound_level("StopShot", None, 0);
+
+        assert_eq!(
+            audio.take_events(),
+            vec![
+                AudioCommand::SetSoundVolume {
+                    name: "VolumeShot".into(),
+                    target: None,
+                    volume: 50,
+                },
+                AudioCommand::StopSound {
+                    name: "StopShot".into(),
+                    target: None,
+                },
+            ]
+        );
+        assert!(!audio.is_looping("VolumeShot", None));
+        assert!(!audio.is_looping("StopShot", None));
+    }
+
+    #[test]
+    fn pending_sound_level_defers_followup_loop_state_without_suppressing_retry() {
+        let mut audio = AudioRegistry::new();
+        audio.sound_level("Shot", None, 50);
+        assert!(
+            !audio.is_playing("Shot", None),
+            "the frontend may still fail to update or start this sound"
+        );
+        audio.play_sound("Shot", None, 100, true, false, None);
+
+        assert!(
+            !audio.is_looping("Shot", None),
+            "an app-suppressed retry must not leave speculative loop state"
+        );
+        assert_eq!(
+            audio.take_events(),
+            vec![
+                AudioCommand::SetSoundVolume {
+                    name: "Shot".into(),
+                    target: None,
+                    volume: 50,
+                },
+                AudioCommand::PlaySound {
+                    name: "Shot".into(),
+                    target: None,
+                    volume: 100,
+                    looped: true,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+            ]
+        );
     }
 
     #[test]

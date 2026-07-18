@@ -36,7 +36,8 @@ fn tutorial07_real_acid_rain_starts_on_each_cpp_phase_call() {
 fn tutorial07_tick10_starts_cpp_wind_loop_at_level_40() {
     // Tutorial07 fixes Wind=50 (Scenario.txt:74). C4Weather::Execute steps
     // wind and then runs SoundLevel("Wind", nullptr, (abs(Wind)-30)*2) on
-    // Tick10 (C4Weather.cpp:94-104), yielding one global loop at level 40.
+    // Tick10 (C4Weather.cpp:94-104). The frontend resolves this atomically by
+    // updating a live instance or starting one global loop at level 40.
     let mut engine = load_tutorial(7, 0);
     assert_eq!(engine.environment().wind, 50);
 
@@ -57,13 +58,10 @@ fn tutorial07_tick10_starts_cpp_wind_loop_at_level_40() {
         .collect::<Vec<_>>();
     assert_eq!(
         wind_events,
-        vec![AudioCommand::PlaySound {
+        vec![AudioCommand::SetSoundVolume {
             name: "Wind".to_string(),
             target: None,
             volume: 40,
-            looped: true,
-            multiple: false,
-            custom_falloff: None,
         }]
     );
 }

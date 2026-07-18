@@ -6069,8 +6069,9 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         // C4Weather::Execute first steps Wind on Tick10, then calls
         // SoundLevel("Wind", nullptr, max(Abs(Wind)-30, 0)*2), before the
         // disaster RNG block (C4Weather.cpp:94-104; C4SoundSystem.cpp:38-51).
-        // Tutorial07's fixed Wind=50 therefore produces one global loop at
-        // volume 40, updates that instance, and stops it once wind is calm.
+        // Tutorial07's fixed Wind=50 therefore asks the frontend to update an
+        // existing global instance or start one loop at volume 40, and keeps
+        // issuing the unconditional stop attempt while wind is calm.
         let mut engine = Engine::with_seed(18);
         engine.set_environment(EnvironmentSettings::new(50));
 
@@ -6079,13 +6080,10 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         }
         assert_eq!(
             engine.tick().expect("Tick10 weather succeeds").audio,
-            vec![AudioCommand::PlaySound {
+            vec![AudioCommand::SetSoundVolume {
                 name: "Wind".to_string(),
                 target: None,
                 volume: 40,
-                looped: true,
-                multiple: false,
-                custom_falloff: None,
             }]
         );
 
@@ -6117,16 +6115,21 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             }]
         );
 
-        for _ in 0..10 {
-            assert!(
-                engine
-                    .tick()
-                    .expect("calm weather frame succeeds")
-                    .audio
-                    .is_empty(),
-                "a stopped global loop must not emit duplicate stop/play events"
-            );
+        for _ in 0..9 {
+            assert!(engine
+                .tick()
+                .expect("pre-Tick40 calm frame succeeds")
+                .audio
+                .is_empty());
         }
+        assert_eq!(
+            engine.tick().expect("Tick40 calm weather succeeds").audio,
+            vec![AudioCommand::StopSound {
+                name: "Wind".to_string(),
+                target: None,
+            }],
+            "SoundLevel(0) always attempts StopSoundEffect"
+        );
     }
 
     #[test]

@@ -6018,7 +6018,7 @@ impl AudioContext {
                     target,
                     volume,
                 } => {
-                    self.update_sound_volume(
+                    let updated = self.update_sound_volume(
                         name,
                         *target,
                         *volume,
@@ -6026,6 +6026,25 @@ impl AudioContext {
                         focus,
                         viewport_center,
                     );
+                    if !updated {
+                        if let Err(err) = self.start_sound(
+                            name,
+                            *target,
+                            *volume,
+                            true,
+                            false,
+                            None,
+                            snapshot,
+                            focus,
+                            viewport_center,
+                        ) {
+                            tracing::error!(
+                                sound = %name,
+                                error = %err,
+                                "failed to start SoundLevel fallback loop"
+                            );
+                        }
+                    }
                 }
                 AudioCommand::PlayMusic { name, looped } => {
                     *runtime_music_enabled = true;
@@ -6284,9 +6303,9 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
-    ) {
+    ) -> bool {
         let Some(key) = self.active_channel_key(name, target) else {
-            return;
+            return false;
         };
         if let Some(info) = self.active_channels.get_mut(&key) {
             info.volume = volume;
@@ -6297,13 +6316,15 @@ impl AudioContext {
                 }
             }
             let Some(channel) = info.channel else {
-                return;
+                return true;
             };
             let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
             mix_volume *= self.options.sound_volume;
             self.system
                 .channel_set_volume_and_pan(channel, mix_volume, pan);
+            return true;
         }
+        false
     }
 
     fn update_channels(
@@ -47162,6 +47183,162 @@ func Award()
     }
 
     #[test]
+    fn sound_level_revolumes_and_stops_a_prior_frame_one_shot() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(10_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        snapshot.audio.push(test_sound_command(false));
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+
+        let original = &audio.active_channels[&key];
+        let original_channel = original.channel.expect("one-shot mixer channel");
+        let original_started_at = original.started_at;
+        snapshot.audio = vec![AudioCommand::SetSoundVolume {
+            name: "Loop".to_string(),
+            target: None,
+            volume: 50,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+
+        let updated = &audio.active_channels[&key];
+        assert_eq!(audio.active_channels.len(), 1);
+        assert_eq!(updated.channel, Some(original_channel));
+        assert_eq!(updated.started_at, original_started_at);
+        assert_eq!(updated.volume, 50);
+        assert!(!updated.looped, "SoundLevel must not promote a one-shot");
+        assert!(audio.system.channel_is_playing(original_channel));
+
+        snapshot.audio = vec![AudioCommand::StopSound {
+            name: "Loop".to_string(),
+            target: None,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(!audio.active_channels.contains_key(&key));
+        assert!(!audio.system.channel_is_playing(original_channel));
+    }
+
+    #[test]
+    fn sound_level_starts_and_reuses_a_loop_when_no_instance_exists() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(10_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        snapshot.audio = vec![AudioCommand::SetSoundVolume {
+            name: "Loop".to_string(),
+            target: None,
+            volume: 37,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+
+        let started = &audio.active_channels[&key];
+        let original_channel = started.channel.expect("fallback loop mixer channel");
+        let original_started_at = started.started_at;
+        assert_eq!(audio.active_channels.len(), 1);
+        assert!(started.looped);
+        assert_eq!(started.volume, 37);
+        assert!(audio.system.channel_is_playing(original_channel));
+
+        snapshot.audio = vec![AudioCommand::SetSoundVolume {
+            name: "Loop".to_string(),
+            target: None,
+            volume: 61,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        let updated = &audio.active_channels[&key];
+        assert_eq!(audio.active_channels.len(), 1);
+        assert_eq!(updated.channel, Some(original_channel));
+        assert_eq!(updated.started_at, original_started_at);
+        assert!(updated.looped);
+        assert_eq!(updated.volume, 61);
+
+        snapshot.audio = vec![AudioCommand::StopSound {
+            name: "Loop".to_string(),
+            target: None,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        assert!(!audio.active_channels.contains_key(&key));
+        assert!(!audio.system.channel_is_playing(original_channel));
+    }
+
+    #[test]
+    fn sound_level_starts_a_loop_after_the_finished_one_shot_is_swept() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(10_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        snapshot.audio.push(test_sound_command(false));
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+        let finished_channel = audio.active_channels[&key]
+            .channel
+            .expect("one-shot mixer channel");
+        audio.system.halt_channel(finished_channel);
+
+        snapshot.audio = vec![AudioCommand::SetSoundVolume {
+            name: "Loop".to_string(),
+            target: None,
+            volume: 45,
+        }];
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+
+        assert!(
+            !audio.active_channels.contains_key(&key),
+            "the unswept C++ instance counts as found, then cleanup removes it"
+        );
+        audio.process_audio(
+            &snapshot,
+            None,
+            Vector2::ZERO,
+            &mut runtime_music_enabled,
+        );
+
+        let fallback = &audio.active_channels[&key];
+        assert_eq!(audio.active_channels.len(), 1);
+        assert!(fallback.looped);
+        assert_eq!(fallback.volume, 45);
+        assert!(fallback
+            .channel
+            .is_some_and(|channel| audio.system.channel_is_playing(channel)));
+    }
+
+    #[test]
     fn muted_one_shot_past_half_duration_is_culled_before_it_can_resume() {
         let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(10_000);
         let key = SoundInstanceKey::new("Loop", None);
@@ -85959,7 +86136,7 @@ protected func InputCallback(string answer, int player)
         audio.active_channels.insert(
             SoundInstanceKey::new("Loop", None),
             ChannelInfo {
-                channel: Some(ChannelId(999)),
+                channel: Some(ChannelId(999, 1)),
                 handle,
                 duration_ms,
                 sample_key: "loop".to_string(),

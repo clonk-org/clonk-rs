@@ -14,8 +14,10 @@ const MAXIMUM_MUSIC_VOLUME: f32 = 80.0;
 const MAXIMUM_SOUND_VOLUME: f32 = 100.0;
 const MAXIMUM_PANNING_VOLUME: f32 = 192.0;
 
+/// Mixer slot plus allocation generation; stale handles cannot control a
+/// later sound that reuses the same numeric slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChannelId(pub usize);
+pub struct ChannelId(pub usize, pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SoundId(u32);
@@ -360,6 +362,7 @@ struct MixerState {
     sounds: HashMap<SoundId, Arc<AudioClip>>,
     music: HashMap<MusicId, Arc<AudioClip>>,
     channels: Vec<Option<ChannelPlayback>>,
+    channel_generations: Vec<u64>,
     active_music: Option<MusicPlayback>,
     next_sound_id: u32,
     next_music_id: u32,
@@ -415,6 +418,7 @@ impl AudioMixer {
             sounds: HashMap::new(),
             music: HashMap::new(),
             channels: (0..max_channels).map(|_| None).collect(),
+            channel_generations: vec![0; max_channels],
             active_music: None,
             next_sound_id: 1,
             next_music_id: 1,
@@ -494,12 +498,20 @@ impl AudioMixer {
             right_gain: 1.0,
         };
         playback.recalculate_gains();
+        let mut generation = state.channel_generations[channel_index].wrapping_add(1);
+        if generation == 0 {
+            generation = 1;
+        }
+        state.channel_generations[channel_index] = generation;
         state.channels[channel_index] = Some(playback);
-        Ok(ChannelId(channel_index))
+        Ok(ChannelId(channel_index, generation))
     }
 
     pub fn halt_channel(&self, channel: ChannelId) {
         let mut state = self.state.lock().unwrap();
+        if state.channel_generations.get(channel.0) != Some(&channel.1) {
+            return;
+        }
         if let Some(slot) = state.channels.get_mut(channel.0) {
             *slot = None;
         }
@@ -507,20 +519,31 @@ impl AudioMixer {
 
     pub fn channel_is_playing(&self, channel: ChannelId) -> bool {
         let state = self.state.lock().unwrap();
-        state
-            .channels
-            .get(channel.0)
-            .and_then(|slot| slot.as_ref())
-            .is_some()
+        state.channel_generations.get(channel.0) == Some(&channel.1)
+            && state
+                .channels
+                .get(channel.0)
+                .and_then(|slot| slot.as_ref())
+                .is_some()
     }
 
-    pub fn channel_set_volume_and_pan(&self, channel: ChannelId, volume: f32, pan: f32) {
+    pub fn channel_set_volume_and_pan(
+        &self,
+        channel: ChannelId,
+        volume: f32,
+        pan: f32,
+    ) -> bool {
         let mut state = self.state.lock().unwrap();
-        if let Some(Some(playback)) = state.channels.get_mut(channel.0) {
-            playback.volume = volume.clamp(0.0, 1.0);
-            playback.pan = pan.clamp(-1.0, 1.0);
-            playback.recalculate_gains();
+        if state.channel_generations.get(channel.0) != Some(&channel.1) {
+            return false;
         }
+        let Some(Some(playback)) = state.channels.get_mut(channel.0) else {
+            return false;
+        };
+        playback.volume = volume.clamp(0.0, 1.0);
+        playback.pan = pan.clamp(-1.0, 1.0);
+        playback.recalculate_gains();
+        true
     }
 
     pub(crate) fn play_music(&self, id: MusicId, looped: bool) -> Result<(), AudioError> {
@@ -950,7 +973,7 @@ mod tests {
         let mixer = AudioMixer::new(44_100, 2);
         let sound_id = mixer.load_sound(&data).unwrap();
         let channel = mixer.play_sound(sound_id, true).unwrap();
-        mixer.channel_set_volume_and_pan(channel, 0.5, 1.0);
+        assert!(mixer.channel_set_volume_and_pan(channel, 0.5, 1.0));
         let mut buffer = vec![0i16; 128 * 2];
         mixer.mix_i16(&mut buffer);
         let left_energy: i64 = buffer
@@ -1010,6 +1033,23 @@ mod tests {
             "hard-pan gain {} exceeds SDL cap {expected_loud_side}",
             playback.right_gain
         );
+    }
+
+    #[test]
+    fn stale_channel_generation_cannot_control_a_reused_slot() {
+        let data = generate_sine_wave(200, 220.0, 44_100);
+        let mixer = AudioMixer::new(44_100, 1);
+        let sound_id = mixer.load_sound(&data).unwrap();
+        let stale = mixer.play_sound(sound_id, false).unwrap();
+        mixer.halt_channel(stale);
+        let replacement = mixer.play_sound(sound_id, true).unwrap();
+
+        assert_eq!(stale.0, replacement.0, "the sole slot is reused");
+        assert_ne!(stale, replacement, "slot reuse advances its generation");
+        assert!(!mixer.channel_is_playing(stale));
+        assert!(!mixer.channel_set_volume_and_pan(stale, 0.0, 0.0));
+        mixer.halt_channel(stale);
+        assert!(mixer.channel_is_playing(replacement));
     }
 
     #[test]
