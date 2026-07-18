@@ -256,9 +256,13 @@ fn cpp_removed_resources_are_pruned_only_after_strictly_more_than_sixty_seconds(
     assert_eq!(catalog.remove_at_client(2), 1);
     assert_eq!(catalog.last_request_at(0x0002_0001), Some(100));
 
-    assert!(catalog.on_timer(160).is_empty());
+    let (actions, expired) = catalog.on_timer_with_expired_resource_ids(160);
+    assert!(actions.is_empty());
+    assert!(expired.is_empty());
     assert!(catalog.contains_resource(0x0002_0001));
-    assert!(catalog.on_timer(161).is_empty());
+    let (actions, expired) = catalog.on_timer_with_expired_resource_ids(161);
+    assert!(actions.is_empty());
+    assert_eq!(expired, vec![0x0002_0001]);
     assert!(!catalog.contains_resource(0x0002_0001));
 }
 

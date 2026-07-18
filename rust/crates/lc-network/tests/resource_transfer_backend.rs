@@ -344,6 +344,72 @@ fn cpp_load_failure_removes_temporary_storage_and_reports_it() {
 }
 
 #[test]
+fn cpp_delayed_expiry_clears_backend_state_and_only_unlinks_temporary_files() {
+    // OnShareFree drops a removed resource strictly after the 60-second
+    // grace window. C4Network2Res::Clear unlinks temporary/standalone copies
+    // but leaves persistent source files alone (src/C4Network2Res.cpp:
+    // 983-1002,1655-1675).
+    let directory = TestDirectory::new("delayed-expiry");
+    let mut backend = ResourceTransferBackend::new(1, directory.path()).unwrap();
+
+    let temporary_id = 0x0002_0001;
+    let temporary_path = backend
+        .register_remote_loadable(core(temporary_id, b"remote.c4s", 1, 1, 0))
+        .unwrap();
+
+    let persistent_id = 0x0002_0002;
+    let persistent_path = directory.path().join("persistent.c4s");
+    fs::write(&persistent_path, b"local").unwrap();
+    backend
+        .register_local_complete(
+            core(
+                persistent_id,
+                b"persistent.c4s",
+                5,
+                2,
+                0x8bd6_88e8,
+            ),
+            &persistent_path,
+            ResourceFileOwnership::Persistent,
+            true,
+        )
+        .unwrap();
+
+    let logical_id = 0x0002_0003;
+    let logical_path = directory.path().join("logical.c4g");
+    fs::write(&logical_path, b"logical").unwrap();
+    let mut logical_core = core(logical_id, b"logical.c4g", 7, 1, 0);
+    logical_core.loadable = false;
+    backend
+        .register_local_logical(logical_core, &logical_path)
+        .unwrap();
+
+    let mut safe_random = |_| 0;
+    let _ = backend.on_timer(100, &mut safe_random).unwrap();
+    assert!(backend.remove_resource(temporary_id));
+    assert!(backend.remove_resource(persistent_id));
+    assert!(backend.remove_resource(logical_id));
+
+    assert!(backend.on_timer(160, &mut safe_random).unwrap().is_empty());
+    for resource_id in [temporary_id, persistent_id, logical_id] {
+        assert!(backend.core(resource_id).is_some());
+        assert!(backend.path(resource_id).is_some());
+    }
+    assert!(temporary_path.exists());
+    assert!(persistent_path.exists());
+    assert!(logical_path.exists());
+
+    assert!(backend.on_timer(161, &mut safe_random).unwrap().is_empty());
+    for resource_id in [temporary_id, persistent_id, logical_id] {
+        assert!(backend.core(resource_id).is_none());
+        assert!(backend.path(resource_id).is_none());
+    }
+    assert!(!temporary_path.exists());
+    assert!(persistent_path.exists());
+    assert!(logical_path.exists());
+}
+
+#[test]
 fn cpp_backend_forwards_packet_time_to_removed_resource_retention() {
     // OnDiscover refreshes iLastReqTime, and OnShareFree measures its strict
     // 60-second retention window from that packet activity

@@ -417,8 +417,14 @@ impl ResourceTransferBackend {
     where
         F: FnMut(usize) -> usize,
     {
-        let actions = self.catalog.on_timer(now_seconds);
-        self.process_actions(actions, now_seconds, safe_random)
+        let (actions, expired_resource_ids) = self
+            .catalog
+            .on_timer_with_expired_resource_ids(now_seconds);
+        let events = self.process_actions(actions, now_seconds, safe_random)?;
+        for resource_id in expired_resource_ids {
+            self.clear_expired_resource(resource_id)?;
+        }
+        Ok(events)
     }
 
     /// Executes catalog effects to quiescence. Generated transport work stays
@@ -602,8 +608,7 @@ impl ResourceTransferBackend {
                     });
                 }
                 ResourceCatalogAction::ResourceLoadFailed { resource_id } => {
-                    self.files.remove(resource_id)?;
-                    self.cores.remove(&resource_id);
+                    self.clear_expired_resource(resource_id)?;
                     events.push(ResourceTransferEvent::LoadFailed { resource_id });
                 }
             }
@@ -617,6 +622,21 @@ impl ResourceTransferBackend {
         } else {
             Ok(())
         }
+    }
+
+    fn clear_expired_resource(
+        &mut self,
+        resource_id: i32,
+    ) -> Result<(), ResourceTransferError> {
+        let file_result = if self.files.path(resource_id).is_some() {
+            self.files.remove(resource_id).map(|_| ())
+        } else {
+            Ok(())
+        };
+        self.cores.remove(&resource_id);
+        self.local_sources.remove(&resource_id);
+        file_result?;
+        Ok(())
     }
 }
 

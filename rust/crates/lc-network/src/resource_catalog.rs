@@ -587,6 +587,17 @@ impl ResourceCatalog {
 
     /// Produces the periodic protocol work from `C4Network2ResList::OnTimer`.
     pub fn on_timer(&mut self, now_seconds: u64) -> Vec<ResourceCatalogAction> {
+        self.on_timer_with_expired_resource_ids(now_seconds).0
+    }
+
+    /// Produces periodic protocol work and reports entries unlinked by
+    /// `C4Network2ResList::OnShareFree` after the timer releases the list.
+    /// Filesystem-owning callers use the IDs to run `C4Network2Res::Clear`;
+    /// pure protocol callers can continue using [`Self::on_timer`].
+    pub fn on_timer_with_expired_resource_ids(
+        &mut self,
+        now_seconds: u64,
+    ) -> (Vec<ResourceCatalogAction>, Vec<i32>) {
         let mut actions = Vec::new();
         self.resources
             .iter_mut()
@@ -655,15 +666,20 @@ impl ResourceCatalog {
                 });
             self.last_status_at = sent_status.then_some(now_seconds);
         }
+        let mut expired_resource_ids = Vec::new();
         self.resources.retain(|resource| {
-            !resource.removed
+            let retained = !resource.removed
                 || resource.last_request_at.is_some_and(|last_request_at| {
                     last_request_at != 0
                         && now_seconds.saturating_sub(last_request_at)
                             <= RESOURCE_DELETE_TIME_SECONDS
-                })
+                });
+            if !retained {
+                expired_resource_ids.push(resource.registration.resource_id);
+            }
+            retained
         });
-        actions
+        (actions, expired_resource_ids)
     }
 
     pub fn mark_discovery_needed(&mut self, resource_id: i32, now_seconds: u64) -> bool {
