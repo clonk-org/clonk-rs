@@ -1,6 +1,6 @@
 use crate::{
-    decode_legacy_script_text, language::component_language_string, ComponentGroups,
-    GraphicsImage, Group, GroupError, LoadedComponent,
+    bitmap::IndexedBitmap, decode_legacy_script_text, language::component_language_string,
+    ComponentGroups, GraphicsImage, Group, GroupError, LoadedComponent,
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -476,9 +476,75 @@ fn format_rank_extension(format: &str, base_name: &str) -> String {
 /// Decodes a single named image from the def group, `None` when absent.
 fn load_plain_image(group: &Group, name: &str) -> Option<GraphicsImage> {
     let data = group.read_file(name).ok()?;
-    let image = image::load_from_memory(&data).ok()?.into_rgba8();
+    let format = definition_image_format(Path::new(name))?;
+    let image = decode_definition_image(&data, format)?;
     let (width, height) = image.dimensions();
     (width > 0 && height > 0).then(|| GraphicsImage::new(width, height, image.into_raw()))
+}
+
+const C4_DEFINITION_GAME_PALETTE: &[u8; 256 * 3] =
+    include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
+
+/// `C4GraphicsResource::Init` expands C4.PAL's six-bit channels and installs
+/// inverse-alpha overrides for the transparent background and force-field
+/// blue (src/C4GraphicsResource.cpp:183-193). Convert that packed palette to
+/// conventional RGBA at the same point C4Surface::SetPix resolves an index.
+fn definition_game_palette_pixel(index: u8) -> [u8; 4] {
+    if index == 0 {
+        return [0, 0, 0, 0];
+    }
+    if index == 191 {
+        return [0, 0, 255, 128];
+    }
+    let offset = usize::from(index) * 3;
+    [
+        C4_DEFINITION_GAME_PALETTE[offset] << 2,
+        C4_DEFINITION_GAME_PALETTE[offset + 1] << 2,
+        C4_DEFINITION_GAME_PALETTE[offset + 2] << 2,
+        255,
+    ]
+}
+
+fn definition_image_format(path: &Path) -> Option<image::ImageFormat> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Some(image::ImageFormat::Png),
+        Some("bmp") => Some(image::ImageFormat::Bmp),
+        Some("jpg" | "jpeg") => Some(image::ImageFormat::Jpeg),
+        Some("tga") => Some(image::ImageFormat::Tga),
+        _ => None,
+    }
+}
+
+/// C4Surface::Read(..., fOwnPal=false) ignores an 8-bit BMP's embedded color
+/// table and resolves every index through the game palette initialized from
+/// C4.PAL. Keep the generic image decoder for C++'s separate 24-bit BMP path
+/// and other image formats. A recognized but invalid 8-bit BMP must not fall
+/// back because the indexed decoder carries the intentional native-layout
+/// hardening.
+fn decode_definition_image(
+    data: &[u8],
+    format: image::ImageFormat,
+) -> Option<image::RgbaImage> {
+    let bit_count = data
+        .get(28..30)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]));
+    if format == image::ImageFormat::Bmp && bit_count == Some(8) {
+        let bitmap = IndexedBitmap::decode(data).ok()?;
+        let pixels = bitmap
+            .indices
+            .iter()
+            .flat_map(|index| definition_game_palette_pixel(*index))
+            .collect();
+        return image::RgbaImage::from_raw(bitmap.width, bitmap.height, pixels);
+    }
+    image::load_from_memory_with_format(data, format)
+        .ok()
+        .map(|image| image.into_rgba8())
 }
 
 /// `C4MaxPhysical` (C4InfoCore.h:31): the 100% value of every physical.
@@ -2409,7 +2475,7 @@ fn load_definition_picture(
 ) -> Option<GraphicsImage> {
     let path = find_picture_entry(group).ok().flatten()?;
     let data = group.read_file(&path).ok()?;
-    let image = image::load_from_memory(&data).ok()?.into_rgba8();
+    let image = decode_definition_image(&data, definition_image_format(&path)?)?;
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         return None;
@@ -2675,21 +2741,8 @@ fn load_graphics_entry(
     let Some(data) = group.read_file(path).ok() else {
         return Ok(None);
     };
-    let format = match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("png") => image::ImageFormat::Png,
-        Some("bmp") => image::ImageFormat::Bmp,
-        Some("jpg" | "jpeg") => image::ImageFormat::Jpeg,
-        Some("tga") => image::ImageFormat::Tga,
-        _ => return Ok(None),
-    };
-    let Some(mut image) = image::load_from_memory_with_format(&data, format)
-        .ok()
-        .map(|image| image.into_rgba8())
+    let Some(mut image) = definition_image_format(path)
+        .and_then(|format| decode_definition_image(&data, format))
     else {
         return Ok(None);
     };
@@ -3973,6 +4026,159 @@ Entrance=1,2,,4
         );
         assert_eq!(actual_mask.pixels, expected_mask.pixels);
         assert_eq!(shield.image.pixels(), expected_image.as_raw());
+    }
+
+    fn indexed_definition_bmp(indices: Vec<u8>) -> Vec<u8> {
+        let width = indices.len() as u32;
+        let bitmap = crate::bitmap::IndexedBitmap {
+            width,
+            height: 1,
+            indices,
+        };
+        let mut misleading_file_palette = [[0_u8; 3]; 256];
+        misleading_file_palette[0] = [159, 169, 251];
+        misleading_file_palette[1] = [200, 4, 8];
+        misleading_file_palette[191] = [200, 0, 0];
+        misleading_file_palette[255] = [255, 255, 255];
+        bitmap
+            .encode_with_palette(&misleading_file_palette)
+            .expect("indexed definition BMP encodes")
+    }
+
+    #[test]
+    fn indexed_definition_bmps_use_game_palette_for_graphics_picture_and_ranks() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Indexed.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=IBMP\n").expect("DefCore");
+        let bmp = indexed_definition_bmp(vec![0, 1, 191, 255]);
+        fs::write(def_dir.join("Graphics.bmp"), &bmp).expect("Graphics.bmp");
+        fs::write(def_dir.join("Rank.bmp"), &bmp).expect("Rank.bmp");
+
+        let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
+            .expect("load indexed definition");
+        let expected = [
+            [0, 0, 0, 0],
+            [52, 52, 52, 255],
+            [0, 0, 255, 128],
+            [0, 0, 0, 255],
+        ]
+        .concat();
+        assert_eq!(
+            definition
+                .graphics_image
+                .as_ref()
+                .expect("graphics image")
+                .pixels(),
+            expected,
+            "Graphics.bmp indices use expanded C4.PAL colors and AlphaPalette"
+        );
+        assert_eq!(
+            definition
+                .picture_image
+                .as_ref()
+                .expect("picture image")
+                .pixels(),
+            expected,
+            "the separately decoded definition picture uses the same palette"
+        );
+        assert_eq!(
+            definition
+                .rank_symbols_image
+                .as_ref()
+                .expect("rank strip")
+                .pixels(),
+            expected,
+            "Rank.bmp uses the same non-owning palette path"
+        );
+        assert_eq!(definition.rank_symbol_count, Some(4));
+    }
+
+    #[test]
+    fn indexed_game_palette_blue_remains_half_alpha_color_by_owner() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("IndexedOwner.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=IOWN\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+        fs::write(
+            def_dir.join("Graphics.bmp"),
+            indexed_definition_bmp(vec![191]),
+        )
+        .expect("Graphics.bmp");
+
+        let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
+            .expect("load indexed owner-color definition");
+        assert_eq!(
+            definition
+                .graphics_image
+                .as_ref()
+                .expect("graphics image")
+                .pixels(),
+            &[255, 255, 255, 128],
+            "the owner-color sweep preserves index 191's half alpha"
+        );
+        assert_eq!(
+            definition
+                .color_by_owner_mask
+                .as_ref()
+                .expect("blue index generates owner-color mask")
+                .pixels,
+            vec![255]
+        );
+    }
+
+    #[test]
+    fn truecolor_definition_bmp_keeps_file_rgb() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Truecolor.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=TRGB\n").expect("DefCore");
+        let path = def_dir.join("Graphics.bmp");
+        image::RgbImage::from_raw(2, 1, vec![7, 23, 211, 240, 17, 99])
+            .expect("RGB image")
+            .save_with_format(&path, image::ImageFormat::Bmp)
+            .expect("24-bit Graphics.bmp");
+        let encoded = fs::read(&path).expect("read Graphics.bmp");
+        assert_eq!(u16::from_le_bytes([encoded[28], encoded[29]]), 24);
+
+        let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
+            .expect("load truecolor definition");
+        assert_eq!(
+            definition
+                .graphics_image
+                .as_ref()
+                .expect("graphics image")
+                .pixels(),
+            &[7, 23, 211, 255, 240, 17, 99, 255],
+            "24-bit BMPs remain on the generic truecolor decoder"
+        );
+    }
+
+    #[test]
+    fn shipped_lastwill_dialog_game_palette_index_zero_is_fully_transparent() {
+        let directory = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../content/Missions.c4f/LastWill.c4s/Dlg.c4d"
+        ));
+        if !directory.is_dir() {
+            return;
+        }
+
+        let definition = Definition::load(&Group::open(directory).expect("open Dlg definition"))
+            .expect("load Dlg definition");
+        let image = definition.graphics_image.as_ref().expect("graphics image");
+        assert_eq!((image.width(), image.height()), (16, 20));
+        assert!(
+            image
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, 0]),
+            "all-index-zero Graphics.bmp must be invisible, not file-palette pink"
+        );
     }
 
     #[test]
