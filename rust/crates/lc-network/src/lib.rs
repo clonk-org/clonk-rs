@@ -193,9 +193,9 @@ pub use search::{
 };
 pub use session::{
     connect_client, connect_client_addresses, connect_dual_client, connect_udp_client, start_host,
-    ClientCommand, ClientConfig, ClientError, ClientEvent, ClientHandle, ClientMeshPuncherConfig,
-    HostCommand, HostConfig, HostError, HostEvent, HostHandle, HostJoinSnapshot,
-    HostedResourceFile, BROADCAST_CLIENT_ID,
+    start_host_with_udp_binding, ClientCommand, ClientConfig, ClientError, ClientEvent,
+    ClientHandle, ClientMeshPuncherConfig, HostCommand, HostConfig, HostError, HostEvent,
+    HostHandle, HostJoinSnapshot, HostUdpBinding, HostedResourceFile, BROADCAST_CLIENT_ID,
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{

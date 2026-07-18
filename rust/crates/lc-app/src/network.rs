@@ -20,12 +20,14 @@ use lc_engine::{
 };
 use lc_network::{
     connect_client_addresses, decode_control_entry_payload, decode_control_packet,
-    encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
-    ClientHandle, ClientId, ClientMeshPuncherConfig, ClientPlayerResourceRequest, ControlDelivery,
-    ControlPacket, HostConfig, HostEvent, HostHandle, HostJoinSnapshot, LegacyControlFrame,
-    LegacyControlSet, NetpuncherGameIds, NetworkAddress, NetworkProtocol, NetworkStatus,
-    ParticipantKind, Tick,
+    encode_control_entry_payload, encode_control_packet, start_host_with_udp_binding, ClientConfig,
+    ClientEvent, ClientHandle, ClientId, ClientMeshPuncherConfig, ClientPlayerResourceRequest,
+    ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle, HostJoinSnapshot,
+    HostUdpBinding, LegacyControlFrame, LegacyControlSet, NetpuncherGameIds, NetworkAddress,
+    NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
 };
+#[cfg(test)]
+use lc_network::start_host;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -124,42 +126,16 @@ async fn resolve_client_mesh_punchers(
     let Some(address) = address.map(str::trim).filter(|address| !address.is_empty()) else {
         return Vec::new();
     };
-    let default_port_host = address
-        .strip_prefix('[')
-        .and_then(|address| address.strip_suffix(']'))
-        .unwrap_or(address);
-    let has_explicit_port = address.parse::<SocketAddr>().is_ok()
-        || (default_port_host.parse::<std::net::IpAddr>().is_err()
-            && address
-                .rsplit_once(':')
-                .is_some_and(|(_, port)| port.parse::<u16>().is_ok()));
-    let resolved: std::io::Result<Vec<_>> = if has_explicit_port {
-        tokio::net::lookup_host(address)
-            .await
-            .map(Iterator::collect)
-    } else {
-        tokio::net::lookup_host((default_port_host, 11_115))
-            .await
-            .map(Iterator::collect)
-    };
-    let Ok(resolved) = resolved else {
-        return Vec::new();
-    };
-    let mut have_ipv4 = false;
-    let mut have_ipv6 = false;
-    resolved
+    resolve_netpuncher_addresses(address)
+        .await
         .into_iter()
-        .filter_map(|address| {
-            let (seen, game_id) = if address.is_ipv4() {
-                (&mut have_ipv4, game_ids.ipv4)
+        .map(|address| {
+            let game_id = if address.is_ipv4() {
+                game_ids.ipv4
             } else {
-                (&mut have_ipv6, game_ids.ipv6)
+                game_ids.ipv6
             };
-            if *seen {
-                return None;
-            }
-            *seen = true;
-            Some(ClientMeshPuncherConfig { address, game_id })
+            ClientMeshPuncherConfig { address, game_id }
         })
         .collect()
 }
@@ -616,11 +592,17 @@ pub struct NetworkManager {
     telemetry_rx: Receiver<NetworkEvent>,
     worker: Option<thread::JoinHandle<()>>,
     local_client_id: ClientId,
-    local_addresses: Vec<NetworkAddress>,
+    netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
     role: NetworkRole,
     client_status: ClientStatusState,
     league_start_response: Option<lc_network::LeagueStartResponse>,
     league_runtime_available: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NetworkNetpuncherState {
+    local_addresses: Vec<NetworkAddress>,
+    game_ids: lc_network::NetpuncherGameIds,
 }
 
 #[cfg(test)]
@@ -1279,6 +1261,10 @@ pub enum NetworkEvent {
     PeerConnectionFailed {
         client_id: ClientId,
     },
+    NetpuncherStateChanged {
+        game_ids: lc_network::NetpuncherGameIds,
+        local_addresses: Vec<NetworkAddress>,
+    },
     ResourceAction(lc_network::ResourceCatalogAction),
     ResourceComplete {
         resource_id: i32,
@@ -1544,6 +1530,7 @@ impl NetworkManager {
         let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) =
             mpsc::channel::<std::result::Result<NetworkWorkerReady, NetworkStartError>>();
+        let netpuncher_state = Arc::new(Mutex::new(NetworkNetpuncherState::default()));
         let thread_name = match mode {
             WorkerMode::Host { .. } => "lc-network-host",
             WorkerMode::Client { .. } => "lc-network-client",
@@ -1552,6 +1539,7 @@ impl NetworkManager {
             .name(thread_name.to_string())
             .spawn({
                 let event_tx = event_tx.clone();
+                let worker_netpuncher_state = netpuncher_state.clone();
                 move || {
                     let runtime = RuntimeBuilder::new_multi_thread()
                         .enable_all()
@@ -1563,6 +1551,7 @@ impl NetworkManager {
                         event_tx.clone(),
                         telemetry_tx,
                         local_id_tx,
+                        worker_netpuncher_state,
                     )) {
                         let _ = event_tx.send(NetworkEvent::Error(format!("{err:?}")));
                     }
@@ -1590,7 +1579,7 @@ impl NetworkManager {
             telemetry_rx,
             worker: Some(worker),
             local_client_id: ready.local_client_id,
-            local_addresses: ready.local_addresses,
+            netpuncher_state,
             role,
             client_status: ClientStatusState::default(),
             league_start_response: ready.league_start_response,
@@ -2298,8 +2287,15 @@ impl NetworkManager {
         self.local_client_id
     }
 
-    pub fn local_addresses(&self) -> &[NetworkAddress] {
-        &self.local_addresses
+    pub fn local_addresses(&self) -> Vec<NetworkAddress> {
+        self.netpuncher_state.lock().local_addresses.clone()
+    }
+
+    pub fn netpuncher_state(
+        &self,
+    ) -> (lc_network::NetpuncherGameIds, Vec<NetworkAddress>) {
+        let state = self.netpuncher_state.lock();
+        (state.game_ids, state.local_addresses.clone())
     }
 
     #[cfg(test)]
@@ -2314,7 +2310,7 @@ impl NetworkManager {
                 telemetry_rx,
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
-                local_addresses: Vec::new(),
+                netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
                 role: NetworkRole::Host,
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
@@ -2338,7 +2334,7 @@ impl NetworkManager {
                 telemetry_rx,
                 worker: None,
                 local_client_id,
-                local_addresses: Vec::new(),
+                netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
                 role: NetworkRole::Client,
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
@@ -2367,7 +2363,7 @@ impl NetworkManager {
                 telemetry_rx,
                 worker: None,
                 local_client_id,
-                local_addresses: Vec::new(),
+                netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
                 role: if local_client_id == HOST_CLIENT_ID {
                     NetworkRole::Host
                 } else {
@@ -2716,12 +2712,112 @@ fn legacy_runtime_message(message: &str) -> lc_engine::LegacyCString {
         .expect("filtered runtime league message contains no interior NUL")
 }
 
+const DEFAULT_NETPUNCHER_PORT: u16 = 11_115;
+
+async fn resolve_netpuncher_addresses(address: &str) -> Vec<SocketAddr> {
+    if address.is_empty() {
+        return Vec::new();
+    }
+    let Some((host, port)) = netpuncher_lookup_target(address) else {
+        tracing::warn!(%address, "invalid netpuncher address");
+        return Vec::new();
+    };
+    let resolved = match tokio::net::lookup_host((host.as_str(), port)).await {
+        Ok(resolved) => resolved.collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::warn!(%error, %address, "cannot resolve netpuncher address");
+            return Vec::new();
+        }
+    };
+    normalize_resolved_netpuncher_addresses(resolved)
+}
+
+fn netpuncher_lookup_target(address: &str) -> Option<(String, u16)> {
+    if let Ok(mut address) = address.parse::<SocketAddr>() {
+        if address.port() == 0 {
+            address.set_port(DEFAULT_NETPUNCHER_PORT);
+        }
+        return Some((address.ip().to_string(), address.port()));
+    }
+    if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+        return Some((ip.to_string(), DEFAULT_NETPUNCHER_PORT));
+    }
+    if let Some(bracketed) = address.strip_prefix('[') {
+        if let Some((host, suffix)) = bracketed.split_once(']') {
+            let port = match suffix {
+                "" => DEFAULT_NETPUNCHER_PORT,
+                suffix => {
+                    let port = suffix.strip_prefix(':')?.parse::<u16>().ok()?;
+                    if port == 0 {
+                        DEFAULT_NETPUNCHER_PORT
+                    } else {
+                        port
+                    }
+                }
+            };
+            return Some((host.to_string(), port));
+        }
+        return None;
+    }
+    if let Some((host, port)) = address.rsplit_once(':') {
+        if !host.contains(':') {
+            return port.parse::<u16>().ok().map(|port| {
+                (
+                    host.to_string(),
+                    if port == 0 {
+                        DEFAULT_NETPUNCHER_PORT
+                    } else {
+                        port
+                    },
+                )
+            });
+        }
+    }
+    Some((address.to_string(), DEFAULT_NETPUNCHER_PORT))
+}
+
+fn normalize_resolved_netpuncher_addresses(
+    resolved: impl IntoIterator<Item = SocketAddr>,
+) -> Vec<SocketAddr> {
+    let mut ipv4 = None;
+    let mut ipv6 = None;
+    for mut address in resolved {
+        if address.port() == 0 {
+            address.set_port(DEFAULT_NETPUNCHER_PORT);
+        }
+        let family = if address.is_ipv4() {
+            &mut ipv4
+        } else {
+            &mut ipv6
+        };
+        if family.is_none() {
+            *family = Some(address);
+        }
+    }
+    ipv4.into_iter().chain(ipv6).collect()
+}
+
+fn host_registration_addresses(
+    tcp_address: SocketAddr,
+    configured_udp_port: Option<u16>,
+) -> Vec<NetworkAddress> {
+    let mut addresses = vec![NetworkAddress::new(NetworkProtocol::Tcp, tcp_address)];
+    if let Some(configured_udp_port) = configured_udp_port.filter(|port| *port != 0) {
+        addresses.push(NetworkAddress::new(
+            NetworkProtocol::Udp,
+            SocketAddr::new(tcp_address.ip(), configured_udp_port),
+        ));
+    }
+    addresses
+}
+
 async fn run_worker(
     mode: WorkerMode,
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
+    netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
     match mode {
         WorkerMode::Host {
@@ -2735,6 +2831,7 @@ async fn run_worker(
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
+                netpuncher_state,
             )
             .await
         }
@@ -2749,6 +2846,7 @@ async fn run_worker(
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
+                netpuncher_state,
             )
             .await
         }
@@ -2762,6 +2860,7 @@ async fn run_host_worker(
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
+    netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
     let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
         .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
@@ -2817,15 +2916,33 @@ async fn run_host_worker(
             return Err(anyhow!(message));
         }
     };
+    if settings.prepared.is_some() {
+        // HostSettings is the socket authority. Production supplies the
+        // configured TCP port; tests and embedders may deliberately request
+        // an ephemeral override.
+        host_config.configured_tcp_port = Some(bound_addr.port());
+    }
+    let udp_bind_address = SocketAddr::new(
+        bound_addr.ip(),
+        if settings.prepared.is_some() {
+            host_config.configured_udp_port.unwrap_or(bound_addr.port())
+        } else {
+            bound_addr.port()
+        },
+    );
+    host_config.udp_bind_address = Some(udp_bind_address);
+    let udp_binding = HostUdpBinding::bind(&host_config);
     let mut league_runtime = None;
     let mut league_start_response = None;
     let mut latest_league_reference = None;
     if let Some(prepared_host) = prepared.as_mut() {
         if let Some(league_config) = prepared_host.league_config().cloned() {
-            let registration_addresses = [
-                NetworkAddress::new(NetworkProtocol::Tcp, bound_addr),
-                NetworkAddress::new(NetworkProtocol::Udp, bound_addr),
-            ];
+            let registration_addresses = host_registration_addresses(
+                bound_addr,
+                udp_binding
+                    .local_addr()
+                    .and(host_config.configured_udp_port),
+            );
             let reference = match prepared_host
                 .initial_host_game_reference(false, &registration_addresses)
             {
@@ -2874,13 +2991,25 @@ async fn run_host_worker(
                 }
             };
             host_config = prepared_host.host_config().clone();
+            host_config.configured_tcp_port = Some(bound_addr.port());
+            host_config.udp_bind_address = Some(udp_bind_address);
             league_start_response = Some(response);
             latest_league_reference = Some(reference);
             league_runtime = Some(runtime);
         }
     }
-    host_config.udp_bind_address = Some(bound_addr);
-    let mut host = match start_host(listener, host_config).await {
+    if league_runtime.is_some() {
+        if let Some(prepared_host) = prepared.as_ref() {
+            let puncher_address = lc_resources::decode_legacy_script_text(
+                prepared_host.netpuncher_address().as_bytes(),
+            );
+            host_config.netpuncher_addresses =
+                resolve_netpuncher_addresses(&puncher_address).await;
+        }
+    }
+    let configured_tcp_port = host_config.configured_tcp_port;
+    let configured_udp_port = host_config.configured_udp_port;
+    let mut host = match start_host_with_udp_binding(listener, host_config, udp_binding).await {
         Ok(host) => host,
         Err(err) => {
             if let (Some(runtime), Some(reference)) =
@@ -2895,10 +3024,24 @@ async fn run_host_worker(
             return Err(anyhow!(message));
         }
     };
-    let mut local_addresses = vec![NetworkAddress::new(NetworkProtocol::Tcp, bound_addr)];
-    if let Some(udp_addr) = host.udp_local_addr() {
-        local_addresses.push(NetworkAddress::new(NetworkProtocol::Udp, udp_addr));
+    let mut local_addresses = Vec::new();
+    let advertised_tcp_port = configured_tcp_port.unwrap_or(bound_addr.port());
+    if advertised_tcp_port != 0 {
+        local_addresses.push(NetworkAddress::new(
+            NetworkProtocol::Tcp,
+            SocketAddr::new(bound_addr.ip(), advertised_tcp_port),
+        ));
     }
+    if let Some(udp_addr) = host.udp_local_addr() {
+        let advertised_udp_port = configured_udp_port.unwrap_or(udp_addr.port());
+        if advertised_udp_port != 0 {
+            local_addresses.push(NetworkAddress::new(
+                NetworkProtocol::Udp,
+                SocketAddr::new(udp_addr.ip(), advertised_udp_port),
+            ));
+        }
+    }
+    netpuncher_state.lock().local_addresses = local_addresses.clone();
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: HOST_CLIENT_ID,
         local_addresses,
@@ -2925,6 +3068,7 @@ async fn run_host_worker(
                             &event_tx,
                             &telemetry_tx,
                             &mut player_info_echo_provenance,
+                            &netpuncher_state,
                         ).await?,
                         None => {
                             return Err(anyhow!("host event stream ended"));
@@ -3245,8 +3389,25 @@ async fn handle_host_event(
     event_tx: &Sender<NetworkEvent>,
     _telemetry_tx: &SyncSender<NetworkEvent>,
     player_info_echo_provenance: &mut VecDeque<PlayerInfoEchoProvenance>,
+    netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
     match event {
+        HostEvent::LocalAddressesChanged { local_addresses } => {
+            netpuncher_state.lock().local_addresses = local_addresses;
+        }
+        HostEvent::NetpuncherStateChanged {
+            game_ids,
+            local_addresses,
+        } => {
+            *netpuncher_state.lock() = NetworkNetpuncherState {
+                local_addresses: local_addresses.clone(),
+                game_ids,
+            };
+            let _ = event_tx.send(NetworkEvent::NetpuncherStateChanged {
+                game_ids,
+                local_addresses,
+            });
+        }
         HostEvent::StatusChanged(status) => {
             let _ = event_tx.send(NetworkEvent::HostStatusChanged(status));
         }
@@ -3391,6 +3552,7 @@ async fn run_client_worker(
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
+    netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
     let league_transport = settings.league_transport.clone();
@@ -3454,6 +3616,7 @@ async fn run_client_worker(
         league_start_response: None,
         league_runtime_available: league_runtime.is_some(),
     }));
+    netpuncher_state.lock().local_addresses.clear();
     let mut client_events = client.take_event_receiver();
     let mut client_events_open = true;
     let mut frame_builder = ControlFrameAccumulator::new(client_id);
@@ -3490,6 +3653,9 @@ async fn run_client_worker(
                         }
                     }
                     Some(event) => {
+                        if let ClientEvent::LocalAddressesChanged { local_addresses } = &event {
+                            netpuncher_state.lock().local_addresses = local_addresses.clone();
+                        }
                         let disconnected = matches!(&event, ClientEvent::Disconnected { .. });
                         handle_client_event(
                             event,
@@ -3935,6 +4101,7 @@ async fn handle_client_event(
     _telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        ClientEvent::LocalAddressesChanged { .. } => {}
         ClientEvent::PingMeasured { round_trip_ms } => {
             let _ = event_tx.send(NetworkEvent::HostPingMeasured { round_trip_ms });
         }
@@ -4289,6 +4456,98 @@ fn current_millis() -> u64 {
 mod tests {
     use super::*;
 
+    fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
+        Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[test]
+    fn netpuncher_resolution_normalizes_default_port_and_family_order() {
+        let addresses = normalize_resolved_netpuncher_addresses([
+            "[2001:db8::2]:0".parse().unwrap(),
+            "192.0.2.9:0".parse().unwrap(),
+            "192.0.2.10:1234".parse().unwrap(),
+            "[2001:db8::3]:1234".parse().unwrap(),
+        ]);
+
+        assert_eq!(
+            addresses,
+            vec![
+                "192.0.2.9:11115".parse().unwrap(),
+                "[2001:db8::2]:11115".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn netpuncher_lookup_accepts_legacy_host_and_ipv6_spellings() {
+        assert_eq!(
+            netpuncher_lookup_target("puncher.example"),
+            Some(("puncher.example".to_string(), 11_115))
+        );
+        assert_eq!(
+            netpuncher_lookup_target("puncher.example:1234"),
+            Some(("puncher.example".to_string(), 1_234))
+        );
+        assert_eq!(
+            netpuncher_lookup_target("[::1]"),
+            Some(("::1".to_string(), 11_115))
+        );
+        assert_eq!(
+            netpuncher_lookup_target("[::1]:0"),
+            Some(("::1".to_string(), 11_115))
+        );
+        assert_eq!(
+            netpuncher_lookup_target("[::1]:1234"),
+            Some(("::1".to_string(), 1_234))
+        );
+        assert_eq!(netpuncher_lookup_target("[::1]:bad"), None);
+        assert_eq!(netpuncher_lookup_target("[::1]junk"), None);
+        assert_eq!(netpuncher_lookup_target("[::1]:70000"), None);
+    }
+
+    #[test]
+    fn league_start_addresses_keep_tcp_and_configured_udp_ports_distinct() {
+        let tcp = "192.0.2.4:11112".parse().unwrap();
+        assert_eq!(
+            host_registration_addresses(tcp, Some(11_113)),
+            vec![
+                NetworkAddress::new(NetworkProtocol::Tcp, tcp),
+                NetworkAddress::new(
+                    NetworkProtocol::Udp,
+                    "192.0.2.4:11113".parse().unwrap(),
+                ),
+            ]
+        );
+        assert_eq!(
+            host_registration_addresses(tcp, None),
+            vec![NetworkAddress::new(NetworkProtocol::Tcp, tcp)]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn league_start_omits_udp_when_the_prebind_fails() {
+        let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let occupied_address = occupied.local_addr().unwrap();
+        let config = HostConfig {
+            udp_bind_address: Some(occupied_address),
+            configured_udp_port: Some(occupied_address.port()),
+            ..HostConfig::default()
+        };
+        let binding = HostUdpBinding::bind(&config);
+
+        assert_eq!(binding.local_addr(), None);
+        assert_eq!(
+            host_registration_addresses(
+                "127.0.0.1:11112".parse().unwrap(),
+                binding.local_addr().and(config.configured_udp_port),
+            ),
+            vec![NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "127.0.0.1:11112".parse().unwrap(),
+            )]
+        );
+    }
+
     fn minimal_league_reference() -> lc_network::HostGameReference {
         let config = lc_network::HostConfig::default();
         let parameters = config
@@ -4614,6 +4873,7 @@ mod tests {
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
+                test_netpuncher_state(),
             )
             .await
         });
@@ -4702,6 +4962,7 @@ mod tests {
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
+                test_netpuncher_state(),
             )
             .await
         });
@@ -4761,6 +5022,7 @@ mod tests {
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
+                test_netpuncher_state(),
             )
             .await
         });
@@ -4971,6 +5233,7 @@ mod tests {
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
+                test_netpuncher_state(),
             )
             .await
         });
@@ -5078,6 +5341,7 @@ mod tests {
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
+                test_netpuncher_state(),
             )
             .await
         });
@@ -6399,6 +6663,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("forward requested status");
@@ -6406,6 +6671,62 @@ mod tests {
         assert_eq!(
             event_rx.recv().expect("status event"),
             NetworkEvent::HostStatusChanged(status)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_puncher_assignment_publishes_one_atomic_app_snapshot() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let state = test_netpuncher_state();
+        let mut provenance = VecDeque::new();
+        let addresses = vec![NetworkAddress::new(
+            NetworkProtocol::Udp,
+            "198.51.100.9:43123".parse().unwrap(),
+        )];
+
+        handle_host_event(
+            HostEvent::LocalAddressesChanged {
+                local_addresses: addresses.clone(),
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut provenance,
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.lock().local_addresses, addresses);
+        assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let game_ids = lc_network::NetpuncherGameIds {
+            ipv4: 0x1122_3344,
+            ipv6: 0,
+        };
+        handle_host_event(
+            HostEvent::NetpuncherStateChanged {
+                game_ids,
+                local_addresses: addresses.clone(),
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut provenance,
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = state.lock().clone();
+        assert_eq!(snapshot.game_ids, game_ids);
+        assert_eq!(snapshot.local_addresses, addresses);
+        assert_eq!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::NetpuncherStateChanged {
+                game_ids,
+                local_addresses: addresses,
+            }
         );
     }
 
@@ -6426,6 +6747,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("forward committed status");
@@ -6452,6 +6774,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("forward host lobby countdown");
@@ -6494,6 +6817,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("forward ready check");
@@ -6739,6 +7063,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("forward host countdown");
@@ -6766,6 +7091,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("forward host ready toggle");
@@ -6927,6 +7253,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("handle remote PlayerInfo");
@@ -6940,6 +7267,7 @@ mod tests {
             &event_tx,
             &telemetry_tx,
             &mut provenance,
+            &test_netpuncher_state(),
         )
         .await
         .expect("handle preexecuted PlayerInfo loopback");

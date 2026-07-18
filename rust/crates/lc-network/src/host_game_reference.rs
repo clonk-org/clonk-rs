@@ -17,7 +17,8 @@ use thiserror::Error;
 
 use crate::{
     ClientPlayerInfosSnapshot, JoinGameParametersEnvelope, JoinTeamListSnapshot, JoinTeamSnapshot,
-    NetworkAddress, NetworkGameReference, NetworkProtocol, PlayerInfoListSnapshot,
+    NetpuncherGameIds, NetworkAddress, NetworkGameReference, NetworkProtocol,
+    PlayerInfoListSnapshot,
 };
 
 const MAX_REFERENCE_LIST_ENTRIES: usize = 5_000;
@@ -101,6 +102,33 @@ impl HostGameReference {
         let mut summary = self.summary.clone();
         summary.control_mode = control_mode;
         Self::new(summary, self.metadata.clone(), self.parameters.clone())
+    }
+
+    /// Rebuilds the socket-facing fields invalidated after the netpuncher
+    /// assigns an ID. C++ owns one address container and one ID pair; update
+    /// both Rust projections atomically so serialization cannot expose a
+    /// stale or internally inconsistent reference.
+    pub fn replacing_netpuncher_state(
+        &self,
+        game_ids: NetpuncherGameIds,
+        addresses: Vec<NetworkAddress>,
+    ) -> Result<Self, HostGameReferenceError> {
+        let mut summary = self.summary.clone();
+        summary.addresses = addresses.clone();
+        summary.tcp_addresses = addresses
+            .iter()
+            .filter_map(|address| {
+                (address.protocol == NetworkProtocol::Tcp).then_some(address.endpoint)
+            })
+            .collect();
+        summary.netpuncher_ipv4 = game_ids.ipv4;
+        summary.netpuncher_ipv6 = game_ids.ipv6;
+
+        let mut metadata = self.metadata.clone();
+        metadata.addresses = addresses;
+        metadata.netpuncher_ipv4 = game_ids.ipv4;
+        metadata.netpuncher_ipv6 = game_ids.ipv6;
+        Self::new(summary, metadata, self.parameters.clone())
     }
 
     /// Rebuild the fields refreshed by `C4Network2Reference::InitLocal`

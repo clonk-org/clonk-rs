@@ -78,7 +78,7 @@ impl NetpuncherIoEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NetpuncherGameIds {
     pub ipv4: u32,
     pub ipv6: u32,

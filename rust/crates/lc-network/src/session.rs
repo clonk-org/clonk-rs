@@ -24,10 +24,11 @@ use crate::{
     run_host_connection_handshake, AdmissionDecision, BarrierEffect, BarrierPhase, ClientId,
     ConnectionAction, ConnectionLivenessState, ControlBacklog, ControlCoordinator, ControlDelivery,
     ControlMessage, ControlOutcome, ControlPacket, HostAdmission, HostAdmissionRequest,
-    JoinClientRegistrySnapshot, JoinDataEnvelope, LobbyCountdownPacket, MissingRange, NetworkStatus,
-    ParticipantKind, ReadyBatch, ReadyCheckPacket, RemoteBarrierState, ResourcePacket,
-    ResyncScheduler, StatusBarrier, Tick, TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO,
-    NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
+    JoinClientRegistrySnapshot, JoinDataEnvelope, LobbyCountdownPacket, MissingRange,
+    NetpuncherAddressFamily, NetpuncherGameIds, NetpuncherIoEvent, NetpuncherPacket,
+    NetpuncherRole, NetpuncherRuntimeState, NetworkStatus, ParticipantKind, ReadyBatch,
+    ReadyCheckPacket, RemoteBarrierState, ResourcePacket, ResyncScheduler, StatusBarrier, Tick,
+    TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -77,6 +78,15 @@ pub struct HostConfig {
     /// Optional C4NetIOUDP listener. TCP remains available through the
     /// `TcpListener` passed to `start_host`.
     pub udp_bind_address: Option<SocketAddr>,
+    /// Resolved netpuncher endpoints in preference order. At most the first
+    /// endpoint for each address family is connected through the shared UDP
+    /// socket.
+    pub netpuncher_addresses: Vec<SocketAddr>,
+    /// Exact `Config.Network.PortTCP`/`PortUDP` values used for local address
+    /// projection. `Some(0)` remains meaningful; `None` preserves the bound
+    /// listener-port behavior of direct API callers.
+    pub configured_tcp_port: Option<u16>,
+    pub configured_udp_port: Option<u16>,
     pub initial_join_snapshot: Option<HostJoinSnapshot>,
     /// Resources in C++ publication order. `ResourceCatalog::register`
     /// prepends each entry, reproducing the linked-list discovery order.
@@ -136,6 +146,9 @@ impl Default for HostConfig {
             password: lc_engine::LegacyCString::default(),
             allow_join: true,
             udp_bind_address: None,
+            netpuncher_addresses: Vec::new(),
+            configured_tcp_port: None,
+            configured_udp_port: None,
             initial_join_snapshot: Some(synthetic_join_snapshot(local_core, 8)),
             resource_registrations: Vec::new(),
             resource_directory: None,
@@ -350,6 +363,17 @@ fn synthetic_join_snapshot(
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    /// Complete current address list for the host client after an
+    /// AddAddrFromPuncher update. Reference invalidation waits for AssID.
+    LocalAddressesChanged {
+        local_addresses: Vec<crate::NetworkAddress>,
+    },
+    /// A family-specific AssID arrived. The complete IDs and current address
+    /// list let the application rebuild one exact advertised reference.
+    NetpuncherStateChanged {
+        game_ids: NetpuncherGameIds,
+        local_addresses: Vec<crate::NetworkAddress>,
+    },
     /// The authoritative host barrier was opened or retargeted. Runtime
     /// control owns the actual drive-to-target/stop operation, so surface
     /// every accepted `ChangeGameStatus` rather than inferring it from raw
@@ -639,7 +663,9 @@ impl HostHandle {
             .send(HostCommand::InspectAcceptedRoutes { completion })
             .await
             .expect("test host loop accepts route inspection");
-        routes.await.expect("test host loop returns route inspection")
+        routes
+            .await
+            .expect("test host loop returns route inspection")
     }
 
     #[cfg(test)]
@@ -649,7 +675,9 @@ impl HostHandle {
             .send(HostCommand::InspectConnectedClients { completion })
             .await
             .expect("test host loop accepts client inspection");
-        clients.await.expect("test host loop returns client inspection")
+        clients
+            .await
+            .expect("test host loop returns client inspection")
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {
@@ -680,9 +708,7 @@ pub enum ClientError {
     #[error("failed to connect to host: {0}")]
     Connect(#[from] io::Error),
     #[error("host rejected the client password: {message:?}")]
-    WrongPassword {
-        message: lc_engine::LegacyCString,
-    },
+    WrongPassword { message: lc_engine::LegacyCString },
     #[error("handshake rejected: {0}")]
     Handshake(String),
     #[error("client resource publication failed: {0}")]
@@ -711,6 +737,27 @@ impl From<ClientError> for ClientAttemptError {
     fn from(error: ClientError) -> Self {
         Self::Terminal(error)
     }
+}
+
+fn selected_puncher_addresses(addresses: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut have_ipv4 = false;
+    let mut have_ipv6 = false;
+    addresses
+        .iter()
+        .copied()
+        .map(crate::canonical_reliable_udp_peer_address)
+        .filter(|address| match address {
+            SocketAddr::V4(_) if !have_ipv4 => {
+                have_ipv4 = true;
+                true
+            }
+            SocketAddr::V6(_) if !have_ipv6 => {
+                have_ipv6 = true;
+                true
+            }
+            _ => false,
+        })
+        .collect()
 }
 
 enum ClientDialStream {
@@ -1008,24 +1055,58 @@ async fn prepare_client_mesh(
     })
 }
 
-/// Starts the multiplayer host loop.
-pub async fn start_host(
+/// UDP socket prepared before a host publishes its league Start reference.
+/// A failed optional bind is retained so the host can surface its transport
+/// error while continuing with TCP.
+pub struct HostUdpBinding {
+    hub: Option<crate::ReliableUdpSessionHub>,
+    start_error: Option<String>,
+}
+
+impl HostUdpBinding {
+    pub fn bind(config: &HostConfig) -> Self {
+        let udp_bind_address = config.udp_bind_address.or_else(|| {
+            (!config.netpuncher_addresses.is_empty())
+                .then_some(SocketAddr::from(([0_u16; 8], 0)))
+        });
+        match udp_bind_address {
+            Some(bind_address) => match crate::ReliableUdpSessionHub::bind(bind_address) {
+                Ok(hub) => Self {
+                    hub: Some(hub),
+                    start_error: None,
+                },
+                Err(error) => Self {
+                    hub: None,
+                    start_error: Some(format!(
+                        "failed to start reliable-UDP listener at {bind_address}: {error}"
+                    )),
+                },
+            },
+            None => Self {
+                hub: None,
+                start_error: None,
+            },
+        }
+    }
+
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        self.hub
+            .as_ref()
+            .map(crate::ReliableUdpSessionHub::local_addr)
+    }
+}
+
+/// Starts the multiplayer host loop after binding its optional UDP socket.
+pub async fn start_host_with_udp_binding(
     listener: TcpListener,
     config: HostConfig,
+    udp_binding: HostUdpBinding,
 ) -> Result<HostHandle, HostError> {
     let resource_backend = build_host_resource_backend(&config)?;
-    let (udp_hub, udp_start_error) = match config.udp_bind_address {
-        Some(bind_address) => match crate::ReliableUdpSessionHub::bind(bind_address) {
-            Ok(hub) => (Some(hub), None),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "failed to start reliable-UDP listener at {bind_address}: {error}"
-                )),
-            ),
-        },
-        None => (None, None),
-    };
+    let HostUdpBinding {
+        hub: udp_hub,
+        start_error: udp_start_error,
+    } = udp_binding;
     let udp_local_addr = udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::local_addr);
@@ -1049,6 +1130,15 @@ pub async fn start_host(
         join_handle,
         udp_local_addr,
     })
+}
+
+/// Starts the multiplayer host loop.
+pub async fn start_host(
+    listener: TcpListener,
+    config: HostConfig,
+) -> Result<HostHandle, HostError> {
+    let udp_binding = HostUdpBinding::bind(&config);
+    start_host_with_udp_binding(listener, config, udp_binding).await
 }
 
 fn build_host_resource_backend(
@@ -1083,7 +1173,10 @@ pub async fn connect_client(
     config: ClientConfig,
 ) -> Result<ClientHandle, ClientError> {
     connect_client_addresses(
-        [crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, addr)],
+        [crate::NetworkAddress::new(
+            crate::NetworkProtocol::Tcp,
+            addr,
+        )],
         config,
     )
     .await
@@ -1107,7 +1200,10 @@ pub async fn connect_udp_client(
     config: ClientConfig,
 ) -> Result<ClientHandle, ClientError> {
     connect_client_addresses(
-        [crate::NetworkAddress::new(crate::NetworkProtocol::Udp, addr)],
+        [crate::NetworkAddress::new(
+            crate::NetworkProtocol::Udp,
+            addr,
+        )],
         config,
     )
     .await
@@ -1591,6 +1687,7 @@ where
             .expect("client puncher initialization lock poisoned");
         std::mem::take(&mut observations.observations)
     };
+    let initial_puncher_addresses_changed = !initial_puncher_observations.is_empty();
     for observed_address in initial_puncher_observations {
         let update = mesh_peers
             .entry(join_data.client_id)
@@ -1732,6 +1829,7 @@ where
         pending_secondary,
         tcp_reconnect,
         pending_tcp,
+        initial_puncher_addresses_changed,
     ));
     Ok(ClientHandle {
         command_tx,
@@ -2288,9 +2386,7 @@ struct ClientUdpReconnect {
 
 impl ClientUdpReconnect {
     fn start(&mut self) -> PendingClientRoute {
-        let connection_id = self
-            .connection_ids
-            .fetch_add(1, AtomicOrdering::Relaxed);
+        let connection_id = self.connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
         tokio::spawn(connect_secondary_udp_route(
             self.handle.clone(),
             self.addr,
@@ -2312,9 +2408,7 @@ struct ClientTcpReconnect {
 
 impl ClientTcpReconnect {
     fn start(&mut self) -> PendingTcpClientRoute {
-        let connection_id = self
-            .connection_ids
-            .fetch_add(1, AtomicOrdering::Relaxed);
+        let connection_id = self.connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
         tokio::spawn(connect_secondary_tcp_route(
             self.addr,
             self.local_core.clone(),
@@ -2483,6 +2577,11 @@ where
 /// Events observed by a connected client.
 #[derive(Debug)]
 pub enum ClientEvent {
+    /// Complete current address list for the local logical client after an
+    /// AddAddrFromPuncher update.
+    LocalAddressesChanged {
+        local_addresses: Vec<crate::NetworkAddress>,
+    },
     PingMeasured {
         round_trip_ms: i32,
     },
@@ -2796,7 +2895,9 @@ impl HostOutboundSender {
         &self,
         message: ControlMessage,
     ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
-        self.sender.send(HostOutboundMessage::Message(message)).await
+        self.sender
+            .send(HostOutboundMessage::Message(message))
+            .await
     }
 
     fn try_send_raw(
@@ -3135,9 +3236,7 @@ fn add_resolved_resource(
 
 fn local_resource_lookup_path(local: &crate::LocalResourceMatch) -> Option<PathBuf> {
     if local.source_path().is_dir() {
-        local
-            .standalone_path()
-            .map(std::path::Path::to_path_buf)
+        local.standalone_path().map(std::path::Path::to_path_buf)
     } else {
         Some(local.source_path().to_path_buf())
     }
@@ -3286,16 +3385,15 @@ impl ClientResourceState {
             .clone()
             .ok_or_else(|| "client has no network resource directory".to_string())?;
         let resource_id = self.catalog.allocate_resource_id();
-        let publication = crate::publish_client_player_resource(
-            crate::ClientPlayerResourcePublicationSpec {
+        let publication =
+            crate::publish_client_player_resource(crate::ClientPlayerResourcePublicationSpec {
                 resource_id,
                 source_path: request.source_path,
                 wire_name: request.wire_name,
                 network_directory,
                 group_maker: request.group_maker,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+            })
+            .map_err(|error| error.to_string())?;
         let crate::ClientPlayerResourcePublication {
             core,
             registration,
@@ -3482,6 +3580,7 @@ struct HostState {
     admission: HostAdmission,
     client_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
     client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
+    netpuncher_game_ids: NetpuncherGameIds,
     pending_kinds: BTreeMap<i32, ParticipantKind>,
     join_snapshot: Option<HostJoinSnapshot>,
     resource_catalog: crate::ResourceCatalog,
@@ -3588,10 +3687,7 @@ fn preferred_host_outbound(
     preferred_host_route(state, client_id, traffic).map(|route| route.outbound.clone())
 }
 
-fn host_target_client_ids(
-    state: &HostState,
-    except_client_id: Option<ClientId>,
-) -> Vec<ClientId> {
+fn host_target_client_ids(state: &HostState, except_client_id: Option<ClientId>) -> Vec<ClientId> {
     state
         .clients
         .keys()
@@ -3712,16 +3808,15 @@ fn publish_host_player_resource(
             break candidate;
         }
     };
-    let publication = crate::publish_client_player_resource(
-        crate::ClientPlayerResourcePublicationSpec {
+    let publication =
+        crate::publish_client_player_resource(crate::ClientPlayerResourcePublicationSpec {
             resource_id,
             source_path: request.source_path,
             wire_name: request.wire_name,
             network_directory,
             group_maker: request.group_maker,
-        },
-    )
-    .map_err(|error| error.to_string())?;
+        })
+        .map_err(|error| error.to_string())?;
     let crate::ClientPlayerResourcePublication {
         core,
         registration,
@@ -3763,6 +3858,123 @@ async fn accept_udp_session(
     }
 }
 
+async fn next_host_puncher_event(
+    events: &mut Option<mpsc::Receiver<NetpuncherIoEvent>>,
+) -> NetpuncherIoEvent {
+    if let Some(events) = events.as_mut() {
+        if let Some(event) = events.recv().await {
+            return event;
+        }
+    }
+    std::future::pending().await
+}
+
+async fn emit_host_netpuncher_state(state: &HostState) {
+    let local_addresses = state
+        .client_addresses
+        .get(&(HOST_CLIENT_ID as i32))
+        .cloned()
+        .unwrap_or_default();
+    let _ = state
+        .event_tx
+        .send(HostEvent::NetpuncherStateChanged {
+            game_ids: state.netpuncher_game_ids,
+            local_addresses,
+        })
+        .await;
+}
+
+async fn emit_host_local_addresses(state: &HostState) {
+    let local_addresses = state
+        .client_addresses
+        .get(&(HOST_CLIENT_ID as i32))
+        .cloned()
+        .unwrap_or_default();
+    let _ = state
+        .event_tx
+        .send(HostEvent::LocalAddressesChanged { local_addresses })
+        .await;
+}
+
+async fn handle_host_puncher_event(
+    event: NetpuncherIoEvent,
+    udp_handle: Option<&crate::ReliableUdpSessionHandle>,
+    configured_tcp_port: u16,
+    configured_udp_port: u16,
+    state: &mut HostState,
+) {
+    let Some(udp_handle) = udp_handle else {
+        return;
+    };
+    match event {
+        NetpuncherIoEvent::Connected {
+            family,
+            observed_address,
+            ..
+        } => {
+            let added = crate::address_packet::add_addresses_from_puncher(
+                state
+                    .client_addresses
+                    .entry(HOST_CLIENT_ID as i32)
+                    .or_default(),
+                observed_address,
+                configured_udp_port,
+                configured_tcp_port,
+            );
+            for address in &added {
+                let packet = crate::AddressPacket {
+                    client_id: HOST_CLIENT_ID as i32,
+                    address: *address,
+                };
+                for client_id in host_target_client_ids(state, None) {
+                    let _ = send_host_message(
+                        state,
+                        client_id,
+                        ConnectionTrafficClass::Message,
+                        ControlMessage::Address(packet),
+                    )
+                    .await;
+                }
+            }
+            if !added.is_empty() {
+                emit_host_local_addresses(state).await;
+            }
+            if let Some(packet) = crate::reduce_puncher_connect(
+                NetpuncherRole::Host,
+                NetpuncherRuntimeState::Other,
+                family,
+                state.netpuncher_game_ids,
+            ) {
+                if let Err(error) = udp_handle.send_puncher_packet(family, packet).await {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::TransportError {
+                            client_id: None,
+                            error: format!("failed to send netpuncher ID request: {error}"),
+                        })
+                        .await;
+                }
+            }
+        }
+        NetpuncherIoEvent::Packet {
+            family,
+            packet: NetpuncherPacket::AssignId { id },
+            ..
+        } => {
+            match family {
+                NetpuncherAddressFamily::Ipv4 => state.netpuncher_game_ids.ipv4 = id,
+                NetpuncherAddressFamily::Ipv6 => state.netpuncher_game_ids.ipv6 = id,
+            }
+            emit_host_netpuncher_state(state).await;
+        }
+        NetpuncherIoEvent::Packet {
+            puncher_address, ..
+        } => {
+            let _ = udp_handle.close_puncher(puncher_address).await;
+        }
+    }
+}
+
 async fn run_host(
     listener: TcpListener,
     mut udp_hub: Option<crate::ReliableUdpSessionHub>,
@@ -3777,6 +3989,26 @@ async fn run_host(
     let udp_listener_addr = udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::local_addr);
+    let mut puncher_events = udp_hub
+        .as_mut()
+        .map(crate::ReliableUdpSessionHub::take_puncher_event_receiver);
+    let mut puncher_start_errors = Vec::new();
+    if let Some(hub) = udp_hub.as_ref() {
+        for address in selected_puncher_addresses(&config.netpuncher_addresses) {
+            if let Err(error) = hub.init_puncher(address, NetpuncherRole::Host).await {
+                puncher_start_errors.push(format!(
+                    "failed to initialize netpuncher at {address}: {error}"
+                ));
+            }
+        }
+    }
+    let udp_handle = udp_hub.as_ref().map(crate::ReliableUdpSessionHub::handle);
+    let puncher_tcp_port = config
+        .configured_tcp_port
+        .unwrap_or_else(|| listener_addr.map(|address| address.port()).unwrap_or(0));
+    let puncher_udp_port = config
+        .configured_udp_port
+        .unwrap_or_else(|| udp_listener_addr.map(|address| address.port()).unwrap_or(0));
     let backlog_limit = config.backlog_limit;
     let mut coordinator = ControlCoordinator::with_start_tick(backlog_limit, config.start_tick);
     // The host is an active lockstep participant from session start. C++ keeps
@@ -3797,27 +4029,39 @@ async fn run_host(
     let client_cores = BTreeMap::from([(0, config.local_core.clone())]);
     let mut host_addresses = Vec::new();
     if let Some(listener_addr) = listener_addr {
-        host_addresses.push(crate::NetworkAddress::new(
-            crate::NetworkProtocol::Tcp,
-            SocketAddr::from(([0, 0, 0, 0], listener_addr.port())),
-        ));
-        if !listener_addr.ip().is_unspecified() {
-            crate::append_received_address(
-                &mut host_addresses,
-                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, listener_addr),
-            );
+        let port = config.configured_tcp_port.unwrap_or(listener_addr.port());
+        if port != 0 {
+            host_addresses.push(crate::NetworkAddress::new(
+                crate::NetworkProtocol::Tcp,
+                SocketAddr::from(([0, 0, 0, 0], port)),
+            ));
+            if !listener_addr.ip().is_unspecified() {
+                crate::append_received_address(
+                    &mut host_addresses,
+                    crate::NetworkAddress::new(
+                        crate::NetworkProtocol::Tcp,
+                        SocketAddr::new(listener_addr.ip(), port),
+                    ),
+                );
+            }
         }
     }
     if let Some(listener_addr) = udp_listener_addr {
-        host_addresses.push(crate::NetworkAddress::new(
-            crate::NetworkProtocol::Udp,
-            SocketAddr::from(([0, 0, 0, 0], listener_addr.port())),
-        ));
-        if !listener_addr.ip().is_unspecified() {
-            crate::append_received_address(
-                &mut host_addresses,
-                crate::NetworkAddress::new(crate::NetworkProtocol::Udp, listener_addr),
-            );
+        let port = config.configured_udp_port.unwrap_or(listener_addr.port());
+        if port != 0 {
+            host_addresses.push(crate::NetworkAddress::new(
+                crate::NetworkProtocol::Udp,
+                SocketAddr::from(([0, 0, 0, 0], port)),
+            ));
+            if !listener_addr.ip().is_unspecified() {
+                crate::append_received_address(
+                    &mut host_addresses,
+                    crate::NetworkAddress::new(
+                        crate::NetworkProtocol::Udp,
+                        SocketAddr::new(listener_addr.ip(), port),
+                    ),
+                );
+            }
         }
     }
     let client_addresses = BTreeMap::from([(0, host_addresses)]);
@@ -3838,11 +4082,7 @@ async fn run_host(
             .clone()
             .unwrap_or_else(|| PathBuf::from("Network")),
     );
-    let published_player_sources = config
-        .player_resource_sources
-        .iter()
-        .cloned()
-        .collect();
+    let published_player_sources = config.player_resource_sources.iter().cloned().collect();
     let mut state = HostState {
         coordinator,
         backlog: ControlBacklog::new(backlog_limit),
@@ -3862,6 +4102,7 @@ async fn run_host(
         admission,
         client_cores,
         client_addresses,
+        netpuncher_game_ids: NetpuncherGameIds { ipv4: 0, ipv6: 0 },
         pending_kinds: BTreeMap::new(),
         join_snapshot: config.initial_join_snapshot.clone(),
         resource_catalog,
@@ -3894,6 +4135,15 @@ async fn run_host(
             })
             .await;
     }
+    for error in puncher_start_errors {
+        let _ = state
+            .event_tx
+            .send(HostEvent::TransportError {
+                client_id: None,
+                error,
+            })
+            .await;
+    }
 
     loop {
         if !state
@@ -3911,6 +4161,16 @@ async fn run_host(
             biased;
             _ = &mut shutdown_rx => {
                 break;
+            }
+            event = next_host_puncher_event(&mut puncher_events) => {
+                handle_host_puncher_event(
+                    event,
+                    udp_handle.as_ref(),
+                    puncher_tcp_port,
+                    puncher_udp_port,
+                    &mut state,
+                )
+                .await;
             }
             accept_result = listener.accept() => {
                 match accept_result {
@@ -4945,10 +5205,9 @@ async fn handle_post_mortem_recovery(
                     .clone()
             });
         if let Some(outbound) = retiring_route {
-            state.pending_post_mortems.insert(
-                packet.connection_id,
-                (source_client_id, packet, ping_ms),
-            );
+            state
+                .pending_post_mortems
+                .insert(packet.connection_id, (source_client_id, packet, ping_ms));
             // C++ retires even a locally-live route as soon as its peer sends
             // PID_PostMortem. The independent signal avoids waiting behind
             // that route's outbound queue or its liveness timeout.
@@ -5171,13 +5430,9 @@ async fn dispatch_host_resource_actions(
                     continue;
                 };
                 let traffic = resource_traffic_class(&packet);
-                let _ = send_host_message(
-                    state,
-                    client_id,
-                    traffic,
-                    ControlMessage::Resource(packet),
-                )
-                .await;
+                let _ =
+                    send_host_message(state, client_id, traffic, ControlMessage::Resource(packet))
+                        .await;
             }
             crate::ResourceCatalogAction::Broadcast { packet } => {
                 let traffic = resource_traffic_class(&packet);
@@ -5510,11 +5765,7 @@ enum ControlIngress {
     Network,
 }
 
-async fn ingest_control(
-    packet: ControlPacket,
-    ingress: ControlIngress,
-    state: &mut HostState,
-) {
+async fn ingest_control(packet: ControlPacket, ingress: ControlIngress, state: &mut HostState) {
     let client_id = packet.client_id();
     // Validate everything PackCompleteCtrl needs before the coordinator
     // consumes contributions and advances its tick. A malformed frame must
@@ -5599,15 +5850,9 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
             lc_engine::ControlPacket::CustomCommand(command) => {
                 ("CID_CustomCommand", command.by_client)
             }
-            lc_engine::ControlPacket::EmMoveObject(control) => {
-                ("CID_EMMoveObj", control.by_client)
-            }
-            lc_engine::ControlPacket::EmDrawTool(control) => {
-                ("CID_EMDrawTool", control.by_client)
-            }
-            lc_engine::ControlPacket::EmDropDef(control) => {
-                ("CID_EMDropDef", control.by_client)
-            }
+            lc_engine::ControlPacket::EmMoveObject(control) => ("CID_EMMoveObj", control.by_client),
+            lc_engine::ControlPacket::EmDrawTool(control) => ("CID_EMDrawTool", control.by_client),
+            lc_engine::ControlPacket::EmDropDef(control) => ("CID_EMDropDef", control.by_client),
             lc_engine::ControlPacket::ActivateGameGoalMenu(control) => {
                 ("CID_ActivateGameGoalMenu", control.by_client)
             }
@@ -5623,9 +5868,7 @@ fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String>
             lc_engine::ControlPacket::EliminatePlayer(control) => {
                 ("CID_EliminatePlayer", control.by_client)
             }
-            lc_engine::ControlPacket::RemovePlayer(remove) => {
-                ("CID_RemovePlr", remove.by_client)
-            }
+            lc_engine::ControlPacket::RemovePlayer(remove) => ("CID_RemovePlr", remove.by_client),
             control => {
                 let Some(set) = crate::LegacyControlSet::from_control_packet(control) else {
                     continue;
@@ -5682,7 +5925,7 @@ async fn fulfill_resync_request(client_id: ClientId, from_tick: Tick, state: &mu
     }
     for (tick, packets) in packets_by_tick {
         // A client requesting old host control needs the same C4ClientIDAll
-            // packet used during live play. C++ HandleControlReq sends the stored
+        // packet used during live play. C++ HandleControlReq sends the stored
         // complete control packet for every contiguous tick
         // (src/C4GameControlNetwork.cpp:531-544).
         let aggregated = match aggregate_control_packets_for_tick(tick, &packets) {
@@ -6141,13 +6384,7 @@ async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &
         } else {
             ControlMessage::Status(status)
         };
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            message,
-        )
-        .await;
+        let _ = send_host_message(state, client_id, ConnectionTrafficClass::Message, message).await;
     }
 }
 
@@ -6260,11 +6497,7 @@ async fn apply_host_control_mode(mode: i32, from_tick: i32, state: &mut HostStat
         return;
     };
     let packets = match mode {
-        0 => contiguous_client_controls(
-            &state.local_control_backlog,
-            HOST_CLIENT_ID,
-            from_tick,
-        ),
+        0 => contiguous_client_controls(&state.local_control_backlog, HOST_CLIENT_ID, from_tick),
         1 => match contiguous_complete_controls(&state.backlog, from_tick) {
             Ok(packets) => packets,
             Err(error) => {
@@ -6367,9 +6600,7 @@ where
         // Preserve commands that this dead route had accepted but had not yet
         // written so the surviving route's PostMortem replay cannot lose them.
         self.retain_queued_post_mortem_packets();
-        let post_mortem = self
-            .transport
-            .create_post_mortem(self.remote_connection_id);
+        let post_mortem = self.transport.create_post_mortem(self.remote_connection_id);
         let _ = self
             .host_tx
             .send(HostLoopMessage::ClientDisconnected {
@@ -7022,7 +7253,10 @@ impl ClientRouteManager {
         let Some(replay) = self.closed_routes.recover(&packet) else {
             return false;
         };
-        let peer_addr = self.closed_route_peers.remove(&replay.connection_id).flatten();
+        let peer_addr = self
+            .closed_route_peers
+            .remove(&replay.connection_id)
+            .flatten();
         for nested_packet in replay.packets {
             let packet = match crate::transport::parse_complete_packet(&nested_packet) {
                 Ok(Some(ControlMessage::PostMortem(post_mortem))) => {
@@ -7061,8 +7295,7 @@ impl ClientRouteManager {
             })
             .map(|route| route.outbound.clone())
         {
-            self.pending_post_mortems
-                .insert(connection_id, post_mortem);
+            self.pending_post_mortems.insert(connection_id, post_mortem);
             outbound.retire();
         }
     }
@@ -7087,12 +7320,10 @@ impl ClientRouteManager {
                     route_id,
                     peer_addr,
                     packet,
-                }
-                    if self.routes.contains_key(&route_id) =>
-                {
-                    if let crate::transport::InboundPacket::Message(
-                        ControlMessage::PostMortem(post_mortem),
-                    ) = packet
+                } if self.routes.contains_key(&route_id) => {
+                    if let crate::transport::InboundPacket::Message(ControlMessage::PostMortem(
+                        post_mortem,
+                    )) = packet
                     {
                         let source_peer_id = self
                             .routes
@@ -7107,9 +7338,11 @@ impl ClientRouteManager {
                         crate::transport::InboundPacket::Message(
                             ControlMessage::ConnectionRequest(_)
                         )
-                    ) && self.routes.get(&route_id).is_some_and(|route| {
-                        matches!(route.protocol, crate::NetworkProtocol::Udp)
-                    }) {
+                    ) && self
+                        .routes
+                        .get(&route_id)
+                        .is_some_and(|route| matches!(route.protocol, crate::NetworkProtocol::Udp))
+                    {
                         // One side of reliable UDP can detect a reordered-Conn
                         // reconnect before the other. Retire the stale session
                         // route and let the surviving protocol start a fresh
@@ -7220,9 +7453,7 @@ impl ClientRouteManager {
                 ClientRouteRead::Disconnected { reason, .. } => {
                     return Err(TransportError::Io(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
-                        reason.unwrap_or_else(|| {
-                            "all client transport routes closed".to_string()
-                        }),
+                        reason.unwrap_or_else(|| "all client transport routes closed".to_string()),
                     )));
                 }
             }
@@ -7496,6 +7727,7 @@ async fn run_client_loop_with_addresses<S>(
         None,
         None,
         None,
+        false,
     )
     .await;
 }
@@ -7522,6 +7754,7 @@ async fn run_client_loop_with_routes(
     mut pending_secondary: Option<PendingClientRoute>,
     mut tcp_reconnect: Option<ClientTcpReconnect>,
     mut pending_tcp: Option<PendingTcpClientRoute>,
+    initial_puncher_addresses_changed: bool,
 ) {
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
     let mut pending_sync = Vec::<lc_engine::ControlPacket>::new();
@@ -7538,6 +7771,16 @@ async fn run_client_loop_with_routes(
         .as_ref()
         .map(crate::ReliableUdpSessionHub::handle);
     let mut mesh_udp_accept_enabled = mesh_udp_hub.is_some();
+
+    if initial_puncher_addresses_changed {
+        if let Some(local_addresses) = client_addresses.get(&local_core.client_id) {
+            let _ = event_tx
+                .send(ClientEvent::LocalAddressesChanged {
+                    local_addresses: local_addresses.clone(),
+                })
+                .await;
+        }
+    }
 
     for (core, path) in std::mem::take(&mut resource_state.initial_complete_resources) {
         let _ = event_tx
@@ -7579,9 +7822,7 @@ async fn run_client_loop_with_routes(
     }
 
     for packet in std::mem::take(&mut resource_state.initial_lobby_countdowns) {
-        let _ = event_tx
-            .send(ClientEvent::LobbyCountdown { packet })
-            .await;
+        let _ = event_tx.send(ClientEvent::LobbyCountdown { packet }).await;
     }
 
     for packet in std::mem::take(&mut resource_state.initial_packets) {
@@ -7677,6 +7918,7 @@ async fn run_client_loop_with_routes(
                             mesh_tcp_port,
                             mesh_epoch.elapsed(),
                         );
+                    let addresses_changed = !update.announcements.is_empty();
                     for address in update.announcements {
                         let addresses = client_addresses
                             .entry(local_core.client_id)
@@ -7693,6 +7935,15 @@ async fn run_client_loop_with_routes(
                         let _ = transport
                             .send_message(ControlMessage::Address(packet))
                             .await;
+                    }
+                    if addresses_changed {
+                        if let Some(local_addresses) = client_addresses.get(&local_core.client_id) {
+                            let _ = event_tx
+                                .send(ClientEvent::LocalAddressesChanged {
+                                    local_addresses: local_addresses.clone(),
+                                })
+                                .await;
+                        }
                     }
                 }
             }
@@ -9119,6 +9370,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UdpSocket;
     use tokio::time::{timeout, timeout_at};
 
     fn tcp_frame(payload: &[u8]) -> Vec<u8> {
@@ -9126,6 +9378,133 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    async fn write_udp_session_payload(stream: &mut crate::ReliableUdpPeerStream, payload: &[u8]) {
+        stream.write_all(&tcp_frame(payload)).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn read_udp_session_payload(stream: &mut crate::ReliableUdpPeerStream) -> Vec<u8> {
+        let mut header = [0_u8; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], 0xff);
+        let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+        let mut payload = vec![0; length];
+        stream.read_exact(&mut payload).await.unwrap();
+        payload
+    }
+
+    #[tokio::test]
+    async fn host_session_requests_puncher_id_punches_and_reports_assigned_state() {
+        let mut puncher =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let puncher_address = puncher.local_addr();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut host = start_host(
+            listener,
+            HostConfig {
+                udp_bind_address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                netpuncher_addresses: vec![puncher_address],
+                configured_tcp_port: Some(31_112),
+                configured_udp_port: Some(31_113),
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let host_udp_address = host.udp_local_addr().unwrap();
+        let mut puncher_stream = timeout(Duration::from_secs(2), puncher.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let observed_address = puncher_stream.peer_addr();
+
+        let request = timeout(
+            Duration::from_secs(2),
+            read_udp_session_payload(&mut puncher_stream),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::decode_netpuncher_packet(&request).unwrap(),
+            NetpuncherPacket::IdRequest
+        );
+
+        let local_addresses = timeout(Duration::from_secs(2), async {
+            loop {
+                match host.events().recv().await {
+                    Some(HostEvent::LocalAddressesChanged { local_addresses }) => {
+                        break local_addresses
+                    }
+                    Some(_) => continue,
+                    None => panic!("host event stream ended"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let observed_udp =
+            crate::NetworkAddress::new(crate::NetworkProtocol::Udp, observed_address);
+        let mut configured_udp = observed_address;
+        configured_udp.set_port(31_113);
+        let configured_udp =
+            crate::NetworkAddress::new(crate::NetworkProtocol::Udp, configured_udp);
+        let mut configured_tcp = observed_address;
+        configured_tcp.set_port(31_112);
+        let configured_tcp =
+            crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, configured_tcp);
+        assert!(local_addresses.contains(&observed_udp));
+        assert!(local_addresses.contains(&configured_udp));
+        assert!(local_addresses.contains(&configured_tcp));
+
+        let assigned_id = 0x1122_3344;
+        write_udp_session_payload(
+            &mut puncher_stream,
+            &crate::encode_netpuncher_packet(&NetpuncherPacket::AssignId { id: assigned_id }),
+        )
+        .await;
+        let (game_ids, assigned_addresses) = timeout(Duration::from_secs(2), async {
+            loop {
+                match host.events().recv().await {
+                    Some(HostEvent::NetpuncherStateChanged {
+                        game_ids,
+                        local_addresses,
+                    }) => break (game_ids, local_addresses),
+                    Some(_) => continue,
+                    None => panic!("host event stream ended"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(game_ids.ipv4, assigned_id);
+        assert_eq!(game_ids.ipv6, 0);
+        assert_eq!(assigned_addresses, local_addresses);
+
+        let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        write_udp_session_payload(
+            &mut puncher_stream,
+            &crate::encode_netpuncher_packet(&NetpuncherPacket::ClientRequest {
+                address: target_address,
+            }),
+        )
+        .await;
+        let mut raw_punch = [0_u8; 16];
+        let (length, source) = timeout(Duration::from_secs(2), target.recv_from(&mut raw_punch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::canonical_reliable_udp_peer_address(source),
+            host_udp_address
+        );
+        assert_eq!(length, 9);
+        assert_eq!(raw_punch[0], 0x01);
+
+        host.shutdown().await.unwrap();
+        puncher.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -9187,10 +9566,52 @@ mod tests {
             })
         );
 
+        let mut game_peer =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let handle = prepared.udp_hub.as_ref().unwrap().handle();
+        let (game_stream, incoming_game_stream) =
+            tokio::join!(handle.connect(game_peer.local_addr()), game_peer.accept());
+        let game_stream = game_stream.unwrap();
+        let incoming_game_stream = incoming_game_stream.unwrap();
+        assert_eq!(incoming_game_stream.peer_addr(), local_address);
+        drop(game_stream);
+        drop(incoming_game_stream);
+
+        prepared
+            .puncher_init
+            .lock()
+            .expect("puncher initialization lock")
+            .initializing = false;
+        handle.close_puncher(puncher_address).await.unwrap();
+        let mut closed = [0_u8; 1];
+        assert_eq!(
+            timeout(EVENT_WAIT, puncher_stream.read(&mut closed))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
         drop(puncher_stream);
+        handle
+            .init_puncher(puncher_address, NetpuncherRole::Client)
+            .await
+            .unwrap();
+        let mut reconnected = timeout(EVENT_WAIT, puncher.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(timeout(
+            Duration::from_millis(100),
+            read_udp_session_payload(&mut reconnected),
+        )
+        .await
+        .is_err());
+        drop(reconnected);
+
         if let Some(hub) = prepared.udp_hub.take() {
             hub.shutdown().await.unwrap();
         }
+        game_peer.shutdown().await.unwrap();
         puncher.shutdown().await.unwrap();
     }
 
@@ -9424,10 +9845,7 @@ mod tests {
         bytes.truncate(count);
         assert_eq!(
             bytes,
-            [
-                0xff, 0x08, 0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00,
-                0xff,
-            ]
+            [0xff, 0x08, 0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00, 0xff,]
         );
 
         shutdown_tx.send(()).ok();
@@ -9772,9 +10190,7 @@ mod tests {
                 HostEvent::ClientLeft { client_id: left } if left == client_id => {
                     saw_left = true;
                 }
-                HostEvent::ClientConnectionFailed { client_id: failed }
-                    if failed == client_id =>
-                {
+                HostEvent::ClientConnectionFailed { client_id: failed } if failed == client_id => {
                     panic!("orderly host shutdown emitted ClientConnectionFailed")
                 }
                 _ => {}
@@ -9852,19 +10268,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(raw_client_received_control(
-            &mut observer,
-            &source_packet,
-            EVENT_WAIT
-        )
-        .await);
+        assert!(raw_client_received_control(&mut observer, &source_packet, EVENT_WAIT).await);
         assert!(
-            !raw_client_received_control(
-                &mut source,
-                &source_packet,
-                Duration::from_millis(100)
-            )
-            .await,
+            !raw_client_received_control(&mut source, &source_packet, Duration::from_millis(100))
+                .await,
             "forward request echoed its nested control to the origin"
         );
         let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
@@ -9892,15 +10299,14 @@ mod tests {
         drain_raw_client(&mut observer_a).await;
         drain_raw_client(&mut observer_b).await;
 
-        let direct_data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
-            PlayerControlData {
+        let direct_data =
+            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
                 player: i32::try_from(source_id).unwrap(),
                 command: 0x22,
                 data: 0x33,
                 by_client: i32::try_from(source_id).unwrap(),
-            },
-        ))
-        .unwrap();
+            }))
+            .unwrap();
         let mut nested_packet = vec![0x42, u8::from(ControlDelivery::Direct)];
         nested_packet.extend_from_slice(&direct_data);
         source
@@ -9919,12 +10325,8 @@ mod tests {
         for observer in [&mut observer_a, &mut observer_b] {
             assert!(raw_client_received_message(observer, &expected_direct, EVENT_WAIT).await);
             assert!(
-                !raw_client_received_message(
-                    observer,
-                    &expected_direct,
-                    Duration::from_millis(50)
-                )
-                .await,
+                !raw_client_received_message(observer, &expected_direct, Duration::from_millis(50))
+                    .await,
                 "direct ControlPkt was relayed more than once"
             );
         }
@@ -9945,15 +10347,14 @@ mod tests {
             }
         }
 
-        let spoofed_data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
-            PlayerControlData {
+        let spoofed_data =
+            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
                 player: i32::try_from(source_id).unwrap(),
                 command: 0x44,
                 data: 0x55,
                 by_client: i32::try_from(source_id + 1).unwrap(),
-            },
-        ))
-        .unwrap();
+            }))
+            .unwrap();
         let mut spoofed_nested = vec![0x42, u8::from(ControlDelivery::Direct)];
         spoofed_nested.extend_from_slice(&spoofed_data);
         source
@@ -9974,7 +10375,10 @@ mod tests {
         }
         let error_deadline = tokio::time::Instant::now() + EVENT_WAIT;
         let error = loop {
-            match timeout_at(error_deadline, host_events.recv()).await.unwrap() {
+            match timeout_at(error_deadline, host_events.recv())
+                .await
+                .unwrap()
+            {
                 Some(HostEvent::Direct {
                     client_id,
                     delivery: ControlDelivery::Direct,
@@ -10043,12 +10447,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(raw_tcp_received_frame(
-            &mut observer,
-            &nested_packet,
-            EVENT_WAIT
-        )
-        .await);
+        assert!(raw_tcp_received_frame(&mut observer, &nested_packet, EVENT_WAIT).await);
         let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
         while let Ok(Some(event)) = timeout_at(quiet_deadline, host_events.recv()).await {
             assert!(
@@ -10333,9 +10732,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn occupied_udp_listener_falls_back_to_a_healthy_tcp_host() {
-        let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let occupied_address = occupied.local_addr().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let tcp_address = listener.local_addr().unwrap();
@@ -10368,6 +10765,74 @@ mod tests {
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn occupied_client_udp_port_falls_back_to_a_healthy_tcp_route() {
+        let occupied = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp_address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+
+        let client = connect_client_addresses(
+            [
+                crate::NetworkAddress::new(crate::NetworkProtocol::Tcp, tcp_address),
+                crate::NetworkAddress::new(crate::NetworkProtocol::Udp, tcp_address),
+            ],
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_mesh_tcp_bind_address(SocketAddr::from(([0_u16; 8], 0)))
+                .with_mesh_udp_bind_address(SocketAddr::from(([0_u16; 8], occupied_port))),
+        )
+        .await
+        .expect("an unavailable configured UDP port does not suppress TCP admission");
+
+        assert_eq!(host.accepted_routes().await.len(), 1);
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_shutdown_releases_the_configured_shared_udp_port() {
+        let reservation = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
+        let configured_udp_port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let mut puncher =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let puncher_address = puncher.local_addr();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp_address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+
+        let client = connect_client(
+            tcp_address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_mesh_udp_bind_address(SocketAddr::from((
+                    [0_u16; 8],
+                    configured_udp_port,
+                )))
+                .with_mesh_punchers([ClientMeshPuncherConfig {
+                    address: puncher_address,
+                    game_id: 0x1122_3344,
+                }]),
+        )
+        .await
+        .unwrap();
+        let _puncher_stream = timeout(EVENT_WAIT, puncher.accept())
+            .await
+            .expect("client reaches the puncher")
+            .unwrap();
+
+        client.shutdown().await.unwrap();
+        let rebound = tokio::net::UdpSocket::bind(SocketAddr::from((
+            [0_u16; 8],
+            configured_udp_port,
+        )))
+        .await
+        .expect("ClientHandle shutdown releases the shared UDP socket");
+        drop(rebound);
+        host.shutdown().await.unwrap();
+        puncher.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -10792,8 +11257,12 @@ mod tests {
             .unwrap();
         let mut header = [0_u8; 5];
         encoded_stream.read_exact(&mut header).await.unwrap();
-        let mut complete_packet = vec![0_u8; u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize];
-        encoded_stream.read_exact(&mut complete_packet).await.unwrap();
+        let mut complete_packet =
+            vec![0_u8; u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize];
+        encoded_stream
+            .read_exact(&mut complete_packet)
+            .await
+            .unwrap();
 
         udp.send_message(ControlMessage::PostMortem(crate::PostMortemPacket {
             connection_id: 1,
@@ -10812,13 +11281,14 @@ mod tests {
                 ControlMessage::LobbyCountdown(packet)
             ) if packet == countdown
         ));
-        assert_eq!(
-            peer_addr,
-            Some(SocketAddr::from(([127, 0, 0, 1], 11_111)))
-        );
+        assert_eq!(peer_addr, Some(SocketAddr::from(([127, 0, 0, 1], 11_111))));
 
         let reciprocal = loop {
-            match timeout(EVENT_WAIT, udp.read_message()).await.unwrap().unwrap() {
+            match timeout(EVENT_WAIT, udp.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
                 ControlMessage::PostMortem(packet) => break packet,
                 ControlMessage::Ping(ping) => {
                     udp.send_message(ControlMessage::Pong(ping)).await.unwrap();
@@ -10840,7 +11310,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            timeout(EVENT_WAIT, udp.read_message()).await.unwrap().unwrap(),
+            timeout(EVENT_WAIT, udp.read_message())
+                .await
+                .unwrap()
+                .unwrap(),
             ControlMessage::StatusAck(status)
         );
 
@@ -11312,9 +11785,10 @@ mod tests {
         let proxy = tokio::spawn(async move {
             let (mut client, _) = proxy_listener.accept().await.unwrap();
             let mut host = TcpStream::connect(host_tcp_address).await.unwrap();
-            let first = tokio::spawn(async move {
-                tokio::io::copy_bidirectional(&mut client, &mut host).await
-            });
+            let first =
+                tokio::spawn(
+                    async move { tokio::io::copy_bidirectional(&mut client, &mut host).await },
+                );
             let _ = cut_first_rx.await;
             first.abort();
             let _ = first.await;
@@ -11375,9 +11849,7 @@ mod tests {
         let tcp_address = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
-        let udp_blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let udp_blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let client = timeout(
             Duration::from_secs(2),
             connect_dual_client(
@@ -11536,8 +12008,7 @@ mod tests {
         }
         udp.send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
             ok: true,
-            message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                .unwrap(),
+            message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec()).unwrap(),
             wrong_password: false,
         }))
         .await
@@ -11554,11 +12025,7 @@ mod tests {
         })
         .await
         .expect("TCP and reliable-UDP routes were not both retained");
-        assert!(routes.contains(&(
-            host_request.connection_id,
-            client_id,
-            remote_connection_id,
-        )));
+        assert!(routes.contains(&(host_request.connection_id, client_id, remote_connection_id,)));
         while let Ok(event) = host_events.try_recv() {
             assert!(
                 !matches!(
@@ -12260,10 +12727,8 @@ mod tests {
             file_crc: c4group_file_crc(&player_raw),
             chunk_size: 100 * 1024,
             contents_crc,
-            filename: lc_engine::LegacyCString::from_bytes(
-                b"Players.c4f/Shared.c4p".to_vec(),
-            )
-            .unwrap(),
+            filename: lc_engine::LegacyCString::from_bytes(b"Players.c4f/Shared.c4p".to_vec())
+                .unwrap(),
             ..Default::default()
         };
         let host = HostConfig::default();
@@ -12291,10 +12756,7 @@ mod tests {
             directories.client.clone(),
         );
         let resource = resolver
-            .resolve(
-                crate::ClientBootstrapResourceRole::Player,
-                &core,
-            )
+            .resolve(crate::ClientBootstrapResourceRole::Player, &core)
             .unwrap();
         let standalone_path = match &resource.source {
             crate::ClientBootstrapResourceSource::Local(local) => {
@@ -12310,10 +12772,11 @@ mod tests {
             ClientBootstrapRegistration::Registered
         );
 
-        assert_eq!(state.local_resource_sources.get(&nested_player), Some(&core));
-        assert!(!state
-            .local_resource_sources
-            .contains_key(&standalone_path));
+        assert_eq!(
+            state.local_resource_sources.get(&nested_player),
+            Some(&core)
+        );
+        assert!(!state.local_resource_sources.contains_key(&standalone_path));
     }
 
     #[test]
@@ -12481,10 +12944,8 @@ mod tests {
         fs::write(&player, &original).unwrap();
         let request = crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
-            wire_name: lc_engine::LegacyCString::from_bytes(
-                b"Players.c4f/Alice.c4p".to_vec(),
-            )
-            .unwrap(),
+            wire_name: lc_engine::LegacyCString::from_bytes(b"Players.c4f/Alice.c4p".to_vec())
+                .unwrap(),
             group_maker: lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
         };
         let host = HostConfig::default();
@@ -12641,16 +13102,15 @@ mod tests {
             wire_name: initial_wire.clone(),
             group_maker: maker.clone(),
         };
-        let initial_publication = crate::publish_client_player_resource(
-            crate::ClientPlayerResourcePublicationSpec {
+        let initial_publication =
+            crate::publish_client_player_resource(crate::ClientPlayerResourcePublicationSpec {
                 resource_id: 0,
                 source_path: initial_player.clone(),
                 wire_name: initial_wire,
                 network_directory: directories.host.clone(),
                 group_maker: maker.clone(),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         let initial_core = initial_publication.core.clone();
 
         let player = directories.root.join("HostRuntime.c4p");
@@ -12662,8 +13122,7 @@ mod tests {
         fs::write(&player, &original).unwrap();
         let publication = crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
-            wire_name: lc_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec())
-                .unwrap(),
+            wire_name: lc_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec()).unwrap(),
             group_maker: maker,
         };
 
@@ -13752,15 +14211,13 @@ mod tests {
     fn scenario_player_init_authenticates_the_selecting_client() {
         // PID_ControlPkt rejects a non-host packet whose embedded ByClient
         // differs from the authenticated connection (src/C4GameControlNetwork.cpp:478-490).
-        let payload = encode_control_entry_payload(
-            &EngineControlPacket::InitScenarioPlayer(
-                lc_engine::InitScenarioPlayerControlData {
-                    team: 2,
-                    player: 4,
-                    by_client: 7,
-                },
-            ),
-        )
+        let payload = encode_control_entry_payload(&EngineControlPacket::InitScenarioPlayer(
+            lc_engine::InitScenarioPlayerControlData {
+                team: 2,
+                player: 4,
+                by_client: 7,
+            },
+        ))
         .expect("encode InitScenarioPlayer");
 
         assert!(authenticated_single_control(&payload, 7).is_ok());
@@ -13812,13 +14269,11 @@ mod tests {
 
     #[test]
     fn remove_player_control_cannot_forge_host_author() {
-        let control = EngineControlPacket::RemovePlayer(
-            lc_engine::RemovePlayerControlData {
-                player: 4,
-                disconnected: false,
-                by_client: 0,
-            },
-        );
+        let control = EngineControlPacket::RemovePlayer(lc_engine::RemovePlayerControlData {
+            player: 4,
+            disconnected: false,
+            by_client: 0,
+        });
         let payload = encode_control_entry_payload(&control).expect("encode CID_RemovePlr");
         assert_eq!(
             authenticated_single_control(&payload, 0).expect("host author matches"),
@@ -13855,8 +14310,8 @@ mod tests {
             authenticated_single_control(&payload, 7).expect("matching author"),
             control
         );
-        let error = authenticated_single_control(&payload, 8)
-            .expect_err("reject spoofed script author");
+        let error =
+            authenticated_single_control(&payload, 8).expect_err("reject spoofed script author");
         assert!(error.contains("claimed author 7"));
         assert!(error.contains("authenticated author is 8"));
     }
@@ -13889,15 +14344,14 @@ mod tests {
 
     #[test]
     fn single_message_board_answer_authenticates_embedded_author() {
-        let control = EngineControlPacket::MessageBoardAnswer(
-            lc_engine::MessageBoardAnswerControlData {
+        let control =
+            EngineControlPacket::MessageBoardAnswer(lc_engine::MessageBoardAnswerControlData {
                 object: 42,
                 answer: lc_engine::LegacyCString::from_bytes(b"answer".to_vec())
                     .expect("fixture is NUL-free"),
                 player: 3,
                 by_client: 7,
-            },
-        );
+            });
         let payload =
             encode_control_entry_payload(&control).expect("encode CID_MessageBoardAnswer");
 
@@ -14210,7 +14664,10 @@ mod tests {
             );
             let direct_error = authenticated_single_control(&payload, 8)
                 .expect_err("direct author spoof must fail");
-            assert!(direct_error.contains("claimed author 7"), "{name}: {direct_error}");
+            assert!(
+                direct_error.contains("claimed author 7"),
+                "{name}: {direct_error}"
+            );
 
             let packet = encode_control_packet(&LegacyControlFrame {
                 client_id: 7,
@@ -14224,7 +14681,9 @@ mod tests {
             let forged = controls(0)
                 .into_iter()
                 .zip(names)
-                .find_map(|(candidate, candidate_name)| (candidate_name == name).then_some(candidate))
+                .find_map(|(candidate, candidate_name)| {
+                    (candidate_name == name).then_some(candidate)
+                })
                 .expect("fixture name exists");
             let forged_packet = encode_control_packet(&LegacyControlFrame {
                 client_id: 7,
@@ -14236,7 +14695,10 @@ mod tests {
             let queued_error = validate_queued_control_authors(&forged_packet)
                 .expect_err("queued author spoof must fail");
             assert!(queued_error.contains(name), "{name}: {queued_error}");
-            assert!(queued_error.contains("claimed author 0"), "{name}: {queued_error}");
+            assert!(
+                queued_error.contains("claimed author 0"),
+                "{name}: {queued_error}"
+            );
         }
     }
 
@@ -14377,7 +14839,9 @@ mod tests {
         })
         .await
         .expect("the prepared opposite transport was not retained");
-        assert!(routes.iter().all(|(_, client_id, _)| *client_id == client.client_id()));
+        assert!(routes
+            .iter()
+            .all(|(_, client_id, _)| *client_id == client.client_id()));
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
@@ -14397,9 +14861,8 @@ mod tests {
 
         let error = connect_client(
             address,
-            ClientConfig::new("Alice", ParticipantKind::Player).with_password(
-                lc_engine::LegacyCString::from_bytes(b"wrong".to_vec()).unwrap(),
-            ),
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_password(lc_engine::LegacyCString::from_bytes(b"wrong".to_vec()).unwrap()),
         )
         .await
         .expect_err("the first password is rejected");
@@ -14426,12 +14889,9 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, host_config).await.unwrap();
 
-        let error = connect_client(
-            address,
-            ClientConfig::new("Alice", ParticipantKind::Player),
-        )
-        .await
-        .expect_err("closed admission is not a password retry");
+        let error = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect_err("closed admission is not a password retry");
         assert!(matches!(error, ClientError::Handshake(_)));
         host.shutdown().await.unwrap();
     }
@@ -14547,8 +15007,7 @@ mod tests {
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
         let (mut canonical, client_id) = raw_client_transport(addr, b"Alice").await;
-        let mut secondary =
-            raw_existing_client_transport(addr, client_id, 29, b"Alice").await;
+        let mut secondary = raw_existing_client_transport(addr, client_id, 29, b"Alice").await;
 
         timeout(EVENT_WAIT, async {
             loop {
@@ -14612,12 +15071,7 @@ mod tests {
         let (mut canonical, client_id) = raw_client_transport(addr, b"Alice").await;
 
         let mut delayed = crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
-        let admission = request_route(
-            &mut delayed,
-            i32::try_from(client_id).unwrap(),
-            29,
-        )
-        .await;
+        let admission = request_route(&mut delayed, i32::try_from(client_id).unwrap(), 29).await;
         assert!(admission.ok);
 
         let remove = EngineControlPacket::ClientRemove(lc_engine::ClientRemoveControlData {
@@ -14637,20 +15091,13 @@ mod tests {
             message: lc_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
             wrong_password: false,
         });
-        assert!(raw_client_received_message(
-            &mut canonical,
-            &close,
-            EVENT_WAIT
-        )
-        .await);
+        assert!(raw_client_received_message(&mut canonical, &close, EVENT_WAIT).await);
 
         delayed
             .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                 ok: true,
-                message: lc_engine::LegacyCString::from_bytes(
-                    b"connection accepted".to_vec(),
-                )
-                .unwrap(),
+                message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
+                    .unwrap(),
                 wrong_password: false,
             }))
             .await
@@ -14684,12 +15131,9 @@ mod tests {
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
 
-        let mut alice = connect_client(
-            addr,
-            ClientConfig::new("Alice", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let mut alice = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .unwrap();
         let alice_id = alice.client_id();
         let mut alice_events = alice.take_event_receiver();
         activate_joined_client(&host, &mut host_events, alice_id).await;
@@ -14730,12 +15174,7 @@ mod tests {
         }
 
         let mut delayed = crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
-        let admission = request_route(
-            &mut delayed,
-            i32::try_from(alice_id).unwrap(),
-            31,
-        )
-        .await;
+        let admission = request_route(&mut delayed, i32::try_from(alice_id).unwrap(), 31).await;
         assert!(admission.ok);
 
         let unreachable = NetworkStatus {
@@ -14757,9 +15196,7 @@ mod tests {
         let mut connection_failed = false;
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
-                Some(HostEvent::ClientConnectionFailed { client_id })
-                    if client_id == alice_id =>
-                {
+                Some(HostEvent::ClientConnectionFailed { client_id }) if client_id == alice_id => {
                     connection_failed = true;
                 }
                 Some(HostEvent::ClientLeft { client_id }) if client_id == alice_id => {
@@ -14777,10 +15214,8 @@ mod tests {
         delayed
             .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                 ok: true,
-                message: lc_engine::LegacyCString::from_bytes(
-                    b"connection accepted".to_vec(),
-                )
-                .unwrap(),
+                message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
+                    .unwrap(),
                 wrong_password: false,
             }))
             .await
@@ -14802,14 +15237,8 @@ mod tests {
             }
         }
 
-        let mut new_route =
-            crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
-        let rejection = request_route(
-            &mut new_route,
-            i32::try_from(alice_id).unwrap(),
-            32,
-        )
-        .await;
+        let mut new_route = crate::ControlTransport::new(TcpStream::connect(addr).await.unwrap());
+        let rejection = request_route(&mut new_route, i32::try_from(alice_id).unwrap(), 32).await;
         assert!(!rejection.ok);
         assert_eq!(rejection.message.as_bytes(), b"removing client");
 
@@ -14925,9 +15354,8 @@ mod tests {
         .unwrap();
         let mut host_events = host.take_event_receiver();
 
-        let mut pending_tcp = crate::ControlTransport::new(
-            TcpStream::connect(tcp_address).await.unwrap(),
-        );
+        let mut pending_tcp =
+            crate::ControlTransport::new(TcpStream::connect(tcp_address).await.unwrap());
         let pending_reply = request_route(&mut pending_tcp, -1, 51).await;
         assert!(
             pending_reply.ok,
@@ -14960,12 +15388,8 @@ mod tests {
             .await
             .unwrap();
         let mut different_host = crate::ControlTransport::new(udp_stream);
-        let rejection = request_route(
-            &mut different_host,
-            i32::try_from(client_id).unwrap(),
-            52,
-        )
-        .await;
+        let rejection =
+            request_route(&mut different_host, i32::try_from(client_id).unwrap(), 52).await;
         assert!(!rejection.ok);
         assert_eq!(
             rejection.message.as_bytes(),
@@ -15050,16 +15474,12 @@ mod tests {
             }
         }
         secondary
-            .send_message(ControlMessage::ConnectionReply(
-                crate::ConnectionReply {
-                    ok: true,
-                    message: lc_engine::LegacyCString::from_bytes(
-                        b"connection accepted".to_vec(),
-                    )
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: true,
+                message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                     .unwrap(),
-                    wrong_password: false,
-                },
-            ))
+                wrong_password: false,
+            }))
             .await
             .unwrap();
 
@@ -15074,11 +15494,7 @@ mod tests {
         })
         .await
         .expect("secondary accepted route was not retained");
-        assert!(routes.contains(&(
-            local_connection_id,
-            canonical_id,
-            remote_connection_id,
-        )));
+        assert!(routes.contains(&(local_connection_id, canonical_id, remote_connection_id,)));
 
         while let Ok(event) = host_events.try_recv() {
             assert!(
@@ -15150,17 +15566,20 @@ mod tests {
                 HostEvent::ClientLeft { client_id } if client_id == canonical_id => {
                     panic!("secondary disconnect emitted ClientLeft for the logical client")
                 }
-                HostEvent::ClientConnectionFailed { client_id }
-                    if client_id == canonical_id =>
-                {
+                HostEvent::ClientConnectionFailed { client_id } if client_id == canonical_id => {
                     panic!("secondary disconnect emitted ClientConnectionFailed")
                 }
                 HostEvent::SyncScheduled { controls, .. }
-                    if controls.iter().any(|control| matches!(
-                        control,
-                        EngineControlPacket::ClientRemove(remove)
-                            if remove.client_id == i32::try_from(canonical_id).unwrap()
-                    )) => panic!("secondary disconnect queued ClientRemove for the logical client"),
+                    if controls.iter().any(|control| {
+                        matches!(
+                            control,
+                            EngineControlPacket::ClientRemove(remove)
+                                if remove.client_id == i32::try_from(canonical_id).unwrap()
+                        )
+                    }) =>
+                {
+                    panic!("secondary disconnect queued ClientRemove for the logical client")
+                }
                 _ => {}
             }
         }
@@ -15170,17 +15589,20 @@ mod tests {
         timeout(EVENT_WAIT, async {
             loop {
                 match canonical_events.recv().await {
-                    Some(ClientEvent::LobbyCountdown { packet })
-                        if packet == after_disconnect =>
-                    {
+                    Some(ClientEvent::LobbyCountdown { packet }) if packet == after_disconnect => {
                         break;
                     }
                     Some(ClientEvent::SyncScheduled { controls, .. })
-                        if controls.iter().any(|control| matches!(
-                            control,
-                            EngineControlPacket::ClientRemove(remove)
-                                if remove.client_id == i32::try_from(canonical_id).unwrap()
-                        )) => panic!("canonical client executed a secondary-route ClientRemove"),
+                        if controls.iter().any(|control| {
+                            matches!(
+                                control,
+                                EngineControlPacket::ClientRemove(remove)
+                                    if remove.client_id == i32::try_from(canonical_id).unwrap()
+                            )
+                        }) =>
+                    {
+                        panic!("canonical client executed a secondary-route ClientRemove")
+                    }
                     Some(ClientEvent::Disconnected { reason }) => {
                         panic!("canonical route disconnected unexpectedly: {reason:?}")
                     }
@@ -15245,16 +15667,12 @@ mod tests {
                 }
             }
             transport
-                .send_message(ControlMessage::ConnectionReply(
-                    crate::ConnectionReply {
-                        ok: true,
-                        message: lc_engine::LegacyCString::from_bytes(
-                            b"connection accepted".to_vec(),
-                        )
+                .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                    ok: true,
+                    message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                         .unwrap(),
-                        wrong_password: false,
-                    },
-                ))
+                    wrong_password: false,
+                }))
                 .await
                 .unwrap();
             (transport, host_request.connection_id)
@@ -15323,11 +15741,7 @@ mod tests {
         .expect("primary route was not removed");
         assert_eq!(
             routes,
-            vec![(
-                secondary_connection_id,
-                canonical_id,
-                remote_connection_id,
-            )]
+            vec![(secondary_connection_id, canonical_id, remote_connection_id,)]
         );
 
         // OnDisconn first removes the dead route (promoting the remaining
@@ -15366,11 +15780,16 @@ mod tests {
                     panic!("primary disconnect emitted ClientLeft despite a surviving route")
                 }
                 HostEvent::SyncScheduled { controls, .. }
-                    if controls.iter().any(|control| matches!(
-                        control,
-                        EngineControlPacket::ClientRemove(remove)
-                            if remove.client_id == i32::try_from(canonical_id).unwrap()
-                    )) => panic!("primary disconnect queued ClientRemove despite a surviving route"),
+                    if controls.iter().any(|control| {
+                        matches!(
+                            control,
+                            EngineControlPacket::ClientRemove(remove)
+                                if remove.client_id == i32::try_from(canonical_id).unwrap()
+                        )
+                    }) =>
+                {
+                    panic!("primary disconnect queued ClientRemove despite a surviving route")
+                }
                 _ => {}
             }
         }
@@ -15392,7 +15811,10 @@ mod tests {
                             decode_control_entry_payload(&data),
                             Ok(EngineControlPacket::ClientRemove(remove))
                                 if remove.client_id == i32::try_from(canonical_id).unwrap()
-                        ) => panic!("surviving route received ClientRemove"),
+                        ) =>
+                    {
+                        panic!("surviving route received ClientRemove")
+                    }
                     Ok(_) => continue,
                     Err(error) => panic!("surviving route closed unexpectedly: {error}"),
                 }
@@ -15454,16 +15876,12 @@ mod tests {
                 }
             }
             transport
-                .send_message(ControlMessage::ConnectionReply(
-                    crate::ConnectionReply {
-                        ok: true,
-                        message: lc_engine::LegacyCString::from_bytes(
-                            b"connection accepted".to_vec(),
-                        )
+                .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                    ok: true,
+                    message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
                         .unwrap(),
-                        wrong_password: false,
-                    },
-                ))
+                    wrong_password: false,
+                }))
                 .await
                 .unwrap();
             (transport, host_request.connection_id)
@@ -15486,10 +15904,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
-        let canonical =
-            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let canonical = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .unwrap();
         let client_id = canonical.client_id();
         let (mut dead_route, dead_connection_id) =
             connect_existing_route(addr, client_id, 29).await;
@@ -15688,20 +16105,15 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
-        let mut alpha = connect_client(
-            address,
-            ClientConfig::new("Alpha", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let mut alpha =
+            connect_client(address, ClientConfig::new("Alpha", ParticipantKind::Player))
+                .await
+                .unwrap();
         let mut alpha_events = alpha.take_event_receiver();
         activate_joined_client(&host, &mut host_events, alpha.client_id()).await;
-        let mut beta = connect_client(
-            address,
-            ClientConfig::new("Beta", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let mut beta = connect_client(address, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
         let mut beta_events = beta.take_event_receiver();
         activate_joined_client(&host, &mut host_events, beta.client_id()).await;
 
@@ -17228,7 +17640,11 @@ mod tests {
         };
         host.change_status(decentral).await.unwrap();
         loop {
-            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+            match timeout(EVENT_WAIT, client.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
                 ControlMessage::Status(status) if status == decentral => break,
                 _ => continue,
             }
@@ -17237,11 +17653,17 @@ mod tests {
             .send_message(ControlMessage::StatusAck(decentral))
             .await
             .unwrap();
-        host.status_reached(decentral, decentral.target_tick).await.unwrap();
+        host.status_reached(decentral, decentral.target_tick)
+            .await
+            .unwrap();
 
         let mut saw_final_ack = false;
         loop {
-            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+            match timeout(EVENT_WAIT, client.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
                 ControlMessage::StatusAck(status) if status == decentral => {
                     saw_final_ack = true;
                 }
@@ -17299,13 +17721,10 @@ mod tests {
         drain_raw_client(&mut client).await;
 
         let host_packet = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
-        host.submit_local_control(host_packet.clone()).await.unwrap();
-        assert!(raw_client_received_control(
-            &mut client,
-            &host_packet,
-            EVENT_WAIT,
-        )
-        .await);
+        host.submit_local_control(host_packet.clone())
+            .await
+            .unwrap();
+        assert!(raw_client_received_control(&mut client, &host_packet, EVENT_WAIT,).await);
         let client_packet = legacy_packet(client_id, 0, 0x21);
         client
             .send_message(ControlMessage::Control(client_packet))
@@ -17323,7 +17742,11 @@ mod tests {
         };
         host.change_status(central).await.unwrap();
         loop {
-            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+            match timeout(EVENT_WAIT, client.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
                 ControlMessage::Status(status) if status == central => break,
                 _ => continue,
             }
@@ -17332,11 +17755,17 @@ mod tests {
             .send_message(ControlMessage::StatusAck(central))
             .await
             .unwrap();
-        host.status_reached(central, central.target_tick).await.unwrap();
+        host.status_reached(central, central.target_tick)
+            .await
+            .unwrap();
 
         let mut saw_final_ack = false;
         loop {
-            match timeout(EVENT_WAIT, client.read_message()).await.unwrap().unwrap() {
+            match timeout(EVENT_WAIT, client.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
                 ControlMessage::StatusAck(status) if status == central => {
                     saw_final_ack = true;
                 }
@@ -17837,8 +18266,7 @@ mod tests {
             .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
                 negative_list: true,
                 clients: Vec::new(),
-                nested_packet: crate::transport::encode_complete_control_packet(&spoofed)
-                    .unwrap(),
+                nested_packet: crate::transport::encode_complete_control_packet(&spoofed).unwrap(),
             }))
             .await
             .expect("submit spoofed host control");
@@ -17863,7 +18291,9 @@ mod tests {
                 .expect("host event wait")
             {
                 Some(HostEvent::TransportError { error, .. }) => {
-                    panic!("C++ accepts PID_Control independently of its source connection: {error}")
+                    panic!(
+                        "C++ accepts PID_Control independently of its source connection: {error}"
+                    )
                 }
                 Some(HostEvent::Ready { packet }) => break packet,
                 Some(_) => continue,
@@ -18159,7 +18589,9 @@ mod tests {
             }
         }
         client.submit_status_ack(running).await.unwrap();
-        host.status_reached(running, running.target_tick).await.unwrap();
+        host.status_reached(running, running.target_tick)
+            .await
+            .unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
@@ -18180,7 +18612,9 @@ mod tests {
                 None => panic!("host event stream ended before client departure"),
             }
         }
-        host.status_reached(running, running.target_tick).await.unwrap();
+        host.status_reached(running, running.target_tick)
+            .await
+            .unwrap();
 
         let mut synchronized_remove = None;
         let mut committed = false;
@@ -18262,10 +18696,7 @@ mod tests {
                 local_reached: false
             }
         );
-        assert_eq!(
-            barrier.remotes.get(&7),
-            Some(&RemoteBarrierState::NotReady)
-        );
+        assert_eq!(barrier.remotes.get(&7), Some(&RemoteBarrierState::NotReady));
         assert_eq!(
             barrier.local_reached_for(retargeted, 4),
             vec![BarrierEffect::StopControl]
@@ -18342,12 +18773,9 @@ mod tests {
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
 
-        let mut alpha = connect_client(
-            addr,
-            ClientConfig::new("Alpha", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
         let alpha_id = alpha.client_id();
         let mut alpha_events = alpha.take_event_receiver();
         activate_joined_client(&host, &mut host_events, alpha_id).await;
@@ -18379,7 +18807,9 @@ mod tests {
         }
         alpha.submit_status_ack(running).await.unwrap();
         beta.submit_status_ack(running).await.unwrap();
-        host.status_reached(running, running.target_tick).await.unwrap();
+        host.status_reached(running, running.target_tick)
+            .await
+            .unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
@@ -18423,10 +18853,11 @@ mod tests {
         beta.submit_status_ack(unreachable).await.unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
-                Some(HostEvent::StatusAck {
-                    client_id,
-                    status,
-                }) if client_id == beta_id && status == unreachable => break,
+                Some(HostEvent::StatusAck { client_id, status })
+                    if client_id == beta_id && status == unreachable =>
+                {
+                    break
+                }
                 Some(_) => continue,
                 None => panic!("host event stream ended before Beta acknowledged unreached Go"),
             }
@@ -18463,7 +18894,9 @@ mod tests {
         }
 
         beta.submit_status_ack(retargeted).await.unwrap();
-        host.status_reached(retargeted, retargeted.target_tick).await.unwrap();
+        host.status_reached(retargeted, retargeted.target_tick)
+            .await
+            .unwrap();
 
         let mut released = None;
         let mut synchronized_remove = None;
@@ -18654,12 +19087,10 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
-        let mut witness = connect_client(
-            addr,
-            ClientConfig::new("Witness", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let mut witness =
+            connect_client(addr, ClientConfig::new("Witness", ParticipantKind::Player))
+                .await
+                .unwrap();
         let witness_id = witness.client_id();
         let mut witness_events = witness.take_event_receiver();
         activate_joined_client(&host, &mut host_events, witness_id).await;
@@ -18681,7 +19112,9 @@ mod tests {
             }
         }
         witness.submit_status_ack(running).await.unwrap();
-        host.status_reached(running, running.target_tick).await.unwrap();
+        host.status_reached(running, running.target_tick)
+            .await
+            .unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::StatusCommitted(status)) if status == running => break,
@@ -18719,10 +19152,11 @@ mod tests {
         witness.submit_status_ack(unreachable).await.unwrap();
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
-                Some(HostEvent::StatusAck {
-                    client_id,
-                    status,
-                }) if client_id == witness_id && status == unreachable => break,
+                Some(HostEvent::StatusAck { client_id, status })
+                    if client_id == witness_id && status == unreachable =>
+                {
+                    break
+                }
                 Some(_) => continue,
                 None => panic!("host event stream ended before unreached Go acknowledgement"),
             }
@@ -18797,7 +19231,9 @@ mod tests {
             }
         }
         witness.submit_status_ack(retargeted).await.unwrap();
-        host.status_reached(retargeted, retargeted.target_tick).await.unwrap();
+        host.status_reached(retargeted, retargeted.target_tick)
+            .await
+            .unwrap();
 
         let mut synchronized_remove = None;
         let mut committed = false;
@@ -18925,11 +19361,16 @@ mod tests {
         while let Ok(Some(event)) = timeout_at(deadline, canonical_events.recv()).await {
             match event {
                 ClientEvent::SyncScheduled { controls, .. }
-                    if controls.iter().any(|control| matches!(
-                        control,
-                        EngineControlPacket::ClientRemove(remove)
-                            if remove.client_id == i32::try_from(canonical_id).unwrap()
-                    )) => panic!("canonical client executed a secondary-route ClientRemove"),
+                    if controls.iter().any(|control| {
+                        matches!(
+                            control,
+                            EngineControlPacket::ClientRemove(remove)
+                                if remove.client_id == i32::try_from(canonical_id).unwrap()
+                        )
+                    }) =>
+                {
+                    panic!("canonical client executed a secondary-route ClientRemove")
+                }
                 ClientEvent::Disconnected { reason } => {
                     panic!("canonical client disconnected unexpectedly: {reason:?}")
                 }
@@ -19045,7 +19486,8 @@ mod tests {
         // Ensure the client loop processed the send before issuing the request.
         while let Ok(Some(event)) = timeout(Duration::from_millis(20), event_rx.recv()).await {
             match event {
-                ClientEvent::PingMeasured { .. }
+                ClientEvent::LocalAddressesChanged { .. }
+                | ClientEvent::PingMeasured { .. }
                 | ClientEvent::Ready { .. }
                 | ClientEvent::Direct { .. }
                 | ClientEvent::ExecSync { .. }
@@ -19465,10 +19907,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
-        let mut client =
-            connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-                .await
-                .unwrap();
+        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
         let mut client_events = client.take_event_receiver();
         let packet = crate::LobbyCountdownPacket::new(5);
 
@@ -20109,9 +20550,7 @@ mod tests {
         ));
 
         host_transport
-            .send_message(ControlMessage::Control(legacy_packet(
-                0, live_tick, 0x11,
-            )))
+            .send_message(ControlMessage::Control(legacy_packet(0, live_tick, 0x11)))
             .await
             .unwrap();
         let aggregate = match timeout(EVENT_WAIT, event_rx.recv()).await.unwrap() {
@@ -20607,10 +21046,8 @@ mod tests {
         transport
             .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                 ok: true,
-                message: lc_engine::LegacyCString::from_bytes(
-                    b"connection accepted".to_vec(),
-                )
-                .unwrap(),
+                message: lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
+                    .unwrap(),
                 wrong_password: false,
             }))
             .await
@@ -20866,6 +21303,8 @@ mod tests {
                 | Ok(Some(HostEvent::StatusAck { .. }))
                 | Ok(Some(HostEvent::StatusChanged(_)))
                 | Ok(Some(HostEvent::SyncScheduled { .. }))
+                | Ok(Some(HostEvent::LocalAddressesChanged { .. }))
+                | Ok(Some(HostEvent::NetpuncherStateChanged { .. }))
                 | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
                 Err(_) => panic!("timed out waiting for host ready event"),
@@ -20881,6 +21320,7 @@ mod tests {
             match timeout(duration, events.recv()).await {
                 Ok(Some(ClientEvent::Ready { packet })) => break packet,
                 Ok(Some(ClientEvent::PingMeasured { .. })) => continue,
+                Ok(Some(ClientEvent::LocalAddressesChanged { .. })) => continue,
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
                 Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,

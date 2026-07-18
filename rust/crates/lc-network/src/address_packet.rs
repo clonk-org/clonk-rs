@@ -163,6 +163,45 @@ pub fn append_received_address(
         })
 }
 
+/// Applies `C4Network2Client::AddAddrFromPuncher` to one ordered client
+/// address list and returns the newly-added addresses in announcement order.
+///
+/// Puncher-derived addresses are inserted at the front. C++ first adds the
+/// observed UDP endpoint, then a configured-port UDP alternative when NAT
+/// translated the port, and finally the configured TCP alternative. Because
+/// each insertion is at the front, the retained list order is the reverse of
+/// the returned announcement order (`src/C4Network2Client.cpp:237-256`).
+pub(crate) fn add_addresses_from_puncher(
+    addresses: &mut Vec<NetworkAddress>,
+    observed_address: SocketAddr,
+    configured_udp_port: u16,
+    configured_tcp_port: u16,
+) -> Vec<NetworkAddress> {
+    let observed_address = NetworkAddress::new(NetworkProtocol::Udp, observed_address).endpoint;
+    let mut added = Vec::new();
+    let mut add_in_front = |address: NetworkAddress| {
+        if addresses.iter().any(|known| *known == address) {
+            return;
+        }
+        addresses.insert(0, address);
+        added.push(address);
+    };
+
+    add_in_front(NetworkAddress::new(NetworkProtocol::Udp, observed_address));
+    if observed_address.port() != configured_udp_port {
+        let mut configured_udp = observed_address;
+        configured_udp.set_port(configured_udp_port);
+        add_in_front(NetworkAddress::new(NetworkProtocol::Udp, configured_udp));
+    }
+    if configured_tcp_port != 0 {
+        let mut configured_tcp = observed_address;
+        configured_tcp.set_port(configured_tcp_port);
+        add_in_front(NetworkAddress::new(NetworkProtocol::Tcp, configured_tcp));
+    }
+
+    added
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressPacketDecodeError {
     UnexpectedEof,
@@ -516,6 +555,39 @@ mod tests {
             AddressInsertion::AlreadyPresent { index: 0 }
         );
         assert_eq!(addresses, [first]);
+    }
+
+    #[test]
+    fn puncher_address_adds_external_udp_and_configured_udp_tcp_variants_in_front() {
+        let retained =
+            NetworkAddress::new(NetworkProtocol::Tcp, "192.0.2.9:11112".parse().unwrap());
+        let observed: SocketAddr = "203.0.113.8:49152".parse().unwrap();
+        let mut addresses = vec![retained];
+
+        let added = add_addresses_from_puncher(&mut addresses, observed, 11_113, 11_112);
+        let external_udp = NetworkAddress::new(NetworkProtocol::Udp, observed);
+        let configured_udp =
+            NetworkAddress::new(NetworkProtocol::Udp, "203.0.113.8:11113".parse().unwrap());
+        let configured_tcp =
+            NetworkAddress::new(NetworkProtocol::Tcp, "203.0.113.8:11112".parse().unwrap());
+
+        assert_eq!(added, [external_udp, configured_udp, configured_tcp]);
+        assert_eq!(
+            addresses,
+            [configured_tcp, configured_udp, external_udp, retained]
+        );
+        assert!(add_addresses_from_puncher(&mut addresses, observed, 11_113, 11_112).is_empty());
+    }
+
+    #[test]
+    fn puncher_address_omits_redundant_udp_and_disabled_tcp_variants() {
+        let observed: SocketAddr = "[2001:db8::8]:11113".parse().unwrap();
+        let mut addresses = Vec::new();
+
+        let added = add_addresses_from_puncher(&mut addresses, observed, 11_113, 0);
+
+        assert_eq!(added, [NetworkAddress::new(NetworkProtocol::Udp, observed)]);
+        assert_eq!(addresses, added);
     }
 
     #[test]

@@ -15001,6 +15001,14 @@ fn build_network_host_preparation(
             auto_frame_skip: boolean("Graphics", "AutoFrameSkip", true),
             max_load_file_size,
             no_runtime_join: boolean("Network", "NoRuntimeJoin", true),
+            network_tcp_port: integer("Network", "PortTCP", 11_112)
+                .try_into()
+                .ok()
+                .unwrap_or(11_112),
+            network_udp_port: integer("Network", "PortUDP", 11_113)
+                .try_into()
+                .ok()
+                .unwrap_or(11_113),
         },
         league,
     })
@@ -23608,6 +23616,17 @@ impl GameApp {
                         self.apply_league_update_response(response.clone());
                         continue;
                     }
+                    if let NetworkEvent::NetpuncherStateChanged {
+                        game_ids,
+                        local_addresses,
+                    } = &event
+                    {
+                        self.update_host_netpuncher_reference(
+                            *game_ids,
+                            local_addresses.clone(),
+                        );
+                        continue;
+                    }
                     let player_info_event = matches!(
                         &event,
                         NetworkEvent::PlayerInfoUpdateRequest { .. }
@@ -23641,6 +23660,9 @@ impl GameApp {
                         NetworkEvent::PeerConnectionFailed { .. } => {
                             Some("client connection failure")
                         }
+                        NetworkEvent::NetpuncherStateChanged { .. } => unreachable!(
+                            "netpuncher state is applied before the classic-lobby boundary"
+                        ),
                         NetworkEvent::ResourceAction(_) => Some("resource action"),
                         NetworkEvent::ResourceComplete { .. } => Some("resource completion"),
                         NetworkEvent::ResourceLoadFailed { .. } => Some("resource load failure"),
@@ -24027,6 +24049,12 @@ impl GameApp {
                                 lc_network::LeagueDisconnectReason::ConnectionFailed,
                             );
                         }
+                    }
+                    NetworkEvent::NetpuncherStateChanged {
+                        game_ids,
+                        local_addresses,
+                    } => {
+                        self.update_host_netpuncher_reference(game_ids, local_addresses);
                     }
                     NetworkEvent::ResourceAction(action) => {
                         // Socket/protocol state is already retained by
@@ -28412,7 +28440,15 @@ impl GameApp {
         // after Players.Init/AllowJoin, then the reference server exposes that
         // complete value (src/C4Network2Reference.cpp:49-109;
         // src/C4Game.cpp:3869-3876).
-        let reference = match prepared.initial_host_game_reference(true, network.local_addresses())
+        let (game_ids, addresses) = network.netpuncher_state();
+        let reference = match prepared
+            .initial_host_game_reference(true, &addresses)
+            .map_err(|error| error.to_string())
+            .and_then(|reference| {
+                reference
+                    .replacing_netpuncher_state(game_ids, addresses)
+                    .map_err(|error| error.to_string())
+            })
         {
             Ok(reference) => reference,
             Err(error) => {
@@ -28444,6 +28480,37 @@ impl GameApp {
             Err(error) => {
                 tracing::warn!(%error, "network game advertising unavailable");
                 self.network_game_advertiser = None;
+            }
+        }
+    }
+
+    fn update_host_netpuncher_reference(
+        &mut self,
+        game_ids: lc_network::NetpuncherGameIds,
+        addresses: Vec<lc_network::NetworkAddress>,
+    ) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network.invalidate_league_reference() {
+                tracing::error!(%error, "failed to invalidate netpuncher league reference");
+            }
+        }
+        let Some(reference) = self.advertised_game_reference.clone() else {
+            return;
+        };
+        let updated = match reference.replacing_netpuncher_state(game_ids, addresses) {
+            Ok(updated) => updated,
+            Err(error) => {
+                tracing::error!(%error, "failed to rebuild netpuncher host reference");
+                return;
+            }
+        };
+        self.advertised_game_reference = Some(updated.clone());
+        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+            if let Err(error) = advertiser.update_exact(&updated) {
+                tracing::error!(%error, "failed to publish netpuncher host reference");
             }
         }
     }
@@ -65717,8 +65784,12 @@ public func Grant(password) { return GainMissionAccess(password); }
             local_addresses[1].protocol,
             lc_network::NetworkProtocol::Udp
         );
-        assert_eq!(local_addresses[0].endpoint, local_addresses[1].endpoint);
+        assert_eq!(
+            local_addresses[0].endpoint.ip(),
+            local_addresses[1].endpoint.ip()
+        );
         assert_ne!(local_addresses[0].endpoint.port(), 0);
+        assert_eq!(local_addresses[1].endpoint.port(), 11_113);
         let advertised = app
             .advertised_game_reference
             .as_ref()
@@ -66095,6 +66166,63 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.change_network_control_to_local(0);
         assert!(app.network_game_advertiser.is_none());
         assert!(app.advertised_game_reference.is_none());
+    }
+
+    #[test]
+    fn netpuncher_assignment_refreshes_the_retained_host_reference() {
+        let (_snapshot, reference) = default_exact_host_reference();
+        let mut app = new_menu_app(320, 200);
+        install_test_classic_host_lobby(&mut app);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.advertised_game_reference = Some(reference);
+        let (manager, events, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(manager);
+        let addresses = vec![
+            lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Tcp,
+                "198.51.100.7:11112".parse().unwrap(),
+            ),
+            lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Udp,
+                "198.51.100.7:11113".parse().unwrap(),
+            ),
+            lc_network::NetworkAddress::new(
+                lc_network::NetworkProtocol::Udp,
+                "198.51.100.7:43123".parse().unwrap(),
+            ),
+        ];
+        events
+            .send(NetworkEvent::NetpuncherStateChanged {
+                game_ids: lc_network::NetpuncherGameIds {
+                    ipv4: 0xaabb_ccdd,
+                    ipv6: 0,
+                },
+                local_addresses: addresses.clone(),
+            })
+            .unwrap();
+
+        app.process_network_events()
+            .expect("apply netpuncher reference invalidation");
+
+        let updated = app
+            .advertised_game_reference
+            .as_ref()
+            .expect("host reference remains retained");
+        assert_eq!(updated.summary().netpuncher_ipv4, 0xaabb_ccdd);
+        assert_eq!(updated.metadata().netpuncher_ipv4, 0xaabb_ccdd);
+        assert_eq!(updated.summary().addresses, addresses);
+        assert_eq!(updated.metadata().addresses, addresses);
+        assert_eq!(
+            updated.summary().tcp_addresses,
+            vec!["198.51.100.7:11112".parse::<SocketAddr>().unwrap()]
+        );
+        assert!(app.classic_host_lobby_active());
+        assert_eq!(commands.take_league_update_effects().1, 1);
     }
 
     #[test]
@@ -66475,6 +66603,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             password_needed: true,
             addresses: vec![private_udp, global_tcp],
             source_address: "127.0.0.1:11111".parse().unwrap(),
+            netpuncher_ipv4: 0x1122_3344,
+            netpuncher_ipv6: 0x5566_7788,
+            netpuncher_address: "puncher.invalid:11115".to_string(),
             version: lc_network::CURRENT_GAME_VERSION,
             build: lc_network::CURRENT_GAME_BUILD,
             ..Default::default()
@@ -66524,6 +66655,12 @@ public func Grant(password) { return GainMissionAccess(password); }
             .as_ref()
             .expect("prepared join is retained while prompting");
         assert_eq!(settings.server_addresses, [global_tcp, private_udp]);
+        assert_eq!(
+            settings.netpuncher_address.as_deref(),
+            Some("puncher.invalid:11115")
+        );
+        assert_eq!(settings.netpuncher_game_ids.ipv4, 0x1122_3344);
+        assert_eq!(settings.netpuncher_game_ids.ipv6, 0x5566_7788);
         assert!(settings.password.is_empty());
         let dialog = app
             .game_option_input_dialog

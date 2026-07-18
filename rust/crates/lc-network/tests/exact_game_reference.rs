@@ -11,7 +11,7 @@ use lc_network::{
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
     JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope,
     JoinTeamListSnapshot, JoinTeamSnapshot, LeagueEndRecord, LeagueHeartbeat, LeagueHostSession,
-    LeagueReferenceRequestEncodeError, NetworkAddress, NetworkGameAdvertiser,
+    LeagueReferenceRequestEncodeError, NetpuncherGameIds, NetworkAddress, NetworkGameAdvertiser,
     NetworkGameAdvertiserConfig, NetworkGameReference, NetworkProtocol, PlayerInfoListSnapshot,
 };
 
@@ -153,6 +153,93 @@ fn replacing_control_mode_refreshes_the_reference_projection() {
     assert!(!encoded
         .windows(b"CtrlMode=2\r\n".len())
         .any(|window| window == b"CtrlMode=2\r\n"));
+}
+
+#[test]
+fn replacing_netpuncher_state_updates_the_exact_reference_atomically() {
+    let reference =
+        HostGameReference::new(fixture_summary(), fixture_metadata(), complete_parameters())
+            .unwrap();
+    let addresses = vec![
+        NetworkAddress::new(NetworkProtocol::Tcp, "198.51.100.4:11112".parse().unwrap()),
+        NetworkAddress::new(NetworkProtocol::Udp, "198.51.100.4:11113".parse().unwrap()),
+        NetworkAddress::new(NetworkProtocol::Udp, "198.51.100.4:43123".parse().unwrap()),
+    ];
+
+    let assigned = reference
+        .replacing_netpuncher_state(
+            NetpuncherGameIds {
+                ipv4: 0x1122_3344,
+                ipv6: 0x5566_7788,
+            },
+            addresses.clone(),
+        )
+        .unwrap();
+
+    assert_eq!(assigned.summary().addresses, addresses);
+    assert_eq!(assigned.metadata().addresses, addresses);
+    assert_eq!(assigned.summary().netpuncher_ipv4, 0x1122_3344);
+    assert_eq!(assigned.metadata().netpuncher_ipv6, 0x5566_7788);
+    assert_eq!(
+        assigned.summary().tcp_addresses,
+        vec!["198.51.100.4:11112".parse::<SocketAddr>().unwrap()]
+    );
+    let encoded = encode_host_game_reference_response(&assigned).unwrap();
+    const ADDRESS_LINE: &[u8] = b"Address=TCP:\"198.51.100.4:11112\",UDP:\"198.51.100.4:11113\",UDP:\"198.51.100.4:43123\"\r\n";
+    assert!(encoded
+        .windows(ADDRESS_LINE.len())
+        .any(|window| window == ADDRESS_LINE));
+    assert!(encoded
+        .windows(b"  IPv4=287454020\r\n".len())
+        .any(|window| window == b"  IPv4=287454020\r\n"));
+    assert!(encoded
+        .windows(b"  IPv6=1432778632\r\n".len())
+        .any(|window| window == b"  IPv6=1432778632\r\n"));
+    assert!(encoded
+        .windows(b"NetpuncherAddr=\"puncher.invalid:11115\"\r\n".len())
+        .any(|window| window == b"NetpuncherAddr=\"puncher.invalid:11115\"\r\n"));
+
+    let runtime = assigned
+        .replacing_runtime(
+            assigned.parameters().clone(),
+            "Running",
+            12,
+            34,
+            false,
+            0,
+        )
+        .unwrap();
+    let game_over = runtime
+        .replacing_game_over(
+            runtime.parameters().clone(),
+            "Running",
+            56,
+            78,
+            false,
+            9,
+            std::iter::empty(),
+        )
+        .unwrap();
+    for rebuilt in [&runtime, &game_over] {
+        assert_eq!(rebuilt.summary().addresses, addresses);
+        assert_eq!(rebuilt.summary().netpuncher_ipv4, 0x1122_3344);
+        assert_eq!(rebuilt.metadata().netpuncher_ipv6, 0x5566_7788);
+        assert_eq!(
+            rebuilt.summary().tcp_addresses,
+            vec!["198.51.100.4:11112".parse::<SocketAddr>().unwrap()]
+        );
+    }
+
+    let cleared = assigned
+        .replacing_netpuncher_state(NetpuncherGameIds::default(), addresses)
+        .unwrap();
+    let encoded = encode_host_game_reference_response(&cleared).unwrap();
+    assert!(!encoded
+        .windows(b"[NetpuncherID]".len())
+        .any(|window| window == b"[NetpuncherID]"));
+    assert!(encoded
+        .windows(b"NetpuncherAddr=\"puncher.invalid:11115\"\r\n".len())
+        .any(|window| window == b"NetpuncherAddr=\"puncher.invalid:11115\"\r\n"));
 }
 
 #[test]
