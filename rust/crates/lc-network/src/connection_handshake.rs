@@ -341,11 +341,10 @@ where
                     });
                 }
             }
-            other => {
-                return Err(ConnectionHandshakeError::UnexpectedPreAdmissionPacket {
-                    packet: packet_name(&other),
-                });
-            }
+            // The pre-half-accept filter consumed every disallowed PID before
+            // decoding. Once half accepted, C++ logs packets whose handlers
+            // are not enabled yet and keeps the connection open.
+            _ => continue,
         }
     }
 }
@@ -406,11 +405,10 @@ where
                     break peer_core;
                 }
             }
-            other => {
-                return Err(ConnectionHandshakeError::UnexpectedPreAdmissionPacket {
-                    packet: packet_name(&other),
-                });
-            }
+            // The pre-half-accept filter consumed every disallowed PID before
+            // decoding. Once half accepted, C++ logs packets whose handlers
+            // are not enabled yet and keeps the connection open.
+            _ => continue,
         }
     };
 
@@ -533,18 +531,45 @@ where
         let timer_deadline = liveness.next_timer_at();
         tokio::select! {
             packet = transport.read_packet() => {
-                match packet? {
-                    crate::transport::InboundPacket::Message(message) => {
-                        liveness.record_inbound_message(&message);
-                        return Ok(message);
-                    }
-                    crate::transport::InboundPacket::Ignored(packet_type) => {
-                        liveness.record_inbound_packet(packet_type);
-                    }
+                if let Some(message) = accept_handshake_packet(
+                    packet?,
+                    liveness,
+                )? {
+                    return Ok(message);
                 }
             }
             _ = tokio::time::sleep_until(timer_deadline) => {
                 drive_liveness_timer(transport, liveness).await?;
+            }
+        }
+    }
+}
+
+fn accept_handshake_packet(
+    packet: crate::transport::InboundPacket,
+    liveness: &mut ConnectionLivenessState,
+) -> Result<Option<ControlMessage>, ConnectionHandshakeError> {
+    let pre_half_accept = liveness.connection().phase() == crate::LivenessPhase::Connected;
+    match packet {
+        crate::transport::InboundPacket::Message(message) => {
+            let packet_type = packet_type(&message);
+            liveness.record_inbound_packet(packet_type);
+            if pre_half_accept && !matches!(packet_type, 0x00 | 0x02 | 0x03) {
+                return Ok(None);
+            }
+            Ok(Some(message))
+        }
+        crate::transport::InboundPacket::Ignored(packet_type) => {
+            liveness.record_inbound_packet(packet_type);
+            Ok(None)
+        }
+        crate::transport::InboundPacket::Empty => Ok(None),
+        crate::transport::InboundPacket::Invalid { packet_type, error } => {
+            liveness.record_inbound_packet(packet_type);
+            if pre_half_accept && !matches!(packet_type, 0x00 | 0x02 | 0x03) {
+                Ok(None)
+            } else {
+                Err(error.into())
             }
         }
     }
@@ -640,15 +665,11 @@ where
         let timer_deadline = liveness.next_timer_at();
         tokio::select! {
             packet = transport.read_packet() => {
-                let message = match packet? {
-                    crate::transport::InboundPacket::Message(message) => {
-                        liveness.record_inbound_message(&message);
-                        message
-                    }
-                    crate::transport::InboundPacket::Ignored(packet_type) => {
-                        liveness.record_inbound_packet(packet_type);
-                        continue;
-                    }
+                let Some(message) = accept_handshake_packet(
+                    packet?,
+                    liveness,
+                )? else {
+                    continue;
                 };
                 match message {
                     ControlMessage::Ping(packet) => {
@@ -916,7 +937,7 @@ mod tests {
         ForwardPacket, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
         JoinTeamListSnapshot, LivenessPhase, NetworkAddress, NetworkProtocol, NetworkStatus,
         PingPacket, PlayerInfoListSnapshot, PlayerInfoUpdateRequest, ResourceDiscoverPacket,
-        ResourcePacket, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+        ResourcePacket, NETWORK_STATE_LOBBY,
     };
 
     fn wire_string(value: &[u8]) -> LegacyCString {
@@ -943,6 +964,13 @@ mod tests {
             message: wire_string(message),
             wrong_password: false,
         }
+    }
+
+    fn tcp_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0xff];
+        frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+        frame.extend_from_slice(payload);
+        frame
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1035,7 +1063,9 @@ mod tests {
         ping_payload.extend_from_slice(&ping.packet_counter.to_ne_bytes());
 
         let (client, mut peer) = duplex(256);
-        peer.write_all(&frame(&tcp_sim_open)).await.unwrap();
+        let mut initial_frames = frame(&[]);
+        initial_frames.extend(frame(&tcp_sim_open));
+        peer.write_all(&initial_frames).await.unwrap();
         let task = tokio::spawn(async move {
             let mut transport = ControlTransport::new(client);
             let mut liveness = ConnectionLivenessState::new_test(0, 0);
@@ -1775,33 +1805,154 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rejects_non_admission_packet_before_connection_admission() {
-        // A non-half-accepted C++ connection rejects every packet other than
-        // Conn, ConnRe and Ping (src/C4Network2IO.cpp:807-812).
-        let (client_stream, host_stream) = duplex(512);
+    async fn non_admission_frame_before_half_accept_is_counted_and_ignored() {
+        // OnPacketReceived counts a nonempty PID at or above
+        // PID_PacketLogStart before HandlePacket applies its pre-unpack gate.
+        // Consequently, even a malformed early FwdReq is counted and dropped
+        // without terminating admission (src/C4Network2IO.cpp:582,807-812,
+        // 1362-1366).
+        let (client_stream, mut host_stream) = duplex(512);
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 7)).await
+        });
+
+        host_stream.write_all(&tcp_frame(&[0x04])).await.unwrap();
+        let mut host = ControlTransport::new(host_stream);
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionRequest(request(0, b"Host", 11)))
+            .await
+            .unwrap();
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionReply(accepted(b"accepted")))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(join_data())))
+            .await
+            .unwrap();
+
+        let handshake = task.await.unwrap().unwrap();
+        assert_eq!(handshake.liveness.connection().inbound_packet_counter(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_frame_before_half_accept_is_ignored_without_counting() {
+        // C++ OnPacket returns for an empty body before OnPacketReceived can
+        // advance the recoverable packet counter (src/C4Network2IO.cpp:582,
+        // 1362-1366).
+        let (client_stream, mut host_stream) = duplex(512);
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 7)).await
+        });
+
+        host_stream.write_all(&tcp_frame(&[])).await.unwrap();
+        let mut host = ControlTransport::new(host_stream);
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionRequest(request(0, b"Host", 11)))
+            .await
+            .unwrap();
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionReply(accepted(b"accepted")))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(join_data())))
+            .await
+            .unwrap();
+
+        let handshake = task.await.unwrap().unwrap();
+        assert_eq!(handshake.liveness.connection().inbound_packet_counter(), 1);
+    }
+
+    #[test]
+    fn malformed_packet_filter_ends_at_half_accept() {
+        let mut connected = ConnectionLivenessState::new_test(0, 0);
+        assert!(matches!(
+            accept_handshake_packet(
+                crate::transport::InboundPacket::Invalid {
+                    packet_type: 0x14,
+                    error: TransportError::Malformed("invalid TCP simultaneous-open packet"),
+                },
+                &mut connected,
+            ),
+            Ok(None)
+        ));
+        assert_eq!(connected.connection().inbound_packet_counter(), 1);
+
+        assert!(matches!(
+            accept_handshake_packet(
+                crate::transport::InboundPacket::Invalid {
+                    packet_type: 0x7e,
+                    error: TransportError::UnsupportedPacket(0x7e),
+                },
+                &mut connected,
+            ),
+            Ok(None)
+        ));
+        assert_eq!(connected.connection().inbound_packet_counter(), 2);
+
+        assert!(matches!(
+            accept_handshake_packet(
+                crate::transport::InboundPacket::Invalid {
+                    packet_type: 0x02,
+                    error: TransportError::Malformed("invalid connection request"),
+                },
+                &mut connected,
+            ),
+            Err(ConnectionHandshakeError::Transport(
+                TransportError::Malformed("invalid connection request")
+            ))
+        ));
+
+        connected.mark_half_accepted();
+        assert!(matches!(
+            accept_handshake_packet(
+                crate::transport::InboundPacket::Invalid {
+                    packet_type: 0x14,
+                    error: TransportError::Malformed("invalid TCP simultaneous-open packet"),
+                },
+                &mut connected,
+            ),
+            Err(ConnectionHandshakeError::Transport(
+                TransportError::Malformed("invalid TCP simultaneous-open packet")
+            ))
+        ));
+        assert_eq!(connected.connection().inbound_packet_counter(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn half_accepted_unhandled_packet_does_not_terminate_admission() {
+        let (client_stream, host_stream) = duplex(1024);
         let task = tokio::spawn(async move {
             let mut transport = ControlTransport::new(client_stream);
             run_client_connection_handshake(&mut transport, request(-1, b"Alice", 7)).await
         });
         let mut host = ControlTransport::new(host_stream);
         let _ = host.read_message().await.unwrap();
-        host.send_message(ControlMessage::Status(NetworkStatus {
-            state: NETWORK_STATE_NONE,
-            control_mode: 0,
-            target_tick: -1,
+        host.send_message(ControlMessage::ConnectionRequest(request(0, b"Host", 11)))
+            .await
+            .unwrap();
+        let _ = host.read_message().await.unwrap();
+
+        // The client is now half accepted. PID_FwdReq is structurally valid,
+        // but its native handler is accepted-only, so C++ logs and ignores it
+        // rather than closing the connection.
+        host.send_message(ControlMessage::ForwardRequest(ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: vec![0x00],
         }))
         .await
         .unwrap();
+        host.send_message(ControlMessage::ConnectionReply(accepted(b"accepted")))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(join_data())))
+            .await
+            .unwrap();
 
-        assert!(matches!(
-            timeout(Duration::from_secs(1), task)
-                .await
-                .unwrap()
-                .unwrap(),
-            Err(ConnectionHandshakeError::UnexpectedPreAdmissionPacket {
-                packet: "PID_Status"
-            })
-        ));
+        let handshake = task.await.unwrap().unwrap();
+        assert_eq!(handshake.liveness.connection().inbound_packet_counter(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]

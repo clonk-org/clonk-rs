@@ -270,10 +270,15 @@ pub enum ControlMessage {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum InboundPacket {
     Message(ControlMessage),
     Ignored(u8),
+    Empty,
+    Invalid {
+        packet_type: u8,
+        error: TransportError,
+    },
 }
 
 /// Length of the frame header: prefix byte plus native-endian u32 size.
@@ -327,7 +332,8 @@ where
         loop {
             match self.read_packet().await? {
                 InboundPacket::Message(message) => return Ok(message),
-                InboundPacket::Ignored(_) => {}
+                InboundPacket::Ignored(_) | InboundPacket::Empty => {}
+                InboundPacket::Invalid { error, .. } => return Err(error),
             }
         }
     }
@@ -375,10 +381,16 @@ where
         if self.read_buf.len() < FRAME_HEADER_LEN + size {
             return Ok(None);
         }
-        let body = &self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size];
-        let packet = match parse_complete_packet(body)? {
-            Some(message) => InboundPacket::Message(message),
-            None => InboundPacket::Ignored(body[0]),
+        let packet = if size == 0 {
+            InboundPacket::Empty
+        } else {
+            let body = &self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size];
+            let packet_type = body[0];
+            match parse_complete_packet(body) {
+                Ok(Some(message)) => InboundPacket::Message(message),
+                Ok(None) => InboundPacket::Ignored(packet_type),
+                Err(error) => InboundPacket::Invalid { packet_type, error },
+            }
         };
         self.read_buf.drain(..FRAME_HEADER_LEN + size);
         Ok(Some(packet))
@@ -512,12 +524,44 @@ pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage
         return Err(TransportError::Malformed("missing packet payload"));
     }
     // Both IDs are present in C++'s typed packet table, but their main-thread
-    // handlers are not ported yet. The TCP frame already delimits their body,
-    // so consume them opaquely instead of treating them as unknown packets.
-    if matches!(body[0], PID_TCP_SIM_OPEN | PID_LEAGUE_ROUND_RESULTS) {
-        return Ok(None);
+    // handlers are not ported yet. C++ still unpacks them before discovering
+    // that no handler is enabled, so malformed bodies remain fatal.
+    match body[0] {
+        PID_TCP_SIM_OPEN => {
+            decode_address_packet_payload(&body[1..]).map_err(|_| {
+                TransportError::Malformed("invalid TCP simultaneous-open packet")
+            })?;
+            return Ok(None);
+        }
+        PID_LEAGUE_ROUND_RESULTS => {
+            validate_league_round_results_payload(&body[1..])?;
+            return Ok(None);
+        }
+        _ => {}
     }
     parse_control_message(body).map(Some)
+}
+
+fn validate_league_round_results_payload(payload: &[u8]) -> Result<(), TransportError> {
+    let mut reader = ConnectionPayloadReader::new(payload);
+    let _success = reader.read_bool()?;
+    let _result_string = reader.read_c_string()?;
+    let player_count = reader.read_packed_i32()?;
+    if !(0..=5_000).contains(&player_count) {
+        return Err(TransportError::Malformed(
+            "league round-results player count is out of range",
+        ));
+    }
+    for _ in 0..player_count {
+        // ID, total playing time, old/new settlement score, league score,
+        // score gain, rank and rank symbol are native-endian dwords.
+        for _ in 0..8 {
+            let _field = reader.read_raw_i32()?;
+        }
+        let _progress_data = reader.read_c_string()?;
+        let _league_status = reader.read_u8()?;
+    }
+    Ok(())
 }
 
 fn parse_control_message(body: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -1093,6 +1137,103 @@ mod tests {
                 .expect("known opaque packets blocked the following frame")
                 .expect("known opaque packet disconnected the transport");
         assert_eq!(message, ControlMessage::Ping(ping));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn known_cpp_packet_exposes_a_skippable_outcome_before_the_next_message() {
+        let ping = PingPacket {
+            sent_at: 0x1234_5678,
+            packet_counter: 9,
+        };
+        let mut ping_payload = vec![PID_PING];
+        encode_ping(ping, &mut ping_payload);
+        let tcp_sim_open = [
+            PID_TCP_SIM_OPEN,
+            0x07,
+            0x01,
+            b'[',
+            b'2',
+            b'0',
+            b'0',
+            b'1',
+            b':',
+            b'd',
+            b'b',
+            b'8',
+            b':',
+            b':',
+            b'7',
+            b']',
+            b':',
+            b'1',
+            b'1',
+            b'1',
+            b'1',
+            b'2',
+            0x00,
+        ];
+        let mut frames = expect_frame(&tcp_sim_open);
+        frames.extend(expect_frame(&ping_payload));
+        let (client, mut server) = duplex(64);
+        server.write_all(&frames).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert!(matches!(
+            transport.read_packet().await.unwrap(),
+            InboundPacket::Ignored(PID_TCP_SIM_OPEN)
+        ));
+        assert!(matches!(
+            transport.read_packet().await.unwrap(),
+            InboundPacket::Message(ControlMessage::Ping(received)) if received == ping
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn zero_length_frame_is_ignored_before_a_buffered_valid_message() {
+        let ping = PingPacket {
+            sent_at: 17,
+            packet_counter: 3,
+        };
+        let mut ping_payload = vec![PID_PING];
+        encode_ping(ping, &mut ping_payload);
+        let mut frames = expect_frame(&[]);
+        frames.extend(expect_frame(&ping_payload));
+        let (client, mut server) = duplex(64);
+        server.write_all(&frames).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(transport.read_message().await.unwrap(), ControlMessage::Ping(ping));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_known_cpp_packet_is_fatal_without_sticking_in_the_buffer() {
+        let ping = PingPacket {
+            sent_at: 29,
+            packet_counter: 4,
+        };
+        let mut ping_payload = vec![PID_PING];
+        encode_ping(ping, &mut ping_payload);
+        let mut frames = expect_frame(&[PID_TCP_SIM_OPEN]);
+        frames.extend(expect_frame(&ping_payload));
+        let (client, mut server) = duplex(64);
+        server.write_all(&frames).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert!(matches!(
+            transport.read_packet().await.unwrap(),
+            InboundPacket::Invalid {
+                packet_type: PID_TCP_SIM_OPEN,
+                error: TransportError::Malformed("invalid TCP simultaneous-open packet"),
+            }
+        ));
+        assert!(matches!(
+            transport.read_packet().await.unwrap(),
+            InboundPacket::Message(ControlMessage::Ping(received)) if received == ping
+        ));
+        assert!(matches!(
+            parse_complete_packet(&[PID_LEAGUE_ROUND_RESULTS, 1, b'O', b'K']),
+            Err(TransportError::UnexpectedEof)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -2160,6 +2160,13 @@ async fn handle_host_event(
             // The app publishes a fresh synchronized dynamic through the host
             // command path; the joining socket remains accepted meanwhile.
         }
+        HostEvent::UnhandledPacket {
+            client_id,
+            packet_type,
+        } => {
+            let status = format!("{packet_type:02x}");
+            tracing::error!(?client_id, %status, "Unhandled packet");
+        }
         HostEvent::TransportError { client_id, error } => {
             let prefix = client_id
                 .map(|id| format!("client {id}: "))
@@ -2636,6 +2643,10 @@ async fn handle_client_event(
         }
         ClientEvent::ResourceDeriveUnsupported { core } => {
             let _ = event_tx.send(NetworkEvent::ResourceDeriveUnsupported { core });
+        }
+        ClientEvent::UnhandledPacket { packet_type } => {
+            let status = format!("{packet_type:02x}");
+            tracing::error!(client_id = HOST_CLIENT_ID, %status, "Unhandled packet");
         }
         ClientEvent::Disconnected { reason } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected {

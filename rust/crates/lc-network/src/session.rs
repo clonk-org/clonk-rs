@@ -342,6 +342,10 @@ pub enum HostEvent {
     ExecSync {
         control_tick: Tick,
     },
+    UnhandledPacket {
+        client_id: Option<ClientId>,
+        packet_type: u8,
+    },
     TransportError {
         client_id: Option<ClientId>,
         error: String,
@@ -980,6 +984,9 @@ pub enum ClientEvent {
     },
     ResourceDeriveUnsupported {
         core: lc_engine::NetworkResourceCore,
+    },
+    UnhandledPacket {
+        packet_type: u8,
     },
     Disconnected {
         reason: Option<String>,
@@ -1750,6 +1757,10 @@ enum HostLoopMessage {
         connection_id: u32,
         error: String,
     },
+    UnhandledPacket {
+        client_id: Option<ClientId>,
+        packet_type: u8,
+    },
     TransportError {
         client_id: Option<ClientId>,
         error: String,
@@ -2041,6 +2052,18 @@ async fn run_host(
                     }
                     HostLoopMessage::AdmissionFailed { connection_id, error } => {
                         handle_admission_failed(connection_id, error, &mut state).await;
+                    }
+                    HostLoopMessage::UnhandledPacket {
+                        client_id,
+                        packet_type,
+                    } => {
+                        let _ = state
+                            .event_tx
+                            .send(HostEvent::UnhandledPacket {
+                                client_id,
+                                packet_type,
+                            })
+                            .await;
                     }
                     HostLoopMessage::TransportError { client_id, error } => {
                         let _ = state.event_tx.send(HostEvent::TransportError { client_id, error }).await;
@@ -3868,7 +3891,22 @@ where
                         }
                         Ok(crate::transport::InboundPacket::Ignored(packet_type)) => {
                             self.liveness.record_inbound_packet(packet_type);
+                            let _ = self
+                                .host_tx
+                                .send(HostLoopMessage::UnhandledPacket {
+                                    client_id: Some(self.client_id),
+                                    packet_type,
+                                })
+                                .await;
                             continue;
+                        }
+                        Ok(crate::transport::InboundPacket::Empty) => continue,
+                        Ok(crate::transport::InboundPacket::Invalid {
+                            packet_type,
+                            error,
+                        }) => {
+                            self.liveness.record_inbound_packet(packet_type);
+                            Err(error)
                         }
                         Err(error) => Err(error),
                     };
@@ -4370,7 +4408,18 @@ async fn run_client_loop_with_addresses<S>(
                     }
                     Ok(crate::transport::InboundPacket::Ignored(packet_type)) => {
                         resource_state.liveness.record_inbound_packet(packet_type);
+                        let _ = event_tx
+                            .send(ClientEvent::UnhandledPacket { packet_type })
+                            .await;
                         continue;
+                    }
+                    Ok(crate::transport::InboundPacket::Empty) => continue,
+                    Ok(crate::transport::InboundPacket::Invalid {
+                        packet_type,
+                        error,
+                    }) => {
+                        resource_state.liveness.record_inbound_packet(packet_type);
+                        Err(error)
                     }
                     Err(error) => Err(error),
                 };
@@ -4873,8 +4922,15 @@ mod tests {
     use std::future::{pending, ready};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
-    use tokio::io::{duplex, AsyncReadExt};
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio::time::{timeout, timeout_at};
+
+    fn tcp_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0xff];
+        frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn client_unwraps_a_selected_forwarded_control() {
@@ -9404,6 +9460,130 @@ mod tests {
         task.await.unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_host_reports_tcp_sim_open_and_keeps_the_connection() {
+        let (host_stream, mut client_stream) = duplex(512);
+        let (outbound_tx, outbound_rx) = mpsc::channel(4);
+        let (host_tx, mut host_rx) = mpsc::channel(4);
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+
+        // Packed client 7 plus a TCP IPv6 endpoint, matching the native
+        // C4PacketTCPSimOpen binary layout.
+        let tcp_sim_open = [
+            0x14, 0x07, 0x01, b'[', b'2', b'0', b'0', b'1', b':', b'd', b'b', b'8', b':', b':',
+            b'7', b']', b':', b'1', b'1', b'1', b'1', b'2', 0x00,
+        ];
+        client_stream
+            .write_all(&tcp_frame(&tcp_sim_open))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, host_rx.recv()).await.unwrap(),
+            Some(HostLoopMessage::UnhandledPacket {
+                client_id: Some(7),
+                packet_type: 0x14,
+            })
+        ));
+
+        let mut client = crate::ControlTransport::new(client_stream);
+        let ping = crate::PingPacket {
+            sent_at: 17,
+            packet_counter: 0,
+        };
+        client
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+        assert_eq!(
+            client.read_message().await.unwrap(),
+            ControlMessage::Pong(ping),
+            "the ignored packet must not terminate the accepted connection"
+        );
+
+        drop(client);
+        drop(outbound_tx);
+        task.await.unwrap();
+        assert!(matches!(
+            host_rx.recv().await,
+            Some(HostLoopMessage::ClientDisconnected {
+                connection_id: 3,
+                client_id: 7,
+                next_inbound_packet: 1,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accepted_client_reports_league_results_and_keeps_the_connection() {
+        let (client_stream, mut host_stream) = duplex(512);
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        // Success, "OK", and zero result players, matching the native
+        // C4PacketLeagueRoundResults binary layout.
+        let league_results = [0x17, 0x01, b'O', b'K', 0x00, 0x00];
+        host_stream
+            .write_all(&tcp_frame(&league_results))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(Duration::from_millis(100), event_rx.recv())
+                .await
+                .unwrap(),
+            Some(ClientEvent::UnhandledPacket { packet_type: 0x17 })
+        ));
+
+        let mut host = crate::ControlTransport::new(host_stream);
+        let ping = crate::PingPacket {
+            sent_at: 23,
+            packet_counter: 0,
+        };
+        host.send_message(ControlMessage::Ping(ping)).await.unwrap();
+        assert_eq!(
+            host.read_message().await.unwrap(),
+            ControlMessage::Pong(ping),
+            "the ignored packet must not terminate the accepted connection"
+        );
+
+        tokio::time::advance(Duration::from_millis(1_500)).await;
+        let liveness_ping = match host.read_message().await.unwrap() {
+            ControlMessage::Ping(ping) => ping,
+            other => panic!("expected accepted-session PID_Ping, got {other:?}"),
+        };
+        assert_eq!(
+            liveness_ping.packet_counter, 1,
+            "the unhandled PID must advance the recoverable inbound counter"
+        );
+        host.send_message(ControlMessage::Pong(liveness_ping))
+            .await
+            .unwrap();
+
+        shutdown_tx.send(()).unwrap();
+        drop(command_tx);
+        task.await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn client_announces_known_host_address_after_applying_join_data() {
         // HandleJoinData finishes by sending every address already known by
@@ -10946,6 +11126,7 @@ mod tests {
                 | ClientEvent::ResourceComplete { .. }
                 | ClientEvent::ResourceLoadFailed { .. }
                 | ClientEvent::ResourceDeriveUnsupported { .. }
+                | ClientEvent::UnhandledPacket { .. }
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected unexpectedly: {reason:?}");
@@ -12223,6 +12404,7 @@ mod tests {
                 // transport error; tolerate it like ClientLeft. A real failure
                 // still trips the timeout because Ready never arrives.
                 Ok(Some(HostEvent::ClientLeft { .. }))
+                | Ok(Some(HostEvent::UnhandledPacket { .. }))
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
                 Ok(Some(HostEvent::Direct { .. }))
                 | Ok(Some(HostEvent::JoinDataNeeded { .. }))
@@ -12260,6 +12442,7 @@ mod tests {
                 Ok(Some(ClientEvent::ResourceComplete { .. }))
                 | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(ClientEvent::ResourceDeriveUnsupported { .. })) => continue,
+                Ok(Some(ClientEvent::UnhandledPacket { .. })) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected during test: {:?}", reason);
