@@ -9,10 +9,59 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use lc_engine::LegacyCString;
 use lc_network::{
-    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourceType,
-    ResourceFileOwnership,
+    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
+    HostResourceType, ResourceFileOwnership,
 };
 use lc_resources::{c4group_file_crc, Group, MutableGroup};
+
+#[test]
+fn calculate_file_sha_prefers_standalone_and_is_idempotent() {
+    let directory = TestDirectory::new();
+    let source = directory.path().join("source.c4g");
+    let standalone = directory.path().join("standalone.c4g");
+    fs::write(&source, b"source").unwrap();
+    fs::write(&standalone, b"standalone").unwrap();
+    let mut publication = HostResourcePublication {
+        core: Default::default(),
+        source_path: source.clone(),
+        standalone_path: Some(standalone.clone()),
+        standalone_ownership: Some(ResourceFileOwnership::Temporary),
+    };
+
+    publication.calculate_file_sha().unwrap();
+    let expected = [
+        0x0b, 0x5c, 0xce, 0xaa, 0xfa, 0x4c, 0xc0, 0x72, 0xea, 0x5e, 0x5f, 0x55, 0x8c, 0xd1, 0xe9,
+        0x9a, 0x8f, 0x50, 0x3c, 0x2d,
+    ];
+    assert_eq!(publication.core.file_sha, Some(expected));
+
+    fs::remove_file(source).unwrap();
+    fs::remove_file(standalone).unwrap();
+    publication.calculate_file_sha().unwrap();
+    assert_eq!(publication.core.file_sha, Some(expected));
+}
+
+#[test]
+fn calculate_file_sha_falls_back_to_source_without_standalone() {
+    let directory = TestDirectory::new();
+    let source = directory.path().join("System.c4g");
+    fs::write(&source, b"abc").unwrap();
+    let mut publication = HostResourcePublication {
+        core: Default::default(),
+        source_path: source,
+        standalone_path: None,
+        standalone_ownership: None,
+    };
+
+    publication.calculate_file_sha().unwrap();
+    assert_eq!(
+        publication.core.file_sha,
+        Some([
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+        ])
+    );
+}
 
 #[test]
 fn cpp_publishes_a_packed_scenario_with_separate_content_and_file_checksums() {

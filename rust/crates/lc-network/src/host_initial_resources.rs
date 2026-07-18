@@ -224,12 +224,27 @@ fn publish_source(
     if resource_type == HostResourceType::Definitions {
         core_spec = core_spec.with_max_load_file_size(spec.max_load_file_size);
     }
-    let publication = build_host_resource_core(&source.path, &spec.network_directory, core_spec)
-        .map_err(|error| HostInitialResourcePublicationError::ResourceCore {
+    let mut publication =
+        build_host_resource_core(&source.path, &spec.network_directory, core_spec).map_err(
+            |error| HostInitialResourcePublicationError::ResourceCore {
+                resource_type,
+                path: source.path.clone(),
+                source: error,
+            },
+        )?;
+    if !spec.parameters.league_address.is_empty()
+        && matches!(
             resource_type,
-            path: source.path.clone(),
-            source: error,
-        })?;
+            HostResourceType::Scenario
+                | HostResourceType::Definitions
+                | HostResourceType::System
+                | HostResourceType::Material
+        )
+    {
+        // CalcHash ignores CalculateSHA's false return, retaining publication
+        // without FileSHA when the physical read fails.
+        let _ = publication.calculate_file_sha();
+    }
     if publication.standalone_ownership == Some(ResourceFileOwnership::Temporary) {
         if let Some(path) = publication.standalone_path.as_ref() {
             temporary_files.track(path.clone());

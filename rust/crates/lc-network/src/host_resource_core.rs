@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lc_engine::{LegacyCString, NetworkResourceCore};
 use lc_resources::{Group, GroupError, MutableGroup, MutableGroupError};
+use sha1::{Digest, Sha1};
 use thiserror::Error;
 
 use crate::ResourceFileOwnership;
@@ -96,6 +97,29 @@ pub struct HostResourcePublication {
     pub source_path: PathBuf,
     pub standalone_path: Option<PathBuf>,
     pub standalone_ownership: Option<ResourceFileOwnership>,
+}
+
+impl HostResourcePublication {
+    /// Adds C++'s optional league FileSHA to the retained resource core.
+    pub fn calculate_file_sha(&mut self) -> Result<(), HostResourceCoreError> {
+        if self.core.file_sha.is_some() {
+            return Ok(());
+        }
+
+        let path = self.standalone_path.as_deref().unwrap_or(&self.source_path);
+        let mut file = File::open(path)?;
+        let mut hasher = Sha1::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        self.core.file_sha = Some(hasher.finalize().into());
+        Ok(())
+    }
 }
 
 #[derive(Debug, Error)]

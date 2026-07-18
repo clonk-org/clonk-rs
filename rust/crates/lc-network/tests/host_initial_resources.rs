@@ -11,6 +11,7 @@ use lc_network::{
     ResourceTransferBackend,
 };
 use lc_resources::{c4group_file_crc, MutableGroup};
+use sha1::{Digest, Sha1};
 
 #[test]
 fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logically() {
@@ -42,6 +43,8 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
     let expected_dynamic = dynamic.packed_bytes.clone();
     let collision = network.join("DynScenario.c4s");
     fs::write(&collision, b"keep").unwrap();
+    let mut parameters = base_parameters();
+    parameters.league = LegacyCString::from_bytes(b"Display only".to_vec()).unwrap();
 
     let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
         network_directory: network.clone(),
@@ -60,7 +63,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
         players: vec![source(player.clone(), b"Players.c4f/Alice.c4p")],
         dynamic,
         dynamic_wire_name: LegacyCString::from_bytes(b"Network/DynScenario.c4s".to_vec()).unwrap(),
-        parameters: base_parameters(),
+        parameters,
         dynamic_tick: 7,
     })
     .unwrap();
@@ -91,6 +94,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
         .iter()
         .enumerate()
         .all(|(index, core)| index == 3 || core.loadable));
+    assert!(cores.iter().all(|core| core.file_sha.is_none()));
     assert_eq!(
         publication
             .resource_registrations
@@ -248,6 +252,69 @@ fn cpp_host_publication_reuses_network_core_for_repeated_game_resource_file() {
         vec![1, 1, 2, 3, 3]
     );
     assert_eq!(publication.join_snapshot.dynamic.id, 4);
+}
+
+#[test]
+fn league_initial_publication_hashes_scenario_and_all_game_resources_only() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let definition = packed_source(&sources, "definitions.bin", "Defs", b"definitions");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let material = packed_source(&sources, "material.bin", "Material", b"material");
+    let player = packed_source(&sources, "player.c4p", "Player", b"player");
+    let mut parameters = base_parameters();
+    parameters.league_address =
+        LegacyCString::from_bytes(b"https://league.invalid/".to_vec()).unwrap();
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: "OracleHost".to_owned(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![source(definition, b"Objects.c4d")],
+        system: source(system, b"System.c4g"),
+        materials: vec![source(material, b"Material.c4g")],
+        players: vec![source(player, b"Player.c4p")],
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters,
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(publication.resource_files.len(), 6);
+    for resource in &publication.resource_files[..4] {
+        assert_eq!(resource.core.file_sha, Some(file_sha(&resource.path)));
+    }
+    assert_eq!(publication.resource_files[4].core.file_sha, None);
+    assert_eq!(publication.resource_files[5].core.file_sha, None);
+
+    assert_eq!(
+        publication.join_snapshot.parameters.scenario,
+        publication.resource_files[0].core
+    );
+    assert_eq!(
+        publication.join_snapshot.parameters.game_resources,
+        publication.resource_files[1..4]
+            .iter()
+            .map(|resource| resource.core.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        publication.join_snapshot.dynamic,
+        publication.resource_files[4].core
+    );
+    assert_eq!(
+        publication.player_cores,
+        vec![publication.resource_files[5].core.clone()]
+    );
+}
+
+fn file_sha(path: &Path) -> [u8; 20] {
+    Sha1::digest(fs::read(path).unwrap()).into()
 }
 
 fn source(path: PathBuf, wire_name: &[u8]) -> HostInitialResourceSource {
