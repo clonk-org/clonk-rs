@@ -6815,7 +6815,7 @@ struct SoundSearchTerms {
 impl SoundSearchTerms {
     fn new(name: &str) -> Self {
         let trimmed = name.trim();
-        let (stem_lower, has_extension) = split_stem_and_extension(trimmed);
+        let (_, has_extension) = split_stem_and_extension(trimmed);
         let mut prepared = trimmed.to_string();
         if !has_extension {
             prepared.push_str(".wav");
@@ -6833,14 +6833,6 @@ impl SoundSearchTerms {
         let mut search_names = Vec::new();
         if !has_wildcards {
             search_names.push(normalized_lower.clone());
-            if !has_extension {
-                for ext in ["ogg", "mp3"] {
-                    let candidate = format!("{}.{}", stem_lower, ext);
-                    if candidate != normalized_lower {
-                        search_names.push(candidate);
-                    }
-                }
-            }
         }
 
         Self {
@@ -46846,6 +46838,83 @@ func Award()
             Some("sound.?")
         );
         assert!(explicit_extension.search_names.is_empty());
+    }
+
+    #[test]
+    fn extensionless_sound_names_resolve_only_wav_across_libraries() {
+        assert_eq!(SoundSearchTerms::new("Boom").search_names, ["boom.wav"]);
+        assert_eq!(
+            SoundSearchTerms::new("Boom.ogg").search_names,
+            ["boom.ogg"]
+        );
+        assert_eq!(
+            SoundSearchTerms::new("Boom.mp3").search_names,
+            ["boom.mp3"]
+        );
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Codec.c4s");
+        let global = dir.path().join("Sound.c4g");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::create_dir_all(&global).expect("create global group");
+        fs::write(scenario.join("OnlyOgg.ogg"), b"only ogg")
+            .expect("write ogg-only sound");
+        fs::write(scenario.join("OnlyMp3.mp3"), b"only mp3")
+            .expect("write mp3-only sound");
+        fs::write(scenario.join("Prefer.ogg"), b"scenario ogg")
+            .expect("write scenario ogg");
+        fs::write(scenario.join("Prefer.mp3"), b"scenario mp3")
+            .expect("write scenario mp3");
+        fs::write(global.join("Prefer.wav"), b"global wav").expect("write global wav");
+
+        let resolver = SoundResolver {
+            global: collect_sound_libraries_for_path(&global),
+            scenario: collect_sound_libraries_for_path(&scenario),
+            scenario_root: Some(scenario),
+            registered_definitions: HashSet::new(),
+        };
+
+        assert!(resolver.resolve_entry("OnlyOgg").is_none());
+        assert!(resolver.resolve_entry("OnlyMp3").is_none());
+        assert_eq!(
+            resolver
+                .resolve_entry("OnlyOgg.ogg")
+                .expect("explicit ogg resolves")
+                .load_audio()
+                .expect("read ogg bytes"),
+            b"only ogg"
+        );
+        assert_eq!(
+            resolver
+                .resolve_entry("OnlyMp3.mp3")
+                .expect("explicit mp3 resolves")
+                .load_audio()
+                .expect("read mp3 bytes"),
+            b"only mp3"
+        );
+        assert_eq!(
+            resolver
+                .resolve_entry("Prefer")
+                .expect("extensionless request finds lower-priority wav")
+                .load_audio()
+                .expect("read wav bytes"),
+            b"global wav"
+        );
+        assert_eq!(
+            resolver
+                .resolve_entry("Prefer.ogg")
+                .expect("explicit ogg keeps scenario precedence")
+                .load_audio()
+                .expect("read ogg bytes"),
+            b"scenario ogg"
+        );
+        assert_eq!(
+            resolver
+                .resolve_entry("Prefer.mp3")
+                .expect("explicit mp3 keeps scenario precedence")
+                .load_audio()
+                .expect("read mp3 bytes"),
+            b"scenario mp3"
+        );
     }
 
     #[test]
