@@ -6176,6 +6176,13 @@ pub struct Object {
     swim_exit_this_frame: bool,
     material_contents: Vec<i32>,
     shape_template: ObjectShapeTemplate,
+    /// Exact live C4Shape rectangle. Con/r may change without UpdateShape,
+    /// so this cannot be reconstructed from the current scalar fields.
+    shape_rect: Option<DefinitionRect>,
+    /// Live C4Shape::FireTop. Unlike the definition template this survives
+    /// SetShape and loaded-object shape data until UpdateShape rebuilds the
+    /// complete shape from DefCore (C4Shape.cpp:495-510).
+    shape_fire_top: i32,
     #[doc(hidden)] pub own_shape_vertices: Option<Vec<ObjectVertex>>,
 }
 
@@ -6212,6 +6219,7 @@ struct ContainerUpdateRecord {
 struct ObjectShapeTemplate {
     vertices: Vec<ObjectVertex>,
     rect: Option<DefinitionRect>,
+    fire_top: i32,
     stretch_growth: bool,
     rotateable: i32,
     /// DefCore Line type: Line objects skip every shape/vertex refresh
@@ -6224,12 +6232,14 @@ impl ObjectShapeTemplate {
     fn new(
         vertices: Vec<ObjectVertex>,
         rect: Option<DefinitionRect>,
+        fire_top: i32,
         stretch_growth: bool,
         rotateable: i32,
     ) -> Self {
         Self {
             vertices,
             rect,
+            fire_top,
             stretch_growth,
             rotateable,
             line: 0,
@@ -6277,6 +6287,22 @@ impl Object {
         let fixed_position = FixedVec2::from_ints(state.position.x, state.position.y);
         let fixed_velocity = FixedVec2::from_ints(state.velocity.x, state.velocity.y);
         let fixed_rotation = itofix(state.rotation);
+        let shape_fire_top = scaled_shape_fire_top(
+            shape_template.fire_top,
+            state.construction,
+            shape_template.line,
+        );
+        let shape_rect = if shape_template.line != 0 {
+            shape_template.rect
+        } else {
+            transformed_shape_rect(
+                shape_template.rect,
+                state.construction,
+                shape_template.stretch_growth,
+                shape_template.rotateable,
+                state.rotation,
+            )
+        };
         Self {
             id,
             definition_id,
@@ -6304,6 +6330,8 @@ impl Object {
             swim_exit_this_frame: false,
             material_contents: Vec::new(),
             shape_template,
+            shape_rect,
+            shape_fire_top,
             own_shape_vertices,
         }
     }
@@ -6383,18 +6411,28 @@ impl Object {
 
     #[doc(hidden)]
     pub fn current_shape_rect(&self) -> Option<DefinitionRect> {
+        self.state.shape_override.or(self.shape_rect)
+    }
+
+    fn definition_derived_shape_rect(&self) -> Option<DefinitionRect> {
         if self.shape_template.line != 0 {
-            return self.state.shape_override.or(self.shape_template.rect);
+            return self.shape_template.rect;
         }
-        self.state.shape_override.or_else(|| {
-            transformed_shape_rect(
-                self.shape_template.rect,
-                self.state.construction,
-                self.shape_template.stretch_growth,
-                self.shape_template.rotateable,
-                self.state.rotation,
-            )
-        })
+        transformed_shape_rect(
+            self.shape_template.rect,
+            self.state.construction,
+            self.shape_template.stretch_growth,
+            self.shape_template.rotateable,
+            self.state.rotation,
+        )
+    }
+
+    fn definition_derived_fire_top(&self) -> i32 {
+        scaled_shape_fire_top(
+            self.shape_template.fire_top,
+            self.state.construction,
+            self.shape_template.line,
+        )
     }
 
     fn refresh_shape_after_state_change(
@@ -6438,6 +6476,9 @@ impl Object {
             // Line shape independent (C4Object.cpp:322-324).
             return;
         }
+        self.state.shape_override = None;
+        self.shape_rect = self.definition_derived_shape_rect();
+        self.shape_fire_top = self.definition_derived_fire_top();
         let vertices = transformed_shape_vertices(
             self.shape_base_vertices(),
             self.state.construction,
@@ -6477,6 +6518,9 @@ impl Object {
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
         self.state.construction = construction.max(0);
+        if !docon_refreshes_construction(previous_construction, self.state.construction) {
+            return;
+        }
         self.refresh_shape_after_state_change(previous_construction, previous_rect, true);
     }
 
@@ -6500,6 +6544,7 @@ impl Object {
         state.script_fixed_velocity = Some(self.fixed_velocity);
         state.script_rotation_velocity = Some(self.rotation_velocity);
         state.script_fixed_rotation = Some(self.fixed_rotation);
+        state.shape_override = self.current_shape_rect();
         state
     }
 
@@ -6532,8 +6577,12 @@ impl Object {
         }
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
+        let construction_refreshes_shape = delta.construction.is_some_and(|construction| {
+            !delta.construction_via_docon
+                || docon_refreshes_construction(previous_construction, construction.max(0))
+        });
         let shape_changed =
-            delta.construction.is_some() || delta.rotation.is_some() || delta.vertices.is_some();
+            construction_refreshes_shape || delta.rotation.is_some() || delta.vertices.is_some();
         // Kill-trace mark BEFORE the energy write (C4Object.cpp:1351-1361)
         // so AssignDeath credits the new cause.
         if let Some(cause) = delta.energy_loss_cause {
@@ -6635,6 +6684,14 @@ impl Object {
                 // which updates sectors but never fix_x/fix_y
                 // (C4Object.cpp:1462-1495, C4Object::UpdatePos at :346-354).
                 self.fixed_position = fixed_position;
+            }
+        }
+        if let Some(shape_override) = delta.shape_override {
+            self.state.shape_override = shape_override;
+            match shape_override {
+                Some(rect) => self.shape_rect = Some(rect),
+                None if !shape_changed => self.refresh_shape_geometry(),
+                None => {}
             }
         }
         if let Some(vertices) = &delta.live_vertices {
@@ -7195,13 +7252,23 @@ impl Object {
                     &mut on_contact,
                 )?;
             } else {
+                let changed = self.state.rotation != target_rotation;
                 self.state.rotation = target_rotation;
+                if changed && self.shape_template.line == 0 {
+                    self.refresh_shape_geometry();
+                }
             }
         } else {
+            let changed = self.state.rotation != target_rotation;
             self.state.rotation = target_rotation;
+            if changed && self.shape_template.line == 0 {
+                self.refresh_shape_geometry();
+            }
         }
 
-        // Circle bounds: keep fix_r within (-180°, 180°]. C4Movement.cpp:434-435.
+        // Circle bounds change raw r/fix_r only. C++ does not UpdateShape
+        // after this wrap, so a 360° step retains the enlarged live Shape
+        // produced immediately before r becomes zero (C4Movement.cpp:434-435).
         let half_circle = itofix(FIX_HALF_CIRCLE);
         let full_circle = itofix(FIX_FULL_CIRCLE);
         if self.fixed_rotation < -half_circle {
@@ -7226,20 +7293,15 @@ impl Object {
         solid_mask_removed: bool,
         on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
     ) -> Result<(bool, u32), EngineError> {
-        let fallback_base;
-        let base_vertices = if movement.definition_vertices.is_empty() {
-            fallback_base = self.state.vertices.clone();
-            fallback_base.as_slice()
-        } else {
-            movement.definition_vertices
-        };
-
         let mut any_contact = false;
         let mut contact_cnat = 0;
         while self.state.rotation != target_rotation {
             let previous_rotation = self.state.rotation;
             let previous_vertices = self.state.vertices.clone();
             let previous_shape_vertices = self.state.shape_vertices.clone();
+            let previous_shape_rect = self.shape_rect;
+            let previous_fire_top = self.shape_fire_top;
+            let previous_shape_override = self.state.shape_override;
             let previous_position = self.state.position;
             // `C4Shape lshape = Shape` — the contact undo restores the
             // attach record too (C4Movement.cpp:395-417).
@@ -7247,10 +7309,7 @@ impl Object {
 
             self.state.rotation += sign_i32(target_rotation - self.state.rotation);
             if self.shape_template.line == 0 {
-                self.state.vertices = rotated_vertices(base_vertices, self.state.rotation);
-                self.state
-                    .shape_vertices
-                    .replace_active(&self.state.vertices);
+                self.refresh_shape_geometry();
             }
 
             let mut candidate_position = self.state.position;
@@ -7285,6 +7344,9 @@ impl Object {
                 self.state.rotation = previous_rotation;
                 self.state.vertices = previous_vertices;
                 self.state.shape_vertices = previous_shape_vertices;
+                self.shape_rect = previous_shape_rect;
+                self.shape_fire_top = previous_fire_top;
+                self.state.shape_override = previous_shape_override;
                 self.state.position = previous_position;
                 self.state.shape_attach = previous_attach;
                 // The rotation walk only restores Shape/r/fix_r on contact;
@@ -7380,6 +7442,12 @@ impl Object {
         // accumulator from its last rotation step.
         let fixed_rotation =
             (self.fixed_rotation != itofix(self.state.rotation)).then_some(self.fixed_rotation);
+        let current_shape = self.current_shape_rect();
+        let current_shape = (current_shape != self.definition_derived_shape_rect())
+            .then_some(current_shape)
+            .flatten();
+        let current_fire_top = (self.shape_fire_top != self.definition_derived_fire_top())
+            .then_some(self.shape_fire_top);
         ObjectSnapshot {
             id: self.id,
             definition_id: self.definition_id.clone(),
@@ -7401,6 +7469,8 @@ impl Object {
             action_procedure: procedure,
             effects: self.state.effects.clone(),
             vertices: self.state.vertices.clone(),
+            current_shape,
+            current_fire_top,
             contact_density: self.state.contact_density,
             own_vertices: self.own_shape_vertices.clone(),
             container: self.state.container,
@@ -8214,10 +8284,18 @@ pub struct SpawnConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[doc(hidden)]
     pub owns_shape_vertices: Option<bool>,
+    /// Exact saved live C4Shape rectangle (Width/Height/Offset). Loaded
+    /// objects install it verbatim; future UpdateShape rebuilds from DefCore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_rect: Option<DefinitionRect>,
     /// Saved live C4Shape::ContactDensity. None means a fresh object copies
     /// its definition; a loaded object defaults to C4M_Solid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_density: Option<i32>,
+    /// Saved live C4Shape::FireTop. Fresh objects derive it from DefCore and
+    /// construction; loaded objects compile the embedded shape verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_fire_top: Option<i32>,
     /// Explicit per-object `C4Object::Component` list. Loaded Objects.txt
     /// entries compile this verbatim (C4Object.cpp:2811); fresh objects use
     /// their definition components scaled to initial Con when absent.
@@ -8351,7 +8429,9 @@ impl SpawnConfig {
             vertices: Vec::new(),
             shape_vertices: None,
             owns_shape_vertices: None,
+            shape_rect: None,
             contact_density: None,
+            shape_fire_top: None,
             components: None,
             component_order: None,
             owner: OWNER_NONE,
@@ -8527,8 +8607,18 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_shape_rect(mut self, rect: DefinitionRect) -> Self {
+        self.shape_rect = Some(rect);
+        self
+    }
+
     pub fn with_contact_density(mut self, contact_density: i32) -> Self {
         self.contact_density = Some(contact_density);
+        self
+    }
+
+    pub fn with_shape_fire_top(mut self, fire_top: i32) -> Self {
+        self.shape_fire_top = Some(fire_top);
         self
     }
 
@@ -8678,6 +8768,16 @@ pub struct ObjectSnapshot {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    /// Exceptional live C4Object::Shape rectangle after SetShape or a loaded
+    /// embedded shape. None means the exact rectangle is reconstructible from
+    /// DefCore, Con and rotation. The sparse sidecar preserves C++ runtime
+    /// shape state in renderer snapshots and saved recordings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_shape: Option<DefinitionRect>,
+    /// Exceptional live C4Shape::FireTop loaded with the embedded shape.
+    /// None means DefCore FireTop scaled by Con (C4Shape.cpp:103-127,495-510).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_fire_top: Option<i32>,
     /// Saved live C4Shape::ContactDensity (C4Shape.cpp:495-510).
     #[serde(
         default = "default_contact_density",
@@ -8910,6 +9010,426 @@ fn map_denumeration_erases_missing_direct_object_entries() {
     assert_eq!(
         map.get_key(&Value::Object(8)),
         Some(&Value::String("live".into()))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn object_snapshot_carries_exceptional_live_shape_and_fire_top_for_rendering() {
+    let mut engine = Engine::new();
+    let mut definition =
+        Definition::from_script("FIRE", "Fire fixture", "").expect("definition compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(-6, -4, 12, 8)));
+    definition.set_shape_vertices(vec![ObjectVertex::new(2, -1), ObjectVertex::new(5, 3)]);
+    definition.set_rotateable(1);
+    definition.set_fire_top(7);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let id = engine
+        .spawn_object(SpawnConfig::new("FIRE").with_rotation(90))
+        .expect("object spawns");
+
+    assert_eq!(engine.definition_fire_top("FIRE"), 7);
+    assert_eq!(
+        engine.object_current_shape_rect(id),
+        Some(DefinitionRect::new(-9, -9, 18, 18))
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(id)
+            .and_then(|object| object.current_shape),
+        None,
+        "definition-derived geometry stays a sparse snapshot sidecar"
+    );
+
+    let mut update = ObjectUpdate::new();
+    update.shape_override = Some(Some(DefinitionRect::new(2, 3, 4, 5)));
+    engine
+        .apply_object_update(id, update)
+        .expect("SetShape-style override applies");
+    assert_eq!(
+        engine
+            .object_snapshot(id)
+            .and_then(|object| object.current_shape),
+        Some(DefinitionRect::new(2, 3, 4, 5))
+    );
+
+    let loaded = engine
+        .spawn_object(
+            SpawnConfig::new("FIRE")
+                .with_loaded(true)
+                .with_shape_fire_top(11),
+        )
+        .expect("loaded object spawns");
+    assert_eq!(
+        engine
+            .object_snapshot(loaded)
+            .and_then(|object| object.current_fire_top),
+        Some(11)
+    );
+    let snapshot = engine.snapshot();
+    let encoded = serde_json::to_string(&snapshot).expect("snapshot serializes");
+    assert!(encoded.contains("current_shape"));
+    assert!(encoded.contains("current_fire_top"));
+    let decoded: SimulationSnapshot =
+        serde_json::from_str(&encoded).expect("snapshot deserializes");
+    assert_eq!(decoded, snapshot, "live shape sidecars round-trip");
+
+    let state = engine.capture_state();
+    let encoded = state.to_json_string().expect("engine state serializes");
+    let decoded = EngineState::from_json_str(&encoded).expect("engine state deserializes");
+    engine
+        .restore_state(&decoded)
+        .expect("engine state restores");
+    let restored = engine
+        .object_snapshot(loaded)
+        .expect("loaded object restored");
+    assert_eq!(restored.current_fire_top, Some(11));
+    assert_eq!(
+        engine
+            .object_snapshot(id)
+            .and_then(|object| object.current_shape),
+        Some(DefinitionRect::new(2, 3, 4, 5))
+    );
+
+    let partial = engine
+        .spawn_object(
+            SpawnConfig::new("FIRE")
+                .with_loaded(true)
+                .with_construction(500)
+                .with_shape_rect(DefinitionRect::new(3, 4, 5, 6))
+                .with_shape_fire_top(9),
+        )
+        .expect("partial loaded object spawns");
+    let partial_index = engine
+        .find_object_index(partial)
+        .expect("partial object index");
+    engine
+        .do_con(partial_index, 100)
+        .expect("same-percent DoCon succeeds");
+    let same_percent = engine.object_snapshot(partial).expect("partial snapshot");
+    assert_eq!(
+        same_percent.current_shape,
+        Some(DefinitionRect::new(3, 4, 5, 6))
+    );
+    assert_eq!(same_percent.current_fire_top, Some(9));
+    engine
+        .do_con(partial_index, 400)
+        .expect("percent-crossing DoCon succeeds");
+    let crossed = engine.object_snapshot(partial).expect("crossed snapshot");
+    assert_eq!(crossed.current_shape, None);
+    assert_eq!(crossed.current_fire_top, None);
+}
+
+#[cfg(test)]
+#[test]
+fn movement_circle_wrap_retains_pre_wrap_live_shape() {
+    let mut engine = Engine::new();
+    let mut definition =
+        Definition::from_script("TURN", "Turning fixture", "").expect("definition compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(-3, -4, 6, 8)));
+    definition.set_rotateable(1);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let id = engine
+        .spawn_object(
+            SpawnConfig::new("TURN")
+                .with_rotation(355)
+                .with_rotation_velocity(itofix(1)),
+        )
+        .expect("object spawns");
+    let index = engine.find_object_index(id).expect("object index");
+    let materials = MaterialSet::new();
+    let movement = MovementContactConfig {
+        definition_vertices: &[],
+        contact_density: CONTACT_DENSITY_SOLID,
+        contact_function_calls: false,
+        border_bound: 0,
+        shape_rect: engine.objects[index].current_shape_rect(),
+        attach: CNAT_NONE,
+        rotateable: 1,
+        action_procedure: ActionProcedure::Undefined,
+        layer_bounds: None,
+        solid_masks: &[],
+        object_id: id,
+    };
+    engine.objects[index].state.ocf |= ocf::ROTATE;
+    engine.objects[index]
+        .advance_fixed_rotation(
+            None,
+            &materials,
+            movement,
+            false,
+            false,
+            false,
+            |_, _| Ok(()),
+        )
+        .expect("rotation step succeeds");
+
+    let object = &engine.objects[engine.find_object_index(id).expect("object remains")];
+    assert_eq!(object.state.rotation, 0, "raw r wraps after reaching 360");
+    assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
+    assert_eq!(
+        object.current_shape_rect(),
+        Some(DefinitionRect::new(-7, -7, 14, 14)),
+        "C++ does not rebuild Shape after the circle-bound r write"
+    );
+    assert_eq!(
+        object.snapshot(None).current_shape,
+        Some(DefinitionRect::new(-7, -7, 14, 14))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shape_refresh_order_preserves_only_later_script_vertex_edits() {
+    // C4Object::SetRotation performs UpdateFace/UpdateShape inline. A later
+    // AddVertex survives; an earlier AddVertex is discarded by that refresh.
+    // Exercise both the calling-object and foreign-object copy-out folds.
+    let mut engine = Engine::new();
+    let mut definition = Definition::from_script(
+        "VRTX",
+        "Vertex ordering fixture",
+        r#"#strict
+public func RotateThenAdd()
+{
+    SetR(90);
+    AddVertex(17, -9);
+    return GetVertexNum();
+}
+public func AddThenRotate()
+{
+    AddVertex(17, -9);
+    SetR(90);
+    return GetVertexNum();
+}
+public func MutateTarget(target)
+{
+    return target->RotateThenAdd();
+}
+"#,
+    )
+    .expect("vertex-ordering definition compiles");
+    definition.set_c4_callback_convention(true);
+    definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 4, 4)));
+    definition.set_shape_vertices(vec![ObjectVertex::new(2, 0)]);
+    definition.set_rotateable(1);
+    engine
+        .register_definition(definition)
+        .expect("vertex-ordering definition registers");
+
+    let rotate_then_add = engine
+        .spawn_object(SpawnConfig::new("VRTX"))
+        .expect("rotate-then-add object spawns");
+    let rotate_then_add_index = engine
+        .find_object_index(rotate_then_add)
+        .expect("rotate-then-add object index");
+    assert_eq!(
+        engine
+            .call_object_function(rotate_then_add_index, "RotateThenAdd", Vec::new())
+            .expect("rotate-then-add runs"),
+        Value::Int(2)
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(rotate_then_add)
+            .expect("rotate-then-add snapshot")
+            .vertices
+            .last(),
+        Some(&ObjectVertex::new(17, -9))
+    );
+
+    let add_then_rotate = engine
+        .spawn_object(SpawnConfig::new("VRTX"))
+        .expect("add-then-rotate object spawns");
+    let add_then_rotate_index = engine
+        .find_object_index(add_then_rotate)
+        .expect("add-then-rotate object index");
+    assert_eq!(
+        engine
+            .call_object_function(add_then_rotate_index, "AddThenRotate", Vec::new())
+            .expect("add-then-rotate runs"),
+        Value::Int(1)
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(add_then_rotate)
+            .expect("add-then-rotate snapshot")
+            .vertices,
+        vec![ObjectVertex::new(0, 2)]
+    );
+
+    let caller = engine
+        .spawn_object(SpawnConfig::new("VRTX"))
+        .expect("foreign caller spawns");
+    let foreign = engine
+        .spawn_object(SpawnConfig::new("VRTX"))
+        .expect("foreign target spawns");
+    let caller_index = engine.find_object_index(caller).expect("caller index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                caller_index,
+                "MutateTarget",
+                vec![Value::Object(foreign.as_u64())],
+            )
+            .expect("foreign mutation runs"),
+        Value::Int(2)
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(foreign)
+            .expect("foreign snapshot")
+            .vertices
+            .last(),
+        Some(&ObjectVertex::new(17, -9))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn enter_and_status_activation_refresh_shape_before_callbacks_but_keep_later_setshape() {
+    let mut engine = Engine::new();
+    let mut container = Definition::from_script(
+        "CONT",
+        "Container",
+        r#"#strict
+local collection_wdt;
+protected func Collection2(item) { collection_wdt = GetObjWidth(item); }
+public func ReadCollectionWdt() { return collection_wdt; }
+"#,
+    )
+    .expect("container compiles");
+    container.set_c4_callback_convention(true);
+    engine
+        .register_definition(container)
+        .expect("container registers");
+
+    let mut item = Definition::from_script(
+        "ITEM",
+        "Item",
+        r#"#strict
+local entrance_wdt;
+public func ProbeEnter(container)
+{
+    SetShape(-1, -1, 27, 41);
+    if (!Enter(container)) return -1;
+    var after_enter = GetObjWidth();
+    SetShape(-2, -3, 9, 11);
+    return after_enter;
+}
+protected func Entrance(container) { entrance_wdt = GetObjWidth(); }
+public func ReadEntranceWdt() { return entrance_wdt; }
+"#,
+    )
+    .expect("item compiles");
+    item.set_c4_callback_convention(true);
+    item.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+    engine.register_definition(item).expect("item registers");
+
+    let mut activatable = Definition::from_script(
+        "ACTV",
+        "Activatable",
+        r#"#strict
+local transfer_wdt;
+public func ProbeActivate()
+{
+    SetShape(-1, -1, 27, 41);
+    if (!SetObjectStatus(1)) return -1;
+    var after_activate = GetObjWidth();
+    SetShape(-2, -3, 9, 11);
+    return after_activate;
+}
+protected func UpdateTransferZone() { transfer_wdt = GetObjWidth(); }
+public func ReadTransferWdt() { return transfer_wdt; }
+"#,
+    )
+    .expect("activatable compiles");
+    activatable.set_c4_callback_convention(true);
+    activatable.set_shape_rect(Some(DefinitionRect::new(-2, -3, 4, 6)));
+    engine
+        .register_definition(activatable)
+        .expect("activatable registers");
+
+    let container_id = engine
+        .spawn_object(SpawnConfig::new("CONT"))
+        .expect("container spawns");
+    let item_id = engine
+        .spawn_object(SpawnConfig::new("ITEM"))
+        .expect("item spawns");
+    let item_index = engine.find_object_index(item_id).expect("item index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                item_index,
+                "ProbeEnter",
+                vec![Value::Object(container_id.as_u64())],
+            )
+            .expect("Enter probe runs"),
+        Value::Int(4),
+        "Enter's UpdateFace is visible before the host call returns"
+    );
+    let item_index = engine.find_object_index(item_id).expect("item remains");
+    assert_eq!(
+        engine
+            .call_object_function(item_index, "ReadEntranceWdt", Vec::new())
+            .expect("Entrance observation reads"),
+        Value::Int(4)
+    );
+    let container_index = engine
+        .find_object_index(container_id)
+        .expect("container remains");
+    assert_eq!(
+        engine
+            .call_object_function(container_index, "ReadCollectionWdt", Vec::new())
+            .expect("Collection2 observation reads"),
+        Value::Int(4)
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(item_id)
+            .expect("item snapshot")
+            .current_shape,
+        Some(DefinitionRect::new(-2, -3, 9, 11)),
+        "SetShape after Enter survives the deferred host fold"
+    );
+
+    let activatable_id = engine
+        .spawn_object(
+            SpawnConfig::new("ACTV")
+                .with_status(ObjectStatus::Inactive)
+                .with_loaded(true)
+                .with_shape_rect(DefinitionRect::new(-1, -1, 27, 41)),
+        )
+        .expect("inactive object spawns");
+    let activatable_index = engine
+        .find_object_index(activatable_id)
+        .expect("activatable index");
+    assert_eq!(
+        engine
+            .call_object_function(activatable_index, "ProbeActivate", Vec::new())
+            .expect("activation probe runs"),
+        Value::Int(4)
+    );
+    let activatable_index = engine
+        .find_object_index(activatable_id)
+        .expect("activatable remains");
+    assert_eq!(
+        engine
+            .call_object_function(activatable_index, "ReadTransferWdt", Vec::new())
+            .expect("UpdateTransferZone observation reads"),
+        Value::Int(4)
+    );
+    let activatable = engine
+        .object_snapshot(activatable_id)
+        .expect("activatable snapshot");
+    assert_eq!(activatable.status, ObjectStatus::Normal);
+    assert_eq!(
+        activatable.current_shape,
+        Some(DefinitionRect::new(-2, -3, 9, 11)),
+        "SetShape after StatusActivate survives its native UpdateFace"
     );
 }
 
@@ -16747,6 +17267,14 @@ fn construction_percent(construction: i32) -> i32 {
     ((i64::from(construction.max(0)) * 100) / i64::from(FULL_CON)) as i32
 }
 
+fn scaled_shape_fire_top(fire_top: i32, construction: i32, line: i32) -> i32 {
+    if line != 0 || construction == FULL_CON {
+        return fire_top;
+    }
+    let percent = construction_percent(construction);
+    saturating_i64_to_i32(i64::from(fire_top) * i64::from(percent) / 100)
+}
+
 fn construction_scaled_vertices(
     vertices: &[ObjectVertex],
     construction: i32,
@@ -16778,7 +17306,7 @@ fn transformed_shape_vertices(
     } else {
         construction_scaled_vertices(vertices, construction, stretch_growth)
     };
-    if rotateable > 0 && rotation.rem_euclid(360) != 0 {
+    if rotateable != 0 && rotation != 0 {
         rotated_vertices(&scaled, rotation)
     } else {
         scaled
@@ -16890,7 +17418,7 @@ fn transformed_shape_rect(
         rect.y = rect.y * percent / 100;
         rect.height = rect.height * percent / 100;
     }
-    if rotateable > 0 && rotation.rem_euclid(360) != 0 {
+    if rotateable != 0 && rotation != 0 {
         let radius = ((i64::from(rect.x) * i64::from(rect.x)
             + i64::from(rect.y) * i64::from(rect.y)) as f64)
             .sqrt() as i32
@@ -23036,7 +23564,7 @@ impl Engine {
                 .with_ocf(ocf)
                 .with_commands(object.commands.command_views())
                 .with_command_stack(object.commands.snapshot())
-                .with_full_state(Rc::new(object.state.clone()))
+                .with_full_state(Rc::new(object.script_state_snapshot()))
                 .with_last_energy_loss_cause(object.last_energy_loss_cause)
             }),
             landscape,
@@ -26331,6 +26859,29 @@ impl Engine {
             .and_then(|definition| definition.shape_rect())
     }
 
+    /// C4Shape::FireTop copied from DefCore and scaled with the live shape
+    /// before the burning-object facet is drawn (src/C4Shape.cpp:103-127;
+    /// src/C4Object.cpp:2388-2408).
+    pub fn definition_fire_top(&self, definition_id: &str) -> i32 {
+        self.definitions
+            .get(definition_id)
+            .map_or(0, Definition::fire_top)
+    }
+
+    /// DefCore Rotateable. Positive values make UpdateShape rotate vertices
+    /// and enlarge the live shape rectangle whenever raw r is nonzero.
+    pub fn definition_rotateable(&self, definition_id: &str) -> i32 {
+        self.definitions
+            .get(definition_id)
+            .map_or(0, Definition::rotateable)
+    }
+
+    pub fn definition_line(&self, definition_id: &str) -> i32 {
+        self.definitions
+            .get(definition_id)
+            .map_or(0, Definition::line)
+    }
+
     /// The live object-local C4Shape rectangle after per-instance shape,
     /// construction, stretch-growth, and rotation updates.
     pub fn object_current_shape_rect(&self, object_id: ObjectId) -> Option<DefinitionRect> {
@@ -26353,15 +26904,6 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .is_some_and(|definition| definition.stretch_growth())
-    }
-
-    /// DefCore `Rotate` presentation metadata. Unlike OCF_Rotate this stays
-    /// true for construction values at or below 100, where C4Object still
-    /// rotates its live Shape (src/C4Object.cpp:336-340,576-580).
-    pub fn definition_rotateable(&self, definition_id: &str) -> bool {
-        self.definitions
-            .get(definition_id)
-            .is_some_and(|definition| definition.rotateable() > 0)
     }
 
     pub fn definition_action_graphics(
@@ -26529,16 +27071,8 @@ impl Engine {
         {
             let object = &mut self.objects[index];
             object.state.construction = after;
-            if object.shape_template.line == 0 {
-                let vertices = transformed_shape_vertices(
-                    object.shape_base_vertices(),
-                    after,
-                    object.shape_template.stretch_growth,
-                    object.shape_template.rotateable,
-                    object.state.rotation,
-                );
-                object.state.shape_vertices.replace_active(&vertices);
-                object.state.vertices = vertices;
+            if docon_refreshes_construction(before, after) && object.shape_template.line == 0 {
+                object.refresh_shape_geometry();
                 let current_rect = object.current_shape_rect();
                 if let (Some(previous), Some(current)) = (previous_rect, current_rect) {
                     if previous.height != current.height || previous.y != current.y {
@@ -29586,9 +30120,6 @@ impl Engine {
             if let Some(color_modulation) = update_color_modulation {
                 object.state.color_modulation = color_modulation;
             }
-            if let Some(shape_override) = update_shape_override {
-                object.state.shape_override = shape_override;
-            }
             if let Some(status) = status {
                 object.apply_status(status);
             }
@@ -29625,11 +30156,11 @@ impl Engine {
             if let Some(position) = resolved_docon_fixed_position {
                 object.fixed_position = position;
             }
-            if let Some(vertices) = live_vertices {
-                object.set_live_shape_vertices(vertices);
+            if let Some(vertices) = live_vertices.as_ref() {
+                object.set_live_shape_vertices(vertices.clone());
             }
-            if let Some(vertices) = shape_vertices {
-                object.set_shape_vertex_buffer(vertices);
+            if let Some(vertices) = shape_vertices.as_ref() {
+                object.set_shape_vertex_buffer(vertices.clone());
             }
             if let Some(overlays) = graphics_overlays {
                 object.state.graphics_overlays = overlays;
@@ -29719,6 +30250,31 @@ impl Engine {
         }
         if change_def_reinsert {
             self.reinsert_change_def_contents_link(object_id)?;
+        }
+        // Host callbacks collapse several ordered native calls into one
+        // ObjectUpdate. SetR/DoCon/Enter/StatusActivate stage an explicit
+        // clear, while a later SetShape replaces it with the final rect.
+        // Apply that ordering token only after every native shape refresh so
+        // `Enter(); SetShape(...)` and its inverse match C++.
+        if let Some(shape_override) = update_shape_override {
+            let object = &mut self.objects[index];
+            object.state.shape_override = shape_override;
+            match shape_override {
+                Some(rect) => object.shape_rect = Some(rect),
+                None => {
+                    object.refresh_shape_geometry();
+                    // The ordering token may represent an earlier SetR,
+                    // Enter, DoCon or activation. Script vertex edits after
+                    // that native UpdateShape are the final C++ state and
+                    // must survive this deferred refresh.
+                    if let Some(vertices) = live_vertices.as_ref() {
+                        object.set_live_shape_vertices(vertices.clone());
+                    }
+                    if let Some(vertices) = shape_vertices.as_ref() {
+                        object.set_shape_vertex_buffer(vertices.clone());
+                    }
+                }
+            }
         }
         // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
         // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
@@ -30144,15 +30700,20 @@ impl Engine {
         let ocf_override = object_update
             .as_ref()
             .and_then(|update| update.ocf_override);
-        let info_rank_update = object_update
-            .as_ref()
-            .and_then(|update| update.info_rank);
-        let info_link_update = object_update
-            .as_ref()
-            .and_then(|update| update.info_link);
+        let info_rank_update = object_update.as_ref().and_then(|update| update.info_rank);
+        let info_link_update = object_update.as_ref().and_then(|update| update.info_link);
         let crew_status_change = object_update
             .as_ref()
             .is_some_and(|update| update.crew_status_change);
+        let final_shape_override = object_update
+            .as_ref()
+            .and_then(|update| update.shape_override);
+        let final_live_vertices = object_update
+            .as_ref()
+            .and_then(|update| update.live_vertices.clone());
+        let final_shape_vertices = object_update
+            .as_ref()
+            .and_then(|update| update.shape_vertices.clone());
 
         if !host_landscape_ops.is_empty() {
             self.apply_landscape_operations(host_landscape_ops);
@@ -30591,6 +31152,23 @@ impl Engine {
             previous_status,
             self.objects[index].state.status,
         );
+        if let Some(shape_override) = final_shape_override {
+            let object = &mut self.objects[index];
+            object.state.shape_override = shape_override;
+            match shape_override {
+                Some(rect) => object.shape_rect = Some(rect),
+                None => {
+                    object.refresh_shape_geometry();
+                    if let Some(vertices) = final_live_vertices {
+                        object.set_live_shape_vertices(vertices);
+                    }
+                    if let Some(vertices) = final_shape_vertices {
+                        object.set_shape_vertex_buffer(vertices);
+                    }
+                }
+            }
+            self.update_sector_for_index(index);
+        }
 
         Ok(())
     }
@@ -30685,6 +31263,18 @@ impl Engine {
                 .update
                 .as_ref()
                 .is_some_and(|update| update.crew_status_change);
+            let final_shape_override = outcome
+                .update
+                .as_ref()
+                .and_then(|update| update.shape_override);
+            let final_live_vertices = outcome
+                .update
+                .as_ref()
+                .and_then(|update| update.live_vertices.clone());
+            let final_shape_vertices = outcome
+                .update
+                .as_ref()
+                .and_then(|update| update.shape_vertices.clone());
             let mut energy_died = false;
             let mut delayed_docon_state = None;
             // FnChangeDef swaps INLINE (C4Object.cpp:1205-1231): apply the
@@ -30949,6 +31539,23 @@ impl Engine {
                     previous_status,
                     current_status,
                 );
+                if let Some(shape_override) = final_shape_override {
+                    let object = &mut self.objects[status_index];
+                    object.state.shape_override = shape_override;
+                    match shape_override {
+                        Some(rect) => object.shape_rect = Some(rect),
+                        None => {
+                            object.refresh_shape_geometry();
+                            if let Some(vertices) = final_live_vertices {
+                                object.set_live_shape_vertices(vertices);
+                            }
+                            if let Some(vertices) = final_shape_vertices {
+                                object.set_shape_vertex_buffer(vertices);
+                            }
+                        }
+                    }
+                    self.update_sector_for_index(status_index);
+                }
             }
         }
         Ok(retained)
@@ -31813,9 +32420,11 @@ impl Engine {
                     ObjectShapeTemplate::new(
                         definition.shape_vertices().to_vec(),
                         definition.shape_rect(),
+                        definition.fire_top(),
                         definition.stretch_growth(),
                         definition.rotateable(),
-                    ),
+                    )
+                    .with_line(definition.line()),
                     definition.blit_mode(),
                     definition
                         .components()
@@ -31907,12 +32516,18 @@ impl Engine {
                     menu: None,
                     color: snapshot.color,
                     color_modulation: snapshot.color_modulation,
-                    shape_override: None,
+                    shape_override: snapshot.current_shape,
                     ocf: OCF_NORMAL,
                 },
                 shape_template,
                 snapshot.own_vertices.clone(),
             );
+            if let Some(rect) = snapshot.current_shape {
+                object.shape_rect = Some(rect);
+            }
+            if let Some(fire_top) = snapshot.current_fire_top {
+                object.shape_fire_top = fire_top;
+            }
             // Restore authoritative sub-pixel state when the snapshot carried it
             // (whole-pixel objects fall back to the `itofix` set by `Object::new`).
             if let Some(fixed_position) = snapshot.fixed_position {
@@ -35141,16 +35756,17 @@ impl Engine {
         let upright_vertices = self.objects[idx].unrotated_shape_vertices();
         let original_vertices = self.objects[idx].state.vertices.clone();
         let original_shape_vertices = self.objects[idx].state.shape_vertices.clone();
-        let mut upright_shape_vertices = original_shape_vertices.clone();
-        upright_shape_vertices.replace_active(&upright_vertices);
+        let original_shape_rect = self.objects[idx].shape_rect;
+        let original_fire_top = self.objects[idx].shape_fire_top;
+        let original_shape_override = self.objects[idx].state.shape_override;
         let object_id = self.objects[idx].id;
         let position = self.objects[idx].state.position;
         // C++ temporarily writes r=0 and UpdateShape() before ContactCheck,
         // so the callback observes the upright rotation and vertices. fix_r
         // is left untouched unless stabilization succeeds (:498-514).
         self.objects[idx].state.rotation = 0;
-        self.objects[idx].state.vertices = upright_vertices;
-        self.objects[idx].state.shape_vertices = upright_shape_vertices;
+        self.objects[idx].refresh_shape_geometry();
+        debug_assert_eq!(self.objects[idx].state.vertices, upright_vertices);
         let contact = self
             .landscape
             .as_ref()
@@ -35178,6 +35794,9 @@ impl Engine {
                 // fix_r) remain live, matching C++'s two assignments (:505-508).
                 self.objects[index].state.vertices = original_vertices;
                 self.objects[index].state.shape_vertices = original_shape_vertices;
+                self.objects[index].shape_rect = original_shape_rect;
+                self.objects[index].shape_fire_top = original_fire_top;
+                self.objects[index].state.shape_override = original_shape_override;
                 self.objects[index].state.rotation = rotation;
             }
         } else if let Some(index) = self.find_object_index(object_id) {
@@ -43092,6 +43711,7 @@ impl Engine {
         let template = ObjectShapeTemplate::new(
             vertices.clone(),
             definition.shape_rect(),
+            definition.fire_top(),
             definition.stretch_growth(),
             definition.rotateable(),
         )
@@ -45164,6 +45784,10 @@ impl Engine {
             self.inactive_exec_list.retain(|other| *other != id);
         }
         if previous == ObjectStatus::Inactive && current == ObjectStatus::Normal {
+            if let Some(index) = self.find_object_index(id) {
+                self.objects[index].refresh_shape_geometry();
+                self.update_sector_for_index(index);
+            }
             // StatusActivate calls Game.Objects.Add(this), so it receives a
             // fresh stMain position rather than recovering its old slot.
             if let Some(position) = self.exec_list.iter().position(|other| *other == id) {
@@ -46900,9 +47524,12 @@ impl Engine {
         // fCopyMotion=true the mask was already removed before CopyMotion;
         // Collect's false form reaches the same removal only here, preserving
         // the C++ OCF-before-UpdateFace order (C4Object.cpp:1608-1621).
-        if new.is_some() && !loaded && !copy_motion {
-            self.remove_solid_mask(object_index);
+        if new.is_some() && !loaded {
+            self.objects[object_index].refresh_shape_geometry();
             self.update_sector_for_index(object_index);
+            if !copy_motion {
+                self.remove_solid_mask(object_index);
+            }
         }
         // C++ updates the entering object's OCF/face before it updates the
         // new container's mass and OCF (C4Object.cpp:1617-1624).
@@ -52191,7 +52818,9 @@ impl Engine {
             vertices,
             shape_vertices: saved_shape_vertices,
             owns_shape_vertices,
+            shape_rect: saved_shape_rect,
             contact_density,
+            shape_fire_top,
             components,
             component_order,
             owner,
@@ -52238,6 +52867,7 @@ impl Engine {
             definition_vertices,
             definition_vertex_slots,
             definition_shape_rect,
+            definition_fire_top,
             definition_stretch_growth,
             definition_oversize,
             definition_rotateable,
@@ -52259,6 +52889,7 @@ impl Engine {
                 definition_ref.shape_vertices().to_vec(),
                 definition_ref.shape_vertex_buffer().clone(),
                 definition_ref.shape_rect(),
+                definition_ref.fire_top(),
                 definition_ref.stretch_growth(),
                 definition_ref.oversize(),
                 definition_ref.rotateable(),
@@ -52358,6 +52989,7 @@ impl Engine {
         let shape_template = ObjectShapeTemplate::new(
             definition_vertices.clone(),
             definition_shape_rect,
+            definition_fire_top,
             definition_stretch_growth,
             definition_rotateable,
         );
@@ -52581,6 +53213,13 @@ impl Engine {
             shape_template,
             own_shape_vertices,
         );
+        if let Some(rect) = saved_shape_rect {
+            object.shape_rect = Some(rect);
+            object.state.shape_override = Some(rect);
+        }
+        if let Some(fire_top) = shape_fire_top {
+            object.shape_fire_top = fire_top;
+        }
         object.solid_mask_instance_sequence = solid_mask_instance_sequence;
         if !loaded {
             // C4Object::Init checks the copied object rect against the base
@@ -53702,7 +54341,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         menu: None,
         color: snapshot.color,
         color_modulation: snapshot.color_modulation,
-        shape_override: None,
+        shape_override: snapshot.current_shape,
         ocf: OCF_NORMAL,
     }
 }
@@ -61446,6 +62085,7 @@ protected func Departure(pContainer)
         let item_index = engine.find_object_index(item).expect("item exists");
         engine.objects[item_index].state.shape_override =
             Some(DefinitionRect::new(0, 0, 6, 6));
+        engine.objects[item_index].shape_rect = Some(DefinitionRect::new(0, 0, 6, 6));
         engine.objects[item_index].fixed_velocity =
             FixedVec2::new(itofix(7), itofix(-9));
 

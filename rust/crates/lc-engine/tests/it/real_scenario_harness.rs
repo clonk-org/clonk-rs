@@ -1428,9 +1428,20 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     let warped_mage = engine
         .object_snapshot(mage)
         .expect("the warped mage remains live");
+    // TransferWarpObject enters AHUT before the zero return removes
+    // WarpUSpellData. C4Object::Enter calls UpdateFace(true), restoring the
+    // seven definition vertices; FxWarpUSpellDataStop then AddVertex-appends
+    // the seven saved X/Y pairs. AddVertex does not copy CNAT/friction into
+    // those new slots (C4Object.cpp:1621; C4Shape.cpp:26-32).
+    let mut expected_warped_vertices = original_vertices.clone();
+    expected_warped_vertices.extend(
+        original_vertices
+            .iter()
+            .map(|vertex| lc_engine::ObjectVertex::new(vertex.x, vertex.y)),
+    );
     assert_eq!(
-        warped_mage.vertices, original_vertices,
-        "WarpUSpellData Stop restores every CLNK vertex tuple, including CNAT and friction"
+        warped_mage.vertices, expected_warped_vertices,
+        "Enter restores the CLNK shape before WarpUSpellData Stop appends its saved coordinates"
     );
     assert!(
         warped_mage

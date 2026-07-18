@@ -9965,6 +9965,10 @@ fn enter_object_live_internal(
         let Some(context) = borrow.as_mut() else {
             return false;
         };
+        let definition_metadata = context
+            .object_effective_definition_id(target)
+            .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
+            .unwrap_or_default();
         let target_ready = context.object_scope(target).is_some_and(|scope| {
             !scope.destroy && scope.status().is_active() && scope.container().is_none()
         }) || context
@@ -10025,6 +10029,12 @@ fn enter_object_live_internal(
             }
         }
         let _ = refresh_live_object_ocf(context, target);
+        if let Some(scope) = context.object_scope_mut(target) {
+            if definition_metadata.line == 0 {
+                scope.pending_update.shape_override = Some(None);
+            }
+            scope.refresh_shape_preview(&definition_metadata);
+        }
         context.update_live_solid_mask(target, false);
         refresh_container_collection_ocf(context, container);
         true
@@ -30411,11 +30421,15 @@ fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return Ok(Value::Bool(false));
         }
+        let metadata = context
+            .object_effective_definition_id(target)
+            .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
+            .unwrap_or_default();
         let Some(object) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
 
-        object.set_rotation(rotation);
+        object.set_rotation(rotation, &metadata);
         context.update_live_solid_mask(target, false);
         Ok(Value::Bool(true))
     })
@@ -41599,6 +41613,16 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         context.preview_object_status_change(object_id, status);
         if status == ObjectStatus::Normal {
+            let metadata = context
+                .object_effective_definition_id(object_id)
+                .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
+                .unwrap_or_default();
+            if let Some(object) = context.object_scope_mut(object_id) {
+                if metadata.line == 0 {
+                    object.pending_update.shape_override = Some(None);
+                }
+                object.refresh_shape_preview(&metadata);
+            }
             // StatusActivate::UpdateFace(true) still performs the ordinary
             // UpdateSolidMask remove/re-put before UpdateTransferZone.
             context.update_live_solid_mask(object_id, false);
@@ -47106,6 +47130,8 @@ impl ObjectScopeContext {
         // definitions copy the current definition shape while fOwnVertices
         // restores the object's private backup.
         if metadata.line == 0 {
+            let replaces_staged_vertex_edit = self.pending_update.live_vertices.is_some()
+                || self.pending_update.shape_vertices.is_some();
             let base = if self.staged_own_vertices {
                 self.shape_vertices.own_original_vertices()
             } else {
@@ -47119,6 +47145,11 @@ impl ObjectScopeContext {
                 self.rotation(),
             );
             self.shape_vertices.replace_active(&vertices);
+            if replaces_staged_vertex_edit {
+                let vertices = self.shape_vertices.clone();
+                self.pending_update.live_vertices = Some(vertices.active_vec());
+                self.pending_update.shape_vertices = Some(vertices);
+            }
         }
     }
 
@@ -48192,13 +48223,17 @@ impl ObjectScopeContext {
             .unwrap_or(self.current_rotation)
     }
 
-    fn set_rotation(&mut self, rotation: i32) {
+    fn set_rotation(&mut self, rotation: i32, metadata: &DefinitionMetadata) {
         let normalized = rotation.rem_euclid(360);
         // C4Object::SetRotation always re-seeds fix_r and refreshes the
         // solid mask/face, even when the integer angle is unchanged.
         self.current_rotation = normalized;
         self.current_fixed_rotation = itofix(normalized);
         self.pending_update.rotation = Some(normalized);
+        if metadata.line == 0 {
+            self.pending_update.shape_override = Some(None);
+        }
+        self.refresh_shape_preview(metadata);
     }
 
     fn fixed_rotation(&self) -> C4Fixed {
@@ -65872,6 +65907,89 @@ func Probe(state) {
                 Value::Int(27),
                 Value::Int(41),
             ])
+        );
+    }
+
+    #[test]
+    fn set_r_updateface_orders_with_set_shape_in_same_call() {
+        // SetRotation ends in UpdateFace(true), so it discards an earlier
+        // SetShape; a later SetShape must still win (C4Object.cpp:5632-5647;
+        // C4Script.cpp:5182-5196).
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                r#"
+                #strict 2
+                func ShapeThenRotate()
+                {
+                    SetShape(-3, -4, 27, 41);
+                    SetR(90);
+                    return [GetObjWidth(), GetObjHeight()];
+                }
+                func RotateThenShape()
+                {
+                    SetR(90);
+                    SetShape(-3, -4, 27, 41);
+                    return [GetObjWidth(), GetObjHeight()];
+                }
+                "#,
+            )
+            .expect("shape ordering probe compiles");
+        let definitions = Rc::new(HashMap::from([(
+            DefinitionId::from("SELF"),
+            DefinitionMetadata {
+                shape: Some(DefinitionRect::new(-10, -15, 20, 30)),
+                rotateable: 1,
+                ..DefinitionMetadata::default()
+            },
+        )]));
+        let run = |function| {
+            let world =
+                HostWorldContext::default().with_definition_metadata(Rc::clone(&definitions));
+            let object = HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                0,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                &[],
+                crate::FULL_CON,
+            )
+            .with_definition_id("SELF");
+            with_effect_context(Some(object), &[], world, 1, || script.call(function, &[]))
+        };
+
+        let (shape_then_rotate, outcome) = run("ShapeThenRotate");
+        assert_eq!(
+            shape_then_rotate.expect("shape-then-rotate succeeds"),
+            Value::Array(vec![Value::Int(40), Value::Int(40)])
+        );
+        assert_eq!(
+            outcome.object_update.expect("object update").shape_override,
+            Some(None)
+        );
+
+        let (rotate_then_shape, outcome) = run("RotateThenShape");
+        assert_eq!(
+            rotate_then_shape.expect("rotate-then-shape succeeds"),
+            Value::Array(vec![Value::Int(27), Value::Int(41)])
+        );
+        assert_eq!(
+            outcome.object_update.expect("object update").shape_override,
+            Some(Some(DefinitionRect::new(-3, -4, 27, 41)))
         );
     }
 

@@ -439,6 +439,14 @@ pub struct DefinitionSprite {
     /// sprite sheet — and the face is anchored at the shape top-left,
     /// x + Shape.x / y + Shape.y (C4Object::Draw, C4Object.cpp:2231).
     pub shape: Option<DefinitionRect>,
+    /// C4Shape::FireTop from DefCore. Construction scaling changes this with
+    /// the live shape before the fire facet is drawn (C4Shape.cpp:103-127).
+    pub fire_top: i32,
+    /// DefCore Rotateable. Required to reconstruct definition-derived live
+    /// shape bounds when a sparse/legacy snapshot has no shape sidecar.
+    pub rotateable: i32,
+    /// DefCore Line. Line objects return through DrawLine before fire/faces.
+    pub line: i32,
     /// DefCore StretchGrowth → C4Def::GrowthType (src/C4Def.cpp:387):
     /// Con scales the shape on both axes (C4Shape::Stretch) instead of
     /// height only (C4Shape::Jolt), C4Object.cpp:329-333.
@@ -5024,6 +5032,29 @@ impl GraphicsSystem {
                 .get(&sprite_map_key(&object.definition_id, None))
                 .cloned();
         }
+        let geometry_sprite = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+            .cloned()
+            .or_else(|| sprite.clone());
+        if let Some(geometry_sprite) = geometry_sprite.as_ref() {
+            let target_position = self.object_target_position(object);
+            let shape = self.live_object_shape(geometry_sprite, object);
+            if !self.object_reaches_post_face_draw(object, geometry_sprite, shape) {
+                return;
+            }
+            // C4Object draws the fire facet before PrepareDrawing and before
+            // its base/action face (src/C4Object.cpp:2388-2418), so the
+            // object's ColorMod, BlitMode, rotation and draw transform do not
+            // affect this normal rendering path.
+            self.draw_object_fire(
+                object,
+                geometry_sprite,
+                target_position,
+                SpriteBlitState::normal(),
+                gamma,
+            );
+        }
         if let Some(sprite) = sprite {
             self.draw_object_face(
                 object,
@@ -5220,14 +5251,18 @@ impl GraphicsSystem {
         if con == FULL_CON {
             return shape;
         }
-        let percent = con * 100 / FULL_CON;
+        let percent = ((i64::from(con.max(0)) * 100) / i64::from(FULL_CON)) as i32;
+        let scale = |value: i32| {
+            (i64::from(value) * i64::from(percent) / 100)
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+        };
         let mut scaled = shape;
         if stretch_growth {
-            scaled.x = scaled.x * percent / 100;
-            scaled.width = scaled.width * percent / 100;
+            scaled.x = scale(scaled.x);
+            scaled.width = scale(scaled.width);
         }
-        scaled.y = scaled.y * percent / 100;
-        scaled.height = scaled.height * percent / 100;
+        scaled.y = scale(scaled.y);
+        scaled.height = scale(scaled.height);
         scaled
     }
 
@@ -5240,36 +5275,157 @@ impl GraphicsSystem {
         sprite: &DefinitionSprite,
         object: &ObjectSnapshot,
     ) -> DefinitionRect {
-        let mut shape = Self::con_scaled_shape(
-            Self::sprite_def_shape(sprite),
-            object.construction.clamp(0, FULL_CON),
-            sprite.stretch_growth,
-        );
-        let rotateable = self
-            .rotateable_definitions
-            .contains(&object.definition_id)
+        if let Some(shape) = object.current_shape {
+            return shape;
+        }
+        let mut shape = Self::sprite_def_shape(sprite);
+        if sprite.line == 0 {
+            shape = Self::con_scaled_shape(
+                shape,
+                object.construction.max(0),
+                sprite.stretch_growth,
+            );
+        }
+        // UpdateShape tests raw r, so a loaded r=360 still enlarges the
+        // rectangle even though its vertices retain their orientation.
+        let rotateable = sprite.rotateable != 0
+            || self
+                .rotateable_definitions
+                .contains(&object.definition_id)
             || object.ocf & lc_engine::ocf::ROTATE != 0;
-        if rotateable && object.rotation != 0 {
-            let radius = ((i64::from(shape.x) * i64::from(shape.x)
+        if sprite.line == 0 && rotateable && object.rotation != 0 {
+            let radius = (((i64::from(shape.x) * i64::from(shape.x)
                 + i64::from(shape.y) * i64::from(shape.y)) as f64)
-                .sqrt() as i32
-                + 2;
-            shape = DefinitionRect::new(-radius, -radius, 2 * radius, 2 * radius);
+                .sqrt() as i32)
+                .saturating_add(2);
+            shape.x = -radius;
+            shape.y = -radius;
+            shape.width = radius.saturating_mul(2);
+            shape.height = radius.saturating_mul(2);
         }
         shape
     }
-
     /// The def Shape rect used for drawing; loader sprites without a def
     /// shape fall back to the whole image centered on the position.
     fn sprite_def_shape(sprite: &DefinitionSprite) -> DefinitionRect {
-        sprite
-            .shape
-            .filter(|shape| shape.width > 0 && shape.height > 0)
-            .unwrap_or_else(|| {
-                let width = sprite.image.width() as i32;
-                let height = sprite.image.height() as i32;
-                DefinitionRect::new(-width / 2, -height / 2, width, height)
-            })
+        sprite.shape.unwrap_or_else(|| {
+            let width = sprite.image.width() as i32;
+            let height = sprite.image.height() as i32;
+            DefinitionRect::new(-width / 2, -height / 2, width, height)
+        })
+    }
+
+    /// C4Object::Draw's fctFire pass (src/C4Object.cpp:2388-2408). The
+    /// horizontal FirePhase cell is stretched without aspect preservation;
+    /// even rotated objects receive an axis-aligned flame rectangle.
+    fn draw_object_fire(
+        &mut self,
+        object: &ObjectSnapshot,
+        definition_sprite: &DefinitionSprite,
+        target_position: (f32, f32),
+        blit: SpriteBlitState,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        if !object.on_fire {
+            return;
+        }
+        let Some(fire) = self.hud_graphics.fire.clone() else {
+            return;
+        };
+        let cell = fire.height() as i32;
+        if cell <= 0 {
+            return;
+        }
+
+        // Oversize definitions may legitimately carry Con > FullCon; C++
+        // scales their Shape and FireTop above 100% (C4Object.cpp:322-340).
+        let con = object.construction.max(0);
+        let shape = self.live_object_shape(definition_sprite, object);
+        let target = if object.rotation == 0 {
+            let percent = if con == FULL_CON {
+                100
+            } else {
+                ((i64::from(con) * 100) / i64::from(FULL_CON)) as i32
+            };
+            let fire_top = object.current_fire_top.unwrap_or_else(|| {
+                if definition_sprite.line != 0 {
+                    definition_sprite.fire_top
+                } else {
+                    (i64::from(definition_sprite.fire_top) * i64::from(percent) / 100)
+                        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+                }
+            });
+            DefinitionRect::new(
+                object.position.x + shape.x,
+                object.position.y + shape.y,
+                shape.width,
+                shape.height - fire_top,
+            )
+        } else {
+            // GetVertexOutline includes the origin and every live vertex.
+            // Its final y is forced to the already-live Shape.y while
+            // retaining the previous lower edge (src/C4Shape.cpp:130-163).
+            // This also preserves SetShape and the non-rotateable/raw-r case.
+            // FireTop is intentionally ignored in this branch.
+            let left = object
+                .vertices
+                .iter()
+                .map(|vertex| vertex.x)
+                .min()
+                .unwrap_or(0)
+                .min(0);
+            let right = object
+                .vertices
+                .iter()
+                .map(|vertex| vertex.x)
+                .max()
+                .unwrap_or(0)
+                .max(0);
+            let bottom = object
+                .vertices
+                .iter()
+                .map(|vertex| vertex.y)
+                .max()
+                .unwrap_or(0)
+                .max(0);
+            DefinitionRect::new(
+                object.position.x + left,
+                object.position.y + shape.y,
+                right - left,
+                bottom - shape.y,
+            )
+        };
+        if target.width <= 0 || target.height <= 0 {
+            return;
+        }
+
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let (target_x, target_y) = target_position;
+        let rect = GuiRect::from_origin_size(
+            GuiPoint::new(
+                (target.x as f32 - target_x) * zoom,
+                (target.y as f32 - target_y) * zoom,
+            ),
+            GuiSize::new(target.width as f32 * zoom, target.height as f32 * zoom),
+        );
+        let source_x = i64::from(object.fire_phase) * i64::from(cell);
+        if source_x < 0 || source_x + i64::from(cell) > i64::from(fire.width()) {
+            return;
+        }
+        let source = SourceRect::new(source_x as i32, 0, cell, cell);
+        let fog = self.fog_draw_context();
+        draw_image_region(
+            &mut self.surface,
+            &rect,
+            &fire,
+            None,
+            &source,
+            false,
+            None,
+            blit,
+            gamma,
+            fog.as_ref(),
+        );
     }
 
     fn live_action_graphics<'a>(
@@ -5943,45 +6099,66 @@ impl GraphicsSystem {
             };
             let owner_color = Some(object_color_by_owner_tint(target));
             let rotation_degrees = (target.rotation.rem_euclid(360)) as f32;
-            // MODE_Object calls the referenced object's Draw body. Its own
-            // IgnoreFoW flag therefore covers the base face and recursively
-            // painted overlays, but DrawTopFace happens after restoration.
-            let suppress_fog = target.category & CATEGORY_IGNORE_FOW_FLAG != 0
-                && self.active_fog_map.is_some();
-            if suppress_fog {
-                self.fog_suppression_depth += 1;
+            let geometry_sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&target.definition_id, None))
+                .cloned()
+                .unwrap_or_else(|| sprite.clone());
+            if geometry_sprite.line != 0 {
+                // C4Object::Draw dispatches lines before every draw-mode
+                // branch, including ODM_Overlay.
+                self.paint_typed_line(target, geometry_sprite.line, gamma);
+            } else {
+                // MODE_Object calls C4Object::Draw with ODM_Overlay. The fire
+                // pass still precedes the face, but inherits the overlay's
+                // already-established blit state (C4DefGraphics.cpp:769-780).
+                // The referenced object's IgnoreFoW flag covers this Draw
+                // body, including fire and recursive overlays, but C++
+                // restores FoW before the separate DrawTopFace call.
+                let suppress_fog = target.category & CATEGORY_IGNORE_FOW_FLAG != 0
+                    && self.active_fog_map.is_some();
+                if suppress_fog {
+                    self.fog_suppression_depth += 1;
+                }
+                self.draw_object_fire(
+                    target,
+                    &geometry_sprite,
+                    (self.viewport_x, self.viewport_y),
+                    blit,
+                    gamma,
+                );
+                self.draw_object_face(
+                    target,
+                    objects,
+                    &sprite,
+                    owner_color,
+                    zoom,
+                    rotation_degrees,
+                    target.draw_transform,
+                    blit,
+                    gamma,
+                );
+                let screen_x = (target.position.x as f32 - self.viewport_x) * zoom;
+                let screen_y = (target.position.y as f32 - self.viewport_y) * zoom;
+                self.draw_object_overlays_inner(
+                    target,
+                    objects,
+                    players,
+                    for_player,
+                    owner_color,
+                    screen_x,
+                    screen_y,
+                    zoom,
+                    rotation_degrees,
+                    target.draw_transform,
+                    gamma,
+                    object_ancestry,
+                );
+                if suppress_fog {
+                    self.fog_suppression_depth -= 1;
+                }
+                self.paint_object_top_face(target, blit, gamma);
             }
-            self.draw_object_face(
-                target,
-                objects,
-                &sprite,
-                owner_color,
-                zoom,
-                rotation_degrees,
-                target.draw_transform,
-                blit,
-                gamma,
-            );
-            let screen_x = (target.position.x as f32 - self.viewport_x) * zoom;
-            let screen_y = (target.position.y as f32 - self.viewport_y) * zoom;
-            self.draw_object_overlays_inner(
-                target,
-                objects,
-                players,
-                for_player,
-                owner_color,
-                screen_x,
-                screen_y,
-                zoom,
-                rotation_degrees,
-                target.draw_transform,
-                gamma,
-                object_ancestry,
-            );
-            if suppress_fog {
-                self.fog_suppression_depth -= 1;
-            }
-            self.paint_object_top_face(target, blit, gamma);
         }
 
         self.viewport_x = saved_viewport_x;
@@ -9859,6 +10036,9 @@ mod tests {
             color_mask: None,
             graphics_scale: 1.0,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -10053,6 +10233,9 @@ mod tests {
             ]),
             color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 4, 4)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             // Expected source: Facet(2,1) + TopFace(1,1)
             // + FacetSize(2,1) * (reversed phase 2, DrawDir 2) = (7,4).
@@ -10115,6 +10298,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(-2, -1, 4, 2)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(2, 1, 2, 2, 1, 0)),
         };
@@ -10126,6 +10312,9 @@ mod tests {
             // Deliberately conflicting metadata: the old path used these
             // coordinates and drew a red pixel at (14,12).
             shape: Some(DefinitionRect::new(2, 2, 2, 2)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
         };
@@ -10194,6 +10383,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(2, 2, 1, 1, 0, 0)),
         };
@@ -10203,6 +10395,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: None,
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -10257,6 +10452,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 4, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -10353,6 +10551,9 @@ mod tests {
             actions: HashMap::from([("Active".to_string(), live_action)]),
             color_mask: None,
             shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(1, 1, 1, 1, 0, 0)),
         };
@@ -10362,6 +10563,9 @@ mod tests {
             actions: HashMap::from([("Active".to_string(), DefinitionActionGraphics::default())]),
             color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 2, 2)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
         };
@@ -10423,6 +10627,9 @@ mod tests {
             actions: HashMap::from([("Active".to_string(), action)]),
             color_mask: None,
             shape: Some(DefinitionRect::new(-3, -1, 6, 2)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
         };
@@ -10477,6 +10684,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: true,
             top_face: Some(DefinitionTargetRect::new(0, 0, 2, 2, 1, 1)),
         };
@@ -10517,6 +10727,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -10588,6 +10801,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(-4, -1, 9, 3)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -10855,6 +11071,9 @@ mod tests {
                         .unwrap_or_default(),
                     color_mask,
                     shape: engine.definition_shape_rect(definition_id),
+                    fire_top: engine.definition_fire_top(definition_id),
+                    rotateable: engine.definition_rotateable(definition_id),
+                    line: engine.definition_line(definition_id),
                     stretch_growth: engine.definition_stretch_growth(definition_id),
                     top_face: engine.definition_top_face(definition_id),
                 },
@@ -10910,6 +11129,8 @@ mod tests {
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                current_shape: None,
+                current_fire_top: None,
                 contact_density: 50,
                 own_vertices: None,
                 container: None,
@@ -11434,6 +11655,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -11949,6 +12173,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([128]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -12050,6 +12277,9 @@ mod tests {
                 .expect("FISH loads its real ActMap facets"),
             color_mask: Some(ColorByOwnerMask::new(width, height, mask)),
             shape: engine.definition_shape_rect("FISH"),
+            fire_top: engine.definition_fire_top("FISH"),
+            rotateable: engine.definition_rotateable("FISH"),
+            line: engine.definition_line("FISH"),
             stretch_growth: engine.definition_stretch_growth("FISH"),
             top_face: engine.definition_top_face("FISH"),
         };
@@ -12123,6 +12353,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -12183,6 +12416,9 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -12209,6 +12445,9 @@ mod tests {
                 )]),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -12225,6 +12464,9 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
             },
@@ -12302,6 +12544,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([255]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -12386,6 +12631,8 @@ mod tests {
         target.owner = 4;
         target.visibility = lc_engine::VIS_OVERLAY_ONLY | lc_engine::VIS_OWNER;
         target.blit_mode = C4GFXBLIT_ADDITIVE;
+        target.on_fire = true;
+        target.current_shape = Some(DefinitionRect::new(0, 0, 1, 1));
         target.graphics_overlays.clear();
 
         let sprites = Arc::new(HashMap::from([
@@ -12397,6 +12644,9 @@ mod tests {
                     actions: HashMap::new(),
                     color_mask: None,
                     shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                    fire_top: 0,
+                    rotateable: 0,
+                    line: 0,
                     stretch_growth: false,
                     top_face: None,
                 },
@@ -12409,12 +12659,17 @@ mod tests {
                     actions: HashMap::new(),
                     color_mask: None,
                     shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                    fire_top: 0,
+                    rotateable: 0,
+                    line: 0,
                     stretch_growth: false,
                     top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 1, 0)),
                 },
             ),
         ]));
-        let render = |for_player| {
+        let render = |for_player, target_blit_mode| {
+            let mut target = target.clone();
+            target.blit_mode = target_blit_mode;
             let mut graphics = GraphicsSystem::new(
                 12,
                 8,
@@ -12423,7 +12678,10 @@ mod tests {
                 test_font(),
                 Arc::clone(&sprites),
                 empty_cursor_atlas(),
-                empty_hud_graphics(),
+                Arc::new(HudGraphics {
+                    fire: Some(ImageData::new(1, 1, vec![0, 0, 20, 255])),
+                    ..HudGraphics::default()
+                }),
             );
             graphics.surface_mut().fill(Color::opaque(10, 10, 10));
             graphics.draw_objects(
@@ -12440,13 +12698,24 @@ mod tests {
             graphics.surface().clone()
         };
 
-        let visible = render(4);
-        assert_eq!(visible.get_pixel(5, 2), Some(Color::opaque(50, 10, 10)));
+        let visible = render(4, C4GFXBLIT_ADDITIVE);
+        assert_eq!(
+            visible.get_pixel(5, 2),
+            Some(Color::opaque(50, 10, 30)),
+            "MODE_Object fire inherits the target's additive PARENT state"
+        );
         assert_eq!(visible.get_pixel(6, 2), Some(Color::opaque(10, 50, 10)));
         assert_eq!(visible.get_pixel(7, 2), Some(Color::opaque(10, 10, 10)));
         assert_eq!(visible.get_pixel(10, 6), Some(Color::opaque(10, 10, 10)));
 
-        let hidden = render(5);
+        let normal = render(4, 0);
+        assert_eq!(
+            normal.get_pixel(5, 2),
+            Some(Color::opaque(40, 0, 0)),
+            "MODE_Object paints fire before the referenced object's opaque face"
+        );
+
+        let hidden = render(5, C4GFXBLIT_ADDITIVE);
         assert_eq!(hidden.get_pixel(5, 2), Some(Color::opaque(10, 10, 10)));
         assert_eq!(hidden.get_pixel(6, 2), Some(Color::opaque(10, 10, 10)));
 
@@ -12640,6 +12909,9 @@ mod tests {
             )]),
             color_mask: None,
             shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -12698,6 +12970,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(shape),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -12734,6 +13009,9 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
             },
@@ -12808,6 +13086,9 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -12820,6 +13101,9 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -12911,6 +13195,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: Some(ColorByOwnerMask::new(1, 1, Arc::from([64]))),
             shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -12972,6 +13259,9 @@ mod tests {
             actions: HashMap::new(),
             color_mask: None,
             shape: Some(DefinitionRect::new(-1, -1, 3, 3)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -13051,6 +13341,9 @@ mod tests {
             )]),
             color_mask: None,
             shape: Some(DefinitionRect::new(-5, -5, 10, 10)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };
@@ -15557,11 +15850,424 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape,
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth,
                 top_face: None,
             },
         );
         Arc::new(sprites)
+    }
+
+    fn fire_test_strip() -> ImageData {
+        let colors = [
+            Color::opaque(200, 0, 0),
+            Color::opaque(0, 200, 0),
+            Color::opaque(0, 0, 200),
+        ];
+        let mut pixels = Vec::with_capacity(6 * 2 * 4);
+        for _ in 0..2 {
+            for color in colors {
+                for _ in 0..2 {
+                    pixels.extend([color.r, color.g, color.b, color.a]);
+                }
+            }
+        }
+        ImageData::new(6, 2, pixels)
+    }
+
+    #[test]
+    fn burning_object_uses_phase_plain_stretch_scaled_fire_top_and_cpp_order() {
+        // C4Object::Draw stretches one height-square FirePhase cell over the
+        // live Shape and draws it before the object face
+        // (src/C4Object.cpp:2388-2418). At half construction, Jolt changes
+        // Shape(-5,-4,10,8) to (-5,-2,10,4) and FireTop 4 to 2, producing
+        // the exact world rect x=15..24, y=18..19.
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "BurningStraight".to_string();
+        object.position = Vector2::new(20, 20);
+        object.construction = FULL_CON / 2;
+        object.current_shape = None;
+        object.crew_member = false;
+        object.on_fire = true;
+        object.fire_phase = 1;
+
+        let mut base_pixels = vec![0; 10 * 8 * 4];
+        let base_index = (4 * 10 + 5) * 4;
+        base_pixels[base_index..base_index + 4].copy_from_slice(&[0, 0, 200, 255]);
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(10, 8, base_pixels),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-5, -4, 10, 8)),
+            fire_top: 4,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let hud = Arc::new(HudGraphics {
+            fire: Some(fire_test_strip()),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            40,
+            32,
+            32,
+            "straight fire facet",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("BurningStraight", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            hud,
+        );
+        let black = Color::opaque(0, 0, 0);
+        let green = Color::opaque(0, 200, 0);
+        let blue = Color::opaque(0, 0, 200);
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object.clone()],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(graphics.surface().get_pixel(15, 18), Some(green));
+        assert_eq!(graphics.surface().get_pixel(24, 19), Some(green));
+        assert_eq!(graphics.surface().get_pixel(14, 18), Some(black));
+        assert_eq!(graphics.surface().get_pixel(25, 18), Some(black));
+        assert_eq!(graphics.surface().get_pixel(15, 17), Some(black));
+        assert_eq!(graphics.surface().get_pixel(15, 20), Some(black));
+        assert_eq!(
+            graphics.surface().get_pixel(20, 18),
+            Some(blue),
+            "the base face is drawn after and can cover the fire facet"
+        );
+
+        object.current_fire_top = Some(1);
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object.clone()],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(graphics.surface().get_pixel(15, 20), Some(green));
+        assert_eq!(graphics.surface().get_pixel(15, 21), Some(black));
+
+        // TargetPos applies object-local parallax before fire. The existing
+        // base-face path intentionally remains transparent at the sampled
+        // edge, so this pins the fire coordinates independently.
+        let int_value = |value| {
+            serde_json::from_value(serde_json::json!({ "Int": value }))
+                .expect("deserialize C4Script integer")
+        };
+        object.current_fire_top = None;
+        object.category |= CATEGORY_PARALLAX_FLAG;
+        object
+            .local_vars
+            .insert("__local_0".to_string(), int_value(50));
+        object
+            .local_vars
+            .insert("__local_1".to_string(), int_value(50));
+        graphics.viewport_x = 10.0;
+        graphics.viewport_y = 10.0;
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object.clone()],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(graphics.surface().get_pixel(10, 13), Some(green));
+        assert_eq!(graphics.surface().get_pixel(5, 8), Some(black));
+        graphics.viewport_x = 0.0;
+        graphics.viewport_y = 0.0;
+        object.category &= !CATEGORY_PARALLAX_FLAG;
+
+        object.on_fire = false;
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object.clone()],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(15, 18),
+            Some(black),
+            "the phase-one pixels come only from the burning overlay"
+        );
+
+        // C4Object::UpdateShape also scales burning Oversize definitions
+        // beyond 100%; fire must not clamp Con to FullCon.
+        object.on_fire = true;
+        object.construction = FULL_CON + FULL_CON / 2;
+        object.current_shape = Some(DefinitionRect::new(-5, -6, 10, 12));
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(graphics.surface().get_pixel(15, 14), Some(green));
+        assert_eq!(graphics.surface().get_pixel(15, 19), Some(green));
+        assert_eq!(graphics.surface().get_pixel(15, 20), Some(black));
+    }
+
+    #[test]
+    fn rotated_burning_object_uses_origin_inclusive_vertex_outline() {
+        // C4Shape::Rotate turns Shape(-6,-4,12,8) into y=-9. The unusual
+        // GetVertexOutline starts at the origin, so all-positive vertices
+        // [(2,-1)..(5,3)] produce x=0,w=5,y=-9,h=12. FireTop is ignored for
+        // rotated fire (src/C4Shape.cpp:41-92,130-163;
+        // src/C4Object.cpp:2397-2405).
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "BurningRotated".to_string();
+        object.position = Vector2::new(16, 16);
+        object.rotation = 90;
+        object.current_shape = None;
+        object.crew_member = false;
+        object.on_fire = true;
+        object.fire_phase = 2;
+        object.vertices = vec![
+            ObjectVertex::new(2, -1),
+            ObjectVertex::new(5, -1),
+            ObjectVertex::new(5, 3),
+            ObjectVertex::new(2, 3),
+        ];
+
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(12, 8, vec![0; 12 * 8 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-6, -4, 12, 8)),
+            fire_top: 7,
+            rotateable: 1,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let hud = Arc::new(HudGraphics {
+            fire: Some(fire_test_strip()),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            40,
+            32,
+            32,
+            "rotated fire facet",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("BurningRotated", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            hud,
+        );
+        let black = Color::opaque(0, 0, 0);
+        let blue = Color::opaque(0, 0, 200);
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object.clone()],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(graphics.surface().get_pixel(16, 7), Some(blue));
+        assert_eq!(graphics.surface().get_pixel(20, 18), Some(blue));
+        assert_eq!(graphics.surface().get_pixel(15, 7), Some(black));
+        assert_eq!(graphics.surface().get_pixel(21, 7), Some(black));
+        assert_eq!(graphics.surface().get_pixel(16, 6), Some(black));
+        assert_eq!(graphics.surface().get_pixel(16, 19), Some(black));
+
+        // A non-rotateable object may retain raw r != 0. C++ still selects
+        // the vertex-outline fire branch, but its live Shape is not enlarged.
+        // Using current_shape also covers a script SetShape override.
+        object.current_shape = Some(DefinitionRect::new(-6, -4, 12, 8));
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(graphics.surface().get_pixel(16, 12), Some(blue));
+        assert_eq!(graphics.surface().get_pixel(20, 18), Some(blue));
+        assert_eq!(graphics.surface().get_pixel(16, 11), Some(black));
+        assert_eq!(graphics.surface().get_pixel(16, 19), Some(black));
+    }
+
+    #[test]
+    fn burning_object_culls_on_live_shape_before_vertex_outline_fire() {
+        // C4Object::Draw rejects a normal-mode object against its live Shape
+        // before constructing the rotated fire rectangle. Even if the vertex
+        // outline would reach back onto the output, no flame is drawn
+        // (src/C4Object.cpp:2266-2283,2388-2408).
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "CulledBurning".to_string();
+        object.position = Vector2::new(5, 5);
+        object.rotation = 1;
+        object.current_shape = Some(DefinitionRect::new(20, 0, 1, 1));
+        object.vertices = vec![
+            ObjectVertex::new(-5, 0),
+            ObjectVertex::new(0, 0),
+            ObjectVertex::new(0, 2),
+        ];
+        object.crew_member = false;
+        object.on_fire = true;
+        object.fire_phase = 0;
+
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 1,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut graphics = GraphicsSystem::new(
+            10,
+            10,
+            10,
+            "culled fire facet",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("CulledBurning", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            Arc::new(HudGraphics {
+                fire: Some(fire_test_strip()),
+                ..HudGraphics::default()
+            }),
+        );
+        let black = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(graphics.surface().get_pixel(1, 5), Some(black));
+        assert!(graphics
+            .surface()
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn zero_sized_definition_shape_does_not_gain_image_sized_fire() {
+        // An explicit zero DefCore Shape is still authoritative. Only a
+        // loader sprite with no shape metadata falls back to image bounds.
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "ZeroShapeBurning".to_string();
+        object.position = Vector2::new(5, 5);
+        object.current_shape = None;
+        object.crew_member = false;
+        object.on_fire = true;
+
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(4, 4, vec![0; 4 * 4 * 4]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 0, 0)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut graphics = GraphicsSystem::new(
+            10,
+            10,
+            10,
+            "zero shape fire facet",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("ZeroShapeBurning", None),
+                sprite,
+            )])),
+            empty_cursor_atlas(),
+            Arc::new(HudGraphics {
+                fire: Some(fire_test_strip()),
+                ..HudGraphics::default()
+            }),
+        );
+        let black = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert!(graphics
+            .surface()
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0, 255]));
     }
 
     #[test]
@@ -15689,6 +16395,9 @@ mod tests {
                 )]),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
             },
@@ -15701,6 +16410,9 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -15774,6 +16486,9 @@ mod tests {
                 )]),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
             },
@@ -15789,6 +16504,9 @@ mod tests {
                 )]),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 10)),
             },
@@ -16115,6 +16833,9 @@ mod tests {
                 actions,
                 color_mask: None,
                 shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -16213,6 +16934,9 @@ mod tests {
                 actions: HashMap::from([("LiftCase".to_string(), lift_case)]),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(-14, -28, 28, 56)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -16225,6 +16949,9 @@ mod tests {
                 actions: HashMap::new(),
                 color_mask: None,
                 shape: Some(DefinitionRect::new(-12, -13, 24, 26)),
+                fire_top: 0,
+                rotateable: 0,
+                line: 0,
                 stretch_growth: false,
                 top_face: None,
             },
@@ -17228,6 +17955,9 @@ mod tests {
             color_mask: None,
             graphics_scale: 1.0,
             shape: Some(shape),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
             stretch_growth: false,
             top_face: None,
         };

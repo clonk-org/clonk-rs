@@ -3530,6 +3530,8 @@ mod tests {
             action_procedure: None,
             effects: Vec::new(),
             vertices: Vec::new(),
+            current_shape: None,
+            current_fire_top: None,
             contact_density: 50,
             own_vertices: None,
             container: None,

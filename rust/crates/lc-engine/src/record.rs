@@ -454,6 +454,8 @@ mod tests {
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                current_shape: None,
+                current_fire_top: None,
                 contact_density: 50,
                 own_vertices: None,
                 container: None,
@@ -536,6 +538,26 @@ mod tests {
         let serialized = recording.to_string().expect("serializes");
         let parsed = Recording::from_str(&serialized).expect("parses");
         assert_eq!(parsed.frames().len(), 2);
+    }
+
+    #[test]
+    fn recording_preserves_live_shape_render_state() {
+        let mut snapshot = make_snapshot(1, 5);
+        snapshot.objects[0].current_shape = Some(crate::DefinitionRect::new(2, 3, 4, 5));
+        snapshot.objects[0].current_fire_top = Some(6);
+        let recording = Recording {
+            frames: vec![snapshot.clone()],
+        };
+
+        let serialized = recording.to_string().expect("serializes");
+        assert!(serialized.contains("current_shape"));
+        assert!(serialized.contains("current_fire_top"));
+
+        let parsed = Recording::from_str(&serialized).expect("parses");
+        assert_eq!(parsed.frames(), &[snapshot.clone()]);
+        Playback::from_recording(parsed)
+            .validate_snapshot(&snapshot)
+            .expect("render state round-trips into playback validation");
     }
 
     #[test]

@@ -1281,6 +1281,8 @@ unsafe fn make_snapshot(
             action_procedure: None,
             effects,
             vertices,
+            current_shape: None,
+            current_fire_top: None,
             // The bridge ABI does not expose the live C4Shape field yet.
             contact_density: crate::CONTACT_DENSITY_SOLID,
             own_vertices: None,

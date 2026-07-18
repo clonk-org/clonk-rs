@@ -3117,6 +3117,9 @@ impl FrontendAssets {
                             DefinitionSprite {
                                 graphics_scale: 1.0,
                                 shape: None,
+                                fire_top: 0,
+                                rotateable: 0,
+                                line: 0,
                                 stretch_growth: false,
                                 top_face: None,
                                 image,
@@ -15675,7 +15678,7 @@ impl GameApp {
         let mut sprites = self.assets.base_sprite_map().clone();
         let mut rotateable_definitions = HashSet::new();
         for definition_id in self.engine.definition_ids() {
-            if self.engine.definition_rotateable(definition_id) {
+            if self.engine.definition_rotateable(definition_id) != 0 {
                 rotateable_definitions.insert(definition_id.to_string());
             }
             let actions = self
@@ -15686,6 +15689,9 @@ impl GameApp {
             let default_key = sprite_map_key(definition_id, None);
             let graphics_scale = self.engine.definition_graphics_scale(definition_id);
             let shape_facet = self.engine.definition_shape_rect(definition_id);
+            let fire_top = self.engine.definition_fire_top(definition_id);
+            let rotateable = self.engine.definition_rotateable(definition_id);
+            let line = self.engine.definition_line(definition_id);
             let stretch_growth = self.engine.definition_stretch_growth(definition_id);
             let top_face = self.engine.definition_top_face(definition_id);
             if let Some(image) = self.engine.definition_sprite_image(definition_id, None) {
@@ -15700,6 +15706,9 @@ impl GameApp {
                     DefinitionSprite {
                         graphics_scale,
                         shape: shape_facet,
+                        fire_top,
+                        rotateable,
+                        line,
                         stretch_growth,
                         top_face,
                         image: ImageData::from_arc(width, height, pixels),
@@ -15715,6 +15724,9 @@ impl GameApp {
                     DefinitionSprite {
                         graphics_scale,
                         shape: shape_facet,
+                        fire_top,
+                        rotateable,
+                        line,
                         stretch_growth,
                         top_face,
                         image: ImageData::from_arc(width, height, image.into_pixels()),
@@ -15725,6 +15737,11 @@ impl GameApp {
             } else if let Some(existing) = sprites.get_mut(&default_key) {
                 existing.graphics_scale = graphics_scale;
                 existing.actions = actions.clone();
+                existing.shape = shape_facet;
+                existing.fire_top = fire_top;
+                existing.rotateable = rotateable;
+                existing.line = line;
+                existing.stretch_growth = stretch_growth;
                 existing.top_face = top_face;
             }
 
@@ -15745,6 +15762,9 @@ impl GameApp {
                         DefinitionSprite {
                             graphics_scale,
                             shape: shape_facet,
+                            fire_top,
+                            rotateable,
+                            line,
                             stretch_growth,
                             top_face,
                             image: ImageData::from_arc(width, height, pixels),
@@ -44227,6 +44247,8 @@ func Award()
             action_procedure: None,
             effects: Vec::new(),
             vertices: Vec::new(),
+            current_shape: None,
+            current_fire_top: None,
             contact_density: 50,
             own_vertices: None,
             container: None,
@@ -45849,6 +45871,8 @@ func Award()
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                current_shape: None,
+                current_fire_top: None,
                 contact_density: 50,
                 own_vertices: None,
                 container: None,
@@ -45918,6 +45942,8 @@ func Award()
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                current_shape: None,
+                current_fire_top: None,
                 contact_density: 50,
                 own_vertices: None,
                 container: None,

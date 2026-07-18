@@ -10645,6 +10645,12 @@ struct LegacyObjectRecord {
     vertex_y: Option<Vec<i32>>,
     vertex_cnat: Option<Vec<i32>>,
     vertex_friction: Option<Vec<i32>>,
+    /// Exact live C4Shape rectangle compiled inline into the Object section.
+    shape_width: Option<i32>,
+    shape_height: Option<i32>,
+    shape_offset: Option<Vec<i32>>,
+    /// Exact live C4Shape::FireTop; missing values compile as zero.
+    shape_fire_top: Option<i32>,
     /// C4Object::fOwnVertices. The original vertex copy occupies raw shape
     /// slots 15.. and is used by later UpdateShape calls.
     own_vertices: Option<bool>,
@@ -10857,6 +10863,25 @@ impl LegacyObjectRecord {
             "localnamed" => {
                 self.local_named = Some(parse_local_named(trimmed_value, self.line)?);
             }
+            "width" => {
+                self.shape_width = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Width `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "height" => {
+                self.shape_height = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Height `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "offset" => {
+                self.shape_offset = Some(parse_i32_list(trimmed_value, self.line, "Offset")?);
+            }
             "vertices" => {
                 self.vertex_count = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -10891,6 +10916,14 @@ impl LegacyObjectRecord {
                 self.contact_density = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid ContactDensity `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "firetop" => {
+                self.shape_fire_top = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid FireTop `{}` ({})",
                         self.line, trimmed_value, err
                     ))
                 })?);
@@ -11190,6 +11223,10 @@ impl LegacyObjectRecord {
             vertex_y,
             vertex_cnat,
             vertex_friction,
+            shape_width,
+            shape_height,
+            shape_offset,
+            shape_fire_top,
             own_vertices,
             contact_density,
             energy,
@@ -11255,6 +11292,15 @@ impl LegacyObjectRecord {
             // Objects.txt entries are LOADED, not created: no
             // Construction/Initialize (C4GameObjects.cpp:535-618).
             .with_loaded(true);
+        let offset = shape_offset.unwrap_or_default();
+        config = config
+            .with_shape_rect(crate::DefinitionRect::new(
+                offset.first().copied().unwrap_or(0),
+                offset.get(1).copied().unwrap_or(0),
+                shape_width.unwrap_or(0),
+                shape_height.unwrap_or(0),
+            ))
+            .with_shape_fire_top(shape_fire_top.unwrap_or(0));
         config = config.with_position(Vector2::new(x.unwrap_or(0), y.unwrap_or(0)));
         if let Some(custom_name) = custom_name {
             config = config.with_custom_name(custom_name);
@@ -24716,7 +24762,7 @@ public func ActualizePhase(pClonk)
         // 94: OwnVertices restores its untransformed original from slots 15+.
         std::fs::write(
             scenario_dir.join("Objects.txt"),
-            "[Object]\nid=GOOD\nNumber=90\nStatus=1\nX=10\nY=10\nContactDensity=25\n\
+            "[Object]\nid=GOOD\nNumber=90\nStatus=1\nX=10\nY=10\nWidth=17\nHeight=19\nOffset=-8,-9\nFireTop=6\nContactDensity=25\n\
              Vertices=3\nVertexX=2,-14,14,99\nVertexY=11,-4,-4,88\n\
              VertexCNAT=8,1,2,4\nVertexFriction=50,50,50,77\n\n\
              [Object]\nid=GOOD\nNumber=91\nStatus=1\nX=30\nY=10\nRotation=90\n\
@@ -24748,6 +24794,16 @@ public func ActualizePhase(pClonk)
             engine.objects[idx].state.contact_density, 25,
             "saved live Shape.ContactDensity loads with the embedded shape"
         );
+        assert_eq!(
+            engine.objects[idx].current_shape_rect(),
+            Some(crate::DefinitionRect::new(-8, -9, 17, 19))
+        );
+        let snapshot = engine.objects[idx].snapshot(None);
+        assert_eq!(
+            snapshot.current_shape,
+            engine.objects[idx].current_shape_rect()
+        );
+        assert_eq!(snapshot.current_fire_top, Some(6));
         assert_eq!(vertices.len(), 3, "saved Vertices= count wins over the def");
         assert_eq!(
             (
