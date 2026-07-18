@@ -60,6 +60,7 @@ pub enum MutableGroupError {
     EmptyEntryName,
     EntryNameContainsNul,
     EntryNameTooLong(usize),
+    EntryAlreadyExists(String),
     TooManyEntries(usize),
     EntryDataTooLarge(usize),
     GroupDataTooLarge,
@@ -80,6 +81,9 @@ impl fmt::Display for MutableGroupError {
                 formatter,
                 "C4Group entry name has {length} bytes; maximum is {MAX_ENTRY_NAME_BYTES}"
             ),
+            Self::EntryAlreadyExists(name) => {
+                write!(formatter, "C4Group entry already exists: {name}")
+            }
             Self::TooManyEntries(count) => {
                 write!(formatter, "C4Group has {count} entries; maximum is int32")
             }
@@ -466,36 +470,88 @@ impl MutableGroup {
     }
 
     /// Renames one entry with C4Group's ASCII-case-insensitive lookup rules.
-    /// A missing source or a distinct entry already occupying `new` leaves
-    /// the group unchanged and returns `false`. Entry payload and metadata are
-    /// retained in place, including for opaque packed child groups.
+    /// A missing source, invalid name, or distinct entry already occupying
+    /// `new` leaves the group unchanged and returns `false`.
     pub fn rename_entry(&mut self, old: &str, new: &str) -> bool {
-        let old = old.as_bytes();
-        let new = new.as_bytes();
-        if old.is_empty() || new.is_empty() || old.contains(&0) || new.contains(&0) {
+        let old_name_bytes = old.as_bytes();
+        let new_name_bytes = new.as_bytes();
+        if old_name_bytes.is_empty()
+            || new_name_bytes.is_empty()
+            || old_name_bytes.contains(&0)
+            || new_name_bytes.contains(&0)
+        {
             return false;
         }
-        let Some(source_index) = self
+        let Some(index) = self
             .entries
             .iter()
-            .position(|entry| entry.name_bytes.eq_ignore_ascii_case(old))
+            .position(|entry| entry.name_bytes.eq_ignore_ascii_case(old_name_bytes))
         else {
             return false;
         };
-        if self.entries.iter().enumerate().any(|(index, entry)| {
-            index != source_index && entry.name_bytes.eq_ignore_ascii_case(new)
+        if self.entries.iter().enumerate().any(|(candidate, entry)| {
+            candidate != index && entry.name_bytes.eq_ignore_ascii_case(new_name_bytes)
         }) {
             return false;
         }
 
-        let name_bytes = new[..new.len().min(MAX_ENTRY_NAME_BYTES)].to_vec();
-        let entry = &mut self.entries[source_index];
-        if let MutableGroupEntryData::Child(child) = &mut entry.data {
-            child.filename = name_bytes.clone();
-        }
-        entry.name = String::from_utf8_lossy(&name_bytes).into_owned();
-        entry.name_bytes = name_bytes;
+        // The startup-player caller needs C4Group's public SCopy truncation
+        // semantics, while scenario mutation uses the checked API below.
+        let stored_name = new_name_bytes[..new_name_bytes.len().min(MAX_ENTRY_NAME_BYTES)].to_vec();
+        self.rename_entry_at(index, stored_name);
         true
+    }
+
+    /// Renames one entry in place without replacing a case-insensitive
+    /// destination collision. The entry's payload, timestamp, executable bit,
+    /// and position are retained; a materialized child also receives the new
+    /// logical filename so its standard C4Group sort list stays correct.
+    pub fn rename_entry_checked(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<bool, MutableGroupError> {
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.name_bytes.eq_ignore_ascii_case(old_name.as_bytes()))
+        else {
+            return Ok(false);
+        };
+
+        let new_name_bytes = new_name.as_bytes();
+        if new_name_bytes.is_empty() {
+            return Err(MutableGroupError::EmptyEntryName);
+        }
+        validate_entry_name(new_name_bytes)?;
+        if self.entries[index].name_bytes == new_name_bytes {
+            return Ok(true);
+        }
+        if self.entries.iter().enumerate().any(|(candidate, entry)| {
+            candidate != index && entry.name_bytes.eq_ignore_ascii_case(new_name_bytes)
+        }) {
+            return Err(MutableGroupError::EntryAlreadyExists(new_name.to_string()));
+        }
+
+        self.rename_entry_at(index, new_name_bytes.to_vec());
+        Ok(true)
+    }
+
+    fn rename_entry_at(&mut self, index: usize, new_name_bytes: Vec<u8>) {
+        let entry = &mut self.entries[index];
+        entry.name = String::from_utf8_lossy(&new_name_bytes).into_owned();
+        entry.name_bytes = new_name_bytes;
+        if let MutableGroupEntryData::ExistingFile { data, .. } = &mut entry.data {
+            // Imported file CRCs include the entry name. Once the name
+            // changes, materialize it as a rewritten file so pack/entry_crc
+            // recompute against the new bytes instead of retaining a stale
+            // cached source CRC.
+            let data = std::mem::take(data);
+            entry.data = MutableGroupEntryData::File(data);
+        }
+        if let MutableGroupEntryData::Child(child) = &mut entry.data {
+            child.filename = entry.name_bytes.clone();
+        }
     }
 
     pub fn sort(&mut self, sort_list: &str) -> bool {

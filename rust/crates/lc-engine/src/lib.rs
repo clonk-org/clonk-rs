@@ -16323,6 +16323,51 @@ impl MissionAccessStore {
     pub fn contains(&self, password: &str) -> bool {
         crate::compat::mission_access_contains(&self.inner.borrow(), password)
     }
+
+    /// Current process-local `Config.General.MissionAccess` value.
+    pub fn snapshot(&self) -> String {
+        self.inner.borrow().clone()
+    }
+
+    /// Applies `SAddModules`/`SRemoveModules`-style semicolon modules and
+    /// returns the value that should be persisted to configuration.
+    ///
+    /// Module matching is ASCII-case-insensitive and surrounding spaces are
+    /// ignored, as in `SGetModule` plus `SIsModule(..., false)`.
+    pub fn update_modules(&self, modules: &str, remove: bool) -> String {
+        let requested = modules
+            .split(';')
+            .map(str::trim)
+            .filter(|module| !module.is_empty())
+            .collect::<Vec<_>>();
+        let mut current = self
+            .inner
+            .borrow()
+            .split(';')
+            .map(str::trim)
+            .filter(|module| !module.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if remove {
+            current.retain(|entry| {
+                !requested
+                    .iter()
+                    .any(|module| entry.eq_ignore_ascii_case(module))
+            });
+        } else {
+            for module in requested {
+                if !current
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(module))
+                {
+                    current.push(module.to_string());
+                }
+            }
+        }
+        let value = current.join(";");
+        *self.inner.borrow_mut() = value.clone();
+        value
+    }
 }
 
 impl Default for MissionAccessStore {
@@ -16362,6 +16407,15 @@ fn mission_access_store_can_be_shared_across_engines() {
 
     first.mission_access.inner.borrow_mut().push_str(";Second");
     assert_eq!(&*second.mission_access.inner.borrow(), "First;Second");
+}
+
+#[cfg(test)]
+#[test]
+fn mission_access_store_updates_semicolon_modules_case_insensitively() {
+    let store = MissionAccessStore::new("Alpha; Beta");
+    assert_eq!(store.update_modules("beta;Gamma", false), "Alpha;Beta;Gamma");
+    assert_eq!(store.snapshot(), "Alpha;Beta;Gamma");
+    assert_eq!(store.update_modules("alpha;GAMMA", true), "Beta");
 }
 
 pub struct Engine {

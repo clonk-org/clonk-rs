@@ -274,6 +274,21 @@ impl Group {
         matches!(self.kind, GroupKind::Directory(_))
     }
 
+    /// Reports C4Group's exact `GetOriginal()` marker. Directory groups do
+    /// not have a packed header and are never marked original.
+    pub fn is_original(&self) -> bool {
+        match &self.kind {
+            GroupKind::Directory(_) => false,
+            GroupKind::Packed(packed) => {
+                i32::from_le_bytes(
+                    packed.header.raw[108..112]
+                        .try_into()
+                        .expect("C4Group original header field has a fixed width"),
+                ) == 1_234_567
+            }
+        }
+    }
+
     pub fn open_child<P: AsRef<Path>>(&self, relative: P) -> Result<Self, GroupError> {
         let relative = normalize_path(relative.as_ref());
         if relative.as_os_str().as_encoded_bytes().contains(&b'*') {

@@ -146,7 +146,8 @@ use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     DefCore as ResourceDefCore, DefinitionError as ResourceDefinitionError, FontCatalog, FontRole,
     GraphicsError, GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks, MutableGroup,
-    ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData, load_endeavour_font,
+    MutableGroupChildMut, ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
+    load_endeavour_font,
     scenario as resource_scenario,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
@@ -7919,7 +7920,14 @@ struct ScriptMenuPresentationState {
 enum MessageDialogContinuation {
     None,
     DeleteStartupPlayer { path: PathBuf },
-    DeleteStartupCrew { player_path: PathBuf, file_name: String },
+    DeleteStartupCrew {
+        player_path: PathBuf,
+        file_name: String,
+    },
+    DeleteScenario {
+        path: PathBuf,
+        next_identifier: Option<String>,
+    },
     LobbyReadyCheck { remaining_seconds: u32 },
     LeagueVote { subject: LeagueVoteSubject },
     LeagueSurrender,
@@ -7961,9 +7969,7 @@ impl ScenarioSelectorMode {
 
 #[derive(Clone, Debug)]
 struct PendingGameOptionInputDialog {
-    kind: GameOptionInputKind,
-    network_join_password: bool,
-    crew_action: Option<PendingCrewInputAction>,
+    purpose: PendingInputDialogPurpose,
     controller: InputDialogController,
 }
 
@@ -7971,6 +7977,14 @@ struct PendingGameOptionInputDialog {
 enum PendingCrewInputAction {
     Rename { index: usize },
     SetDeathMessage { index: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingInputDialogPurpose {
+    GameOption(GameOptionInputKind),
+    NetworkJoinPassword,
+    ScenarioMissionAccess,
+    StartupCrew(PendingCrewInputAction),
 }
 
 struct StagedNetworkHostScenario {
@@ -10211,10 +10225,6 @@ enum ClassicParityBoundary {
     EditScenario {
         identifier: String,
     },
-    ScenarioSelectorShortcut {
-        key: &'static str,
-        action: &'static str,
-    },
     IngameMenuResources {
         missing: Vec<&'static str>,
     },
@@ -10341,10 +10351,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::EditScenario { identifier } => write!(
                 f,
                 "classic Edit action for `{identifier}` is unavailable in the Rust menu"
-            ),
-            Self::ScenarioSelectorShortcut { key, action } => write!(
-                f,
-                "classic scenario-selector {action} action ({key}) is unavailable; refusing conflicting Rust fallback"
             ),
             Self::IngameMenuResources { missing } => write!(
                 f,
@@ -10837,6 +10843,8 @@ struct MenuState {
     search_edit: SearchEditState,
     /// Last submitted edit buffer used by `visible_entries`.
     applied_search_text: String,
+    /// Inline `CallbackRenameEdit` projected over the selected row label.
+    rename_edit: Option<ScenarioRenameState>,
     /// Logical-pixel offset of the left scenario `C4GUI::ListBox`.
     scenario_list_scroll: i32,
     /// Selection last passed through `ScrollRangeInView`. Keeping this
@@ -10863,6 +10871,14 @@ struct MenuState {
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
     include_back: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ScenarioRenameState {
+    identifier: String,
+    original_title: String,
+    edit: SearchEditState,
+    last_click: Option<Instant>,
 }
 
 /// `C4GUI::Dialog::AdvanceFocus` order for C4StartupScenSelDlg. The option
@@ -11870,6 +11886,7 @@ impl MenuState {
             visible_entries,
             search_edit: SearchEditState::default(),
             applied_search_text: String::new(),
+            rename_edit: None,
             scenario_list_scroll: 0,
             list_scroll_selection: None,
             selection_info_scroll: 0,
@@ -11912,6 +11929,95 @@ impl MenuState {
             MenuLayerStyle::Book => None,
             MenuLayerStyle::Map(map) => Some(map),
         }
+    }
+
+    fn start_renaming_selected(&mut self) -> bool {
+        if self.rename_edit.is_some() || self.current_map().is_some() {
+            return false;
+        }
+        let Some((identifier, mut title)) = self
+            .selected_scenario()
+            .map(|selected| (selected.identifier.clone(), selected.title.clone()))
+        else {
+            return false;
+        };
+        Markup::strip_markup(&mut title);
+        let mut edit = SearchEditState::default();
+        edit.set_text(title.clone());
+        edit.focus();
+        self.search_edit.blur();
+        self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
+        self.rename_edit = Some(ScenarioRenameState {
+            identifier,
+            original_title: title,
+            edit,
+            last_click: None,
+        });
+        true
+    }
+
+    fn abort_renaming(&mut self) -> bool {
+        let had_edit = self.rename_edit.take().is_some();
+        if had_edit {
+            self.dialog_focus = ScenselDialogFocus::List;
+        }
+        had_edit
+    }
+
+    fn replace_discovered_entries(
+        &mut self,
+        entries: Vec<FrontendScenario>,
+        selected_identifier: Option<&str>,
+        select_first_when_missing: bool,
+        apply_live_search: bool,
+    ) -> Vec<StartupMenuAction> {
+        let folder_identifiers = self
+            .stack
+            .iter()
+            .filter_map(|layer| layer.folder.as_ref().map(|folder| folder.identifier.clone()))
+            .collect::<Vec<_>>();
+        self.stack = vec![MenuLayer::new("Scenarios", entries)];
+        for identifier in folder_identifiers {
+            let Some(folder) = self
+                .current_entries()
+                .iter()
+                .find(|entry| {
+                    entry.identifier == identifier
+                        && matches!(entry.kind, ScenarioKind::Folder)
+                })
+                .cloned()
+            else {
+                break;
+            };
+            self.stack.push(MenuLayer::for_folder(folder));
+        }
+        // UpdateList reads the live edit text, not merely the last submitted
+        // query, after F5/MissionAccess rebuilds the list.
+        if apply_live_search {
+            self.applied_search_text = self.search_edit.text().to_string();
+        }
+        self.rename_edit = None;
+        self.pointer_position = None;
+        self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
+        self.refresh_menu_entries();
+        let selected = selected_identifier
+            .and_then(|identifier| {
+                self.visible_entries
+                    .iter()
+                    .position(|entry| entry.identifier == identifier)
+            })
+            .or_else(|| {
+                (select_first_when_missing && !self.visible_entries.is_empty()).then_some(0)
+            });
+        let actions = selected
+            .map(|index| index + usize::from(self.include_back))
+            .and_then(|index| self.menu.select_entry_by_index(index).ok())
+            .unwrap_or_default();
+        self.sync_definition_checkbox_to_selection();
+        actions
     }
 
     /// The folder whose contents are currently listed (None at root).
@@ -13531,6 +13637,25 @@ fn sort_frontend_entries(entries: &mut [FrontendScenario]) {
     for entry in entries.iter_mut() {
         sort_frontend_entries(&mut entry.children);
     }
+}
+
+fn override_frontend_scenario_title(
+    entries: &mut [FrontendScenario],
+    identifier: &str,
+    title: &str,
+) -> bool {
+    let mut changed = false;
+    for entry in entries.iter_mut() {
+        if entry.identifier == identifier {
+            entry.title = title.to_string();
+            changed = true;
+        }
+        changed |= override_frontend_scenario_title(&mut entry.children, identifier, title);
+    }
+    if changed {
+        sort_frontend_entries(entries);
+    }
+    changed
 }
 
 fn compare_frontend_entries(a: &FrontendScenario, b: &FrontendScenario) -> Ordering {
@@ -18770,6 +18895,16 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.startup_view == StartupView::ScenarioBrowser
+            && self.menu_state.rename_edit.is_some()
+        {
+            let mut encoded = [0_u8; 4];
+            if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                rename.edit.insert_text(character.encode_utf8(&mut encoded));
+            }
+            self.mark_menu_dirty();
+            return Ok(());
+        }
         if self.startup_view == StartupView::ScenarioBrowser && self.menu_state.search_focused() {
             let mut encoded = [0_u8; 4];
             self.menu_state
@@ -18931,6 +19066,116 @@ impl GameApp {
             self.scensel_search_last_click = None;
         } else {
             self.scensel_search_last_click = inside.then_some(now);
+        }
+        true
+    }
+
+    fn scensel_rename_char_pos(&self, point: GuiPoint, require_inside: bool) -> Option<usize> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return None;
+        }
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let book = self.assets.book_fonts.as_deref()?;
+        let rename = self.menu_state.rename_edit.as_ref()?;
+        let row = self
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == rename.identifier)?;
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let item_height = lc_frontend::startup_scensel::scen_list_item_height(&book.text);
+        let pitch = item_height + 1;
+        let edit_x = layout.list.x + 3 + item_height + 2;
+        let edit_y = layout.list.y + 3 - self.menu_state.scenario_list_scroll()
+            + i32::try_from(row).unwrap_or(i32::MAX).saturating_mul(pitch)
+            + 2;
+        let edit_w = layout.list.w - 6 - 16 - item_height - 4;
+        let edit_h = fonts.text.line_height;
+        let inside = point.x >= edit_x as f32
+            && point.x < (edit_x + edit_w) as f32
+            && point.y >= edit_y as f32
+            && point.y < (edit_y + edit_h) as f32;
+        if require_inside && !inside {
+            return None;
+        }
+        let control_x =
+            point.x as i32 - (edit_x + 2) + rename.edit.horizontal_scroll;
+        let text = rename.edit.text();
+        let mut last_width = 0;
+        for (start, character) in text.char_indices() {
+            let end = start + character.len_utf8();
+            let width = fonts.text.measure(&text[..end], false).0;
+            if width - (width - last_width) / 2 >= control_x {
+                return Some(start);
+            }
+            last_width = width;
+        }
+        Some(text.len())
+    }
+
+    fn handle_scensel_rename_pointer_down(&mut self, point: GuiPoint) -> bool {
+        let Some(position) = self.scensel_rename_char_pos(point, true) else {
+            return false;
+        };
+        if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+            rename.edit.begin_pointer_selection(position);
+        }
+        true
+    }
+
+    fn handle_scensel_rename_pointer_move(&mut self, point: GuiPoint) -> bool {
+        if !self
+            .menu_state
+            .rename_edit
+            .as_ref()
+            .is_some_and(|rename| rename.edit.dragging)
+        {
+            return false;
+        }
+        if let Some(position) = self.scensel_rename_char_pos(point, false) {
+            if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                rename.edit.drag_pointer_selection(position);
+            }
+        }
+        true
+    }
+
+    fn handle_scensel_rename_pointer_up(&mut self, point: GuiPoint) -> bool {
+        if !self
+            .menu_state
+            .rename_edit
+            .as_ref()
+            .is_some_and(|rename| rename.edit.dragging)
+        {
+            return false;
+        }
+        let position = self
+            .scensel_rename_char_pos(point, false)
+            .or_else(|| {
+                self.menu_state
+                    .rename_edit
+                    .as_ref()
+                    .map(|rename| rename.edit.caret())
+            })
+            .unwrap_or(0);
+        let inside = self.scensel_rename_char_pos(point, true).is_some();
+        let now = Instant::now();
+        if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+            rename.edit.end_pointer_selection(position);
+            let double_click = inside
+                && rename
+                    .last_click
+                    .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+            if double_click {
+                rename.edit.select_word_at(position);
+                rename.last_click = None;
+            } else {
+                rename.last_click = inside.then_some(now);
+            }
         }
         true
     }
@@ -19776,8 +20021,408 @@ impl GameApp {
         Ok(outcome.captured || release_latched)
     }
 
+    fn reload_scenario_selector(
+        &mut self,
+        selected_identifier: Option<&str>,
+        select_first_when_missing: bool,
+        apply_live_search: bool,
+    ) -> Result<(), EngineError> {
+        let entries = self
+            .app_paths
+            .as_ref()
+            .map(load_frontend_scenarios_from_paths)
+            .unwrap_or_else(|| {
+                self.menu_state
+                    .stack
+                    .first()
+                    .map(|layer| layer.entries.clone())
+                    .unwrap_or_default()
+            });
+        self.scenario_catalog = build_scenario_catalog(&entries);
+        let selected_identifier = selected_identifier.map(str::to_string);
+        self.handle_menu_input(move |menu| {
+            menu.replace_discovered_entries(
+                entries,
+                selected_identifier.as_deref(),
+                select_first_when_missing,
+                apply_live_search,
+            )
+        })?;
+        // Rebuilding the folder stack creates Book layers. Restore the
+        // active folder's configured map style before syncing selection-
+        // dependent controls so F5 does not silently leave FolderMap view.
+        self.configure_current_folder_map();
+        self.menu_state.sync_definition_checkbox_to_selection();
+        self.sync_scenario_game_option_constraint();
+        self.scensel_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn retain_renamed_scenario_title(
+        &mut self,
+        identifier: &str,
+        title: &str,
+    ) -> Result<(), EngineError> {
+        let mut entries = self
+            .menu_state
+            .stack
+            .first()
+            .map(|layer| layer.entries.clone())
+            .unwrap_or_default();
+        if !override_frontend_scenario_title(&mut entries, identifier, title) {
+            return Ok(());
+        }
+        self.scenario_catalog = build_scenario_catalog(&entries);
+        let identifier = identifier.to_string();
+        self.handle_menu_input(move |menu| {
+            menu.replace_discovered_entries(entries, Some(&identifier), true, false)
+        })?;
+        self.menu_state.sync_definition_checkbox_to_selection();
+        self.sync_scenario_game_option_constraint();
+        Ok(())
+    }
+
+    fn open_scenario_mission_access_dialog(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Mission Access input dialog",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        self.close_context_menu_silently();
+        self.scenario_game_options.cancel_interaction();
+        let controller = InputDialogController::new(
+            "Enter mission password:",
+            "Mission Access",
+            InputDialogIcon::OPTIONS,
+        );
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::ScenarioMissionAccess,
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn apply_scenario_mission_access(&mut self, input: &str) -> Result<(), EngineError> {
+        let (remove, modules) = input
+            .strip_prefix('-')
+            .map_or((false, input), |modules| (true, modules));
+        if modules.is_empty() {
+            return Ok(());
+        }
+        let selected = self
+            .menu_state
+            .selected_scenario()
+            .map(|entry| entry.identifier.clone());
+        let value = self.mission_access.update_modules(modules, remove);
+        if let Some(paths) = self.app_paths.as_ref() {
+            if let Err(error) = persist_config_value(paths, "General", "MissionAccess", value) {
+                tracing::warn!(%error, "failed to persist General.MissionAccess");
+                self.status_text = format!("Unable to save mission access: {error}");
+            }
+        }
+        self.reload_scenario_selector(selected.as_deref(), true, true)
+    }
+
+    fn open_scenario_delete_dialog(&mut self) -> Result<(), EngineError> {
+        self.menu_state.abort_renaming();
+        let Some(selected) = self.menu_state.selected_scenario().cloned() else {
+            return Ok(());
+        };
+        let distinct_sources = selected
+            .source_paths
+            .iter()
+            .map(|source| scenario_root_key(source))
+            .collect::<HashSet<_>>();
+        if distinct_sources.len() > 1 {
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Delete failure.",
+                    "Delete",
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+            return Ok(());
+        }
+        let Some(path) = selected.path.clone() else {
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Delete failure.",
+                    "Delete",
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+            return Ok(());
+        };
+        let next_identifier = self
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == selected.identifier)
+            .and_then(|index| self.menu_state.visible_entries().get(index + 1))
+            .map(|entry| entry.identifier.clone());
+        let type_name = match selected.kind {
+            ScenarioKind::Scenario => "Scenario",
+            ScenarioKind::Folder
+                if path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f")) =>
+            {
+                "Scenario folder"
+            }
+            _ => "Directory",
+        };
+        let subject = format!("{type_name} {}", selected.title);
+        let warning = if scenario_storage_is_original(&path) {
+            format!("{subject} is an original file. Are your sure you want to delete it?")
+        } else {
+            format!("Delete {subject}?")
+        };
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                warning,
+                "Delete",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::DeleteScenario {
+                path,
+                next_identifier,
+            },
+        )
+    }
+
+    fn delete_scenario_and_refresh(
+        &mut self,
+        path: &Path,
+        next_identifier: Option<&str>,
+    ) -> Result<(), EngineError> {
+        if let Err(error) = delete_scenario_storage(path) {
+            tracing::warn!(%error, path = %path.display(), "failed to delete scenario entry");
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Delete failure.",
+                    "Delete",
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+            return Ok(());
+        }
+        self.reload_scenario_selector(next_identifier, false, false)
+    }
+
+    fn commit_scenario_rename(&mut self) -> Result<(), EngineError> {
+        let Some(rename) = self.menu_state.rename_edit.as_ref().cloned() else {
+            return Ok(());
+        };
+        let title = rename.edit.text().to_string();
+        if title.is_empty() || title == rename.original_title {
+            self.menu_state.abort_renaming();
+            self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+            self.mark_menu_dirty();
+            return Ok(());
+        }
+        let scenario = self
+            .scenario_catalog
+            .get(&rename.identifier)
+            .cloned()
+            .or_else(|| {
+                self.menu_state
+                    .visible_entries()
+                    .iter()
+                    .find(|entry| entry.identifier == rename.identifier)
+                    .cloned()
+            });
+        let result = (|| -> Result<String> {
+            let scenario = scenario.ok_or_else(|| anyhow!("selected scenario is stale"))?;
+            let path = scenario
+                .path
+                .as_deref()
+                .ok_or_else(|| anyhow!("selected scenario has no storage path"))?;
+            let distinct_sources = scenario
+                .source_paths
+                .iter()
+                .map(|source| scenario_root_key(source))
+                .collect::<HashSet<_>>();
+            anyhow::ensure!(
+                distinct_sources.len() <= 1,
+                "merged scenario entries cannot be renamed safely"
+            );
+            let language = scenario_title_language(self.app_paths.as_ref());
+            let destination =
+                rename_scenario_storage(path, scenario.kind, &title, &language)?;
+            let filename = destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("renamed scenario has no UTF-8 filename"))?;
+            let parent = rename
+                .identifier
+                .rsplit_once('/')
+                .map(|(parent, _)| parent);
+            Ok(parent.map_or_else(|| filename.to_string(), |parent| format!("{parent}/{filename}")))
+        })();
+        match result {
+            Ok(identifier) => {
+                self.menu_state.abort_renaming();
+                self.reload_scenario_selector(Some(&identifier), true, true)?;
+                self.retain_renamed_scenario_title(&identifier, &title)?;
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to rename scenario entry");
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.select_all();
+                }
+                self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        error.to_string(),
+                        "Rename failure",
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::None,
+                )?;
+            }
+        }
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn handle_scenario_rename_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.menu_state.rename_edit.is_none() {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers.is_empty() && key == VirtualKeyCode::F5 {
+            if state == ElementState::Pressed {
+                self.menu_state.abort_renaming();
+            }
+            return Ok(false);
+        }
+        let commits_on_focus_loss = state == ElementState::Pressed
+            && ((c4_modifiers.alt()
+                && !c4_modifiers.ctrl()
+                && context_menu_hotkey(key).is_some())
+                || (key == VirtualKeyCode::F && c4_modifiers == ModifiersState::CTRL)
+                || key == VirtualKeyCode::Tab);
+        if commits_on_focus_loss {
+            self.commit_scenario_rename()?;
+            return Ok(self.menu_state.rename_edit.is_some());
+        }
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        let ctrl = self.keyboard_modifiers.ctrl();
+        let shift = self.keyboard_modifiers.shift();
+        match key {
+            VirtualKeyCode::F2 if c4_modifiers.is_empty() => {}
+            VirtualKeyCode::Escape => {
+                self.menu_state.abort_renaming();
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+            }
+            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => {
+                self.commit_scenario_rename()?;
+            }
+            VirtualKeyCode::Back => {
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.backspace(ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Delete => {
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.delete(ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Left => {
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.move_cursor(SearchCursorOperation::Left, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Right => {
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.move_cursor(SearchCursorOperation::Right, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::Home => {
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.move_cursor(SearchCursorOperation::Home, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::End => {
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.move_cursor(SearchCursorOperation::End, ctrl, shift);
+                }
+            }
+            VirtualKeyCode::A if ctrl => {
+                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                    rename.edit.select_all();
+                }
+            }
+            VirtualKeyCode::C if ctrl => {
+                let result = self
+                    .menu_state
+                    .rename_edit
+                    .as_mut()
+                    .map(|rename| {
+                        transfer_search_edit_selection(&mut rename.edit, false, |selected| {
+                            arboard::Clipboard::new().and_then(|mut clipboard| {
+                                clipboard.set_text(selected.to_string())
+                            })
+                        })
+                    });
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "failed to copy scenario rename text");
+                }
+            }
+            VirtualKeyCode::X if ctrl => {
+                let result = self
+                    .menu_state
+                    .rename_edit
+                    .as_mut()
+                    .map(|rename| {
+                        transfer_search_edit_selection(&mut rename.edit, true, |selected| {
+                            arboard::Clipboard::new().and_then(|mut clipboard| {
+                                clipboard.set_text(selected.to_string())
+                            })
+                        })
+                    });
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "failed to cut scenario rename text");
+                }
+            }
+            VirtualKeyCode::V if ctrl => match arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+            {
+                Ok(text) => {
+                    if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                        rename.edit.insert_text(&text);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to paste scenario rename text"),
+            },
+            _ => {}
+        }
+        self.mark_menu_dirty();
+        Ok(true)
+    }
+
     fn handle_scenario_selector_override_key(
-        &self,
+        &mut self,
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
@@ -19799,26 +20444,30 @@ impl GameApp {
         let no_modifiers = c4_modifiers.is_empty();
         let book_selection = self.menu_state.current_map().is_none()
             && self.menu_state.selected_scenario().is_some();
-        let shortcut = match key {
-            VirtualKeyCode::F5 if no_modifiers => Some(("F5", "Refresh")),
-            VirtualKeyCode::F2 if no_modifiers && book_selection => Some(("F2", "Rename")),
+        match key {
+            VirtualKeyCode::F5 if no_modifiers => {
+                self.reload_scenario_selector(None, true, true)?;
+                Ok(true)
+            }
+            VirtualKeyCode::F2 if no_modifiers && book_selection => {
+                self.menu_state.start_renaming_selected();
+                self.scenario_game_options.set_focused_button(None);
+                self.mark_menu_dirty();
+                Ok(true)
+            }
             VirtualKeyCode::Delete if no_modifiers && book_selection => {
-                Some(("Delete", "Delete"))
+                self.open_scenario_delete_dialog()?;
+                Ok(true)
             }
             VirtualKeyCode::M
                 if c4_modifiers == ModifiersState::ALT
                     && self.menu_state.current_map().is_none() =>
             {
-                Some(("Alt+M", "Mission Access"))
+                self.open_scenario_mission_access_dialog()?;
+                Ok(true)
             }
-            _ => None,
-        };
-        let Some((key, action)) = shortcut else {
-            return Ok(false);
-        };
-        Err(classic_parity_engine_error(report_classic_parity_boundary(
-            ClassicParityBoundary::ScenarioSelectorShortcut { key, action },
-        )))
+            _ => Ok(false),
+        }
     }
 
     fn runtime_network_role(&self) -> RuntimeNetworkRole {
@@ -20753,6 +21402,9 @@ impl GameApp {
                     return Ok(());
                 }
                 if self.startup_view == StartupView::ScenarioBrowser {
+                    if self.handle_scenario_rename_key(key, state)? {
+                        return Ok(());
+                    }
                     if self.handle_scenario_selector_override_key(key, state)? {
                         return Ok(());
                     }
@@ -26102,6 +26754,12 @@ impl GameApp {
             return self.handle_classic_lobby_gamepad_direction(button, state);
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+            if state == ElementState::Pressed && self.menu_state.rename_edit.is_some() {
+                self.commit_scenario_rename()?;
+                if self.menu_state.rename_edit.is_some() {
+                    return Ok(());
+                }
+            }
             let direction = match button {
                 ControlButton::Left => GameOptionGamepadDirection::Left,
                 ControlButton::Right => GameOptionGamepadDirection::Right,
@@ -26259,6 +26917,16 @@ impl GameApp {
         if self.handle_startup_dialog_key(KeyCode::Escape, state)? {
             return Ok(());
         }
+        if self.startup_view == StartupView::ScenarioBrowser
+            && self.menu_state.rename_edit.is_some()
+        {
+            if state == ElementState::Pressed {
+                self.menu_state.abort_renaming();
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+                self.mark_menu_dirty();
+            }
+            return Ok(());
+        }
         match self.startup_view {
             StartupView::ScenarioBrowser => match state {
                 ElementState::Pressed => self.close_scenario_browser(),
@@ -26321,6 +26989,15 @@ impl GameApp {
         }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_gamepad_action(action, state);
+        }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::ScenarioBrowser
+            && self.menu_state.rename_edit.is_some()
+        {
+            if state == ElementState::Pressed {
+                self.commit_scenario_rename()?;
+            }
+            return Ok(());
         }
         match action {
             GamepadActionType::Select => match self.mode {
@@ -26516,7 +27193,8 @@ impl GameApp {
                             self.mark_menu_dirty();
                             return Ok(());
                         }
-                        if self.handle_scensel_search_pointer_move(point)
+                        if self.handle_scensel_rename_pointer_move(point)
+                            || self.handle_scensel_search_pointer_move(point)
                             || self.handle_scensel_scrollbar_move(point)
                         {
                             Ok(())
@@ -28052,6 +28730,25 @@ impl GameApp {
                             return Ok(());
                         }
                         if let Some(point) = self.menu_state.pointer_position() {
+                            if self.menu_state.rename_edit.is_some() {
+                                match button_state {
+                                    ElementState::Pressed => {
+                                        if self.handle_scensel_rename_pointer_down(point) {
+                                            return Ok(());
+                                        }
+                                        self.commit_scenario_rename()?;
+                                        if self.menu_state.rename_edit.is_some() {
+                                            return Ok(());
+                                        }
+                                    }
+                                    ElementState::Released
+                                        if self.handle_scensel_rename_pointer_up(point) =>
+                                    {
+                                        return Ok(());
+                                    }
+                                    ElementState::Released => {}
+                                }
+                            }
                             self.scenario_game_options.handle_pointer_move(point);
                             match button_state {
                                 ElementState::Pressed => {
@@ -28495,6 +29192,34 @@ impl GameApp {
             }
             StartupView::ScenarioBrowser => {
                 self.menu_state.set_pointer_position(Some(position));
+                if self.menu_state.rename_edit.is_some() {
+                    match phase {
+                        TouchPhase::Started => {
+                            if self.handle_scensel_rename_pointer_down(position) {
+                                return Ok(());
+                            }
+                            self.commit_scenario_rename()?;
+                            if self.menu_state.rename_edit.is_some() {
+                                return Ok(());
+                            }
+                        }
+                        TouchPhase::Moved if self.handle_scensel_rename_pointer_move(position) => {
+                            return Ok(());
+                        }
+                        TouchPhase::Ended if self.handle_scensel_rename_pointer_up(position) => {
+                            self.pointer_left_unchecked();
+                            return Ok(());
+                        }
+                        TouchPhase::Cancelled => {
+                            if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                                rename.edit.dragging = false;
+                            }
+                            self.pointer_left_unchecked();
+                            return Ok(());
+                        }
+                        TouchPhase::Moved | TouchPhase::Ended => {}
+                    }
+                }
                 self.scenario_game_options.handle_pointer_move(position);
                 if phase == TouchPhase::Started {
                     self.game_option_pointer_capture = self
@@ -28536,7 +29261,8 @@ impl GameApp {
                         Ok(())
                     }
                     TouchPhase::Moved => {
-                        let _ = self.handle_scensel_search_pointer_move(position)
+                        let _ = self.handle_scensel_rename_pointer_move(position)
+                            || self.handle_scensel_search_pointer_move(position)
                             || self.handle_scensel_scrollbar_move(position);
                         Ok(())
                     }
@@ -29482,9 +30208,7 @@ impl GameApp {
             InputDialogIcon::LOCKED,
         );
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
-            kind: GameOptionInputKind::Password,
-            network_join_password: true,
-            crew_action: None,
+            purpose: PendingInputDialogPurpose::NetworkJoinPassword,
             controller,
         });
         self.game_option_input_consumed_keys.clear();
@@ -31679,9 +32403,9 @@ impl GameApp {
         )
         .with_input_text(&initial_text);
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
-            kind: GameOptionInputKind::Comment,
-            network_join_password: false,
-            crew_action: Some(PendingCrewInputAction::Rename { index }),
+            purpose: PendingInputDialogPurpose::StartupCrew(PendingCrewInputAction::Rename {
+                index,
+            }),
             controller,
         });
         self.game_option_input_consumed_keys.clear();
@@ -31718,9 +32442,9 @@ impl GameApp {
         .with_max_text(75)
         .with_input_text(&initial_text);
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
-            kind: GameOptionInputKind::Comment,
-            network_join_password: false,
-            crew_action: Some(PendingCrewInputAction::SetDeathMessage { index }),
+            purpose: PendingInputDialogPurpose::StartupCrew(
+                PendingCrewInputAction::SetDeathMessage { index },
+            ),
             controller,
         });
         self.game_option_input_consumed_keys.clear();
@@ -33354,6 +34078,7 @@ impl GameApp {
     }
 
     fn close_scenario_browser(&mut self) {
+        self.menu_state.abort_renaming();
         match self.scenario_selector_mode {
             ScenarioSelectorMode::Local => self.show_main_menu(),
             ScenarioSelectorMode::NetworkHost => {
@@ -33555,6 +34280,7 @@ impl GameApp {
     }
 
     fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
+        self.menu_state.abort_renaming();
         self.close_context_menu_silently();
         self.startup_player_properties_dialog = None;
         self.game_option_input_dialog = None;
@@ -35690,7 +36416,16 @@ impl GameApp {
                     .unwrap_or(false);
                 let scrollbar_changed = self.tick_scensel_scrollbar_arrow();
                 let search_blink_changed = self.menu_state.search_edit.tick_blink();
-                if definition_scroll_changed || scrollbar_changed || search_blink_changed {
+                let rename_blink_changed = self
+                    .menu_state
+                    .rename_edit
+                    .as_mut()
+                    .is_some_and(|rename| rename.edit.tick_blink());
+                if definition_scroll_changed
+                    || scrollbar_changed
+                    || search_blink_changed
+                    || rename_blink_changed
+                {
                     self.mark_menu_dirty();
                 }
                 let fade_finished = self.resume_frontend_music_after_fade
@@ -36571,9 +37306,7 @@ impl GameApp {
             .with_max_text(request.max_text)
             .with_input_text(&request.initial_text);
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
-            kind: request.kind,
-            network_join_password: false,
-            crew_action: None,
+            purpose: PendingInputDialogPurpose::GameOption(request.kind),
             controller,
         });
         self.game_option_input_consumed_keys.clear();
@@ -36651,36 +37384,43 @@ impl GameApp {
                     };
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
-                    if pending.network_join_password {
-                        if text.is_empty() {
-                            self.pending_network_join = None;
-                            self.status_text.clear();
-                            break;
+                    match pending.purpose {
+                        PendingInputDialogPurpose::NetworkJoinPassword => {
+                            if text.is_empty() {
+                                self.pending_network_join = None;
+                                self.status_text.clear();
+                                break;
+                            }
+                            let Some(password) =
+                                lc_engine::LegacyCString::from_bytes(text.into_bytes())
+                            else {
+                                self.pending_network_join = None;
+                                self.status_text =
+                                    "Network password contains an unsupported NUL byte".to_string();
+                                break;
+                            };
+                            let Some(settings) = self.pending_network_join.as_mut() else {
+                                self.status_text =
+                                    "Network join settings are unavailable".to_string();
+                                break;
+                            };
+                            settings.password = password;
+                            self.launch_pending_network_join();
                         }
-                        let Some(password) = lc_engine::LegacyCString::from_bytes(text.into_bytes())
-                        else {
-                            self.pending_network_join = None;
-                            self.status_text =
-                                "Network password contains an unsupported NUL byte".to_string();
-                            break;
-                        };
-                        let Some(settings) = self.pending_network_join.as_mut() else {
-                            self.status_text = "Network join settings are unavailable".to_string();
-                            break;
-                        };
-                        settings.password = password;
-                        self.launch_pending_network_join();
-                        break;
+                        PendingInputDialogPurpose::GameOption(kind) => {
+                            let actions = self.scenario_game_options.resolve_input_dialog(
+                                kind,
+                                GameOptionInputDialogResult::Submitted(text),
+                            );
+                            self.finish_game_option_input(actions)?;
+                        }
+                        PendingInputDialogPurpose::ScenarioMissionAccess => {
+                            self.apply_scenario_mission_access(&text)?;
+                        }
+                        PendingInputDialogPurpose::StartupCrew(action) => {
+                            self.complete_startup_crew_input(action, text)?;
+                        }
                     }
-                    if let Some(action) = pending.crew_action {
-                        self.complete_startup_crew_input(action, text)?;
-                        break;
-                    }
-                    let actions = self.scenario_game_options.resolve_input_dialog(
-                        pending.kind,
-                        GameOptionInputDialogResult::Submitted(text),
-                    );
-                    self.finish_game_option_input(actions)?;
                     break;
                 }
                 InputDialogAction::Cancelled => {
@@ -36689,18 +37429,21 @@ impl GameApp {
                     };
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
-                    if pending.network_join_password {
-                        self.pending_network_join = None;
-                        self.status_text.clear();
-                        break;
+                    match pending.purpose {
+                        PendingInputDialogPurpose::NetworkJoinPassword => {
+                            self.pending_network_join = None;
+                            self.status_text.clear();
+                        }
+                        PendingInputDialogPurpose::GameOption(kind) => {
+                            let actions = self.scenario_game_options.resolve_input_dialog(
+                                kind,
+                                GameOptionInputDialogResult::Cancelled,
+                            );
+                            self.finish_game_option_input(actions)?;
+                        }
+                        PendingInputDialogPurpose::ScenarioMissionAccess => {}
+                        PendingInputDialogPurpose::StartupCrew(_) => {}
                     }
-                    if pending.crew_action.is_some() {
-                        break;
-                    }
-                    let actions = self
-                        .scenario_game_options
-                        .resolve_input_dialog(pending.kind, GameOptionInputDialogResult::Cancelled);
-                    self.finish_game_option_input(actions)?;
                     break;
                 }
             }
@@ -36922,6 +37665,13 @@ impl GameApp {
                 self.delete_startup_crew_and_refresh(&player_path, &file_name)?;
             }
             MessageDialogContinuation::DeleteStartupCrew { .. } => {}
+            MessageDialogContinuation::DeleteScenario {
+                path,
+                next_identifier,
+            } if result == lc_frontend::message_dialog::MessageDialogResult::Yes => {
+                self.delete_scenario_and_refresh(&path, next_identifier.as_deref())?;
+            }
+            MessageDialogContinuation::DeleteScenario { .. } => {}
         }
         Ok(())
     }
@@ -43016,6 +43766,86 @@ fn draw_scensel_map_dynamic(
     Ok(())
 }
 
+fn draw_scensel_rename_edit(
+    surface: &mut Surface,
+    font: &lc_graphics::clonk_font::ClonkFont,
+    edit: &mut SearchEditState,
+    rect: Rect,
+    gamma: &'static lc_graphics::GammaRamp,
+) {
+    let cursor_x = font.measure(&edit.text[..edit.caret], false).0;
+    let cursor_half = font.measure("¦", false).0 / 2;
+    edit.scroll_cursor_in_view(cursor_x, rect.width as i32 - 4, cursor_half);
+    fill_engine_box(
+        surface,
+        rect.x,
+        rect.y,
+        rect.x + rect.width as i32 - 1,
+        rect.y + rect.height as i32 - 1,
+        0x7f000000,
+        gamma,
+    );
+    lc_frontend::classic_gui::draw_3d_frame(
+        surface,
+        lc_frontend::classic_gui::IntRect {
+            x: rect.x,
+            y: rect.y,
+            w: rect.width as i32,
+            h: rect.height as i32,
+        },
+        Some(gamma),
+    );
+    let client_left = rect.x + 2;
+    let client_right = rect.x + rect.width as i32 - 3;
+    if let Some(selection) = edit.selection_range() {
+        let x1 = client_left + font.measure(&edit.text[..selection.start], false).0
+            - edit.horizontal_scroll;
+        let x2 = client_left + font.measure(&edit.text[..selection.end], false).0
+            - edit.horizontal_scroll;
+        if x2 > x1 {
+            fill_engine_box(
+                surface,
+                x1.clamp(client_left, client_right),
+                rect.y + 1,
+                (x2 - 1).clamp(client_left, client_right),
+                rect.y + rect.height as i32 - 2,
+                0x7f7f7f00,
+                gamma,
+            );
+        }
+    }
+    let previous_clip = surface.clip();
+    surface.set_clip(rect);
+    font.draw_with_gamma(
+        surface,
+        client_left - edit.horizontal_scroll,
+        rect.y,
+        &edit.text,
+        [255, 255, 255, 255],
+        lc_graphics::clonk_font::TextAlign::Left,
+        false,
+        Some(gamma),
+    );
+    if edit.cursor_visible() {
+        let x = client_left + cursor_x - edit.horizontal_scroll;
+        if (client_left..=client_right).contains(&x) {
+            fill_engine_box(
+                surface,
+                x,
+                rect.y + 1,
+                x,
+                rect.y + rect.height as i32 - 2,
+                0x00ffffff,
+                gamma,
+            );
+        }
+    }
+    match previous_clip {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
+    }
+}
+
 /// Draws the selection-dependent layer of the scenario book over the cached
 /// chrome: caption, list rows + selection bar, the right info page, the
 /// Open/Start button and the "Choose definitions" checkbox.
@@ -43080,18 +43910,18 @@ fn draw_scensel_dynamic(
     if scenario_menu.list_scroll_selection != Some(selected) {
         scenario_menu.ensure_list_selection_visible(viewport_height, pitch, item_h);
     }
-    let rows: Vec<(u32, String)> = scenario_menu
+    let rows: Vec<(String, u32, String)> = scenario_menu
         .visible_entries()
         .iter()
         .map(|entry| {
             let mut title = entry.title.clone();
             Markup::strip_markup(&mut title);
-            (scensel_entry_icon(entry), title)
+            (entry.identifier.clone(), scensel_entry_icon(entry), title)
         })
         .collect();
     let mut list_layer = surface.clone();
     let mut y = top - scenario_menu.scenario_list_scroll();
-    for (index, (icon, title)) in rows.iter().enumerate() {
+    for (index, (identifier, icon, title)) in rows.iter().enumerate() {
         if y >= bottom {
             break;
         }
@@ -43099,7 +43929,10 @@ fn draw_scensel_dynamic(
             // C4GUI_ListBoxSelColor while the list draws focus; the edit or
             // an open context retains logical focus but uses InactiveSelColor.
             let selection_color =
-                if draw_focus && scenario_menu.dialog_focus() == ScenselDialogFocus::List {
+                if draw_focus
+                    && scenario_menu.dialog_focus() == ScenselDialogFocus::List
+                    && scenario_menu.rename_edit.is_none()
+                {
                     0xafaf0000
                 } else {
                     0xaf7f7f7f
@@ -43115,6 +43948,10 @@ fn draw_scensel_dynamic(
             );
         }
         if y + item_h > top {
+            let is_renaming = scenario_menu
+                .rename_edit
+                .as_ref()
+                .is_some_and(|rename| rename.identifier == *identifier);
             scensel::draw_scen_list_item(
                 &mut list_layer,
                 &assets.scen_icons,
@@ -43123,9 +43960,23 @@ fn draw_scensel_dynamic(
                 x,
                 y,
                 *icon,
-                title,
+                if is_renaming { "" } else { title },
                 true,
             );
+            if is_renaming {
+                let edit_x = x + item_h + 2;
+                let edit_w = (item_w - item_h - 4).max(1) as u32;
+                let edit_h = fonts.text.line_height.max(1) as u32;
+                if let Some(rename) = scenario_menu.rename_edit.as_mut() {
+                    draw_scensel_rename_edit(
+                        &mut list_layer,
+                        &fonts.text,
+                        &mut rename.edit,
+                        Rect::new(edit_x, y + 2, edit_w, edit_h),
+                        gamma,
+                    );
+                }
+            }
         }
         y += pitch;
     }
@@ -46297,45 +47148,24 @@ fn startup_language_sequence(paths: Option<&AppPaths>) -> Vec<String> {
     codes
 }
 
+fn scenario_title_language(paths: Option<&AppPaths>) -> String {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("General"), "Language")
+                .or_else(|| config.get("Language"))
+                .map(str::trim)
+                .filter(|language| !language.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| startup_language_sequence(paths).into_iter().next())
+        .unwrap_or_else(|| "US".to_string())
+}
+
 fn load_frontend_scenarios() -> Vec<FrontendScenario> {
     match AppPaths::discover() {
-        Ok(paths) => {
-            let languages = startup_language_sequence(Some(&paths));
-            let language_packs = classic_language_packs(&paths);
-            let roots = scenario_roots(&paths);
-            let existing_roots: Vec<_> = roots.iter().filter(|root| root.path.exists()).collect();
-            if !existing_roots.is_empty() {
-                let mut combined_entries: Vec<(resource_scenario::ScenarioEntry, String)> =
-                    Vec::new();
-                for root in existing_roots {
-                    match resource_scenario::discover_with_languages_and_packs(
-                        &root.path,
-                        &languages,
-                        &language_packs,
-                    ) {
-                        Ok(entries) => combined_entries
-                            .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                path = %root.path.display(),
-                                "failed to discover scenarios from install root"
-                            );
-                        }
-                    }
-                }
-
-                if !combined_entries.is_empty() {
-                    let mut scenarios = Vec::new();
-                    for (entry, label) in combined_entries {
-                        scenarios.push(FrontendScenario::from_resource(entry, &label));
-                    }
-                    if !scenarios.is_empty() {
-                        return merge_frontend_scenarios(scenarios);
-                    }
-                }
-            }
-        }
+        Ok(paths) => return load_frontend_scenarios_from_paths(&paths),
         Err(err) => tracing::error!(
             error = %err,
             "app paths discovery failed; no synthetic scenario will be exposed in menus"
@@ -46346,6 +47176,346 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
         "no classic scenarios were discovered; keeping the player-facing catalog empty"
     );
     Vec::new()
+}
+
+fn load_frontend_scenarios_from_paths(paths: &AppPaths) -> Vec<FrontendScenario> {
+    let languages = startup_language_sequence(Some(paths));
+    let language_packs = classic_language_packs(paths);
+    let roots = scenario_roots(paths);
+    let mut combined_entries: Vec<(resource_scenario::ScenarioEntry, String)> = Vec::new();
+    for root in roots.iter().filter(|root| root.path.exists()) {
+        match resource_scenario::discover_with_languages_and_packs(
+            &root.path,
+            &languages,
+            &language_packs,
+        ) {
+            Ok(entries) => combined_entries
+                .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %root.path.display(),
+                "failed to discover scenarios from install root"
+            ),
+        }
+    }
+    merge_frontend_scenarios(
+        combined_entries
+            .into_iter()
+            .map(|(entry, label)| FrontendScenario::from_resource(entry, &label))
+            .collect(),
+    )
+}
+
+/// Resolves the physical C4Group file and child path represented by a
+/// scenario-discovery path. Children of packed folders deliberately look
+/// like ordinary joined paths even though they do not exist in the host FS.
+fn scenario_logical_storage(path: &Path) -> Result<(PathBuf, Vec<String>)> {
+    if path.exists() {
+        return Ok((path.to_path_buf(), Vec::new()));
+    }
+    let mut ancestor = path.to_path_buf();
+    let mut children = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("scenario path has no UTF-8 group entry: {}", path.display()))?;
+        children.push(name.to_string());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| anyhow!("scenario path has no physical ancestor: {}", path.display()))?
+            .to_path_buf();
+    }
+    anyhow::ensure!(
+        ancestor.is_file(),
+        "logical scenario child is not inside a packed group: {}",
+        path.display()
+    );
+    children.reverse();
+    Ok((ancestor, children))
+}
+
+fn mutable_group_descend<'a>(
+    group: &'a mut MutableGroup,
+    children: &[String],
+) -> Result<&'a mut MutableGroup> {
+    let Some((child_name, rest)) = children.split_first() else {
+        return Ok(group);
+    };
+    match group.child_mut(child_name)? {
+        MutableGroupChildMut::Child(child) => mutable_group_descend(child, rest),
+        MutableGroupChildMut::Missing => {
+            Err(anyhow!("C4Group child `{child_name}` does not exist"))
+        }
+        MutableGroupChildMut::File => Err(anyhow!("C4Group entry `{child_name}` is not a group")),
+    }
+}
+
+fn scenario_filename_from_title(title: &str, kind: ScenarioKind, old_path: &Path) -> String {
+    const STRIP: &[char] = &[
+        '!', '"', '§', '%', '&', '/', '=', '?', '+', '*', '#', ':', ';', '<', '>', '\\',
+        '.',
+    ];
+    let mut filename = title
+        .chars()
+        .skip_while(|character| character.is_whitespace())
+        .filter(|character| !STRIP.contains(character))
+        .collect::<String>();
+    filename = filename.trim_end_matches(char::is_whitespace).to_string();
+    if filename.is_empty() {
+        filename.push_str("unnamed");
+    }
+    let extension = match kind {
+        ScenarioKind::Scenario => Some("c4s"),
+        ScenarioKind::Folder
+            if old_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f")) =>
+        {
+            Some("c4f")
+        }
+        _ => None,
+    };
+    if let Some(extension) = extension {
+        filename.push('.');
+        filename.push_str(extension);
+    }
+    filename
+}
+
+fn replace_file_from_same_directory(path: &Path, bytes: &[u8]) -> Result<()> {
+    static NEXT_REWRITE: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("rewrite target has no parent: {}", path.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("group");
+    let permissions = fs::metadata(path).ok().map(|metadata| metadata.permissions());
+    let mut last_error = None;
+    for _ in 0..100 {
+        let nonce = NEXT_REWRITE.fetch_add(1, AtomicOrdering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{filename}.lc-rewrite-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let result = (|| -> io::Result<()> {
+            if let Some(permissions) = permissions.clone() {
+                file.set_permissions(permissions)?;
+            }
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, path)
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+        return Ok(());
+    }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "temporary rewrite path"))
+        .into())
+}
+
+fn rewrite_directory_scenario_title(
+    path: &Path,
+    kind: ScenarioKind,
+    title: &str,
+    language: &str,
+) -> Result<()> {
+    let title_paths = fs::read_dir(path)
+        .with_context(|| format!("open {}", path.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("Title.txt"))
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    let stem_matches = !matches!(kind, ScenarioKind::Scenario)
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == title);
+    if stem_matches {
+        for title_path in title_paths {
+            fs::remove_file(title_path)?;
+        }
+        return Ok(());
+    }
+    let canonical_title = path.join("Title.txt");
+    replace_file_from_same_directory(
+        &canonical_title,
+        format!("{language}:{title}").as_bytes(),
+    )?;
+    for title_path in title_paths {
+        let same_file = matches!(
+            (fs::canonicalize(&title_path), fs::canonicalize(&canonical_title)),
+            (Ok(left), Ok(right)) if left == right
+        );
+        if !same_file && title_path != canonical_title {
+            fs::remove_file(title_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_mutable_scenario_title(
+    group: &mut MutableGroup,
+    logical_path: &Path,
+    kind: ScenarioKind,
+    title: &str,
+    language: &str,
+) -> Result<()> {
+    group.remove_entry("Title.txt");
+    let stem_matches = !matches!(kind, ScenarioKind::Scenario)
+        && logical_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == title);
+    if !stem_matches {
+        group.add_file("Title.txt", format!("{language}:{title}").into_bytes())?;
+    }
+    Ok(())
+}
+
+fn rewrite_scenario_title(
+    path: &Path,
+    kind: ScenarioKind,
+    title: &str,
+    language: &str,
+) -> Result<()> {
+    if path.is_dir() {
+        return rewrite_directory_scenario_title(path, kind, title, language);
+    }
+    let (physical, children) = scenario_logical_storage(path)?;
+    let source = Group::open(&physical)?;
+    let mut mutable = MutableGroup::from_group(&source)?;
+    let target = mutable_group_descend(&mut mutable, &children)?;
+    rewrite_mutable_scenario_title(target, path, kind, title, language)?;
+    let packed = mutable.pack()?;
+    replace_file_from_same_directory(&physical, &packed)?;
+    Ok(())
+}
+
+fn rename_scenario_storage(
+    path: &Path,
+    kind: ScenarioKind,
+    title: &str,
+    language: &str,
+) -> Result<PathBuf> {
+    anyhow::ensure!(!title.is_empty(), "scenario title is empty");
+    let filename = scenario_filename_from_title(title, kind, path);
+    if path.exists() {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("scenario path has no parent: {}", path.display()))?;
+        let destination = parent.join(filename);
+        let identical = destination.exists()
+            && matches!(
+                (fs::canonicalize(path), fs::canonicalize(&destination)),
+                (Ok(left), Ok(right)) if left == right
+            );
+        anyhow::ensure!(
+            !destination.exists() || identical,
+            "{} already exists",
+            destination.display()
+        );
+        let moved = destination != path;
+        if moved {
+            fs::rename(path, &destination).with_context(|| {
+                format!("rename {} to {}", path.display(), destination.display())
+            })?;
+        }
+        if let Err(error) = rewrite_scenario_title(&destination, kind, title, language) {
+            if moved {
+                fs::rename(&destination, path).with_context(|| {
+                    format!(
+                        "roll back failed title rewrite from {} to {} after: {error:#}",
+                        destination.display(),
+                        path.display()
+                    )
+                })?;
+            }
+            return Err(error);
+        }
+        return Ok(destination);
+    }
+
+    let (physical, mut children) = scenario_logical_storage(path)?;
+    let old_name = children
+        .pop()
+        .ok_or_else(|| anyhow!("logical scenario path has no child entry"))?;
+    let source = Group::open(&physical)?;
+    let mut mutable = MutableGroup::from_group(&source)?;
+    let parent = mutable_group_descend(&mut mutable, &children)?;
+    anyhow::ensure!(
+        parent.rename_entry_checked(&old_name, &filename)?,
+        "C4Group entry `{old_name}` does not exist"
+    );
+    children.push(filename.clone());
+    let target = mutable_group_descend(&mut mutable, &children)?;
+    let destination = path.with_file_name(filename);
+    rewrite_mutable_scenario_title(target, &destination, kind, title, language)?;
+    let packed = mutable.pack()?;
+    replace_file_from_same_directory(&physical, &packed)?;
+    Ok(destination)
+}
+
+fn delete_scenario_storage(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+        return Ok(());
+    }
+    if path.is_file() {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+    let (physical, mut children) = scenario_logical_storage(path)?;
+    let name = children
+        .pop()
+        .ok_or_else(|| anyhow!("logical scenario path has no child entry"))?;
+    let source = Group::open(&physical)?;
+    let mut mutable = MutableGroup::from_group(&source)?;
+    let parent = mutable_group_descend(&mut mutable, &children)?;
+    anyhow::ensure!(parent.remove_entry(&name), "C4Group entry `{name}` does not exist");
+    let packed = mutable.pack()?;
+    replace_file_from_same_directory(&physical, &packed)?;
+    Ok(())
+}
+
+fn scenario_storage_is_original(path: &Path) -> bool {
+    let Ok((physical, children)) = scenario_logical_storage(path) else {
+        return false;
+    };
+    let Ok(mut group) = Group::open(physical) else {
+        return false;
+    };
+    for child in children {
+        let Ok(next) = group.open_child(child) else {
+            return false;
+        };
+        group = next;
+    }
+    group.is_original()
 }
 
 struct ScenarioRoot {
@@ -59040,7 +60210,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             .game_option_input_dialog
             .as_ref()
             .expect("password InputDialog");
-        assert_eq!(dialog.kind, GameOptionInputKind::Password);
+        assert_eq!(
+            dialog.purpose,
+            PendingInputDialogPurpose::GameOption(GameOptionInputKind::Password)
+        );
         assert_eq!(dialog.controller.caption(), "Password");
         assert_eq!(dialog.controller.text(), "old password");
         app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
@@ -61662,13 +62835,22 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn scensel_selector_shortcuts_fail_typed_before_conflicting_controls() {
+    fn scensel_selector_shortcuts_execute_before_conflicting_controls() {
         let _lock = env_lock().lock();
         let user_data = tempdir().expect("isolated selector shortcut user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let scenario_path = paths.scenario_dir().join("Shortcut.c4s");
+        fs::create_dir_all(&scenario_path).expect("create shortcut scenario");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Shortcut Target\n",
+        )
+        .expect("write shortcut scenario");
         let mut scenario = FrontendScenario::fallback();
-        scenario.identifier = "shortcut_target".to_string();
+        scenario.identifier = "Shortcut.c4s".to_string();
         scenario.title = "Shortcut Target".to_string();
+        scenario.path = Some(scenario_path);
+        scenario.source_paths = vec![scenario.path.clone().expect("scenario path")];
         let scenarios = vec![scenario];
         let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
             .expect("selector shortcut menu");
@@ -61690,21 +62872,21 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set keyboard modifiers");
-        let mission_access = app
-            .handle_key(VirtualKeyCode::M, ElementState::Pressed)
-            .expect_err("Alt+M must not open the lower-priority Comment control");
-        assert!(matches!(
-            &mission_access,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
-        assert!(mission_access.to_string().contains("Mission Access"));
-        assert!(app.game_option_input_dialog.is_none());
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("Alt+M opens Mission Access before Comment");
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("Mission Access input dialog")
+                .purpose,
+            PendingInputDialogPurpose::ScenarioMissionAccess
+        );
         assert_eq!(
             app.scenario_game_options.values().comment,
             "unchanged comment"
         );
-        app.handle_key(VirtualKeyCode::M, ElementState::Released)
-            .expect("selector callbacks have no key-up action");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+            .expect("cancel Mission Access");
         assert!(app.game_option_input_dialog.is_none());
 
         app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL)
@@ -61721,8 +62903,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             app.game_option_input_dialog
                 .as_ref()
                 .expect("Comment input dialog")
-                .kind,
-            GameOptionInputKind::Comment
+                .purpose,
+            PendingInputDialogPurpose::GameOption(GameOptionInputKind::Comment)
         );
         app.game_option_input_dialog = None;
         app.game_option_input_consumed_keys.clear();
@@ -61730,10 +62912,17 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::LOGO)
             .expect("set keyboard modifiers");
-        let mission_access = app
-            .handle_key(VirtualKeyCode::M, ElementState::Pressed)
-            .expect_err("C4KeyCodeEx ignores the OS Logo modifier");
-        assert!(mission_access.to_string().contains("Mission Access"));
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("C4KeyCodeEx ignores the OS Logo modifier");
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("Mission Access input dialog")
+                .purpose,
+            PendingInputDialogPurpose::ScenarioMissionAccess
+        );
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+            .expect("cancel Mission Access");
 
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("set keyboard modifiers");
@@ -61756,25 +62945,26 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("set keyboard modifiers");
-        for (key, action) in [
-            (VirtualKeyCode::F5, "Refresh"),
-            (VirtualKeyCode::F2, "Rename"),
-        ] {
-            let error = app
-                .handle_key(key, ElementState::Pressed)
-                .expect_err("unported selector action must fail typed");
-            assert!(matches!(
-                &error,
-                EngineError::ClassicMenuParityBoundary { .. }
-            ));
-            assert!(error.to_string().contains(action), "unexpected {error}");
-        }
+        app.menu_state.set_search_text("");
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("F2 starts inline rename");
+        assert_eq!(
+            app.menu_state
+                .rename_edit
+                .as_ref()
+                .map(|rename| rename.edit.selected_text()),
+            Some(Some("Shortcut Target"))
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape aborts inline rename");
+        assert!(app.menu_state.rename_edit.is_none());
+
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("F5 refreshes the selector in place");
         app.handle_modifiers_changed(ModifiersState::LOGO)
             .expect("set keyboard modifiers");
-        let refresh = app
-            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-            .expect_err("C4 ignores Logo when matching unmodified F5");
-        assert!(refresh.to_string().contains("Refresh"));
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("C4 ignores Logo when matching unmodified F5");
 
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("set keyboard modifiers");
@@ -61782,15 +62972,12 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.menu_state.set_search_focused(true);
         app.menu_state.search_edit.anchor = 0;
         app.menu_state.search_edit.caret = 0;
-        let delete = app
-            .handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
-            .expect_err("selector Delete must outrank its normal-priority search edit");
-        assert!(matches!(
-            &delete,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
-        assert!(delete.to_string().contains("Delete"));
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("selector Delete must outrank its normal-priority search edit");
+        assert_eq!(app.message_dialogs.len(), 1);
         assert_eq!(app.menu_state.search_text(), "alpha beta");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline deletion");
 
         // The selector binds only unmodified Delete. Ctrl+Delete remains an
         // edit operation, matching Edit::RegisterCursorOp's modifier list.
@@ -61826,10 +63013,470 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
             .expect("Rename declines without a selected scenario row");
-        let refresh = app
-            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
-            .expect_err("Refresh remains dialog-wide without a selection");
-        assert!(refresh.to_string().contains("Refresh"));
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("Refresh remains dialog-wide without a selection");
+    }
+
+    #[test]
+    fn scensel_f5_rediscovers_current_folder_and_applies_live_search() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated refresh user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let folder = paths.scenario_dir().join("RefreshPack.c4f");
+        let alpha = folder.join("Alpha.c4s");
+        fs::create_dir_all(&alpha).expect("create initial refresh scenario");
+        fs::write(folder.join("Folder.txt"), "[Head]\nIndex=1\n")
+            .expect("write refresh folder core");
+        fs::write(alpha.join("Scenario.txt"), "[Head]\nTitle=Alpha\n")
+            .expect("write initial refresh scenario core");
+
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        app.menu_state.enter_folder("RefreshPack.c4f");
+        assert_eq!(
+            app.menu_state
+                .current_folder()
+                .map(|folder| folder.identifier.as_str()),
+            Some("RefreshPack.c4f")
+        );
+        app.menu_state.set_search_text("beta");
+
+        let beta = folder.join("Beta.c4s");
+        fs::create_dir_all(&beta).expect("create refreshed scenario");
+        fs::write(beta.join("Scenario.txt"), "[Head]\nTitle=Beta Mission\n")
+            .expect("write refreshed scenario core");
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("refresh current scenario folder");
+
+        assert_eq!(
+            app.menu_state
+                .current_folder()
+                .map(|folder| folder.identifier.as_str()),
+            Some("RefreshPack.c4f")
+        );
+        assert_eq!(
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["RefreshPack.c4f/Beta.c4s"]
+        );
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("RefreshPack.c4f/Beta.c4s")
+        );
+        assert!(
+            app.scenario_catalog
+                .contains_key("RefreshPack.c4f/Beta.c4s")
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_f2_renames_unpacked_scenario_rewrites_title_and_refocuses() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated rename user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "Language", "DE")
+            .expect("configure primary title language");
+        let old_path = paths.scenario_dir().join("Old.c4s");
+        fs::create_dir_all(&old_path).expect("create rename scenario");
+        fs::write(
+            old_path.join("Scenario.txt"),
+            "[Head]\nTitle=Old display title\n",
+        )
+        .expect("write rename scenario core");
+        fs::write(old_path.join("Title.txt"), "US:Old display title")
+            .expect("write old title");
+
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        let index = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == "Old.c4s")
+            .expect("Old scenario row");
+        app.handle_menu_input(|menu| menu.select_list_index(index))
+            .expect("select Old scenario");
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start inline rename");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("abort inline rename");
+        assert!(old_path.exists());
+        assert!(app.menu_state.rename_edit.is_none());
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("restart inline rename");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("focused rename edit owns bare Delete");
+        assert_eq!(
+            app.menu_state
+                .rename_edit
+                .as_ref()
+                .map(|rename| rename.edit.text()),
+            Some("")
+        );
+        assert!(app.message_dialogs.is_empty());
+        for character in "New Name".chars() {
+            app.handle_text_input(character).expect("type new title");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("commit inline rename");
+
+        let new_path = paths.scenario_dir().join("New Name.c4s");
+        assert!(!old_path.exists());
+        assert!(new_path.is_dir());
+        assert_eq!(
+            fs::read_to_string(new_path.join("Title.txt")).expect("read rewritten title"),
+            "DE:New Name"
+        );
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| (entry.identifier.as_str(), entry.title.as_str())),
+            Some(("New Name.c4s", "New Name"))
+        );
+        assert!(app.scenario_catalog.contains_key("New Name.c4s"));
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scenario_storage_renames_and_deletes_nested_packed_child() {
+        let directory = tempdir().expect("packed scenario directory");
+        let outer_path = directory.path().join("Campaign.c4f");
+        let mut scenario = MutableGroup::new("Old.c4s");
+        scenario
+            .add_file("Scenario.txt", b"[Head]\nTitle=Old\n".to_vec())
+            .expect("add scenario core");
+        scenario
+            .add_file("Title.txt", b"US:Old".to_vec())
+            .expect("add old title");
+        let mut chapter = MutableGroup::new("Chapter.c4f");
+        chapter
+            .add_child("Old.c4s", scenario)
+            .expect("add scenario to nested chapter");
+        let mut campaign = MutableGroup::new("Campaign.c4f");
+        campaign
+            .add_child("Chapter.c4f", chapter)
+            .expect("add nested chapter");
+        fs::write(&outer_path, campaign.pack().expect("pack campaign"))
+            .expect("write campaign");
+
+        assert_eq!(
+            scenario_filename_from_title("Foo.c4s", ScenarioKind::Scenario, Path::new("Old.c4s")),
+            "Fooc4s.c4s"
+        );
+        assert_eq!(
+            scenario_filename_from_title(".!", ScenarioKind::Scenario, Path::new("Old.c4s")),
+            "unnamed.c4s"
+        );
+        assert_eq!(
+            scenario_filename_from_title("New Pack", ScenarioKind::Folder, Path::new("Old.c4f")),
+            "New Pack.c4f"
+        );
+        assert_eq!(
+            scenario_filename_from_title("New Dir", ScenarioKind::Folder, Path::new("OldDir")),
+            "New Dir"
+        );
+        let renamed = rename_scenario_storage(
+            &outer_path.join("Chapter.c4f/Old.c4s"),
+            ScenarioKind::Scenario,
+            "Packed New",
+            "US",
+        )
+        .expect("rename nested packed scenario");
+        assert_eq!(renamed, outer_path.join("Chapter.c4f/Packed New.c4s"));
+        let campaign = Group::open(&outer_path).expect("open rewritten campaign");
+        let chapter = campaign
+            .open_child("Chapter.c4f")
+            .expect("open rewritten chapter");
+        assert!(!chapter.exists("Old.c4s"));
+        let renamed_group = chapter
+            .open_child("Packed New.c4s")
+            .expect("open renamed packed child");
+        assert_eq!(
+            renamed_group.read_file("Title.txt").expect("read packed title"),
+            b"US:Packed New"
+        );
+
+        delete_scenario_storage(&renamed).expect("delete nested packed scenario");
+        let campaign = Group::open(&outer_path).expect("open deleted campaign");
+        let chapter = campaign
+            .open_child("Chapter.c4f")
+            .expect("open deleted chapter");
+        assert!(!chapter.exists("Packed New.c4s"));
+    }
+
+    #[test]
+    fn scensel_rename_collision_is_modal_and_keeps_editor_and_storage() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated rename collision user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        for (filename, title) in [("Source.c4s", "Source"), ("Taken.c4s", "Taken")]
+        {
+            let path = paths.scenario_dir().join(filename);
+            fs::create_dir_all(&path).expect("create collision scenario");
+            fs::write(
+                path.join("Scenario.txt"),
+                format!("[Head]\nTitle={title}\n"),
+            )
+            .expect("write collision scenario");
+        }
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        let index = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == "Source.c4s")
+            .expect("source row");
+        app.handle_menu_input(|menu| menu.select_list_index(index))
+            .expect("select source");
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start collision rename");
+        for character in "Taken".chars() {
+            app.handle_text_input(character)
+                .expect("type colliding title");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("collision is handled by modal");
+
+        assert!(paths.scenario_dir().join("Source.c4s").exists());
+        assert!(paths.scenario_dir().join("Taken.c4s").exists());
+        let rename = app
+            .menu_state
+            .rename_edit
+            .as_ref()
+            .expect("invalid rename editor remains");
+        assert_eq!(rename.edit.selected_text(), Some("Taken"));
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(
+            app.message_dialogs[0].state.caption(),
+            "Rename failure"
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss rename failure");
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn packed_scenario_rename_missing_source_does_not_touch_destination() {
+        let directory = tempdir().expect("packed collision directory");
+        let outer_path = directory.path().join("Campaign.c4f");
+        let mut destination = MutableGroup::new("Destination.c4s");
+        destination
+            .add_file("Scenario.txt", b"[Head]\nTitle=Keep\n".to_vec())
+            .expect("add destination core");
+        destination
+            .add_file("Title.txt", b"US:Keep".to_vec())
+            .expect("add destination title");
+        let mut campaign = MutableGroup::new("Campaign.c4f");
+        campaign
+            .add_child("Destination.c4s", destination)
+            .expect("add destination scenario");
+        let before = campaign.pack().expect("pack collision campaign");
+        fs::write(&outer_path, &before).expect("write collision campaign");
+
+        let error = rename_scenario_storage(
+            &outer_path.join("Missing.c4s"),
+            ScenarioKind::Scenario,
+            "Destination",
+            "US",
+        )
+        .expect_err("missing source must not rewrite an existing destination");
+        assert!(error.to_string().contains("does not exist"));
+        assert_eq!(fs::read(&outer_path).expect("read untouched campaign"), before);
+        let group = Group::open(&outer_path).expect("open untouched campaign");
+        assert_eq!(
+            group
+                .open_child("Destination.c4s")
+                .expect("open untouched destination")
+                .read_file("Title.txt")
+                .expect("read untouched title"),
+            b"US:Keep"
+        );
+    }
+
+    #[test]
+    fn scensel_delete_confirms_exact_subject_deletes_and_selects_next() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated delete user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        for (filename, title) in [("A.c4s", "Alpha"), ("B.c4s", "Beta"), ("C.c4s", "Gamma")] {
+            let path = paths.scenario_dir().join(filename);
+            fs::create_dir_all(&path).expect("create delete scenario");
+            fs::write(
+                path.join("Scenario.txt"),
+                format!("[Head]\nTitle={title}\n"),
+            )
+            .expect("write delete scenario");
+        }
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        let index = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == "B.c4s")
+            .expect("Beta row");
+        app.handle_menu_input(|menu| menu.select_list_index(index))
+            .expect("select Beta");
+        app.menu_state.set_search_text("pending query that excludes Gamma");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("open scenario delete confirmation");
+        assert_eq!(
+            app.message_dialogs
+                .last()
+                .expect("delete confirmation")
+                .state
+                .message(),
+            "Delete Scenario Beta?"
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("confirm scenario deletion");
+        assert!(!paths.scenario_dir().join("B.c4s").exists());
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("C.c4s")
+        );
+        assert_eq!(
+            app.menu_state.search_text(),
+            "pending query that excludes Gamma"
+        );
+        assert!(!app.scenario_catalog.contains_key("B.c4s"));
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_delete_uses_original_group_warning() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated original warning user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let original_path = paths.scenario_dir().join("Original.c4s");
+        fs::create_dir_all(paths.scenario_dir()).expect("create scenario directory");
+        let mut original = MutableGroup::new("Original.c4s");
+        original.make_original(true);
+        original
+            .add_file("Scenario.txt", b"[Head]\nTitle=Original\n".to_vec())
+            .expect("add original scenario core");
+        fs::write(&original_path, original.pack().expect("pack original scenario"))
+            .expect("write original scenario");
+
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        let index = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == "Original.c4s")
+            .expect("original scenario row");
+        app.handle_menu_input(|menu| menu.select_list_index(index))
+            .expect("select original scenario");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("open original delete warning");
+        assert_eq!(
+            app.message_dialogs
+                .last()
+                .expect("original warning")
+                .state
+                .message(),
+            "Scenario Original is an original file. Are your sure you want to delete it?"
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline original deletion");
+        assert!(original_path.exists());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_delete_failure_is_nonfatal_and_keeps_row_selected() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated delete failure user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let scenario_path = paths.scenario_dir().join("Failure.c4s");
+        fs::create_dir_all(&scenario_path).expect("create failing delete scenario");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Failure\n",
+        )
+        .expect("write failing delete scenario");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        let index = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == "Failure.c4s")
+            .expect("failure scenario row");
+        app.handle_menu_input(|menu| menu.select_list_index(index))
+            .expect("select failure scenario");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("open failing delete confirmation");
+        fs::remove_dir_all(&scenario_path).expect("make confirmed deletion fail");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("delete failure is handled");
+
+        let failure = app.message_dialogs.last().expect("delete failure modal");
+        assert_eq!(failure.state.caption(), "Delete");
+        assert_eq!(failure.state.message(), "Delete failure.");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("Failure.c4s")
+        );
+        assert!(app.scenario_catalog.contains_key("Failure.c4s"));
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_alt_m_updates_shared_and_persisted_mission_access() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated mission access user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_network_host_scenario_browser();
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set Alt modifier");
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("open Mission Access dialog");
+        let dialog = app
+            .game_option_input_dialog
+            .as_ref()
+            .expect("Mission Access dialog");
+        assert_eq!(dialog.purpose, PendingInputDialogPurpose::ScenarioMissionAccess);
+        assert_eq!(dialog.controller.caption(), "Mission Access");
+        assert_eq!(dialog.controller.message(), "Enter mission password:");
+        assert_eq!(dialog.controller.icon(), InputDialogIcon::OPTIONS);
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "Secret;Second".to_string(),
+        )])
+        .expect("grant mission access");
+        assert_eq!(app.mission_access.snapshot(), "Secret;Second");
+        assert_eq!(
+            load_configured_mission_access(&paths).expect("load persisted mission access"),
+            "Secret;Second"
+        );
+
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("reopen Mission Access dialog");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "-secret".to_string(),
+        )])
+        .expect("remove mission access case-insensitively");
+        assert_eq!(app.mission_access.snapshot(), "Second");
+        assert_eq!(
+            load_configured_mission_access(&paths).expect("load updated mission access"),
+            "Second"
+        );
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -66780,6 +68427,99 @@ public func Grant(password) { return GainMissionAccess(password); }
             })]
         })
         .expect("FolderMap folder activation");
+    }
+
+    #[test]
+    fn folder_map_f5_refresh_preserves_map_and_book_only_shortcuts() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("FolderMap refresh user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let map_path = paths.scenario_dir().join("Map.c4f");
+        let alpha_path = map_path.join("Alpha.c4s");
+        fs::create_dir_all(&alpha_path).expect("initial map scenario");
+        fs::write(map_path.join("Folder.txt"), "[Head]\nIndex=1\n")
+            .expect("map folder core");
+        fs::write(
+            alpha_path.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha Mission\n",
+        )
+        .expect("initial map scenario core");
+        write_map_png(
+            &map_path.join("FolderMap.png"),
+            16,
+            8,
+            [20, 30, 40, 255],
+        );
+        fs::write(
+            map_path.join("FolderMap.txt"),
+            "[FolderMap]\n    [Scenario]\n    File=Alpha.c4s\n    Area=0,0,8,8\n    [Scenario]\n    File=Beta.c4s\n    Area=8,0,8,8\n",
+        )
+        .expect("map data");
+
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        app.enter_scenario_folder("Map.c4f");
+        assert!(app.menu_state.current_map().is_some());
+
+        let select_alpha = app
+            .menu_state
+            .activate_map_button(0)
+            .expect("select Alpha map button");
+        app.handle_menu_input(move |_| vec![select_alpha])
+            .expect("apply Alpha selection");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("Map.c4f/Alpha.c4s")
+        );
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("map view has no inline rename shortcut");
+        assert!(app.menu_state.rename_edit.is_none());
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("map view has no list delete shortcut");
+        assert!(app.message_dialogs.is_empty());
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set map shortcut modifier");
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("map view has no Mission Access shortcut");
+        assert!(app.game_option_input_dialog.is_none());
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear map shortcut modifier");
+
+        let beta_path = map_path.join("Beta.c4s");
+        fs::create_dir_all(&beta_path).expect("refreshed map scenario");
+        fs::write(
+            beta_path.join("Scenario.txt"),
+            "[Head]\nTitle=Beta Mission\n",
+        )
+        .expect("refreshed map scenario core");
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("refresh active map folder");
+
+        assert_eq!(
+            app.menu_state
+                .current_folder()
+                .map(|folder| folder.identifier.as_str()),
+            Some("Map.c4f")
+        );
+        let map = app
+            .menu_state
+            .current_map()
+            .expect("F5 preserves FolderMap style");
+        assert!(
+            map.selected_entry().is_none(),
+            "F5 rebuild clears the visible map selection"
+        );
+        assert!(map.scenarios.iter().any(|button| {
+            button
+                .entry
+                .as_ref()
+                .is_some_and(|entry| entry.identifier == "Map.c4f/Beta.c4s")
+        }));
+        assert!(app.scenario_catalog.contains_key("Map.c4f/Beta.c4s"));
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -71820,7 +73560,10 @@ ScenInfoArea=70,5,25,90
             .game_option_input_dialog
             .as_ref()
             .expect("password prompt is modal");
-        assert!(dialog.network_join_password);
+        assert_eq!(
+            dialog.purpose,
+            PendingInputDialogPurpose::NetworkJoinPassword
+        );
         assert_eq!(dialog.controller.message(), "Enter password:");
         assert_eq!(dialog.controller.caption(), "Enter password:");
         assert_eq!(dialog.controller.icon(), InputDialogIcon::LOCKED);
@@ -71879,7 +73622,10 @@ ScenInfoArea=70,5,25,90
             .game_option_input_dialog
             .as_ref()
             .expect("wrong password reopens prompt");
-        assert!(prompt.network_join_password);
+        assert_eq!(
+            prompt.purpose,
+            PendingInputDialogPurpose::NetworkJoinPassword
+        );
         assert!(prompt.controller.text().is_empty());
 
         app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(

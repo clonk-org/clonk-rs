@@ -4,7 +4,7 @@
 mod group_writer;
 
 use group_writer::{c4group_file_crc, compress_c4group_for_test};
-use lc_resources::{Group, MutableGroup, MutableGroupChildMut};
+use lc_resources::{Group, MutableGroup, MutableGroupChildMut, MutableGroupError};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
@@ -57,6 +57,89 @@ fn cpp_child_crc_is_recursive_xor_and_omits_child_entry_name() {
 
     assert_eq!(first_parent.entry_crc("First.c4g"), Some(0x6554_cbb7));
     assert_eq!(first_parent.contents_crc(), renamed_parent.contents_crc());
+}
+
+#[test]
+fn mutable_group_rename_is_collision_safe_and_preserves_entry_metadata() {
+    let mut child = MutableGroup::new("Old.bin");
+    child.add_file("z.raw", b"tail".to_vec()).unwrap();
+    child.add_file("Scenario.txt", b"core".to_vec()).unwrap();
+
+    let mut parent = MutableGroup::new("Parent.c4g");
+    parent
+        .add_child_with_metadata("Old.bin", child, 0xa0b0_c0d0, true)
+        .unwrap();
+    parent.add_file("Taken.c4s", b"taken".to_vec()).unwrap();
+
+    assert_eq!(
+        parent.rename_entry_checked("Old.bin", "taken.C4S"),
+        Err(MutableGroupError::EntryAlreadyExists(
+            "taken.C4S".to_string()
+        ))
+    );
+    assert_eq!(parent.entry_names(), ["Old.bin", "Taken.c4s"]);
+
+    assert!(parent
+        .rename_entry_checked("old.BIN", "Renamed.c4s")
+        .unwrap());
+    assert_eq!(parent.entry_names(), ["Renamed.c4s", "Taken.c4s"]);
+
+    let packed = parent.pack_raw().unwrap();
+    let group = Group::from_memory(PathBuf::from("Parent.c4g"), packed).unwrap();
+    let renamed = group
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.relative_path == PathBuf::from("Renamed.c4s"))
+        .unwrap();
+    assert_eq!(renamed.time, 0xa0b0_c0d0);
+    assert!(renamed.executable);
+
+    let child = group.open_child("Renamed.c4s").unwrap();
+    assert_eq!(child.read_file("Scenario.txt").unwrap(), b"core");
+    assert_eq!(child.read_file("z.raw").unwrap(), b"tail");
+    assert_eq!(
+        packed_entry_names(&child.raw_image().unwrap()),
+        ["Scenario.txt", "z.raw"],
+        "the renamed child's filename selects the scenario sort list"
+    );
+}
+
+#[test]
+fn mutable_group_rename_recomputes_imported_file_crc_for_new_name() {
+    let mut source = MutableGroup::new("Files.c4g");
+    source.add_file("Old.txt", b"payload".to_vec()).unwrap();
+    let source = Group::from_memory(PathBuf::from("Files.c4g"), source.pack_raw().unwrap())
+        .unwrap();
+    let mut rewritten = MutableGroup::from_group(&source).unwrap();
+    let old_crc = rewritten.entry_crc("Old.txt").unwrap();
+    assert!(rewritten
+        .rename_entry_checked("Old.txt", "New.txt")
+        .unwrap());
+
+    let mut expected = MutableGroup::new("Files.c4g");
+    expected.add_file("New.txt", b"payload".to_vec()).unwrap();
+    assert_eq!(rewritten.entry_crc("New.txt"), expected.entry_crc("New.txt"));
+    assert_ne!(rewritten.entry_crc("New.txt"), Some(old_crc));
+}
+
+#[test]
+fn group_original_marker_is_exact_and_directories_are_not_original() {
+    let mut mutable = MutableGroup::new("Original.c4g");
+    mutable.make_original(true);
+    let original =
+        Group::from_memory(PathBuf::from("Original.c4g"), mutable.pack_raw().unwrap()).unwrap();
+    assert!(original.is_original());
+
+    mutable.make_original(false);
+    let ordinary =
+        Group::from_memory(PathBuf::from("Ordinary.c4g"), mutable.pack_raw().unwrap()).unwrap();
+    assert!(!ordinary.is_original());
+
+    let directory = tempdir().unwrap();
+    let unpacked = directory.path().join("Unpacked.c4g");
+    std::fs::create_dir(&unpacked).unwrap();
+    assert!(!Group::open(unpacked).unwrap().is_original());
 }
 
 #[test]
