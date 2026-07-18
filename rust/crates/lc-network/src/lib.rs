@@ -33,6 +33,7 @@ mod resource_transfer_backend;
 mod resync;
 mod search;
 mod session;
+mod statistics;
 mod status;
 mod transport;
 mod udp;
@@ -204,6 +205,11 @@ pub use session::{
     start_host_with_udp_binding, ClientCommand, ClientConfig, ClientError, ClientEvent,
     ClientHandle, ClientMeshPuncherConfig, HostCommand, HostConfig, HostError, HostEvent,
     HostHandle, HostJoinSnapshot, HostUdpBinding, HostedResourceFile, BROADCAST_CLIENT_ID,
+};
+pub use statistics::{
+    ConnectionRateStatistics, ConnectionStatisticsKey, ConnectionStatisticsRecorder,
+    NetworkIoStatistics, NetworkIoStatisticsSnapshot, ProtocolRateStatistics,
+    NETWORK_STATISTICS_INTERVAL_MS, TCP_STATISTICS_HEADER_BYTES, UDP_STATISTICS_HEADER_BYTES,
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{
