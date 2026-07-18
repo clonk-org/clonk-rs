@@ -30,7 +30,6 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const TCP_FRAME_PREFIX: u8 = 0xFF;
-const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2 MiB cap to guard against bogus frames.
 const PID_PING: u8 = 0x00;
 const PID_PONG: u8 = 0x01;
 const PID_CONN: u8 = 0x02;
@@ -293,6 +292,22 @@ pub(crate) enum InboundPacket {
 /// Length of the frame header: prefix byte plus native-endian u32 size.
 const FRAME_HEADER_LEN: usize = 5;
 
+/// Validates the only size bound imposed by C4NetIOTCP's wire format.
+///
+/// A smaller policy cap is not compatible with stock C++ producers:
+/// `PID_Control` may contain an unbounded `C4ControlScript::Script`,
+/// `PID_JoinData` may contain an uncapped localized scenario title as well as
+/// player/client/resource lists whose native count guards allow 5,000
+/// entries, and `PID_PostMortem` serializes the complete unacknowledged packet
+/// log (src/C4Control.h:131-147, src/C4ComponentHost.cpp:238-255,
+/// src/C4GameParameters.cpp:555-587, src/C4PlayerInfo.cpp:601-630,1733-1759,
+/// and src/C4Network2IO.cpp:1390-1407,1451-1465). C++'s receive wire body is
+/// therefore bounded only by its native-endian uint32 length field.
+fn cpp_frame_body_size(size: usize) -> Result<u32, TransportError> {
+    u32::try_from(size)
+        .map_err(|_| TransportError::Malformed("packet exceeds C++ uint32 frame size"))
+}
+
 /// Tokio-powered transport that understands LegacyClonk TCP framing and control packets.
 #[derive(Debug)]
 pub struct ControlTransport<S> {
@@ -384,16 +399,18 @@ where
             self.read_buf[3],
             self.read_buf[4],
         ]) as usize;
-        if size > MAX_PACKET_SIZE {
-            return Err(TransportError::Malformed("packet exceeds allowed size"));
-        }
-        if self.read_buf.len() < FRAME_HEADER_LEN + size {
+        let Some(frame_end) = FRAME_HEADER_LEN.checked_add(size) else {
+            // Matches C4NetIOTCP::UnpackPacket's wrap guard: an impossible
+            // frame remains incomplete instead of becoming a fatal packet.
+            return Ok(None);
+        };
+        if self.read_buf.len() < frame_end {
             return Ok(None);
         }
         let packet = if size == 0 {
             InboundPacket::Empty
         } else {
-            let body = &self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size];
+            let body = &self.read_buf[FRAME_HEADER_LEN..frame_end];
             let packet_type = body[0];
             match parse_complete_packet(body) {
                 Ok(Some(message)) => InboundPacket::Message(message),
@@ -401,7 +418,7 @@ where
                 Err(error) => InboundPacket::Invalid { packet_type, error },
             }
         };
-        self.read_buf.drain(..FRAME_HEADER_LEN + size);
+        self.read_buf.drain(..frame_end);
         Ok(Some(packet))
     }
 
@@ -522,7 +539,7 @@ where
             }
         }
 
-        let size = (frame.len() - FRAME_HEADER_LEN) as u32;
+        let size = cpp_frame_body_size(frame.len() - FRAME_HEADER_LEN)?;
         frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_ne_bytes());
         Ok(frame)
     }
@@ -543,9 +560,7 @@ where
         &mut self,
         packet: Vec<u8>,
     ) -> Result<(), TransportError> {
-        if packet.len() > MAX_PACKET_SIZE {
-            return Err(TransportError::Malformed("packet exceeds allowed size"));
-        }
+        cpp_frame_body_size(packet.len())?;
         self.outbound_packet_log.record_outbound(packet);
         Ok(())
     }
@@ -569,12 +584,11 @@ where
         &mut self,
         packet: &[u8],
     ) -> Result<(), TransportError> {
-        if packet.len() > MAX_PACKET_SIZE {
-            return Err(TransportError::Malformed("packet exceeds allowed size"));
-        }
-        let size = u32::try_from(packet.len())
-            .map_err(|_| TransportError::Malformed("packet exceeds allowed size"))?;
-        let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + packet.len());
+        let size = cpp_frame_body_size(packet.len())?;
+        let frame_size = FRAME_HEADER_LEN
+            .checked_add(packet.len())
+            .ok_or(TransportError::Malformed("TCP frame size overflow"))?;
+        let mut frame = Vec::with_capacity(frame_size);
         frame.push(TCP_FRAME_PREFIX);
         frame.extend_from_slice(&size.to_ne_bytes());
         frame.extend_from_slice(packet);
@@ -1131,6 +1145,94 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    #[test]
+    fn cpp_tcp_frame_above_two_mib_waits_until_complete_then_decodes() {
+        const BODY_SIZE: usize = 2 * 1024 * 1024 + 1;
+
+        let (stream, _peer) = duplex(1);
+        let mut transport = ControlTransport::new(stream);
+        transport.read_buf.push(TCP_FRAME_PREFIX);
+        transport
+            .read_buf
+            .extend_from_slice(&(BODY_SIZE as u32).to_ne_bytes());
+        assert!(transport.extract_frame().unwrap().is_none());
+
+        transport
+            .read_buf
+            .resize(FRAME_HEADER_LEN + BODY_SIZE, 0x5a);
+        transport.read_buf[FRAME_HEADER_LEN] = PID_CONTROL_PKT;
+        transport.read_buf[FRAME_HEADER_LEN + 1] = u8::from(ControlDelivery::Direct);
+        let ping = PingPacket {
+            sent_at: 0x1122_3344,
+            packet_counter: 7,
+        };
+        let mut ping_body = vec![PID_PING];
+        encode_ping(ping, &mut ping_body);
+        transport.read_buf.extend(expect_frame(&ping_body));
+        let packet = transport
+            .extract_frame()
+            .unwrap()
+            .expect("complete C++ u32-sized frame must decode");
+        assert!(matches!(
+            packet,
+            InboundPacket::Message(ControlMessage::Packet {
+                delivery: ControlDelivery::Direct,
+                data,
+            }) if data.len() == BODY_SIZE - 2 && data.iter().all(|byte| *byte == 0x5a)
+        ));
+        assert!(matches!(
+            transport.extract_frame().unwrap(),
+            Some(InboundPacket::Message(ControlMessage::Ping(received))) if received == ping
+        ));
+        assert!(
+            transport.read_buf.is_empty(),
+            "following frame stays aligned"
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn cpp_tcp_size_bound_is_u32_and_maximum_incomplete_frame_does_not_allocate() {
+        assert_eq!(cpp_frame_body_size(u32::MAX as usize).unwrap(), u32::MAX);
+        assert!(matches!(
+            cpp_frame_body_size(u32::MAX as usize + 1),
+            Err(TransportError::Malformed(
+                "packet exceeds C++ uint32 frame size"
+            ))
+        ));
+
+        let (stream, _peer) = duplex(1);
+        let mut transport = ControlTransport::new(stream);
+        transport.read_buf.push(TCP_FRAME_PREFIX);
+        transport
+            .read_buf
+            .extend_from_slice(&u32::MAX.to_ne_bytes());
+        assert!(transport.extract_frame().unwrap().is_none());
+        assert_eq!(transport.read_buf.len(), FRAME_HEADER_LEN);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cpp_tcp_complete_packet_above_two_mib_sends_with_u32_length() {
+        const BODY_SIZE: usize = 2 * 1024 * 1024 + 1;
+
+        let mut packet = vec![0x5a; BODY_SIZE];
+        packet[0] = PID_CONTROL_PKT;
+        let (client, mut server) = duplex(FRAME_HEADER_LEN + BODY_SIZE);
+        let mut transport = ControlTransport::new(client);
+        transport.send_complete_packet_bytes(&packet).await.unwrap();
+
+        let mut header = [0; FRAME_HEADER_LEN];
+        server.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], TCP_FRAME_PREFIX);
+        assert_eq!(
+            u32::from_ne_bytes(header[1..].try_into().unwrap()),
+            BODY_SIZE as u32
+        );
+        let mut received = vec![0; BODY_SIZE];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, packet);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -35,7 +35,6 @@ use crate::{
 
 const TCP_FRAME_PREFIX: u8 = 0xff;
 const TCP_FRAME_HEADER_SIZE: usize = 5;
-const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024;
 const HUB_COMMAND_CAPACITY: usize = 64;
 const INCOMING_PEER_CAPACITY: usize = 32;
 const PUNCHER_EVENT_CAPACITY: usize = 16;
@@ -224,12 +223,6 @@ impl ReliableUdpPeerStream {
                 .try_into()
                 .expect("TCP frame header length checked"),
         ) as usize;
-        if packet_size > MAX_PACKET_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "reliable-UDP session packet exceeds the transport limit",
-            ));
-        }
         TCP_FRAME_HEADER_SIZE
             .checked_add(packet_size)
             .map(Some)
@@ -301,19 +294,16 @@ impl ReliableUdpPeerStream {
     }
 
     fn install_read_frame(&mut self, payload: Vec<u8>) -> io::Result<()> {
-        if payload.len() > MAX_PACKET_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "reliable-UDP session packet exceeds the transport limit",
-            ));
-        }
         let packet_size = u32::try_from(payload.len()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "reliable-UDP session packet length exceeds u32",
             )
         })?;
-        self.read_frame = Vec::with_capacity(TCP_FRAME_HEADER_SIZE + payload.len());
+        let frame_size = TCP_FRAME_HEADER_SIZE
+            .checked_add(payload.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "TCP frame size overflow"))?;
+        self.read_frame = Vec::with_capacity(frame_size);
         self.read_frame.push(TCP_FRAME_PREFIX);
         self.read_frame
             .extend_from_slice(&packet_size.to_ne_bytes());
@@ -1273,6 +1263,40 @@ mod tests {
 
     fn loopback() -> SocketAddr {
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)
+    }
+
+    #[test]
+    fn peer_stream_adapter_accepts_cpp_frames_above_the_old_two_mib_cap() {
+        const BODY_SIZE: usize = 2 * 1024 * 1024 + 1;
+
+        let (commands, _commands_rx) = mpsc::channel(1);
+        let (_inbound_tx, inbound) = mpsc::channel(1);
+        let terminal = Arc::new(PeerTerminalState::open());
+        let mut stream = ReliableUdpPeerStream::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_111)),
+            1,
+            commands,
+            inbound,
+            terminal,
+        );
+
+        stream.install_read_frame(vec![0x5a; BODY_SIZE]).unwrap();
+        assert_eq!(stream.read_frame[0], TCP_FRAME_PREFIX);
+        assert_eq!(
+            &stream.read_frame[1..TCP_FRAME_HEADER_SIZE],
+            &(BODY_SIZE as u32).to_ne_bytes()
+        );
+        assert_eq!(stream.read_frame.len(), TCP_FRAME_HEADER_SIZE + BODY_SIZE);
+
+        stream.write_buffer.clear();
+        stream.write_buffer.push(TCP_FRAME_PREFIX);
+        stream
+            .write_buffer
+            .extend_from_slice(&(BODY_SIZE as u32).to_ne_bytes());
+        assert_eq!(
+            stream.buffered_frame_size().unwrap(),
+            Some(TCP_FRAME_HEADER_SIZE + BODY_SIZE)
+        );
     }
 
     async fn connected_pair() -> (
