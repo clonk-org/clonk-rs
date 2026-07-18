@@ -55532,6 +55532,27 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn scenario_music_safe_random_does_not_advance_the_synchronized_lcg() {
+        let dir = tempdir().expect("scenario music RNG fixture");
+        let scenario = dir.path().join("Scenario.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("A.ogg"), silent_pcm_wav(20)).expect("write A");
+        fs::write(scenario.join("B.ogg"), silent_pcm_wav(20)).expect("write B");
+        let mut app = new_running_sandbox_app();
+        let synchronized_before = app.engine.snapshot().rng;
+
+        app.runtime_music_enabled = true;
+        app.play_scenario_audio(&scenario);
+
+        assert_eq!(
+            app.engine.snapshot().rng,
+            synchronized_before,
+            "the live scenario path must draw through libc SafeRandom, not Engine::LcgRng"
+        );
+        app.audio.as_mut().expect("test audio").stop_music();
+    }
+
+    #[test]
     fn duplicate_music_records_exclude_only_the_record_that_started() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("Shared.ogg"), b"shared").expect("write music fixture");
