@@ -1,6 +1,14 @@
 use crate::DefinitionId;
 use serde::{Deserialize, Serialize};
 
+/// `C4RoundResults::NetResult`; `None` represents `NR_None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoundResultsNetworkResult {
+    LeagueOk,
+    LeagueError,
+    NetworkError,
+}
+
 /// Per-player data retained by `C4RoundResultsPlayer` after evaluation.
 ///
 /// The ID links to `C4PlayerInfo`, not the in-round `C4Player::Number`
@@ -21,7 +29,8 @@ pub struct RoundResultsPlayerState {
     /// League score on the server after this round; `-1` is unknown.
     #[serde(default = "invalid_score", skip_serializing_if = "is_invalid_score")]
     pub league_score_new: i32,
-    /// League score change awarded for this round.
+    /// League score change awarded for this round. C++ constructs this as
+    /// zero, while its serialized default for a missing field is `-1`.
     #[serde(default = "invalid_score", skip_serializing_if = "is_invalid_score")]
     pub league_score_gain: i32,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
@@ -97,13 +106,13 @@ pub struct RoundResultsState {
         with = "lc_script::c4_string_serde"
     )]
     pub custom_evaluation_strings: String,
-    /// Result of the league backend evaluation. `None` means no league reply
-    /// has been applied; `Some(false)` is a completed league error.
+    /// First network evaluation applied to these results. C++ preserves an
+    /// earlier, usually more-specific disconnect error over a league reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub league_success: Option<bool>,
-    /// Raw legacy result text paired with `league_success`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub league_result_message: Option<Vec<u8>>,
+    pub network_result: Option<RoundResultsNetworkResult>,
+    /// Raw legacy result text paired with `network_result`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_result_message: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub players: Vec<RoundResultsPlayerState>,
 }
@@ -116,8 +125,8 @@ impl RoundResultsState {
             && !self.hide_settlement_score
             && self.league_performance == 0
             && self.custom_evaluation_strings.is_empty()
-            && self.league_success.is_none()
-            && self.league_result_message.is_none()
+            && self.network_result.is_none()
+            && self.network_result_message.is_empty()
             && self.players.is_empty()
     }
 
@@ -176,19 +185,37 @@ impl RoundResultsState {
         self.players[index].league_performance = score;
     }
 
-    /// Applies `C4RoundResults::EvaluateLeague`: retain the network result and
-    /// copy only the server-owned league fields into each existing/local
-    /// round-result row. Settlement score and playing time remain local.
+    /// `C4RoundResults::EvaluateNetwork`: the first result is usually the most
+    /// specific, so later disconnect/league outcomes cannot replace it.
+    pub fn evaluate_network(
+        &mut self,
+        result: RoundResultsNetworkResult,
+        result_message: Option<Vec<u8>>,
+    ) {
+        if self.network_result.is_none() {
+            self.network_result = Some(result);
+            self.network_result_message = result_message.unwrap_or_default();
+        }
+    }
+
+    /// Applies `C4RoundResults::EvaluateLeague`: retain the first network
+    /// result and copy only the server-owned league fields into rows keyed by
+    /// persistent player-info ID. Local settlement score and playing time are
+    /// deliberately untouched.
     pub fn evaluate_league(
         &mut self,
         success: bool,
         result_message: Vec<u8>,
         players: impl IntoIterator<Item = LeagueRoundResultUpdate>,
     ) {
-        if self.league_success.is_none() {
-            self.league_success = Some(success);
-            self.league_result_message = Some(result_message);
-        }
+        self.evaluate_network(
+            if success {
+                RoundResultsNetworkResult::LeagueOk
+            } else {
+                RoundResultsNetworkResult::LeagueError
+            },
+            Some(result_message),
+        );
         for update in players {
             let index = self
                 .players
@@ -312,8 +339,11 @@ mod tests {
             }],
         );
 
-        assert_eq!(results.league_success, Some(true));
-        assert_eq!(results.league_result_message.as_deref(), Some(&b"evaluated"[..]));
+        assert_eq!(
+            results.network_result,
+            Some(RoundResultsNetworkResult::LeagueOk)
+        );
+        assert_eq!(results.network_result_message, b"evaluated");
         let player = &results.players[0];
         assert_eq!((player.total_playing_time, player.score_old, player.score_new), (90, 10, Some(12)));
         assert_eq!(
@@ -326,6 +356,86 @@ mod tests {
             (80, -5, 3, 4)
         );
         assert_eq!(player.league_progress_data.as_deref(), Some(&b"progress"[..]));
+    }
+
+    #[test]
+    fn league_evaluation_retains_first_result_and_updates_server_owned_player_fields() {
+        let mut results = RoundResultsState {
+            players: vec![RoundResultsPlayerState {
+                player_info_id: 7,
+                total_playing_time: 90,
+                score_old: 10,
+                score_new: Some(12),
+                ..RoundResultsPlayerState::default()
+            }],
+            ..RoundResultsState::default()
+        };
+        let update = |player_info_id, league_score_new| LeagueRoundResultUpdate {
+            player_info_id,
+            league_score_new,
+            league_score_gain: -5,
+            league_rank_new: 3,
+            league_rank_symbol_new: 4,
+            league_progress_data: b"progress".to_vec(),
+        };
+
+        results.evaluate_network(
+            RoundResultsNetworkResult::NetworkError,
+            Some(b"first".to_vec()),
+        );
+        results.evaluate_league(true, b"second".to_vec(), [update(7, 81), update(9, 70)]);
+
+        assert_eq!(
+            results.network_result,
+            Some(RoundResultsNetworkResult::NetworkError)
+        );
+        assert_eq!(
+            results.network_result_message.as_slice(),
+            &b"first"[..]
+        );
+        let retained = results
+            .players
+            .iter()
+            .find(|player| player.player_info_id == 7)
+            .unwrap();
+        assert_eq!(
+            (retained.total_playing_time, retained.score_old, retained.score_new),
+            (90, 10, Some(12))
+        );
+        assert_eq!(
+            (
+                retained.league_score_new,
+                retained.league_score_gain,
+                retained.league_rank_new,
+                retained.league_rank_symbol_new,
+                retained.league_progress_data.as_deref(),
+            ),
+            (81, -5, 3, 4, Some(&b"progress"[..]))
+        );
+        let created = results
+            .players
+            .iter()
+            .find(|player| player.player_info_id == 9)
+            .unwrap();
+        assert_eq!((created.score_old, created.score_new), (-1, None));
+        assert_eq!(created.league_score_new, 70);
+
+        let serialized = serde_json::to_string(&results).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RoundResultsState>(&serialized).unwrap(),
+            results
+        );
+
+        let mut league_error = RoundResultsState::default();
+        league_error.evaluate_league(false, b"backend error".to_vec(), []);
+        assert_eq!(
+            league_error.network_result,
+            Some(RoundResultsNetworkResult::LeagueError)
+        );
+        assert_eq!(
+            league_error.network_result_message.as_slice(),
+            &b"backend error"[..]
+        );
     }
 
     #[test]

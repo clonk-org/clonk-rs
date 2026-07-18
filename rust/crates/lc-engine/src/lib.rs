@@ -130,7 +130,9 @@ pub use player::{
     PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
 pub use record::{Playback, PlaybackError, Recorder, Recording};
-pub use round_results::{LeagueRoundResultUpdate, RoundResultsPlayerState, RoundResultsState};
+pub use round_results::{
+    LeagueRoundResultUpdate, RoundResultsNetworkResult, RoundResultsPlayerState, RoundResultsState,
+};
 pub use scenario::{
     InitialNetworkScenarioMetadata, InitialNetworkTeam, InitialNetworkTeamDistribution,
     InitialNetworkTeamMetadata, LegacyC4SVal, PlayerStart, Scenario,

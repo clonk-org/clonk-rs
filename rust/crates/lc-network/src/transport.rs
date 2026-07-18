@@ -1242,6 +1242,76 @@ mod tests {
         assert_eq!(received, packet);
     }
 
+    #[test]
+    fn cpp_one_player_league_round_results_transport_frame_is_byte_exact() {
+        let expected_packet = [
+            PID_LEAGUE_ROUND_RESULTS,
+            0x01,
+            b'O',
+            b'K',
+            0x00,
+            0x01,
+            0x04,
+            0x03,
+            0x02,
+            0x01,
+            0x08,
+            0x07,
+            0x06,
+            0x05,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0x64,
+            0x00,
+            0x00,
+            0x00,
+            0xc8,
+            0x00,
+            0x00,
+            0x00,
+            0xfb,
+            0xff,
+            0xff,
+            0xff,
+            0x03,
+            0x00,
+            0x00,
+            0x00,
+            0x04,
+            0x00,
+            0x00,
+            0x00,
+            b'P',
+            0x00,
+            0x02,
+        ];
+        let packet = LeagueRoundResultsPacket {
+            success: true,
+            result_string: LegacyCString::from_bytes(b"OK".to_vec()).unwrap(),
+            players: vec![crate::LeagueRoundResultsPlayer {
+                player_info_id: 0x0102_0304,
+                total_playing_time: 0x0506_0708,
+                settlement_score_old: -1,
+                settlement_score_new: 100,
+                league_score_new: 200,
+                league_score_gain: -5,
+                league_rank_new: 3,
+                league_rank_symbol_new: 4,
+                league_progress_data: LegacyCString::from_bytes(b"P".to_vec()).unwrap(),
+                status: crate::LeagueRoundPlayerStatus::Won,
+            }],
+        };
+        let expected_frame = expect_frame(&expected_packet);
+        let actual_frame = ControlTransport::<tokio::io::DuplexStream>::encode_message_frame(
+            ControlMessage::LeagueRoundResults(packet),
+        )
+        .expect("known C++ league result encodes");
+
+        assert_eq!(actual_frame, expected_frame);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn known_cpp_packets_decode_or_skip_without_losing_following_tcp_frame() {
         // Real C++ bodies: packed client 7 + TCP IPv6 address for

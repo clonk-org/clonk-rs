@@ -72776,11 +72776,14 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn league_round_result_packet_applies_persistent_evaluation_fields() {
+    fn client_league_round_result_packet_applies_persistent_evaluation_fields() {
         let mut app = new_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
         app.control_player_infos.replace_snapshot(
             10,
             [lc_engine::PlayerInfoControlData {
@@ -72824,10 +72827,17 @@ public func Grant(password) { return GainMissionAccess(password); }
             "EvaluateLeague does not overwrite live PlayerInfo"
         );
         let engine_snapshot = app.engine.snapshot();
-        assert_eq!(engine_snapshot.round_results.league_success, Some(true));
+        assert_eq!(app.snapshot.round_results, engine_snapshot.round_results);
         assert_eq!(
-            engine_snapshot.round_results.league_result_message.as_deref(),
-            Some(&b"evaluated"[..])
+            engine_snapshot.round_results.network_result,
+            Some(lc_engine::RoundResultsNetworkResult::LeagueOk)
+        );
+        assert_eq!(
+            engine_snapshot
+                .round_results
+                .network_result_message
+                .as_slice(),
+            &b"evaluated"[..]
         );
         let result = engine_snapshot
             .round_results
