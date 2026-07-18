@@ -1180,8 +1180,51 @@ impl ClientHandle {
 }
 
 #[derive(Debug)]
+enum HostOutboundMessage {
+    Message(ControlMessage),
+    Raw(Vec<u8>),
+}
+
+#[derive(Clone, Debug)]
+struct HostOutboundSender {
+    sender: mpsc::Sender<HostOutboundMessage>,
+}
+
+impl HostOutboundSender {
+    fn channel(capacity: usize) -> (Self, mpsc::Receiver<HostOutboundMessage>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (Self { sender }, receiver)
+    }
+
+    async fn send(
+        &self,
+        message: ControlMessage,
+    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
+        self.sender.send(HostOutboundMessage::Message(message)).await
+    }
+
+    async fn send_raw(
+        &self,
+        packet: Vec<u8>,
+    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
+        self.sender.send(HostOutboundMessage::Raw(packet)).await
+    }
+
+    fn try_send(
+        &self,
+        message: ControlMessage,
+    ) -> Result<(), mpsc::error::TrySendError<HostOutboundMessage>> {
+        self.sender.try_send(HostOutboundMessage::Message(message))
+    }
+
+    fn same_channel(&self, other: &Self) -> bool {
+        self.sender.same_channel(&other.sender)
+    }
+}
+
+#[derive(Debug)]
 struct ClientConnection {
-    outbound: mpsc::Sender<ControlMessage>,
+    outbound: HostOutboundSender,
     core: lc_engine::ClientCoreControlData,
     peer_addr: SocketAddr,
     join_data_sent: bool,
@@ -1197,7 +1240,7 @@ struct AcceptedConnectionRoute {
     client_id: ClientId,
     remote_connection_id: u32,
     peer_addr: SocketAddr,
-    outbound: mpsc::Sender<ControlMessage>,
+    outbound: HostOutboundSender,
 }
 
 #[derive(Debug)]
@@ -1737,7 +1780,7 @@ enum HostLoopMessage {
         remote_connection_id: u32,
         core: lc_engine::ClientCoreControlData,
         peer_addr: SocketAddr,
-        outbound: mpsc::Sender<ControlMessage>,
+        outbound: HostOutboundSender,
         setup_tx: oneshot::Sender<Result<Option<ClientSetup>, String>>,
     },
     ClientMessage {
@@ -2216,7 +2259,7 @@ fn spawn_host_accept(
                 .await;
             return;
         };
-        let (outbound, outbound_rx) = mpsc::channel(64);
+        let (outbound, outbound_rx) = HostOutboundSender::channel(64);
         let (setup_tx, setup_rx) = oneshot::channel();
         if host_tx
             .send(HostLoopMessage::ClientAccepted {
@@ -2390,7 +2433,7 @@ async fn handle_client_accepted(
     remote_connection_id: u32,
     core: lc_engine::ClientCoreControlData,
     peer_addr: SocketAddr,
-    outbound: mpsc::Sender<ControlMessage>,
+    outbound: HostOutboundSender,
     setup_tx: oneshot::Sender<Result<Option<ClientSetup>, String>>,
     state: &mut HostState,
 ) {
@@ -2643,7 +2686,7 @@ impl HostState {
 }
 
 async fn handle_client_message(
-    _connection_id: u32,
+    connection_id: u32,
     client_id: ClientId,
     message: ControlMessage,
     ping_ms: i32,
@@ -2675,10 +2718,11 @@ async fn handle_client_message(
                 .await;
         }
         ControlMessage::ForwardRequest(packet) => {
-            handle_forward_request(client_id, packet, state).await;
+            handle_forward_request(connection_id, client_id, packet, ping_ms, state).await;
         }
         ControlMessage::Forward(packet) => {
-            handle_forwarded_packet_for_host(client_id, packet, state).await;
+            handle_forwarded_packet_for_host(connection_id, client_id, packet, ping_ms, state)
+                .await;
         }
         ControlMessage::PostMortem(packet) => {
             handle_post_mortem_recovery(packet, ping_ms, state).await;
@@ -2755,19 +2799,9 @@ async fn handle_client_message(
                 .await;
         }
         ControlMessage::Control(packet) => {
-            if packet.client_id() != client_id {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: Some(client_id),
-                        error: format!(
-                            "control packet claimed client {}, but arrived on client {client_id}'s connection",
-                            packet.client_id()
-                        ),
-                    })
-                    .await;
-                return;
-            }
+            // C4GameControlNetwork::HandleControl receives the source client
+            // ID but deliberately does not authenticate the packet envelope
+            // against it. Only PID_ControlPkt checks its embedded ByClient.
             ingest_control(packet, ControlIngress::Network, state).await;
         }
         ControlMessage::Request { from_tick } => {
@@ -2810,7 +2844,9 @@ async fn handle_post_mortem_recovery(
                 ))
                 .await;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                report_unhandled_forwarded_packet(replay.client_id, &nested_packet, state).await;
+            }
             Err(error) => {
                 let _ = state
                     .event_tx
@@ -2836,27 +2872,6 @@ fn forward_selects(packet: &crate::ForwardPacket, client_id: i32) -> bool {
     }
 }
 
-fn authenticated_forwarded_control(
-    source: ClientId,
-    packet: &crate::ForwardPacket,
-) -> Result<ControlPacket, String> {
-    let nested = crate::transport::parse_complete_packet(&packet.nested_packet)
-        .map_err(|error| format!("invalid forwarded packet: {error}"))?
-        .ok_or_else(|| "forwarded packet must contain one non-recursive PID_Control".to_string())?;
-    let ControlMessage::Control(control) = nested else {
-        return Err("forwarded packet must contain one non-recursive PID_Control".to_string());
-    };
-    if control.client_id() != source {
-        return Err(format!(
-            "forwarded control claimed client {}, but arrived on client {source}'s connection",
-            control.client_id()
-        ));
-    }
-    validate_control_envelope(&control)
-        .map_err(|error| format!("invalid forwarded control packet: {error}"))?;
-    Ok(control)
-}
-
 async fn report_forward_error(source: ClientId, error: String, state: &HostState) {
     let _ = state
         .event_tx
@@ -2867,39 +2882,30 @@ async fn report_forward_error(source: ClientId, error: String, state: &HostState
         .await;
 }
 
+async fn report_unhandled_forwarded_packet(
+    source: ClientId,
+    nested_packet: &[u8],
+    state: &HostState,
+) {
+    let Some(&packet_type) = nested_packet.first() else {
+        return;
+    };
+    let _ = state
+        .event_tx
+        .send(HostEvent::UnhandledPacket {
+            client_id: Some(source),
+            packet_type,
+        })
+        .await;
+}
+
 async fn handle_forward_request(
+    connection_id: u32,
     source: ClientId,
     packet: crate::ForwardPacket,
+    ping_ms: i32,
     state: &mut HostState,
 ) {
-    // These are the two canonical no-mesh BroadcastMsgToClients shapes emitted
-    // by the Rust client. Keep this compatibility bridge shape-restricted;
-    // generic C4 forwarding still needs to preserve arbitrary nested bytes.
-    if packet.negative_list {
-        match crate::transport::parse_complete_packet(&packet.nested_packet) {
-            Ok(Some(ControlMessage::Packet { delivery, data }))
-                if packet.clients.is_empty()
-                    && matches!(delivery, ControlDelivery::Direct | ControlDelivery::Private) =>
-            {
-                broadcast_packet(delivery, data, Some(source), state).await;
-                return;
-            }
-            Ok(Some(ControlMessage::ReadyCheck(ready)))
-                if packet.clients == [HOST_CLIENT_ID as i32] && !ready.data.vote_requested() =>
-            {
-                broadcast_ready_check(ready, Some(source), state).await;
-                return;
-            }
-            _ => {}
-        }
-    }
-    let control = match authenticated_forwarded_control(source, &packet) {
-        Ok(control) => control,
-        Err(error) => {
-            report_forward_error(source, error, state).await;
-            return;
-        }
-    };
     // C4Network2IO keeps connection-list order, excludes the requester's
     // client ID, and deduplicates targets into a positive list. Rust assigns
     // monotonically increasing IDs, so reverse ID order mirrors the current
@@ -2925,9 +2931,7 @@ async fn handle_forward_request(
         .collect::<Vec<_>>();
     if target_ids.len() <= 2 {
         for outbound in targets {
-            let _ = outbound
-                .send(ControlMessage::Control(control.clone()))
-                .await;
+            let _ = outbound.send_raw(packet.nested_packet.clone()).await;
         }
     } else {
         let forwarded = ControlMessage::Forward(crate::ForwardPacket {
@@ -2943,21 +2947,71 @@ async fn handle_forward_request(
         }
     }
     if forward_selects(&packet, HOST_CLIENT_ID as i32) {
-        ingest_control(control, ControlIngress::Network, state).await;
+        dispatch_forwarded_packet_for_host(
+            connection_id,
+            source,
+            &packet.nested_packet,
+            ping_ms,
+            state,
+        )
+        .await;
     }
 }
 
 async fn handle_forwarded_packet_for_host(
+    connection_id: u32,
     source: ClientId,
     packet: crate::ForwardPacket,
+    ping_ms: i32,
     state: &mut HostState,
 ) {
     if !forward_selects(&packet, HOST_CLIENT_ID as i32) {
         return;
     }
-    match authenticated_forwarded_control(source, &packet) {
-        Ok(control) => ingest_control(control, ControlIngress::Network, state).await,
-        Err(error) => report_forward_error(source, error, state).await,
+    dispatch_forwarded_packet_for_host(
+        connection_id,
+        source,
+        &packet.nested_packet,
+        ping_ms,
+        state,
+    )
+    .await;
+}
+
+async fn dispatch_forwarded_packet_for_host(
+    connection_id: u32,
+    source: ClientId,
+    nested_packet: &[u8],
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    let message = match crate::transport::parse_complete_packet(nested_packet) {
+        Ok(Some(message)) => message,
+        Ok(None) => {
+            report_unhandled_forwarded_packet(source, nested_packet, state).await;
+            return;
+        }
+        Err(error) => {
+            report_forward_error(source, format!("invalid forwarded packet: {error}"), state).await;
+            return;
+        }
+    };
+    match message {
+        ControlMessage::Packet { delivery, data }
+            if matches!(delivery, ControlDelivery::Direct | ControlDelivery::Private) =>
+        {
+            dispatch_packet(delivery, data, Some(source), false, state).await;
+        }
+        message => {
+            Box::pin(handle_client_message(
+                connection_id,
+                source,
+                message,
+                ping_ms,
+                state,
+            ))
+            .await;
+        }
     }
 }
 
@@ -3471,6 +3525,16 @@ async fn broadcast_packet(
     origin: Option<ClientId>,
     state: &mut HostState,
 ) {
+    dispatch_packet(delivery, data, origin, true, state).await;
+}
+
+async fn dispatch_packet(
+    delivery: ControlDelivery,
+    data: Vec<u8>,
+    origin: Option<ClientId>,
+    relay_to_clients: bool,
+    state: &mut HostState,
+) {
     match delivery {
         ControlDelivery::Sync => {
             let expected_author = origin
@@ -3492,14 +3556,16 @@ async fn broadcast_packet(
             // The client that originated a Sync packet deleted its local copy
             // and waits for the host echo, so include every client here
             // (src/C4GameControlNetwork.cpp:181-220,568-572).
-            for client in state.clients.values() {
-                let _ = client
-                    .outbound
-                    .send(ControlMessage::Packet {
-                        delivery,
-                        data: data.clone(),
-                    })
-                    .await;
+            if relay_to_clients {
+                for client in state.clients.values() {
+                    let _ = client
+                        .outbound
+                        .send(ControlMessage::Packet {
+                            delivery,
+                            data: data.clone(),
+                        })
+                        .await;
+                }
             }
             state.pending_sync.push(control);
             if state.status_barrier.is_frozen() {
@@ -3558,17 +3624,19 @@ async fn broadcast_packet(
                     local_data = normalized;
                 }
             }
-            for (client_id, client) in state.clients.iter() {
-                if Some(*client_id) == origin {
-                    continue;
+            if relay_to_clients {
+                for (client_id, client) in state.clients.iter() {
+                    if Some(*client_id) == origin {
+                        continue;
+                    }
+                    let _ = client
+                        .outbound
+                        .send(ControlMessage::Packet {
+                            delivery,
+                            data: data.clone(),
+                        })
+                        .await;
                 }
-                let _ = client
-                    .outbound
-                    .send(ControlMessage::Packet {
-                        delivery,
-                        data: data.clone(),
-                    })
-                    .await;
             }
             let _ = state
                 .event_tx
@@ -3847,7 +3915,7 @@ struct ClientTask<S> {
     remote_connection_id: u32,
     client_id: ClientId,
     transport: crate::ControlTransport<S>,
-    outbound_rx: mpsc::Receiver<ControlMessage>,
+    outbound_rx: mpsc::Receiver<HostOutboundMessage>,
     host_tx: mpsc::Sender<HostLoopMessage>,
     liveness: ConnectionLivenessState,
 }
@@ -3877,7 +3945,15 @@ where
             let liveness_deadline = self.liveness.next_timer_at();
             tokio::select! {
                 Some(message) = self.outbound_rx.recv() => {
-                    if let Err(error) = self.transport.send_message(message).await {
+                    let result = match message {
+                        HostOutboundMessage::Message(message) => {
+                            self.transport.send_message(message).await
+                        }
+                        HostOutboundMessage::Raw(packet) => {
+                            self.transport.send_complete_packet_bytes(&packet).await
+                        }
+                    };
+                    if let Err(error) = result {
                         self.notify_disconnected(Some(format!("send failed: {error}")))
                             .await;
                         break;
@@ -4431,7 +4507,13 @@ async fn run_client_loop_with_addresses<S>(
                         }
                         match crate::transport::parse_complete_packet(&packet.nested_packet) {
                             Ok(Some(message)) => Ok(message),
-                            Ok(None) => continue,
+                            Ok(None) => {
+                                let packet_type = packet.nested_packet[0];
+                                let _ = event_tx
+                                    .send(ClientEvent::UnhandledPacket { packet_type })
+                                    .await;
+                                continue;
+                            }
                             Err(error) => Err(error),
                         }
                     }
@@ -4988,6 +5070,61 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn client_reports_a_selected_forwarded_unhandled_packet() {
+        // PID_Fwd recursively enters HandlePacket. A structurally valid packet
+        // without an enabled handler is logged just like a direct packet and
+        // does not close the connection (src/C4Network2IO.cpp:1037-1045,
+        // 856-899).
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let league_results = vec![0x17, 0x01, b'O', b'K', 0x00, 0x00];
+
+        host_transport
+            .send_message(ControlMessage::Forward(crate::ForwardPacket {
+                negative_list: false,
+                clients: vec![1],
+                nested_packet: league_results,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::UnhandledPacket { packet_type: 0x17 })
+        ));
+
+        let ping = crate::PingPacket {
+            sent_at: 29,
+            packet_counter: 0,
+        };
+        host_transport
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+        assert_eq!(
+            host_transport.read_message().await.unwrap(),
+            ControlMessage::Pong(ping)
+        );
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn client_ignores_unselected_malformed_forward_and_bounds_recursion() {
         // DoFwdTo is evaluated before the nested packet is unpacked. A selected
         // recursive PID_Fwd is bounded instead of reproducing C++'s unbounded
@@ -5358,27 +5495,32 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, HostConfig::default()).await.unwrap();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
-        let (mut observer, _) = raw_client_transport(address, b"Observer").await;
+        let (mut observer_a, _) = raw_client_transport(address, b"Observer A").await;
+        let (mut observer_b, _) = raw_client_transport(address, b"Observer B").await;
         drain_raw_client(&mut source).await;
-        drain_raw_client(&mut observer).await;
+        drain_raw_client(&mut observer_a).await;
+        drain_raw_client(&mut observer_b).await;
 
         let packet = ControlPacket::builder(source_id, 0).payload(vec![0xff]);
         source
             .send_message(ControlMessage::Control(packet.clone()))
             .await
             .unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-        let mut rebroadcast = false;
-        while let Ok(Ok(message)) = timeout_at(deadline, observer.read_message()).await {
-            if message == ControlMessage::Control(packet.clone()) {
-                rebroadcast = true;
-                break;
+        for observer in [&mut observer_a, &mut observer_b] {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+            let mut rebroadcast = false;
+            while let Ok(Ok(message)) = timeout_at(deadline, observer.read_message()).await {
+                if message == ControlMessage::Control(packet.clone()) {
+                    rebroadcast = true;
+                    break;
+                }
             }
+            assert!(!rebroadcast, "raw PID_Control was incorrectly relayed");
         }
-        assert!(!rebroadcast, "raw PID_Control was incorrectly relayed");
 
         drop(source);
-        drop(observer);
+        drop(observer_a);
+        drop(observer_b);
         host.shutdown().await.unwrap();
     }
 
@@ -5435,12 +5577,264 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_rejects_malformed_recursive_and_spoofed_forward_requests_safely() {
-        // C++ recursively unpacks selected nested packets; Rust bounds that
-        // recursion and authenticates decentralized PID_Control against the
-        // requesting connection before fanout. This is a deliberate hardening
-        // of C4Network2IO::HandleFwdReq's unbounded recursion
-        // (pristine C++ src/C4Network2IO.cpp:1019-1033,1066-1117).
+    async fn host_routes_forwarded_direct_control_and_checks_self_dispatch_author() {
+        // HandleFwdReq relays the opaque ControlPkt before its independent
+        // self leg applies C4GameControlNetwork's ByClient check
+        // (src/C4Network2IO.cpp:1077-1128;
+        // src/C4GameControlNetwork.cpp:477-492).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        let (mut observer_a, _) = raw_client_transport(address, b"Observer A").await;
+        let (mut observer_b, _) = raw_client_transport(address, b"Observer B").await;
+        drain_raw_client(&mut source).await;
+        drain_raw_client(&mut observer_a).await;
+        drain_raw_client(&mut observer_b).await;
+
+        let direct_data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData {
+                player: i32::try_from(source_id).unwrap(),
+                command: 0x22,
+                data: 0x33,
+                by_client: i32::try_from(source_id).unwrap(),
+            },
+        ))
+        .unwrap();
+        let mut nested_packet = vec![0x42, u8::from(ControlDelivery::Direct)];
+        nested_packet.extend_from_slice(&direct_data);
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet,
+            }))
+            .await
+            .unwrap();
+
+        let expected_direct = ControlMessage::Packet {
+            delivery: ControlDelivery::Direct,
+            data: direct_data.clone(),
+        };
+        for observer in [&mut observer_a, &mut observer_b] {
+            assert!(raw_client_received_message(observer, &expected_direct, EVENT_WAIT).await);
+            assert!(
+                !raw_client_received_message(
+                    observer,
+                    &expected_direct,
+                    Duration::from_millis(50)
+                )
+                .await,
+                "direct ControlPkt was relayed more than once"
+            );
+        }
+        let host_deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            match timeout_at(host_deadline, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct {
+                    client_id,
+                    delivery: ControlDelivery::Direct,
+                    data,
+                }) if client_id == source_id && data == direct_data => break,
+                Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                }) if client_id == source_id => panic!("valid self dispatch failed: {error}"),
+                Some(_) => continue,
+                None => panic!("host event stream ended before direct self dispatch"),
+            }
+        }
+
+        let spoofed_data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
+            PlayerControlData {
+                player: i32::try_from(source_id).unwrap(),
+                command: 0x44,
+                data: 0x55,
+                by_client: i32::try_from(source_id + 1).unwrap(),
+            },
+        ))
+        .unwrap();
+        let mut spoofed_nested = vec![0x42, u8::from(ControlDelivery::Direct)];
+        spoofed_nested.extend_from_slice(&spoofed_data);
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: spoofed_nested,
+            }))
+            .await
+            .unwrap();
+
+        let expected_spoofed = ControlMessage::Packet {
+            delivery: ControlDelivery::Direct,
+            data: spoofed_data.clone(),
+        };
+        for observer in [&mut observer_a, &mut observer_b] {
+            assert!(raw_client_received_message(observer, &expected_spoofed, EVENT_WAIT).await);
+        }
+        let error_deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        let error = loop {
+            match timeout_at(error_deadline, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Direct {
+                    client_id,
+                    delivery: ControlDelivery::Direct,
+                    data,
+                }) if client_id == source_id && data == spoofed_data => {
+                    panic!("spoofed ControlPkt executed before its author error")
+                }
+                Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                }) if client_id == source_id => break error,
+                Some(_) => continue,
+                None => panic!("host event stream ended before ControlPkt author error"),
+            }
+        };
+        assert!(error.contains("claimed author"));
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = timeout_at(quiet_deadline, host_events.recv()).await {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::Direct {
+                        client_id,
+                        delivery: ControlDelivery::Direct,
+                        ref data,
+                    } if client_id == source_id && *data == spoofed_data
+                ),
+                "spoofed ControlPkt executed on the host"
+            );
+        }
+
+        drop(source);
+        drop(observer_a);
+        drop(observer_b);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_relays_forwarded_ready_check_opaquely_without_self_dispatch() {
+        // A ReadyCheck can be selected for remote peers while the negative
+        // list excludes the host. Its trailing bytes survive the direct relay
+        // (src/C4Network2IO.cpp:1077-1128; src/C4GameLobby.cpp:329-343).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        let (mut observer, _) = raw_client_transport(address, b"Observer").await;
+        drain_raw_client(&mut source).await;
+        drain_raw_client(&mut observer).await;
+        let mut observer = observer.into_inner();
+        let ready = ReadyCheckPacket {
+            client_id: i32::try_from(source_id).unwrap(),
+            data: crate::ReadyCheckData::Ready,
+        };
+        let mut nested_packet = vec![0x21];
+        nested_packet.extend_from_slice(&ready.client_id.to_ne_bytes());
+        nested_packet.extend_from_slice(&i32::from(ready.data).to_ne_bytes());
+        nested_packet.extend_from_slice(&[0xde, 0xad]);
+
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: vec![HOST_CLIENT_ID as i32],
+                nested_packet: nested_packet.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(raw_tcp_received_frame(
+            &mut observer,
+            &nested_packet,
+            EVENT_WAIT
+        )
+        .await);
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(Some(event)) = timeout_at(quiet_deadline, host_events.recv()).await {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        ..
+                    } if client_id == source_id
+                ),
+                "opaque ReadyCheck relay was reported as an error"
+            );
+            assert!(
+                !matches!(event, HostEvent::ReadyCheck { packet } if packet == ready),
+                "host was excluded from the forwarding list"
+            );
+        }
+
+        drop(source);
+        drop(observer);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_reports_a_self_forwarded_unhandled_packet() {
+        // HandleFwdReq relays first and then recursively handles the self leg.
+        // A valid packet with no enabled handler is reported without closing
+        // its source connection (src/C4Network2IO.cpp:856-899,1077-1129).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        drain_raw_client(&mut source).await;
+        let league_results = vec![0x17, 0x01, b'O', b'K', 0x00, 0x00];
+
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: league_results,
+            }))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::UnhandledPacket {
+                    client_id: Some(client_id),
+                    packet_type: 0x17,
+                }) if client_id == source_id => break,
+                Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                }) if client_id == source_id => {
+                    panic!("forwarded unhandled packet failed: {error}")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before unhandled packet"),
+            }
+        }
+
+        let ping = crate::PingPacket {
+            sent_at: 31,
+            packet_counter: 0,
+        };
+        source
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, source.read_message()).await.unwrap() {
+                Ok(ControlMessage::Pong(received)) if received == ping => break,
+                Ok(_) => continue,
+                Err(error) => panic!("connection closed after unhandled forwarding: {error}"),
+            }
+        }
+
+        drop(source);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_reports_malformed_nested_forward_requests_without_closing() {
+        // Selected nested packets recursively use the full packet pipeline;
+        // malformed bytes are reported without preventing later traffic.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
@@ -5478,20 +5872,7 @@ mod tests {
             .unwrap();
         assert!(wait_for_host_error(&mut host_events, source_id)
             .await
-            .contains("non-recursive PID_Control"));
-
-        let spoofed = ControlPacket::builder(source_id + 1, 0).payload(vec![0xff]);
-        source
-            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
-                negative_list: true,
-                clients: Vec::new(),
-                nested_packet: crate::transport::encode_complete_control_packet(&spoofed).unwrap(),
-            }))
-            .await
-            .unwrap();
-        assert!(wait_for_host_error(&mut host_events, source_id)
-            .await
-            .contains("claimed client"));
+            .contains("invalid forwarded packet"));
 
         let ping = crate::PingPacket {
             sent_at: 17,
@@ -5554,6 +5935,10 @@ mod tests {
         };
         for transport in [&mut observer_a, &mut observer_b, &mut observer_c] {
             assert!(raw_client_received_forward(transport, &expected, EVENT_WAIT).await);
+            assert!(
+                !raw_client_received_control(transport, &control, Duration::from_millis(50)).await,
+                "more-than-two target routing also sent a raw nested packet"
+            );
         }
         assert!(
             !raw_client_received_forward(&mut source, &expected, Duration::from_millis(100)).await,
@@ -9427,7 +9812,7 @@ mod tests {
         // 1141-1177).
         let (host_stream, client_stream) = duplex(512);
         let mut client = crate::ControlTransport::new(client_stream);
-        let (outbound_tx, outbound_rx) = mpsc::channel(4);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel(4);
         let (host_tx, mut host_rx) = mpsc::channel(4);
         let task = tokio::spawn(
             ClientTask {
@@ -10360,7 +10745,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_rejects_a_client_control_that_claims_another_client_slot() {
+    async fn host_matches_cpp_pid_control_source_id_semantics() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -10369,52 +10754,54 @@ mod tests {
             .await
             .expect("start host");
         let mut host_events = host.take_event_receiver();
-        let client = connect_client(
-            addr,
-            ClientConfig::new("spoof-check", ParticipantKind::Player),
-        )
-        .await
-        .expect("connect client");
-        activate_joined_client(&host, &mut host_events, client.client_id()).await;
+        let (mut client, client_id) = raw_client_transport(addr, b"spoof-check").await;
+        activate_joined_client(&host, &mut host_events, client_id).await;
+        drain_raw_client(&mut client).await;
+        let spoofed = legacy_packet(HOST_CLIENT_ID, 0, 0x66);
         client
-            .submit_control(legacy_packet(HOST_CLIENT_ID, 0, 0x66))
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::transport::encode_complete_control_packet(&spoofed)
+                    .unwrap(),
+            }))
             .await
             .expect("submit spoofed host control");
+        raw_client_ping_barrier(&mut client).await;
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
             .await
             .expect("submit real host control");
+        let contribution = legacy_packet(client_id, 0, 0x22);
         client
-            .submit_control(legacy_packet(client.client_id(), 0, 0x22))
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::transport::encode_complete_control_packet(&contribution)
+                    .unwrap(),
+            }))
             .await
             .expect("submit real client control");
 
-        let mut saw_rejection = false;
         let ready = loop {
             match timeout(EVENT_WAIT, host_events.recv())
                 .await
                 .expect("host event wait")
             {
-                Some(HostEvent::TransportError {
-                    client_id: Some(rejected_id),
-                    error,
-                }) => {
-                    assert_eq!(rejected_id, client.client_id());
-                    assert!(error.contains("claimed client 0"));
-                    saw_rejection = true;
+                Some(HostEvent::TransportError { error, .. }) => {
+                    panic!("C++ accepts PID_Control independently of its source connection: {error}")
                 }
                 Some(HostEvent::Ready { packet }) => break packet,
                 Some(_) => continue,
                 None => panic!("host event stream ended before ready"),
             }
         };
-        assert!(saw_rejection, "spoofed contribution was not rejected");
         assert_eq!(
             control_commands(&ready),
-            vec![0x11, 0x22],
-            "the authenticated host slot must not be replaced by client data"
+            vec![0x66, 0x22],
+            "HandleControl ignores iByClientID and retains the first contribution for a slot"
         );
 
-        client.shutdown().await.expect("client shutdown");
+        drop(client);
         host.shutdown().await.expect("host shutdown");
     }
 
@@ -11266,7 +11653,7 @@ mod tests {
         // not another disconnect when that close becomes EOF
         // (src/C4Network2Client.cpp:104-119,457-492).
         let (host_stream, client_stream) = duplex(128);
-        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let (_outbound_tx, outbound_rx) = HostOutboundSender::channel(1);
         let (host_tx, mut host_rx) = mpsc::channel(2);
         let task = tokio::spawn(
             ClientTask {
@@ -11318,7 +11705,7 @@ mod tests {
         // (src/C4Network2IO.cpp:520-570,1379-1396;
         // src/C4Network2.cpp:883-905).
         let (host_stream, client_stream) = duplex(256);
-        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel(1);
         let (host_tx, mut host_rx) = mpsc::channel(1);
         let task = tokio::spawn(
             ClientTask {
@@ -11642,10 +12029,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_ignores_network_ready_request_but_still_trusts_spoofed_ready() {
+    async fn host_ignores_network_ready_request_but_relays_its_opaque_fanout_leg() {
         // HandleReadyCheck rejects every Request while this process is the
-        // host, but Ready/NotReady still select packet.Client without checking
-        // the transport origin (src/C4Network2.cpp:1625-1654,1700-1703).
+        // host. HandleFwdReq still relays the opaque packet to selected peers,
+        // where a claimed host author is accepted; Ready/NotReady likewise
+        // select packet.Client without checking the transport origin
+        // (src/C4Network2IO.cpp:1077-1129;
+        // src/C4Network2.cpp:1625-1654,1700-1703).
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
@@ -11669,11 +12059,18 @@ mod tests {
                 "host surfaced a network-origin ready request"
             );
         }
-        while let Ok(Some(event)) = timeout(Duration::from_millis(50), beta_events.recv()).await {
-            assert!(
-                !matches!(event, ClientEvent::ReadyCheck { packet } if packet == request),
-                "host relayed a network-origin ready request"
-            );
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, request);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("beta disconnected during opaque request relay: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("beta event stream ended before opaque request relay"),
+            }
         }
 
         let spoofed_ready = ReadyCheckPacket {
@@ -12333,6 +12730,69 @@ mod tests {
             timeout(Duration::from_millis(20), transport.read_message()).await,
             Ok(Ok(_))
         ) {}
+    }
+
+    async fn raw_client_ping_barrier(transport: &mut crate::ControlTransport<TcpStream>) {
+        let ping = crate::PingPacket {
+            sent_at: 0x1020_3040,
+            packet_counter: 0,
+        };
+        transport
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + EVENT_WAIT;
+        loop {
+            match timeout_at(deadline, transport.read_message()).await {
+                Ok(Ok(ControlMessage::Pong(received))) if received == ping => return,
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => panic!("ping barrier failed: {error}"),
+                Err(_) => panic!("timed out waiting for ping barrier"),
+            }
+        }
+    }
+
+    async fn raw_client_received_message(
+        transport: &mut crate::ControlTransport<TcpStream>,
+        expected: &ControlMessage,
+        duration: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + duration;
+        while let Ok(Ok(message)) = timeout_at(deadline, transport.read_message()).await {
+            if &message == expected {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn raw_tcp_received_frame(
+        stream: &mut TcpStream,
+        expected: &[u8],
+        duration: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + duration;
+        loop {
+            let mut header = [0_u8; 5];
+            if !matches!(
+                timeout_at(deadline, stream.read_exact(&mut header)).await,
+                Ok(Ok(_))
+            ) {
+                return false;
+            }
+            assert_eq!(header[0], 0xff, "invalid TCP packet frame prefix");
+            let size = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let mut body = vec![0; size];
+            if !matches!(
+                timeout_at(deadline, stream.read_exact(&mut body)).await,
+                Ok(Ok(_))
+            ) {
+                return false;
+            }
+            if body == expected {
+                return true;
+            }
+        }
     }
 
     async fn raw_client_received_control(

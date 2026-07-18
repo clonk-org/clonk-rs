@@ -517,6 +517,28 @@ where
         self.stream.flush().await?;
         Ok(())
     }
+
+    /// Sends one already-encoded complete packet body without normalizing its
+    /// payload. C++ uses this path when a host directly relays a `PID_FwdReq`
+    /// nested packet to at most two clients.
+    pub(crate) async fn send_complete_packet_bytes(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<(), TransportError> {
+        if packet.len() > MAX_PACKET_SIZE {
+            return Err(TransportError::Malformed("packet exceeds allowed size"));
+        }
+        let size = u32::try_from(packet.len())
+            .map_err(|_| TransportError::Malformed("packet exceeds allowed size"))?;
+        let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + packet.len());
+        frame.push(TCP_FRAME_PREFIX);
+        frame.extend_from_slice(&size.to_ne_bytes());
+        frame.extend_from_slice(packet);
+        self.outbound_packet_log.record_outbound(packet.to_vec());
+        self.stream.write_all(&frame).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
 }
 
 pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage>, TransportError> {
@@ -1247,6 +1269,37 @@ mod tests {
             transport.read_message().await,
             Err(TransportError::UnsupportedPacket(0x7e))
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opaque_complete_packet_send_preserves_every_nested_byte() {
+        let packet = [PID_READY_CHECK, 7, 0, 0, 0, 1, 0, 0, 0, 0xde, 0xad];
+        let recoverable = [PID_CONTROL, 0xaa];
+        let mut expected = expect_frame(&packet);
+        expected.extend(expect_frame(&recoverable));
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_complete_packet_bytes(&packet)
+            .await
+            .unwrap();
+        transport
+            .send_complete_packet_bytes(&recoverable)
+            .await
+            .unwrap();
+        assert_eq!(
+            transport
+                .create_post_mortem(9)
+                .expect("raw relay enters the recovery log")
+                .packets,
+            vec![packet.to_vec(), recoverable.to_vec()]
+        );
+        drop(transport);
+        let mut received = Vec::new();
+        server.read_to_end(&mut received).await.unwrap();
+
+        assert_eq!(received, expected);
     }
 
     async fn assert_resource_frame_round_trip(packet: ResourcePacket, payload: &[u8]) {
