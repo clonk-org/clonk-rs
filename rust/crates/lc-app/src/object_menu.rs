@@ -569,10 +569,34 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
     })
 }
 
-fn apply_default_menu_owner_color(pixels: &mut [u8], mask: &[u8]) {
-    // C4Def::Picture2Facet calls Graphics.GetBitmap(0); C4Surface::SetClr
-    // maps zero to 0xff, the engine's default blue owner color
-    // (C4Def.cpp:1374-1378; C4DefGraphics.h:49; C4Surface.h:110).
+pub(crate) fn apply_definition_owner_color(
+    pixels: &mut [u8],
+    mask: &[u8],
+    owner: [u8; 3],
+) {
+    if mask.len() == pixels.len() {
+        for (pixel, overlay) in pixels.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+            let overlay_alpha = u32::from(overlay[3]);
+            let base_alpha = u32::from(pixel[3]);
+            let inverse = 255 - overlay_alpha;
+            let output_alpha_weight = overlay_alpha * 255 + base_alpha * inverse;
+            if output_alpha_weight == 0 {
+                pixel.copy_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            for (channel_index, (channel, owner)) in
+                pixel[..3].iter_mut().zip(owner).enumerate()
+            {
+                let tinted = u32::from(overlay[channel_index]) * u32::from(owner) / 255;
+                let premultiplied = tinted * overlay_alpha * 255
+                    + u32::from(*channel) * base_alpha * inverse;
+                *channel = (premultiplied / output_alpha_weight) as u8;
+            }
+            pixel[3] = (output_alpha_weight / 255).min(255) as u8;
+        }
+        return;
+    }
+
     for (index, mask_value) in mask.iter().copied().enumerate() {
         let offset = index * 4;
         let Some(pixel) = pixels.get_mut(offset..offset + 4) else {
@@ -583,10 +607,18 @@ fn apply_default_menu_owner_color(pixels: &mut [u8], mask: &[u8]) {
             continue;
         }
         let inverse = 255_u16 - mask;
-        pixel[0] = (u16::from(pixel[0]) * inverse / 255) as u8;
-        pixel[1] = (u16::from(pixel[1]) * inverse / 255) as u8;
-        pixel[2] = ((u16::from(pixel[2]) * inverse + 255 * mask) / 255) as u8;
+        for (channel, owner) in pixel[..3].iter_mut().zip(owner) {
+            *channel = ((u16::from(*channel) * inverse + u16::from(owner) * mask) / 255)
+                as u8;
+        }
     }
+}
+
+fn apply_default_menu_owner_color(pixels: &mut [u8], mask: &[u8]) {
+    // C4Def::Picture2Facet calls Graphics.GetBitmap(0); C4Surface::SetClr
+    // maps zero to 0xff, the engine's default blue owner color
+    // (C4Def.cpp:1374-1378; C4DefGraphics.h:49; C4Surface.h:110).
+    apply_definition_owner_color(pixels, mask, [0, 0, 255]);
 }
 
 pub(crate) fn definition_menu_picture(image: DefinitionPictureImage) -> ImageData {
@@ -3304,11 +3336,9 @@ fn collect_build_items(engine: &Engine, crew: &lc_engine::ObjectSnapshot) -> Vec
 }
 
 fn definition_icon(engine: &Engine, definition_id: &str) -> Option<ImageData> {
-    engine.definition_picture_image(definition_id).map(|image| {
-        let width = image.width();
-        let height = image.height();
-        ImageData::from_arc(width, height, image.into_pixels())
-    })
+    engine
+        .definition_picture_image(definition_id)
+        .map(definition_menu_picture)
 }
 
 fn build_definition_summary(engine: &Engine, definition_id: &str) -> Option<String> {
@@ -6011,6 +6041,25 @@ mod tests {
         apply_default_menu_owner_color(&mut pixels, &[136, 0]);
         assert_eq!(&pixels[..4], &[0, 0, 136, 255]);
         assert_eq!(&pixels[4..], &[100, 50, 10, 255]);
+
+        let mut pixels = vec![0, 255, 0, 255, 100, 50, 10, 255];
+        apply_default_menu_owner_color(
+            &mut pixels,
+            &[128, 128, 128, 128, 0, 0, 255, 255],
+        );
+        assert_eq!(&pixels[..4], &[0, 127, 64, 255]);
+        assert_eq!(&pixels[4..], &[0, 0, 255, 255]);
+
+        let mut transparent_base = vec![0, 0, 0, 0];
+        apply_default_menu_owner_color(
+            &mut transparent_base,
+            &[128, 128, 128, 128],
+        );
+        assert_eq!(
+            transparent_base,
+            [0, 0, 128, 128],
+            "flattening keeps straight RGB so the eventual draw applies alpha only once"
+        );
     }
 
     #[test]
@@ -6155,9 +6204,9 @@ mod tests {
             [
                 "64x64#90fd40b3",
                 "64x64#9fc301d8",
-                "32x40#8a109ab3",
-                "32x40#10658227",
-                "32x40#b3333430",
+                "32x40#fd53621b",
+                "32x40#47e6b4a2",
+                "32x40#965dc12f",
             ]
         );
 
@@ -6264,9 +6313,9 @@ mod tests {
                 character_mage_90.snapshot().to_string(),
             ],
             [
-                "640x480#c90bac1a",
-                "640x480#787b9170",
-                "640x480#35e9f542",
+                "640x480#6eb1959e",
+                "640x480#8a94364e",
+                "640x480#2d34951c",
             ]
         );
     }

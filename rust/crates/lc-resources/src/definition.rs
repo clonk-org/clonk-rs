@@ -81,6 +81,9 @@ pub struct Definition {
 pub struct ColorByOwnerMask {
     pub width: u32,
     pub height: u32,
+    /// Auto-generated owner-color surfaces use one grayscale byte per pixel.
+    /// Explicit Overlay*.png surfaces retain four RGBA bytes per pixel so
+    /// colored texels and partial alpha survive through the renderer.
     pub pixels: Vec<u8>,
 }
 
@@ -2519,10 +2522,16 @@ fn crop_definition_picture_mask(
         return None;
     }
 
-    let mut pixels = Vec::with_capacity((crop_w * crop_h) as usize);
+    let pixel_count = usize::try_from(u64::from(mask.width) * u64::from(mask.height)).ok()?;
+    let channels = if mask.pixels.len() == pixel_count.checked_mul(4)? {
+        4
+    } else {
+        1
+    };
+    let mut pixels = Vec::with_capacity((crop_w * crop_h) as usize * channels);
     for row in crop_y..crop_y + crop_h {
-        let start = (row * mask.width + crop_x) as usize;
-        let end = start + crop_w as usize;
+        let start = (row * mask.width + crop_x) as usize * channels;
+        let end = start + crop_w as usize * channels;
         pixels.extend_from_slice(&mask.pixels[start..end]);
     }
     pixels
@@ -2894,7 +2903,7 @@ fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> 
 
 fn extract_mask_from_overlay(
     overlay: &image::RgbaImage,
-    base: &mut image::RgbaImage,
+    base: &image::RgbaImage,
 ) -> Option<ColorByOwnerMask> {
     let (width, height) = base.dimensions();
     if overlay.dimensions() != (width, height) {
@@ -2902,46 +2911,15 @@ fn extract_mask_from_overlay(
     }
 
     // Overlay.png IS the ClrByOwner surface (C4DefGraphics.cpp:74-94 +
-    // C4Surface::SetAsClrByOwnerOf, C4Surface.cpp:320-331): its pixels are
-    // blitted owner-modulated OVER the base with the OVERLAY's alpha. Baked
-    // into the single-image + scalar-mask model: the base contribution
-    // shrinks by the overlay coverage (exactly black under an opaque
-    // overlay), the sprite alpha is the over-composite, and the mask keeps
-    // the coverage-scaled overlay intensity so the draw-time
-    // `blend_color_by_owner` reproduces `overlay ⊗ owner` for gray overlays.
-    let mut pixels = vec![0u8; (width * height) as usize];
-    let mut has_mask = false;
-    for y in 0..height {
-        for x in 0..width {
-            let overlay_pixel = overlay.get_pixel(x, y);
-            let coverage = u16::from(overlay_pixel[3]);
-            if coverage == 0 {
-                continue;
-            }
-            let mask_value = (u16::from(overlay_pixel[0]) * coverage / 255) as u8;
-            if mask_value == 0 {
-                continue;
-            }
-            let idx = (y * width + x) as usize;
-            pixels[idx] = mask_value;
-            has_mask = true;
-            let base_pixel = base.get_pixel_mut(x, y);
-            let keep = 255 - coverage;
-            let base_alpha = u16::from(base_pixel[3]);
-            *base_pixel = image::Rgba([
-                (u16::from(base_pixel[0]) * keep / 255) as u8,
-                (u16::from(base_pixel[1]) * keep / 255) as u8,
-                (u16::from(base_pixel[2]) * keep / 255) as u8,
-                (base_alpha + coverage * (255 - base_alpha) / 255) as u8,
-            ]);
-        }
-    }
-
-    if has_mask {
+    // C4Surface::SetAsClrByOwnerOf, C4Surface.cpp:320-331). C++ keeps its
+    // complete texture and draws it owner-modulated over the unchanged base.
+    // Retain all four channels: red is not an ownership key, and alpha is the
+    // coverage for the second blit pass.
+    if overlay.pixels().any(|pixel| pixel[3] != 0) {
         Some(ColorByOwnerMask {
             width,
             height,
-            pixels,
+            pixels: overlay.as_raw().clone(),
         })
     } else {
         None
@@ -3787,28 +3765,26 @@ Entrance=1,2,,4
     // C4Surface::SetAsClrByOwnerOf, C4Surface.cpp:320-331), so drawing blits
     // the overlay pixel modulated by the owner color OVER the base using the
     // OVERLAY's alpha. The Mage body lives only in Overlay.png (base cells are
-    // transparent apart from the staff) — the baked sprite must make those
-    // pixels visible with the overlay intensity as mask.
+    // transparent apart from the staff), so both surfaces must remain intact.
     #[test]
-    fn overlay_only_pixels_become_visible_owner_masked_pixels() {
-        let mut base = image::RgbaImage::from_pixel(2, 1, image::Rgba([100, 64, 35, 0]));
-        // The "staff": opaque base content without overlay coverage.
-        base.put_pixel(1, 0, image::Rgba([80, 50, 20, 255]));
-        let mut overlay = image::RgbaImage::from_pixel(2, 1, image::Rgba([100, 100, 100, 0]));
-        // The "robe": opaque gray overlay over a transparent base pixel.
+    fn explicit_owner_overlay_retains_rgba_and_leaves_base_unchanged() {
+        let mut base = image::RgbaImage::from_pixel(4, 1, image::Rgba([100, 64, 35, 0]));
+        base.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        base.put_pixel(2, 0, image::Rgba([80, 50, 20, 255]));
+        base.put_pixel(3, 0, image::Rgba([11, 22, 33, 255]));
+        let original_base = base.clone();
+        let mut overlay = image::RgbaImage::from_pixel(4, 1, image::Rgba([100, 100, 100, 0]));
         overlay.put_pixel(0, 0, image::Rgba([136, 136, 136, 255]));
+        overlay.put_pixel(1, 0, image::Rgba([128, 128, 128, 128]));
+        overlay.put_pixel(2, 0, image::Rgba([0, 0, 255, 255]));
+        overlay.put_pixel(3, 0, image::Rgba([0, 0, 0, 255]));
 
         let mask = extract_mask_from_overlay(&overlay, &mut base).expect("mask extracted");
 
-        // Robe pixel: fully covered by the overlay — the sprite must be
-        // opaque, contribute no untinted color (black base term) and carry
-        // the overlay intensity in the mask.
-        assert_eq!(base.get_pixel(0, 0), &image::Rgba([0, 0, 0, 255]));
-        assert_eq!(mask.pixels[0], 136);
-        // Staff pixel: overlay alpha 0 must neither mask (its RGB is the
-        // keyed-out background) nor touch the base.
-        assert_eq!(base.get_pixel(1, 0), &image::Rgba([80, 50, 20, 255]));
-        assert_eq!(mask.pixels[1], 0);
+        // The base remains byte-exact; Overlay.png is a second surface, not a
+        // scalar mask baked into the first one.
+        assert_eq!(base, original_base);
+        assert_eq!(mask.pixels, overlay.as_raw().to_vec());
     }
 
     #[test]
@@ -3842,14 +3818,14 @@ Entrance=1,2,,4
         assert_eq!((picture.width(), picture.height()), (1, 1));
         assert_eq!(
             picture.pixels(),
-            &[0, 0, 0, 255],
-            "C++ removes owner-color Overlay pixels from the base surface before Picture2Facet"
+            &[0, 0, 0, 0],
+            "the separately retained overlay must not be baked into the base picture"
         );
         let mask = definition
             .picture_color_by_owner_mask
             .expect("picture must retain owner-color mask");
         assert_eq!((mask.width, mask.height), (1, 1));
-        assert_eq!(mask.pixels, vec![136]);
+        assert_eq!(mask.pixels, vec![136, 136, 136, 255]);
     }
 
     #[test]
@@ -3929,7 +3905,11 @@ Entrance=1,2,,4
                 .picture_color_by_owner_mask
                 .expect("picture owner mask");
             assert_eq!((mask.width, mask.height), (2, 1), "{name}");
-            assert_eq!(mask.pixels, vec![136; 2], "{name}");
+            assert_eq!(
+                mask.pixels,
+                [136, 136, 136, 255].repeat(2),
+                "{name}"
+            );
         }
     }
 
@@ -3991,12 +3971,12 @@ Entrance=1,2,,4
         let portrait = definition
             .portrait_graphics_image
             .expect("color-aware portrait image");
-        assert_eq!(portrait.pixels(), &[0, 0, 0, 255]);
+        assert_eq!(portrait.pixels(), &[0, 0, 0, 0]);
         let mask = definition
             .portrait_color_by_owner_mask
             .expect("portrait must retain owner-color mask");
         assert_eq!((mask.width, mask.height), (1, 1));
-        assert_eq!(mask.pixels, vec![136]);
+        assert_eq!(mask.pixels, vec![136, 136, 136, 255]);
         let named = definition
             .portrait_graphics
             .iter()
@@ -4009,7 +3989,7 @@ Entrance=1,2,,4
                 .color_by_owner_mask
                 .as_ref()
                 .map(|mask| mask.pixels.as_slice()),
-            Some([64, 64].as_slice())
+            Some([64, 64, 64, 255, 64, 64, 64, 255].as_slice())
         );
     }
 

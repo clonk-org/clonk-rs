@@ -58513,8 +58513,8 @@ func ProbeGraphicsBounds() {
         assert_eq!((portrait.width(), portrait.height()), (2, 2));
         assert_eq!(
             portrait.color_mask().as_deref(),
-            Some([136, 136, 136, 136].as_slice()),
-            "Portrait1's Overlay1 owner-color mask reaches presentation"
+            Some([136, 136, 136, 255].repeat(4).as_slice()),
+            "Portrait1's full Overlay1 RGBA reaches presentation"
         );
         let named = engine
             .definition_named_portrait_graphics_image("CRWT", "captain1")

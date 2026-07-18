@@ -156,10 +156,10 @@ use network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
 use object_menu::{
     EngineScriptMenuPointerTarget, MenuMode as AppObjectMenuMode, ObjectMenuAction,
-    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState, definition_menu_picture,
-    engine_script_menu_inline_image_specs, engine_script_menu_pointer_target_with_info,
-    render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
-    validate_menu_decoration_for_area,
+    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState, apply_definition_owner_color,
+    definition_menu_picture, engine_script_menu_inline_image_specs,
+    engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
+    resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
 };
 use offline_startup::{
     OfflineStartupPlayers, offline_player_paths_identical, offline_player_real_path,
@@ -15722,6 +15722,9 @@ impl GameApp {
             } else if let Some(image) = self.engine.definition_picture_image(definition_id) {
                 let width = image.width();
                 let height = image.height();
+                let mask = image
+                    .color_mask()
+                    .map(|mask| ColorByOwnerMask::new(width, height, mask));
                 sprites.insert(
                     default_key.clone(),
                     DefinitionSprite {
@@ -15734,7 +15737,7 @@ impl GameApp {
                         top_face,
                         image: ImageData::from_arc(width, height, image.into_pixels()),
                         actions: actions.clone(),
-                        color_mask: None,
+                        color_mask: mask,
                     },
                 );
             } else if let Some(existing) = sprites.get_mut(&default_key) {
@@ -15844,15 +15847,9 @@ impl GameApp {
                                         )
                                     })
                                     .or_else(|| {
-                                        self.engine.definition_picture_image(&definition_id).map(
-                                            |picture| {
-                                                ImageData::from_arc(
-                                                    picture.width(),
-                                                    picture.height(),
-                                                    picture.pixels(),
-                                                )
-                                            },
-                                        )
+                                        self.engine
+                                            .definition_picture_image(&definition_id)
+                                            .map(definition_menu_picture)
                                     })
                             })
                             .clone()
@@ -19530,12 +19527,7 @@ impl GameApp {
             .filter_map(|entry| {
                 self.engine
                     .definition_picture_image(&entry.definition_id)
-                    .map(|image| {
-                        (
-                            entry.definition_id.clone(),
-                            ImageData::from_arc(image.width(), image.height(), image.into_pixels()),
-                        )
-                    })
+                    .map(|image| (entry.definition_id.clone(), definition_menu_picture(image)))
             })
             .collect();
         let gfx = self.ensure_ingame_menu_gfx();
@@ -30171,9 +30163,7 @@ impl GameApp {
             |definition_id| {
                 self.engine
                     .definition_picture_image(definition_id)
-                    .map(|picture| {
-                        ImageData::from_arc(picture.width(), picture.height(), picture.pixels())
-                    })
+                    .map(definition_menu_picture)
             },
         );
         dialog.configure_classic_fonts(self.assets.clonk_fonts.as_deref());
@@ -32132,11 +32122,7 @@ impl GameApp {
                 let decoration_image = message.frame_decoration.as_ref().and_then(|decoration| {
                     self.engine
                         .definition_sprite_image(&decoration.source_definition, None)
-                        .map(|image| {
-                            let width = image.width();
-                            let height = image.height();
-                            ImageData::from_arc(width, height, image.into_pixels())
-                        })
+                        .map(default_owner_definition_sprite)
                 });
                 let font_images = resolve_message_font_images(
                     &self.engine,
@@ -32460,11 +32446,7 @@ impl GameApp {
             let frame_decoration = menu.decoration.as_ref().and_then(|decoration| {
                 self.engine
                     .definition_sprite_image(&decoration.source_definition, None)
-                    .map(|image| {
-                        let width = image.width();
-                        let height = image.height();
-                        ImageData::from_arc(width, height, image.into_pixels())
-                    })
+                    .map(default_owner_definition_sprite)
             });
             if let Some(decoration) = menu.decoration.as_ref() {
                 if let Err(error) =
@@ -32877,11 +32859,7 @@ impl GameApp {
                 let decoration_image = message.frame_decoration.as_ref().and_then(|decoration| {
                     self.engine
                         .definition_sprite_image(&decoration.source_definition, None)
-                        .map(|image| {
-                            let width = image.width();
-                            let height = image.height();
-                            ImageData::from_arc(width, height, image.into_pixels())
-                        })
+                        .map(default_owner_definition_sprite)
                 });
                 let font_images = resolve_message_font_images(
                     &self.engine,
@@ -36402,7 +36380,7 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
     fn def_picture(&self, definition_id: &str) -> Option<ImageData> {
         self.engine
             .definition_picture_image(definition_id)
-            .map(|picture| ImageData::from_arc(picture.width(), picture.height(), picture.pixels()))
+            .map(definition_menu_picture)
     }
 
     fn def_grab_put_get(&self, definition_id: &str) -> i32 {
@@ -36413,25 +36391,11 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
         if phase <= 0 {
             return self.def_picture(definition_id);
         }
-        // C4Def::Draw iPhaseX offsets the Picture rect by phase widths in
-        // the def sheet (src/C4Object.cpp:4055).
-        let rect = self.engine.definition_picture(definition_id)?;
-        let sheet = self.engine.definition_sprite_image(definition_id, None)?;
-        let (x0, y0) = (rect.x + phase * rect.width, rect.y);
-        if x0 < 0 || y0 < 0 || rect.width <= 0 || rect.height <= 0 {
-            return self.def_picture(definition_id);
-        }
-        let (w, h) = (rect.width as u32, rect.height as u32);
-        if x0 as u32 + w > sheet.width() || y0 as u32 + h > sheet.height() {
-            return self.def_picture(definition_id);
-        }
-        let src = sheet.pixels();
-        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-        for row in 0..h {
-            let start = (((y0 as u32 + row) * sheet.width() + x0 as u32) * 4) as usize;
-            pixels.extend_from_slice(&src[start..start + (w * 4) as usize]);
-        }
-        Some(ImageData::new(w, h, pixels))
+        // C4Def::Draw iPhaseX offsets Picture by phase widths and retains the
+        // paired owner-color surface (src/C4Object.cpp:4055).
+        self.engine
+            .definition_picture_phase_image(definition_id, phase)
+            .map(definition_menu_picture)
     }
 
     fn control_image(
@@ -37171,10 +37135,14 @@ fn compose_owned_menu_picture(
 ) -> Option<ImageData> {
     let side = u32::try_from(object.symbol_size.max(1)).ok()?;
     let destination = Rect::new(0, 0, side, side);
-    let mut base_pixels = inventory_picture_pixels(&image, object.color);
     let object_mode = inventory_blit_mode(object.blit_mode);
     let object_modulation = inventory_modulation(object.color_modulation, object.blit_mode);
-    prepare_owned_menu_pixels(&mut base_pixels, object_modulation, object_mode);
+    let base_pixels = prepare_owned_menu_definition_pixels(
+        &image,
+        object.color,
+        object_modulation,
+        object.blit_mode,
+    )?;
     let base = Surface::from_bytes(
         image.width(),
         image.height(),
@@ -37191,8 +37159,12 @@ fn compose_owned_menu_picture(
     )?;
 
     for (overlay, image) in overlays {
-        let mut overlay_pixels = inventory_picture_pixels(&image, object.color);
         let inherits_parent = overlay.blit_mode == 256;
+        let effective_blit_mode = if inherits_parent {
+            object.blit_mode
+        } else {
+            overlay.blit_mode
+        };
         let mode = if inherits_parent {
             object_mode
         } else {
@@ -37205,7 +37177,12 @@ fn compose_owned_menu_picture(
         } else {
             inventory_modulation(overlay.color_modulation, overlay.blit_mode)
         };
-        prepare_owned_menu_pixels(&mut overlay_pixels, modulation, mode);
+        let overlay_pixels = prepare_owned_menu_definition_pixels(
+            &image,
+            object.color,
+            modulation,
+            effective_blit_mode,
+        )?;
         let overlay_surface = Surface::from_bytes(
             image.width(),
             image.height(),
@@ -37277,19 +37254,31 @@ fn prepare_inventory_picture(
 ) -> Option<PreparedInventoryPicture> {
     let width = image.width();
     let height = image.height();
-    let mut pixels = inventory_picture_pixels(&image, object_color);
     let object_mode = inventory_blit_mode(blit_mode);
     let object_modulation = inventory_modulation(color_modulation, blit_mode);
-
-    if let Some(modulation) = object_modulation {
-        prepare_inventory_pixels(&mut pixels, modulation, object_mode);
+    let (base_pixels, owner_pixels) = prepare_inventory_definition_layers(
+        &image,
+        object_color,
+        object_modulation,
+        blit_mode,
+    )?;
+    let base = ImageData::new(width, height, base_pixels);
+    let mut prepared_overlays = Vec::with_capacity(
+        overlays.len() * 2 + usize::from(owner_pixels.is_some()),
+    );
+    if let Some(owner_pixels) = owner_pixels {
+        prepared_overlays.push(InventoryPictureOverlay {
+            picture: ImageData::new(width, height, owner_pixels),
+            additive: matches!(object_mode, BlitMode::Additive | BlitMode::Mod2Additive),
+        });
     }
-
-    let base = ImageData::new(width, height, pixels);
-    let mut prepared_overlays = Vec::with_capacity(overlays.len());
     for (overlay, image) in overlays {
-        let mut overlay_pixels = inventory_picture_pixels(&image, object_color);
         let inherits_parent = overlay.blit_mode == 256;
+        let effective_blit_mode = if inherits_parent {
+            blit_mode
+        } else {
+            overlay.blit_mode
+        };
         let mode = if inherits_parent {
             object_mode
         } else {
@@ -37301,52 +37290,62 @@ fn prepare_inventory_picture(
             None
         } else {
             inventory_modulation(overlay.color_modulation, overlay.blit_mode)
-        }
-        .unwrap_or(Color::opaque(255, 255, 255));
-        prepare_inventory_pixels(&mut overlay_pixels, modulation, mode);
-        let overlay_surface = Surface::from_bytes(
-            image.width(),
-            image.height(),
-            PixelFormat::Rgba8888,
-            overlay_pixels,
-        )
-        .ok()?;
+        };
+        let (overlay_pixels, owner_pixels) = prepare_inventory_definition_layers(
+            &image,
+            object_color,
+            modulation,
+            effective_blit_mode,
+        )?;
         let source_rect = Rect::new(0, 0, image.width(), image.height());
         let destination_rect = Rect::new(0, 0, width, height);
-        let mut layer = Surface::new(width, height, PixelFormat::Rgba8888);
-        if let Some(transform) = overlay.transform {
-            let scale_factor = width as f32 / 64.0;
-            let center_x = width as f32 / 2.0;
-            let center_y = height as f32 / 2.0;
-            let matrix =
-                centered_picture_transform(transform.matrix(), scale_factor, center_x, center_y);
-            let mut stretched = Surface::new(width, height, PixelFormat::Rgba8888);
-            copy_stretched_picture(
-                &overlay_surface,
-                source_rect,
-                &mut stretched,
-                destination_rect,
-            )?;
-            layer
-                .copy_transformed(
-                    &stretched,
+        for pixels in std::iter::once(overlay_pixels).chain(owner_pixels) {
+            let overlay_surface = Surface::from_bytes(
+                image.width(),
+                image.height(),
+                PixelFormat::Rgba8888,
+                pixels,
+            )
+            .ok()?;
+            let mut layer = Surface::new(width, height, PixelFormat::Rgba8888);
+            if let Some(transform) = overlay.transform {
+                let scale_factor = width as f32 / 64.0;
+                let center_x = width as f32 / 2.0;
+                let center_y = height as f32 / 2.0;
+                let matrix = centered_picture_transform(
+                    transform.matrix(),
+                    scale_factor,
+                    center_x,
+                    center_y,
+                );
+                let mut stretched = Surface::new(width, height, PixelFormat::Rgba8888);
+                copy_stretched_picture(
+                    &overlay_surface,
+                    source_rect,
+                    &mut stretched,
                     destination_rect,
-                    SurfacePoint::new(0, 0),
-                    &matrix,
-                )
-                .ok()?;
-        } else {
-            copy_stretched_picture(
-                &overlay_surface,
-                source_rect,
-                &mut layer,
-                destination_rect,
-            )?;
+                )?;
+                layer
+                    .copy_transformed(
+                        &stretched,
+                        destination_rect,
+                        SurfacePoint::new(0, 0),
+                        &matrix,
+                    )
+                    .ok()?;
+            } else {
+                copy_stretched_picture(
+                    &overlay_surface,
+                    source_rect,
+                    &mut layer,
+                    destination_rect,
+                )?;
+            }
+            prepared_overlays.push(InventoryPictureOverlay {
+                picture: ImageData::new(width, height, layer.pixels().to_vec()),
+                additive: matches!(mode, BlitMode::Additive | BlitMode::Mod2Additive),
+            });
         }
-        prepared_overlays.push(InventoryPictureOverlay {
-            picture: ImageData::new(width, height, layer.pixels().to_vec()),
-            additive: matches!(mode, BlitMode::Additive | BlitMode::Mod2Additive),
-        });
     }
 
     Some(PreparedInventoryPicture {
@@ -37568,6 +37567,19 @@ fn object_menu_buying_player_color(
         .unwrap_or(0)
 }
 
+fn default_owner_definition_sprite(image: lc_engine::DefinitionSpriteImage) -> ImageData {
+    let width = image.width();
+    let height = image.height();
+    let mask = image.color_mask();
+    let mut pixels = image.into_pixels().to_vec();
+    if let Some(mask) = mask {
+        // FrameDecoration::SetFacetByAction draws GetBitmap() with C4's
+        // default zero->blue owner color.
+        apply_definition_owner_color(&mut pixels, &mask, [0, 0, 255]);
+    }
+    ImageData::new(width, height, pixels)
+}
+
 fn inventory_picture_pixels(
     image: &lc_engine::DefinitionPictureImage,
     object_color: u32,
@@ -37581,26 +37593,205 @@ fn inventory_picture_pixels(
         } else {
             object_color
         };
-        let owner_color = Color::opaque(
+        let owner_color = [
             ((owner >> 16) & 0xff) as u8,
             ((owner >> 8) & 0xff) as u8,
             (owner & 0xff) as u8,
-        );
-        for (pixel, amount) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
-            let amount = u16::from(amount);
-            let inverse = 255_u16 - amount;
-            for (channel, owner) in
-                pixel[..3]
-                    .iter_mut()
-                    .zip([owner_color.r, owner_color.g, owner_color.b])
-            {
-                let base = u16::from(*channel) * inverse / 255;
-                let tint = u16::from(owner) * amount / 255;
-                *channel = base.saturating_add(tint).min(255) as u8;
-            }
-        }
+        ];
+        apply_definition_owner_color(&mut pixels, &mask, owner_color);
     }
     pixels
+}
+
+fn inventory_owner_modulation(object_color: u32) -> Color {
+    let owner = if object_color == 0 { 0xff } else { object_color };
+    Color::new(
+        ((owner >> 16) & 0xff) as u8,
+        ((owner >> 8) & 0xff) as u8,
+        (owner & 0xff) as u8,
+        ((owner >> 24) & 0xff) as u8,
+    )
+}
+
+fn combine_inventory_modulations(owner: Color, global: Color) -> Color {
+    let multiply = |left: u8, right: u8| -> u8 {
+        (u16::from(left) * u16::from(right) >> 8) as u8
+    };
+    let screen_transparency = |left: u8, right: u8| -> u8 {
+        let product = u16::from(left) * u16::from(right) >> 8;
+        (u16::from(left) + u16::from(right) - product).min(255) as u8
+    };
+    Color::new(
+        multiply(owner.r, global.r),
+        multiply(owner.g, global.g),
+        multiply(owner.b, global.b),
+        screen_transparency(owner.a, global.a),
+    )
+}
+
+fn inventory_owner_blit_mode(raw: u32) -> BlitMode {
+    match (raw & 1 != 0, raw & 8 != 0) {
+        (false, false) => BlitMode::Normal,
+        (true, false) => BlitMode::Additive,
+        (false, true) => BlitMode::Mod2,
+        (true, true) => BlitMode::Mod2Additive,
+    }
+}
+
+fn prepare_inventory_owner_pixels(
+    pixels: &mut [u8],
+    modulation: Color,
+    mode: BlitMode,
+) {
+    let mod2 = matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive)
+        && modulation != Color::transparent();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let source = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
+        let prepared = if mod2 {
+            let channel = |source: u8, modulation: u8| -> u8 {
+                (2 * i32::from(source) + 2 * i32::from(modulation) - 255)
+                    .clamp(0, 255) as u8
+            };
+            Color::new(
+                channel(source.r, modulation.r),
+                channel(source.g, modulation.g),
+                channel(source.b, modulation.b),
+                source.a,
+            )
+        } else {
+            let channel = |source: u8, modulation: u8| -> u8 {
+                (u16::from(source) * u16::from(modulation) / 255) as u8
+            };
+            Color::new(
+                channel(source.r, modulation.r),
+                channel(source.g, modulation.g),
+                channel(source.b, modulation.b),
+                source.a.saturating_sub(modulation.a),
+            )
+        };
+        pixel.copy_from_slice(&[prepared.r, prepared.g, prepared.b, prepared.a]);
+    }
+}
+
+fn prepare_inventory_definition_layers(
+    image: &lc_engine::DefinitionPictureImage,
+    object_color: u32,
+    global_modulation: Option<Color>,
+    raw_blit_mode: u32,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let mut base = image.pixels().to_vec();
+    let Some(owner_pixels) = image
+        .color_mask()
+        .filter(|mask| mask.len() == base.len())
+    else {
+        let mut flattened = inventory_picture_pixels(image, object_color);
+        if let Some(modulation) = global_modulation {
+            prepare_inventory_pixels(
+                &mut flattened,
+                modulation,
+                inventory_blit_mode(raw_blit_mode),
+            );
+        } else if raw_blit_mode & 2 != 0 {
+            prepare_inventory_pixels(
+                &mut flattened,
+                Color::new(255, 255, 255, 0),
+                inventory_blit_mode(raw_blit_mode),
+            );
+        }
+        return Some((flattened, None));
+    };
+
+    if let Some(modulation) = global_modulation {
+        prepare_inventory_pixels(
+            &mut base,
+            modulation,
+            inventory_blit_mode(raw_blit_mode),
+        );
+    } else if raw_blit_mode & 2 != 0 {
+        prepare_inventory_pixels(
+            &mut base,
+            Color::new(255, 255, 255, 0),
+            inventory_blit_mode(raw_blit_mode),
+        );
+    }
+    let mut owner_pixels = owner_pixels.to_vec();
+    let mut owner_modulation = inventory_owner_modulation(object_color);
+    if raw_blit_mode & 4 == 0 {
+        if let Some(global) = global_modulation {
+            owner_modulation = combine_inventory_modulations(owner_modulation, global);
+        }
+    }
+    prepare_inventory_owner_pixels(
+        &mut owner_pixels,
+        owner_modulation,
+        inventory_owner_blit_mode(raw_blit_mode),
+    );
+    Some((base, Some(owner_pixels)))
+}
+
+fn prepare_owned_menu_definition_pixels(
+    image: &lc_engine::DefinitionPictureImage,
+    object_color: u32,
+    global_modulation: Option<Color>,
+    raw_blit_mode: u32,
+) -> Option<Vec<u8>> {
+    let mut base = image.pixels().to_vec();
+    let Some(original_owner) = image
+        .color_mask()
+        .filter(|mask| mask.len() == base.len())
+    else {
+        let mut flattened = inventory_picture_pixels(image, object_color);
+        prepare_owned_menu_pixels(
+            &mut flattened,
+            global_modulation,
+            inventory_blit_mode(raw_blit_mode),
+        );
+        return Some(flattened);
+    };
+
+    prepare_owned_menu_pixels(
+        &mut base,
+        global_modulation,
+        inventory_blit_mode(raw_blit_mode),
+    );
+    let mut owner = original_owner.to_vec();
+    prepare_owned_menu_pixels(
+        &mut owner,
+        Some(inventory_owner_modulation(object_color)),
+        inventory_owner_blit_mode(raw_blit_mode),
+    );
+    if raw_blit_mode & 4 == 0 {
+        prepare_owned_menu_pixels(&mut owner, global_modulation, BlitMode::Normal);
+    }
+    composite_owned_menu_owner_pixels(&mut base, &owner, &original_owner);
+    Some(base)
+}
+
+fn composite_owned_menu_owner_pixels(
+    base: &mut [u8],
+    owner: &[u8],
+    original_owner: &[u8],
+) {
+    for ((base, owner), original_owner) in base
+        .chunks_exact_mut(4)
+        .zip(owner.chunks_exact(4))
+        .zip(original_owner.chunks_exact(4))
+    {
+        if original_owner[3] == 0 {
+            continue;
+        }
+        if original_owner[3] == 255 || base[3] == 0 {
+            base.copy_from_slice(owner);
+            continue;
+        }
+        let alpha = u16::from(owner[3]);
+        for channel in 0..3 {
+            base[channel] = ((u16::from(owner[channel]) * alpha
+                + u16::from(base[channel]) * (255 - alpha))
+                >> 8) as u8;
+        }
+        base[3] = base[3].saturating_add(owner[3]);
+    }
 }
 
 fn inventory_modulation(color: u32, blit_mode: u32) -> Option<Color> {
@@ -37624,6 +37815,14 @@ fn inventory_blit_mode(raw: u32) -> BlitMode {
 }
 
 fn prepare_inventory_pixels(pixels: &mut [u8], modulation: Color, mode: BlitMode) {
+    if modulation == Color::opaque(255, 255, 255)
+        && matches!(mode, BlitMode::Normal | BlitMode::Additive)
+    {
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        return;
+    }
     for pixel in pixels.chunks_exact_mut(4) {
         let prepared = mode.prepare_source(
             Color::new(pixel[0], pixel[1], pixel[2], pixel[3]),
@@ -46789,20 +46988,42 @@ func Award()
         assert_eq!((picture.width(), picture.height()), (64, 64));
         let source_pixels = source.pixels();
         let mask = source.color_mask().expect("FLAG ColorByOwner mask");
-        let sample = mask
-            .iter()
-            .position(|value| *value != 0)
-            .expect("FLAG picture has a colorized pixel");
-        let offset = sample * 4;
-        let amount = u16::from(mask[sample]);
-        let inverse = 255_u16 - amount;
-        let tint = [owner_color.r, owner_color.g, owner_color.b];
-        for (channel, owner) in tint.into_iter().enumerate() {
-            let expected = (u16::from(source_pixels[offset + channel]) * inverse / 255
-                + u16::from(owner) * amount / 255) as u8;
-            assert_eq!(picture.pixels()[offset + channel], expected);
+        if mask.len() == source_pixels.len() {
+            assert_eq!(picture.pixels(), source_pixels.as_ref());
+            assert_eq!(inventory[0].picture_overlays.len(), 1);
+            let owner_picture = &inventory[0].picture_overlays[0].picture;
+            let sample = mask
+                .chunks_exact(4)
+                .position(|pixel| pixel[3] != 0)
+                .expect("FLAG picture has an overlay pixel");
+            let offset = sample * 4;
+            let overlay = &mask[offset..offset + 4];
+            let tint = [owner_color.r, owner_color.g, owner_color.b];
+            for (channel, owner) in tint.into_iter().enumerate() {
+                let expected = u16::from(overlay[channel]) * u16::from(owner) / 255;
+                assert_eq!(owner_picture.pixels()[offset + channel], expected as u8);
+            }
+            assert_eq!(
+                owner_picture.pixels()[offset + 3],
+                overlay[3],
+                "owner coverage remains on the second HUD pass",
+            );
+        } else {
+            let sample = mask
+                .iter()
+                .position(|value| *value != 0)
+                .expect("FLAG picture has a colorized pixel");
+            let offset = sample * 4;
+            let amount = u16::from(mask[sample]);
+            let inverse = 255_u16 - amount;
+            let tint = [owner_color.r, owner_color.g, owner_color.b];
+            for (channel, owner) in tint.into_iter().enumerate() {
+                let expected = (u16::from(source_pixels[offset + channel]) * inverse / 255
+                    + u16::from(owner) * amount / 255) as u8;
+                assert_eq!(picture.pixels()[offset + channel], expected);
+            }
+            assert_eq!(picture.pixels()[offset + 3], source_pixels[offset + 3]);
         }
-        assert_eq!(picture.pixels()[offset + 3], source_pixels[offset + 3]);
 
         // Buy row definition pictures use the buying player attached to the
         // menu command object, not the base/title owner and not default blue
@@ -46835,7 +47056,14 @@ func Award()
             0,
         )
         .expect("buy row picture");
-        assert_eq!(buy_picture.pixels(), picture.pixels());
+        let buy_source = engine
+            .definition_picture_phase_image("FLAG", 0)
+            .or_else(|| engine.definition_picture_image("FLAG"))
+            .expect("buy row definition picture");
+        assert_eq!(
+            buy_picture.pixels(),
+            inventory_picture_pixels(&buy_source, buy_color),
+        );
     }
 
     #[test]
@@ -47183,6 +47411,27 @@ func Award()
         let transparent_image = engine
             .definition_picture_phase_image("M2BG", 0)
             .expect("transparent definition picture");
+        let mut owner_definition =
+            Definition::from_script("M2OW", "Owner Overlay", "")
+                .expect("owner-overlay definition compiles");
+        owner_definition.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        owner_definition.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0, 255, 0, 255]),
+            color_mask: Some(Arc::from([128, 128, 128, 128])),
+        }));
+        engine
+            .register_definition(owner_definition)
+            .expect("owner-overlay definition registers");
+        let owner_image = engine
+            .definition_picture_phase_image("M2OW", 0)
+            .expect("owner-overlay definition picture");
         let modulation = 0x007f_7f7f;
 
         let inventory = compose_inventory_picture(
@@ -47220,6 +47469,87 @@ func Award()
             &[128, 255, 255, 128],
             "Picture2Facet uses packed software MOD2 in its temporary surface",
         );
+
+        let prepared_owner = prepare_inventory_picture(
+            owner_image.clone(),
+            Vec::new(),
+            0x00ff_0000,
+            modulation,
+            2,
+        )
+        .expect("two-pass owner inventory picture");
+        assert_eq!(prepared_owner.base.pixels(), &[0, 255, 0, 255]);
+        assert_eq!(prepared_owner.overlays.len(), 1);
+        assert_eq!(
+            prepared_owner.overlays[0].picture.pixels(),
+            &[63, 0, 0, 128],
+            "owner tint and global modulation are prepared on the owner pass",
+        );
+        let (default_mod2_base, default_mod2_owner) =
+            prepare_inventory_definition_layers(&owner_image, 0x00ff_0000, None, 2)
+                .expect("default-modulation MOD2 layers");
+        assert_eq!(default_mod2_base, [255, 255, 255, 255]);
+        assert_eq!(
+            default_mod2_owner.expect("owner pass"),
+            [128, 0, 0, 128],
+            "implicit white drives base MOD2 without dimming the owner pass",
+        );
+        let owner_inventory = compose_inventory_picture(
+            owner_image.clone(),
+            Vec::new(),
+            0x00ff_0000,
+            modulation,
+            2,
+        )
+        .expect("flattened two-pass owner inventory picture");
+        assert_eq!(owner_inventory.pixels(), &[32, 127, 0, 255]);
+        let fully_faded_owner = prepare_inventory_picture(
+            owner_image.clone(),
+            Vec::new(),
+            0x00ff_0000,
+            0xffff_ffff,
+            0,
+        )
+        .expect("fully faded owner inventory picture");
+        assert_eq!(fully_faded_owner.base.pixels(), &[0, 255, 0, 0]);
+        assert_eq!(
+            fully_faded_owner.overlays[0].picture.pixels(),
+            &[127, 0, 0, 0],
+            "packed 0xffffffff is active full transparency, not a neutral sentinel",
+        );
+        for (mode, expected) in [
+            (0, [16, 16, 12, 128]),
+            (4, [32, 64, 96, 128]),
+            (8, [65, 65, 49, 128]),
+            (12, [129, 255, 255, 128]),
+        ] {
+            let prepared = prepare_inventory_picture(
+                owner_image.clone(),
+                Vec::new(),
+                0x0040_80c0,
+                0x0080_4020,
+                mode,
+            )
+            .expect("owner-mode inventory picture");
+            assert_eq!(prepared.overlays[0].picture.pixels(), &expected);
+        }
+        let owner_menu = compose_owned_menu_picture(
+            owner_image,
+            Vec::new(),
+            &lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "M2OW".to_string(),
+                symbol_size: 1,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 2,
+                color: 0x00ff_0000,
+                color_modulation: modulation,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            },
+        )
+        .expect("packed two-pass owner menu picture");
+        assert_eq!(owner_menu.pixels(), &[31, 126, 0, 255]);
 
         let render_cached_picture = |picture: &ImageData| {
             let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);

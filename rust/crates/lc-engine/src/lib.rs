@@ -10385,6 +10385,25 @@ pub struct DefinitionPictureImage {
     color_mask: Option<Arc<[u8]>>,
 }
 
+fn definition_color_mask_channels(mask: &[u8], width: u32, height: u32) -> Option<usize> {
+    let pixels = usize::try_from(u64::from(width).checked_mul(u64::from(height))?).ok()?;
+    if mask.len() == pixels {
+        Some(1)
+    } else if mask.len() == pixels.checked_mul(4)? {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+fn definition_color_mask_has_coverage(mask: &[u8], channels: usize) -> bool {
+    if channels == 4 {
+        mask.chunks_exact(4).any(|pixel| pixel[3] != 0)
+    } else {
+        mask.iter().any(|value| *value != 0)
+    }
+}
+
 const C4_DEFINITION_GAME_PALETTE: &[u8; 256 * 3] =
     include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
 
@@ -10458,9 +10477,16 @@ impl DefinitionPictureImage {
         mask: Option<&lc_resources::ColorByOwnerMask>,
     ) -> Self {
         let color_mask = mask.and_then(|mask| {
-            ((mask.width, mask.height) == (image.width(), image.height())
-                && mask.pixels.iter().any(|value| *value != 0))
-            .then(|| Arc::from(mask.pixels.clone().into_boxed_slice()))
+            if (mask.width, mask.height) != (image.width(), image.height()) {
+                return None;
+            }
+            let channels = definition_color_mask_channels(
+                &mask.pixels,
+                image.width(),
+                image.height(),
+            )?;
+            definition_color_mask_has_coverage(&mask.pixels, channels)
+                .then(|| Arc::from(mask.pixels.clone().into_boxed_slice()))
         });
         Self {
             width: image.width(),
@@ -10490,10 +10516,13 @@ impl DefinitionPictureImage {
             pixels.extend_from_slice(sprite.pixels.get(start..end)?);
         }
         let color_mask = sprite.color_mask.as_ref().and_then(|mask| {
-            let mut cropped = Vec::with_capacity(width as usize * height as usize);
+            let channels =
+                definition_color_mask_channels(mask, sprite.width, sprite.height)?;
+            let mut cropped =
+                Vec::with_capacity(width as usize * height as usize * channels);
             for row in y..y + height {
-                let start = (row * sprite.width + x) as usize;
-                let end = start + width as usize;
+                let start = (row * sprite.width + x) as usize * channels;
+                let end = start + width as usize * channels;
                 cropped.extend_from_slice(mask.get(start..end)?);
             }
             Some(Arc::from(cropped.into_boxed_slice()))
@@ -10521,7 +10550,12 @@ impl DefinitionPictureImage {
         }
         let pixel_count = usize::try_from(u64::from(width).checked_mul(u64::from(height))?).ok()?;
         let mut pixels = vec![0; pixel_count.checked_mul(4)?];
-        let mut color_mask = sprite.color_mask.as_ref().map(|_| vec![0; pixel_count]);
+        let color_mask_channels = sprite.color_mask.as_ref().and_then(|mask| {
+            definition_color_mask_channels(mask, sprite.width, sprite.height)
+        });
+        let mut color_mask = color_mask_channels
+            .and_then(|channels| pixel_count.checked_mul(channels))
+            .map(|len| vec![0; len]);
 
         let left = i64::from(rect.x).max(0);
         let top = i64::from(rect.y).max(0);
@@ -10548,13 +10582,20 @@ impl DefinitionPictureImage {
                 if let (Some(destination_mask), Some(source_mask)) =
                     (color_mask.as_mut(), sprite.color_mask.as_ref())
                 {
-                    let source_start =
-                        usize::try_from(source_y * i64::from(sprite.width) + left).ok()?;
-                    let source_end = source_start.checked_add(copy_width)?;
+                    let channels = color_mask_channels?;
+                    let source_start = usize::try_from(
+                        source_y * i64::from(sprite.width) + left,
+                    )
+                    .ok()?
+                    .checked_mul(channels)?;
+                    let source_end =
+                        source_start.checked_add(copy_width.checked_mul(channels)?)?;
                     let destination_start = destination_y
                         .checked_mul(width as usize)?
                         .checked_add(destination_x)?;
-                    let destination_end = destination_start.checked_add(copy_width)?;
+                    let destination_start = destination_start.checked_mul(channels)?;
+                    let destination_end = destination_start
+                        .checked_add(copy_width.checked_mul(channels)?)?;
                     destination_mask
                         .get_mut(destination_start..destination_end)?
                         .copy_from_slice(source_mask.get(source_start..source_end)?);
@@ -10612,7 +10653,12 @@ impl DefinitionSpriteImage {
             if mask.width != image.width() || mask.height != image.height() {
                 return None;
             }
-            if mask.pixels.iter().all(|value| *value == 0) {
+            let channels = definition_color_mask_channels(
+                &mask.pixels,
+                image.width(),
+                image.height(),
+            )?;
+            if !definition_color_mask_has_coverage(&mask.pixels, channels) {
                 return None;
             }
             Some(Arc::from(mask.pixels.clone().into_boxed_slice()))
@@ -10643,6 +10689,28 @@ impl DefinitionSpriteImage {
 
     pub fn color_mask(&self) -> Option<Arc<[u8]>> {
         self.color_mask.as_ref().map(Arc::clone)
+    }
+
+    fn solid_mask_source_pixels(&self) -> Arc<[u8]> {
+        let Some(overlay) = self
+            .color_mask
+            .as_ref()
+            .filter(|overlay| overlay.len() == self.pixels.len())
+        else {
+            return Arc::clone(&self.pixels);
+        };
+        let mut pixels = self.pixels.to_vec();
+        for (base, overlay) in pixels
+            .chunks_exact_mut(4)
+            .zip(overlay.chunks_exact(4))
+        {
+            // C4Surface::GetPixDw composites the owner surface before
+            // IsPixTransparent samples a solid mask. With C4's inverse-alpha
+            // BltAlpha helper this is a saturating sum of conventional
+            // opacities, not just the base PNG's alpha.
+            base[3] = base[3].saturating_add(overlay[3]);
+        }
+        Arc::from(pixels.into_boxed_slice())
     }
 
     fn colorize_by_material(&mut self, colors: &[[u8; 4]; 3]) {
@@ -12375,11 +12443,12 @@ impl Definition {
         };
         let image_width = i32::try_from(image.width).unwrap_or(i32::MAX);
         let image_height = i32::try_from(image.height).unwrap_or(i32::MAX);
+        let pixels = image.solid_mask_source_pixels();
         solid_mask_pixels_for_checked_bitmap(
             mask,
             image_width,
             image_height,
-            image.pixels.as_ref(),
+            pixels.as_ref(),
         )
         .map(SolidMaskPixels::Alpha)
         .unwrap_or(SolidMaskPixels::OutOfBounds)
@@ -23435,7 +23504,11 @@ impl Engine {
                 .iter()
                 .map(|(id, definition)| {
                     let image = |image: &DefinitionSpriteImage| {
-                        HostSolidMaskImage::new(image.width(), image.height(), image.pixels())
+                        HostSolidMaskImage::new(
+                            image.width(),
+                            image.height(),
+                            image.solid_mask_source_pixels(),
+                        )
                     };
                     let named_images = definition
                         .sprite_variant_keys()
@@ -62402,6 +62475,35 @@ protected func Departure(pContainer)
             assert!(denied.objects[actor_index].state.menu.is_none());
             assert!(denied.objects[actor_index].commands.snapshot().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod owner_overlay_solid_mask_regression {
+    use super::*;
+
+    #[test]
+    fn explicit_owner_overlay_alpha_participates_in_solid_mask_pixels() {
+        let image = DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([10, 20, 30, 40, 50, 60, 70, 200]),
+            color_mask: Some(Arc::from([
+                128, 128, 128, 90, 255, 255, 255, 0,
+            ])),
+        };
+        let pixels = image.solid_mask_source_pixels();
+        assert_eq!(pixels[3], 130, "base and overlay opacity saturating-add");
+        assert_eq!(pixels[7], 200, "transparent overlay leaves base alpha");
+
+        let solid = solid_mask_pixels_for_checked_bitmap(
+            DefinitionTargetRect::new(0, 0, 2, 1, 0, 0),
+            2,
+            1,
+            &pixels,
+        )
+        .expect("solid mask pixels");
+        assert_eq!(solid.as_slice(), &[1, 1]);
     }
 }
 

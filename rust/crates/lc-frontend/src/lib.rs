@@ -501,12 +501,53 @@ impl ColorByOwnerMask {
         }
     }
 
-    fn value_at(&self, x: u32, y: u32) -> u8 {
+    fn value_at(&self, x: u32, y: u32) -> ColorByOwnerSample {
         if x >= self.width || y >= self.height {
-            return 0;
+            return ColorByOwnerSample::Scalar(0);
         }
         let idx = (y * self.width + x) as usize;
-        self.pixels.get(idx).copied().unwrap_or(0)
+        let pixel_count = u64::from(self.width) * u64::from(self.height);
+        if pixel_count.checked_mul(4) == Some(self.pixels.len() as u64) {
+            let idx = idx * 4;
+            return self
+                .pixels
+                .get(idx..idx + 4)
+                .map(|pixel| {
+                    ColorByOwnerSample::Overlay(Color::new(
+                        pixel[0], pixel[1], pixel[2], pixel[3],
+                    ))
+                })
+                .unwrap_or(ColorByOwnerSample::Scalar(0));
+        }
+        ColorByOwnerSample::Scalar(self.pixels.get(idx).copied().unwrap_or(0))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ColorByOwnerSample {
+    Scalar(u8),
+    Overlay(Color),
+}
+
+#[derive(Clone, Copy)]
+enum PreparedSpriteLayer {
+    Legacy(Color),
+    Shader { rgb: [f32; 3], alpha: u8 },
+}
+
+impl PreparedSpriteLayer {
+    fn alpha(self) -> u8 {
+        match self {
+            Self::Legacy(color) => color.a,
+            Self::Shader { alpha, .. } => alpha,
+        }
+    }
+
+    fn into_fragment(self) -> PreparedSpriteFragment {
+        match self {
+            Self::Legacy(color) => PreparedSpriteFragment::Legacy(color),
+            Self::Shader { rgb, alpha } => PreparedSpriteFragment::Shader { rgb, alpha },
+        }
     }
 }
 
@@ -516,6 +557,12 @@ enum PreparedSpriteFragment {
     Legacy(Color),
     /// StdGL shader output before gamma lookup and framebuffer blending.
     Shader { rgb: [f32; 3], alpha: u8 },
+    /// C4Surface owner-color bitmaps are two textures and therefore two
+    /// framebuffer passes: unchanged base first, full RGBA overlay second.
+    Layers {
+        base: PreparedSpriteLayer,
+        overlay: PreparedSpriteLayer,
+    },
 }
 
 impl PreparedSpriteFragment {
@@ -523,6 +570,15 @@ impl PreparedSpriteFragment {
         match self {
             Self::Legacy(color) => color.a,
             Self::Shader { alpha, .. } => alpha,
+            Self::Layers { base, overlay } => base.alpha().max(overlay.alpha()),
+        }
+    }
+
+    fn into_layer(self) -> PreparedSpriteLayer {
+        match self {
+            Self::Legacy(color) => PreparedSpriteLayer::Legacy(color),
+            Self::Shader { rgb, alpha } => PreparedSpriteLayer::Shader { rgb, alpha },
+            Self::Layers { .. } => unreachable!("nested sprite layers are never prepared"),
         }
     }
 }
@@ -1428,40 +1484,61 @@ fn shader_modulate_fragment(source: Color, modulation: u32, mod2: bool) -> Prepa
     }
 }
 
+fn prepare_color_by_owner_fragment(
+    source: Color,
+    mut modulation: u32,
+    blit: SpriteBlitState,
+) -> PreparedSpriteFragment {
+    if let Some(global) = blit.modulation {
+        if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
+            modulation = modulate_c4_colors(modulation, global);
+        }
+    }
+    let quad_modulation_is_nonzero = if modulation != 0 {
+        blit.fog_modulation.map_or(true, |fog| {
+            let any_nonzero = fog.combined_quad_is_nonzero(modulation);
+            modulation = fog.combine_with(modulation);
+            any_nonzero
+        })
+    } else {
+        false
+    };
+    // PerformBlt explicitly disables MOD2 for a completely black modulation
+    // quad, not independently at each interpolated fragment (StdGL.cpp:471-472).
+    let mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0 && quad_modulation_is_nonzero;
+    shader_modulate_fragment(source, modulation, mod2)
+}
+
 fn prepare_sprite_fragment(
     source: Color,
-    owner_mask: Option<u8>,
+    owner_mask: Option<ColorByOwnerSample>,
     owner_color: Option<u32>,
     blit: SpriteBlitState,
 ) -> PreparedSpriteFragment {
-    if let (Some(mask), Some(mut modulation)) =
-        (owner_mask.filter(|mask| *mask != 0), owner_color)
+    if let (Some(ColorByOwnerSample::Overlay(overlay)), Some(modulation)) =
+        (owner_mask, owner_color)
     {
+        if overlay.a != 0 {
+            let base = prepare_sprite_fragment(source, None, None, blit).into_layer();
+            let overlay =
+                prepare_color_by_owner_fragment(overlay, modulation, blit).into_layer();
+            return PreparedSpriteFragment::Layers { base, overlay };
+        }
+    }
+
+    if let (Some(ColorByOwnerSample::Scalar(mask)), Some(modulation)) =
+        (owner_mask, owner_color)
+    {
+        if mask == 0 {
+            return prepare_sprite_fragment(source, None, None, blit);
+        }
         // The mask stores the grey ClrByOwner texture intensity. Its main-sfc
         // pixel was cleared when C4Surface::CreateColorByOwner split the image
         // (C4Surface.cpp:288-312).
-        if let Some(global) = blit.modulation {
-            if blit.mode & C4GFXBLIT_CLRSFC_OWNCLR == 0 {
-                modulation = modulate_c4_colors(modulation, global);
-            }
-        }
-        let quad_modulation_is_nonzero = if modulation != 0 {
-            blit.fog_modulation.map_or(true, |fog| {
-                let any_nonzero = fog.combined_quad_is_nonzero(modulation);
-                modulation = fog.combine_with(modulation);
-                any_nonzero
-            })
-        } else {
-            false
-        };
-        // PerformBlt explicitly disables MOD2 for a completely black
-        // modulation quad, not independently at each interpolated fragment
-        // (StdGL.cpp:471-472).
-        let mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0 && quad_modulation_is_nonzero;
-        return shader_modulate_fragment(
+        return prepare_color_by_owner_fragment(
             Color::new(mask, mask, mask, source.a),
             modulation,
-            mod2,
+            blit,
         );
     }
 
@@ -9357,6 +9434,12 @@ fn composite_sprite_fragment(
     blit: SpriteBlitState,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) -> Color {
+    if let PreparedSpriteFragment::Layers { base, overlay } = source {
+        let destination =
+            composite_sprite_fragment(base.into_fragment(), destination, blit, gamma);
+        return composite_sprite_fragment(overlay.into_fragment(), destination, blit, gamma);
+    }
+
     if let PreparedSpriteFragment::Legacy(source) = source {
         if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
             return blend_fragment_additive(source, destination, gamma);
@@ -12173,6 +12256,163 @@ mod tests {
     }
 
     #[test]
+    fn full_rgba_owner_overlay_keeps_color_and_composites_over_the_base() {
+        let render = |base: Color, overlay: Color, owner_color: u32| {
+            let fragment = prepare_sprite_fragment(
+                base,
+                Some(ColorByOwnerSample::Overlay(overlay)),
+                Some(owner_color),
+                SpriteBlitState::normal(),
+            );
+            composite_sprite_fragment(
+                fragment,
+                Color::opaque(17, 23, 31),
+                SpriteBlitState::normal(),
+                None,
+            )
+        };
+
+        assert_eq!(
+            render(
+                Color::opaque(0, 255, 0),
+                Color::new(128, 128, 128, 128),
+                0x00ff_0000,
+            ),
+            Color::opaque(64, 127, 0),
+            "a half-alpha owner pass blends over, rather than replacing, green base"
+        );
+        assert_eq!(
+            render(
+                Color::opaque(20, 30, 40),
+                Color::opaque(0, 0, 255),
+                0x00ff_ffff,
+            ),
+            Color::opaque(0, 0, 255),
+            "colored Overlay.png channels survive white-owner modulation"
+        );
+        assert_eq!(
+            render(
+                Color::opaque(20, 30, 40),
+                Color::opaque(0, 0, 255),
+                0x00ff_0000,
+            ),
+            Color::opaque(0, 0, 0),
+            "an opaque red-zero overlay still covers the base after modulation"
+        );
+        assert_eq!(
+            render(
+                Color::opaque(20, 30, 40),
+                Color::new(200, 150, 100, 0),
+                0x00ff_0000,
+            ),
+            Color::opaque(20, 30, 40),
+            "transparent overlay RGB never changes the base pass"
+        );
+    }
+
+    #[test]
+    fn shipped_knight_walk_crop_matches_two_pass_owner_overlay_oracle() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../content/Knights.c4d/Crew.c4d/Knight.c4d",
+        );
+        if !directory.is_dir() {
+            return;
+        }
+        let group = Group::open(&directory).expect("open Knight definition");
+        let resource = lc_resources::ResourceDefinition::load(&group)
+            .expect("load Knight resources");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                lc_engine::Definition::from_resource(&resource)
+                    .expect("compile Knight definition"),
+            )
+            .expect("register Knight definition");
+        let image = engine
+            .definition_sprite_image("KNIG", None)
+            .expect("Knight sprite image");
+        let width = image.width();
+        let height = image.height();
+        let overlay = image.color_mask().expect("Knight Overlay.png");
+        assert_eq!(overlay.len(), width as usize * height as usize * 4);
+
+        let mut raw_base = image::load_from_memory(
+            &group.read_file("Graphics.png").expect("read Graphics.png"),
+        )
+        .expect("decode Graphics.png")
+        .into_rgba8();
+        let mut raw_overlay = image::load_from_memory(
+            &group.read_file("Overlay.png").expect("read Overlay.png"),
+        )
+        .expect("decode Overlay.png")
+        .into_rgba8();
+        for image in [&mut raw_base, &mut raw_overlay] {
+            for pixel in image.pixels_mut() {
+                if pixel[3] == 0 {
+                    pixel[0] = 0;
+                    pixel[1] = 0;
+                    pixel[2] = 0;
+                }
+            }
+        }
+        assert_eq!(image.pixels().as_ref(), raw_base.as_raw());
+        assert_eq!(overlay.as_ref(), raw_overlay.as_raw());
+
+        let mut rendered = Surface::new(16, 20, PixelFormat::Rgba8888);
+        rendered.fill(Color::opaque(0, 0, 0));
+        draw_image_region(
+            &mut rendered,
+            &GuiRect::new(0.0, 0.0, 16.0, 20.0),
+            &ImageData::from_arc(width, height, image.into_pixels()),
+            Some(&ColorByOwnerMask::new(width, height, overlay)),
+            &SourceRect::new(0, 0, 16, 20),
+            false,
+            Some(0x00ff_0000),
+            SpriteBlitState::normal(),
+            None,
+            None,
+        );
+
+        let mut partial_overlay_pixels = 0;
+        for y in 0..20 {
+            for x in 0..16 {
+                let base = raw_base.get_pixel(x, y).0;
+                let owner = raw_overlay.get_pixel(x, y).0;
+                partial_overlay_pixels += usize::from((1..=254).contains(&owner[3]));
+                let base_alpha = u16::from(base[3]);
+                let base_rgb = [
+                    (u16::from(base[0]) * base_alpha / 255) as u8,
+                    (u16::from(base[1]) * base_alpha / 255) as u8,
+                    (u16::from(base[2]) * base_alpha / 255) as u8,
+                ];
+                let overlay_alpha = f32::from(owner[3]) / 255.0;
+                let expected = Color::new(
+                    (f32::from(owner[0]) * overlay_alpha
+                        + f32::from(base_rgb[0]) * (1.0 - overlay_alpha))
+                        .round() as u8,
+                    (f32::from(base_rgb[1]) * (1.0 - overlay_alpha)).round() as u8,
+                    (f32::from(base_rgb[2]) * (1.0 - overlay_alpha)).round() as u8,
+                    255,
+                );
+                let actual = rendered.get_pixel(x, y).expect("rendered crop pixel");
+                for (actual, expected) in [actual.r, actual.g, actual.b, actual.a]
+                    .into_iter()
+                    .zip([expected.r, expected.g, expected.b, expected.a])
+                {
+                    assert!(
+                        actual.abs_diff(expected) <= 1,
+                        "Knight Walk crop mismatch at ({x},{y}): {actual} vs {expected}"
+                    );
+                }
+            }
+        }
+        assert!(
+            partial_overlay_pixels > 0,
+            "the reference crop must exercise antialiased owner-color edges"
+        );
+    }
+
+    #[test]
     fn color_by_owner_uses_object_color_instead_of_owner_lookup() {
         // C4Object::DrawFace passes the live C4Object::Color to GetBitmap
         // (C4Object.cpp:440-477). This may differ from the current player
@@ -12280,7 +12520,11 @@ mod tests {
         // Swim phase zero starts at (0,12). Its opaque body pixel at local
         // (7,7) is grey 147 in Overlay.png and transparent in Graphics.png.
         let body_mask_index = 19 * width as usize + 7;
-        assert_eq!(mask[body_mask_index], 147);
+        let body_mask_offset = body_mask_index * 4;
+        assert_eq!(
+            &mask[body_mask_offset..body_mask_offset + 4],
+            &[147, 147, 147, 255]
+        );
         let sprite = DefinitionSprite {
             graphics_scale: 1.0,
             image: ImageData::from_arc(width, height, image.into_pixels()),
