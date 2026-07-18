@@ -191,6 +191,9 @@ const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
 const MAX_REFRESH_INTERVAL: Duration = Duration::from_millis(30);
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
+/// `C4NetDeactivationDelay` is measured in simulation frames, despite the
+/// native header's historical "ticks" comment (`src/C4Network2.h:57-60`).
+const NETWORK_CLIENT_DEACTIVATION_DELAY: i32 = 500;
 const GAME_MUSIC_FADE_OUT_MS: u32 = 2_000;
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
@@ -3089,6 +3092,62 @@ impl SyncCheckState {
     fn prune_before(&mut self, threshold: i32) {
         self.local.retain(|&frame, _| frame >= threshold);
         self.remote.retain(|&frame, _| frame >= threshold);
+    }
+}
+
+/// Host-local `C4Network2Client::iLastActivity` state. Native deliberately
+/// keeps this outside the synchronized client core and does not serialize it.
+#[derive(Debug, Default)]
+struct NetworkClientActivity {
+    last_frame: BTreeMap<i32, i32>,
+}
+
+impl NetworkClientActivity {
+    fn replace_clients(&mut self, client_ids: impl IntoIterator<Item = i32>) {
+        self.last_frame = client_ids
+            .into_iter()
+            .map(|client_id| (client_id, 0))
+            .collect();
+    }
+
+    fn reset_client(&mut self, client_id: i32) {
+        self.last_frame.insert(client_id, 0);
+    }
+
+    fn remove_client(&mut self, client_id: i32) {
+        self.last_frame.remove(&client_id);
+    }
+
+    fn mark_activated(&mut self, client_id: i32, current_frame: i32) {
+        self.last_frame.insert(client_id, current_frame);
+    }
+
+    fn clear(&mut self) {
+        self.last_frame.clear();
+    }
+
+    fn deactivation_candidates(
+        &mut self,
+        activated_client_ids: impl IntoIterator<Item = i32>,
+        player_client_ids: impl IntoIterator<Item = i32>,
+        local_client_id: i32,
+        current_frame: i32,
+    ) -> Vec<i32> {
+        let clients_with_players = player_client_ids.into_iter().collect::<HashSet<_>>();
+        let mut candidates = Vec::new();
+        for client_id in activated_client_ids {
+            let last_frame = self.last_frame.entry(client_id).or_insert(0);
+            if clients_with_players.contains(&client_id) {
+                *last_frame = current_frame;
+            }
+            if client_id != local_client_id
+                && i64::from(*last_frame) + i64::from(NETWORK_CLIENT_DEACTIVATION_DELAY)
+                    < i64::from(current_frame)
+            {
+                candidates.push(client_id);
+            }
+        }
+        candidates
     }
 }
 
@@ -8653,6 +8712,7 @@ struct GameApp {
     frames_per_second: i32,
     frames_since_second: i32,
     control_clients: ControlClientRegistry,
+    network_client_activity: NetworkClientActivity,
     control_player_infos: ControlPlayerInfoRegistry,
     network_team_assignment: Option<NetworkTeamAssignmentState>,
     admission_resources: AdmissionResourceStore,
@@ -16281,6 +16341,7 @@ impl GameApp {
             frames_per_second: 0,
             frames_since_second: 0,
             control_clients,
+            network_client_activity: NetworkClientActivity::default(),
             control_player_infos,
             network_team_assignment,
             admission_resources: AdmissionResourceStore::default(),
@@ -22812,6 +22873,14 @@ impl GameApp {
                         ));
                         self.control_clients
                             .replace_snapshot(join_data.parameters.clients.clients.iter().cloned());
+                        self.network_client_activity.replace_clients(
+                            join_data
+                                .parameters
+                                .clients
+                                .clients
+                                .iter()
+                                .map(|client| client.client_id),
+                        );
                         self.control_player_infos.replace_snapshot(
                             join_data.parameters.player_infos.last_player_id,
                             join_data
@@ -22990,6 +23059,8 @@ impl GameApp {
                     NetworkEvent::DirectControl(control) => match control {
                         NetworkControl::ClientJoin(join) => {
                             if self.control_clients.apply_join(&join) {
+                                self.network_client_activity
+                                    .reset_client(join.core.client_id);
                                 self.publish_updated_host_join_snapshot();
                             }
                         }
@@ -26936,6 +27007,9 @@ impl GameApp {
         self.mark_menu_dirty();
         match result {
             Ok((mode, manager)) => {
+                // InitNetwork constructs a fresh C4Network2Client list; no
+                // activity timestamp survives into the new socket session.
+                self.network_client_activity.clear();
                 if purpose == Some(StartupNetworkPurpose::StagedHost) {
                     let control_clients = initial_control_clients(Some(&manager), Some(&mode));
                     let network_control_clock = initial_network_control_clock(Some(&mode));
@@ -29889,6 +29963,7 @@ impl GameApp {
             );
             self.network_control_running = true;
             self.control_clients = initial_control_clients(None, None);
+            self.network_client_activity.clear();
             self.scenario_game_options = GameOptionButtons::new(
                 GameOptionContext::LocalSelector,
                 load_scenario_game_option_values(self.app_paths.as_ref()),
@@ -30112,6 +30187,7 @@ impl GameApp {
         self.client_combined_scenario_path = None;
         self.client_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
+        self.network_client_activity.clear();
         self.control_clients.register(local_client_id, true, false);
         self.engine.set_control_host(true);
         self.engine.set_network_control_mode(false);
@@ -30714,11 +30790,22 @@ impl GameApp {
                 }
                 NetworkControl::ClientUpdate(update) => {
                     let host_authored = update.by_client == 0;
+                    let activates_client = host_authored
+                        && update.update_type == lc_engine::CLIENT_UPDATE_ACTIVATE
+                        && update.data != 0
+                        && self.control_clients.contains(update.client_id)
+                        && !self.control_clients.is_activated(update.client_id);
                     let removes_players = host_authored
                         && update.update_type == lc_engine::CLIENT_UPDATE_SET_OBSERVER
                         && self.control_clients.contains(update.client_id)
                         && !self.control_clients.is_observer(update.client_id);
                     self.control_clients.apply_update(&update);
+                    if activates_client && self.control_clients.is_activated(update.client_id) {
+                        self.network_client_activity.mark_activated(
+                            update.client_id,
+                            i32::try_from(self.engine.frame()).unwrap_or(i32::MAX),
+                        );
+                    }
                     if removes_players && self.control_clients.is_observer(update.client_id) {
                         self.remove_runtime_players_at_client(update.client_id, false);
                         self.refresh_current_host_player_infos();
@@ -30739,6 +30826,8 @@ impl GameApp {
                 }
                 NetworkControl::ClientJoin(join) => {
                     if self.control_clients.apply_join(&join) {
+                        self.network_client_activity
+                            .reset_client(join.core.client_id);
                         self.publish_updated_host_join_snapshot();
                     }
                     Ok(())
@@ -30762,6 +30851,7 @@ impl GameApp {
                             self.remove_runtime_players_at_client(remove.client_id, true);
                         }
                         if self.control_clients.apply_remove(&remove) {
+                            self.network_client_activity.remove_client(remove.client_id);
                             self.control_messages.remove_client(remove.client_id);
                             self.control_player_infos.on_client_part(remove.client_id);
                             seed_engine_player_info_parameters(
@@ -31283,6 +31373,46 @@ impl GameApp {
         Ok(())
     }
 
+    fn deactivate_inactive_network_clients(&mut self) {
+        if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
+            return;
+        }
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return;
+        };
+        let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+        let activated_client_ids = self.control_clients.activated_client_ids();
+        let player_client_ids = self
+            .engine
+            .players()
+            .map(|player| player.at_client().get())
+            .collect::<Vec<_>>();
+        let candidates = self.network_client_activity.deactivation_candidates(
+            activated_client_ids,
+            player_client_ids,
+            local_client_id,
+            current_frame,
+        );
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        for client_id in candidates {
+            let update = lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id,
+                data: 0,
+                by_client: 0,
+            };
+            if let Err(error) = network.submit_client_update(update) {
+                tracing::error!(%client_id, %error, "failed to deactivate inactive client");
+            }
+        }
+    }
+
     fn update(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         if self.mode == AppMode::Loading && self.loading_state.is_some() {
@@ -31295,6 +31425,9 @@ impl GameApp {
         self.poll_startup_game_search();
         self.poll_startup_network_connection();
         self.process_network_events()?;
+        // Native runs Network.Execute before Control.Prepare, so this scan
+        // must still happen when the ready-control gate returns early.
+        self.deactivate_inactive_network_clients();
         self.expire_message_board_line();
         if !matches!(self.mode, AppMode::Menu) {
             // Whatever happens while loading or in-game (game over, return
@@ -31434,6 +31567,9 @@ impl GameApp {
     /// tests and other hosts may pulse it explicitly.
     fn sec1_timer(&mut self) -> Result<bool, EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        // C4Network2 is also a one-second timer proc and calls Execute from
+        // that independent scheduler callback (`src/C4Network2.cpp:674-677`).
+        self.deactivate_inactive_network_clients();
         let lobby_countdown_changed = self.tick_network_lobby_countdown();
         let ready_check_changed = self.tick_lobby_ready_check_prompt();
         let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
@@ -35405,6 +35541,7 @@ impl GameApp {
         self.frames_since_second = 0;
         self.control_clients =
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
+        self.network_client_activity.clear();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.network_team_assignment = None;
         self.admission_resources.clear();
@@ -54440,6 +54577,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "the selected loader's pack-aware title is retained for JoinData"
         );
         app.staged_network_host_scenario = Some(staged);
+        app.network_client_activity.mark_activated(99, 123);
 
         let (manager, _events) = NetworkManager::test_stub();
         let (sender, receiver) = mpsc::channel();
@@ -54467,6 +54605,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.poll_startup_network_connection();
 
         assert_eq!(app.mode, AppMode::Menu);
+        assert!(app.network_client_activity.last_frame.is_empty());
         assert_eq!(app.startup_view, StartupView::NetworkLobby);
         assert!(
             app.network.is_some(),
@@ -67829,6 +67968,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         // src/C4PlayerInfo.cpp:649-665).
         let mut app = new_menu_app(320, 200);
         app.control_clients.register(99, true, false);
+        app.network_client_activity.mark_activated(99, 123);
         app.control_player_infos
             .apply(lc_engine::PlayerInfoControlData {
                 client_id: 99,
@@ -67892,6 +68032,10 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         assert_eq!(app.pending_network_join_data, Some(join_data));
         assert!(!app.control_clients.contains(99));
+        assert_eq!(
+            app.network_client_activity.last_frame,
+            BTreeMap::from([(0, 0), (7, 0)])
+        );
         let host = app.control_clients.state(0).expect("host core restored");
         assert!(host.activated);
         assert!(host.lobby_ready);
@@ -73768,6 +73912,165 @@ protected func InputCallback(string answer, int player)
                 update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
                 client_id: 3,
                 data: 1,
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn network_client_activity_uses_player_presence_and_strict_frame_age() {
+        // UpdateClientActivity refreshes from Game.Players.GetAtClient, not
+        // from received controls. DeactivateInactiveClients uses a strict
+        // `last + 500 < FrameCounter` comparison and excludes the local
+        // client (src/C4Network2Client.cpp:648-654;
+        // src/C4Network2.cpp:2148-2159).
+        let mut activity = NetworkClientActivity::default();
+
+        assert!(activity
+            .deactivation_candidates([0, 3], [], 0, 500)
+            .is_empty());
+        assert_eq!(
+            activity.deactivation_candidates([0, 3], [], 0, 501),
+            vec![3]
+        );
+
+        activity.mark_activated(3, 700);
+        assert!(activity
+            .deactivation_candidates([0, 3], [], 0, 1_200)
+            .is_empty());
+        assert_eq!(
+            activity.deactivation_candidates([0, 3], [], 0, 1_201),
+            vec![3]
+        );
+
+        assert!(activity
+            .deactivation_candidates([0, 3], [3], 0, 10_000)
+            .is_empty());
+    }
+
+    #[test]
+    fn host_deactivates_playerless_remote_before_the_ready_control_gate() {
+        // C4Game::Execute calls Network.Execute before Control.Prepare. The
+        // player-less client is therefore selected at frame 501 even when
+        // network control is currently stopped. OnSec1Timer independently
+        // calls Execute too, and native does not suppress a repeated update
+        // before the synchronized first one executes (src/C4Game.cpp:776-787;
+        // src/C4Network2.cpp:674-700,2148-2159).
+        let mut app = new_running_sandbox_app();
+        for _ in 0..500 {
+            app.engine.tick().expect("advance to strict delay boundary");
+        }
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_control_running = false;
+        app.control_clients.register(3, true, false);
+
+        app.update().expect("scan frame 500 before ready gate");
+        assert!(commands.take_submitted_client_updates().is_empty());
+
+        app.engine.tick().expect("advance to first stale frame");
+        app.update().expect("scan frame 501 before ready gate");
+        let expected = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 0,
+            by_client: 0,
+        };
+        assert_eq!(commands.take_submitted_client_updates(), vec![expected.clone()]);
+        assert!(
+            app.control_clients.is_activated(3),
+            "submission must not bypass synchronized execution"
+        );
+
+        app.sec1_timer().expect("run independent native second callback");
+        assert_eq!(commands.take_submitted_client_updates(), vec![expected]);
+    }
+
+    #[test]
+    fn runtime_player_refreshes_inactive_client_even_when_eliminated() {
+        // C4PlayerList::GetAtClient does not filter eliminated players. Any
+        // extant runtime player refreshes iLastActivity and prevents this
+        // delayed path from selecting its client (src/C4PlayerList.cpp:487-496).
+        let mut app = new_running_sandbox_app();
+        for _ in 0..501 {
+            app.engine.tick().expect("advance beyond deactivation delay");
+        }
+        app.engine
+            .register_player(PlayerConfig::new(17, "Remote"))
+            .expect("register remote runtime player");
+        app.engine
+            .player_mut(17)
+            .expect("remote runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(3));
+        app.engine
+            .set_player_status(17, lc_engine::PlayerStatus::Eliminated)
+            .expect("eliminate remote runtime player");
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_control_running = false;
+        app.control_clients.register(3, true, false);
+
+        app.update().expect("refresh activity from eliminated player");
+
+        assert!(commands.take_submitted_client_updates().is_empty());
+        assert!(app.control_clients.is_activated(3));
+    }
+
+    #[test]
+    fn synchronized_activation_restarts_playerless_activity_window() {
+        // C4Client::SetActivated(true) stamps the current FrameCounter. The
+        // strict delay begins at synchronized execution, not at connection or
+        // request time (src/C4Client.cpp:104-110; src/C4Control.cpp:589-602).
+        let mut app = new_running_sandbox_app();
+        for _ in 0..400 {
+            app.engine.tick().expect("advance before activation");
+        }
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_control_running = false;
+        app.control_clients.register(3, false, false);
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id: 3,
+                    data: 1,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute synchronized activation at frame 400");
+
+        for _ in 0..500 {
+            app.engine.tick().expect("advance to activation delay boundary");
+        }
+        app.update().expect("scan activation age 500");
+        assert!(commands.take_submitted_client_updates().is_empty());
+
+        app.engine.tick().expect("advance past activation delay");
+        app.update().expect("scan activation age 501");
+        assert_eq!(
+            commands.take_submitted_client_updates(),
+            vec![lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 3,
+                data: 0,
                 by_client: 0,
             }]
         );
