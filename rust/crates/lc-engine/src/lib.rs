@@ -16316,6 +16316,13 @@ impl MissionAccessStore {
             inner: Rc::new(RefCell::new(mission_access.into())),
         }
     }
+
+    /// Tests one password against the live process-local semicolon module
+    /// list with the same legacy-byte, case-insensitive rules as
+    /// `GetMissionAccess`/`SIsModule`.
+    pub fn contains(&self, password: &str) -> bool {
+        crate::compat::mission_access_contains(&self.inner.borrow(), password)
+    }
 }
 
 impl Default for MissionAccessStore {

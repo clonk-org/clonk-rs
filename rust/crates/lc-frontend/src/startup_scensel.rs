@@ -315,6 +315,10 @@ pub struct ScenSelLayout {
     /// Dialog client rect (margins X = w/50, top = h/7, bottom = h*2/75;
     /// C4StartupScenSelDlg.h:406, C4GuiDialogs.cpp:819-820).
     pub client: IntRect,
+    /// Client bounds of the zero-chrome tabular sheet that hosts either the
+    /// normal book or a `FolderMap.txt` map (C4StartupScenSelDlg.cpp:
+    /// 1313-1328).
+    pub map_sheet: IntRect,
     /// Fullscreen title "Start Game": ACenter anchor x and top y
     /// (C4GuiDialogs.cpp:834-849; offsets captured with the pre-override
     /// margin top of 50 + h*2/75).
@@ -517,6 +521,12 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
 
     ScenSelLayout {
         client,
+        map_sheet: IntRect {
+            x: client.x + rc_map.x,
+            y: client.y + rc_map.y,
+            w: rc_map.w,
+            h: rc_map.h,
+        },
         title_anchor,
         caption_anchor,
         search_label,

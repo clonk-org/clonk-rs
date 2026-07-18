@@ -15755,7 +15755,7 @@ fn c4_bytes_equal_no_case(left: &[u8], right: &[u8]) -> bool {
             .all(|(left, right)| c4_char_capital(*left) == c4_char_capital(*right))
 }
 
-fn mission_access_contains(list: &str, password: &str) -> bool {
+pub(crate) fn mission_access_contains(list: &str, password: &str) -> bool {
     let list = lc_script::c4_string_bytes(list);
     let password = lc_script::c4_string_bytes(password);
     list.split(|byte| *byte == b';').any(|module| {

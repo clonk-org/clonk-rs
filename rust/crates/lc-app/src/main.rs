@@ -4971,7 +4971,7 @@ fn run_menu_dump(
                 .require_supported_activation(&identifier)
                 .map_err(report_classic_parity_boundary)
                 .map_err(anyhow::Error::new)?;
-            app.menu_state.enter_folder(&identifier);
+            app.enter_scenario_folder(&identifier);
             let actions = app.menu_state.select_default_entry();
             app.process_menu_actions(actions)
                 .map_err(anyhow::Error::new)?;
@@ -8812,6 +8812,8 @@ struct GameApp {
     loaded_default_rank_names: Option<Vec<String>>,
     /// Process-local Config.General.MissionAccess shared across fresh games.
     mission_access: MissionAccessStore,
+    /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
+    show_folder_maps: bool,
     /// Process-local Config.Graphics.ShowCommands enable requests shared
     /// across fresh engines.
     show_commands_requests: ShowCommandsRequestStore,
@@ -10199,14 +10201,6 @@ enum ClassicParityBoundary {
     StartupMainResources {
         missing: Vec<&'static str>,
     },
-    FolderMap {
-        identifier: String,
-        marker: PathBuf,
-    },
-    FolderMapInspection {
-        path: PathBuf,
-        detail: String,
-    },
     ScenarioStartInspection {
         path: PathBuf,
         detail: String,
@@ -10334,16 +10328,6 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic startup main-menu resources are unavailable (missing {})",
                 missing.join(", ")
-            ),
-            Self::FolderMap { identifier, marker } => write!(
-                f,
-                "scenario folder `{identifier}` uses unported FolderMap layout at {}",
-                marker.display()
-            ),
-            Self::FolderMapInspection { path, detail } => write!(
-                f,
-                "cannot verify classic FolderMap layout for {}: {detail}",
-                path.display()
             ),
             Self::ScenarioStartInspection { path, detail } => write!(
                 f,
@@ -10922,6 +10906,63 @@ struct ScenselScrollbarSpec {
     offset: i32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MapFolderRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+#[derive(Clone, Debug)]
+struct MapFolderScenarioButton {
+    entry: Option<FrontendScenario>,
+    base_image: Option<ImageData>,
+    overlay_image: Option<ImageData>,
+    single_click: bool,
+    area: MapFolderRect,
+    title: String,
+    title_font_size: i32,
+    title_color_inactive: u32,
+    title_color_active: u32,
+    title_offset_x: i32,
+    title_offset_y: i32,
+    title_align: u8,
+    title_use_book_font: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MapFolderAccessOverlay {
+    image: Option<ImageData>,
+    area: MapFolderRect,
+}
+
+#[derive(Clone, Debug)]
+struct MapFolderData {
+    source_path: PathBuf,
+    background: ImageData,
+    scenario_info_area: MapFolderRect,
+    fullscreen_background: bool,
+    hide_title: bool,
+    scenarios: Vec<MapFolderScenarioButton>,
+    access_overlays: Vec<MapFolderAccessOverlay>,
+    selected_button: Option<usize>,
+}
+
+impl MapFolderData {
+    fn selected_entry(&self) -> Option<&FrontendScenario> {
+        self.selected_button
+            .and_then(|index| self.scenarios.get(index))
+            .and_then(|button| button.entry.as_ref())
+    }
+}
+
+#[derive(Clone, Debug)]
+enum MenuLayerStyle {
+    Book,
+    Map(MapFolderData),
+}
+
 fn scensel_scrollbar_pin_travel(bar_height: i32) -> Option<i32> {
     (bar_height > 3 * SCENSEL_SCROLLBAR_PART).then_some(bar_height - 3 * SCENSEL_SCROLLBAR_PART)
 }
@@ -10957,6 +10998,7 @@ struct MenuLayer {
     /// shown on the right page when nothing is selected
     /// (C4StartupScenSelDlg::UpdateSelection, cpp:1566-1572).
     folder: Option<FrontendScenario>,
+    style: MenuLayerStyle,
 }
 
 struct MainMenuState {
@@ -11804,6 +11846,7 @@ impl MenuLayer {
             title: title.into(),
             entries,
             folder: None,
+            style: MenuLayerStyle::Book,
         }
     }
 
@@ -11812,6 +11855,7 @@ impl MenuLayer {
             title: folder.title.clone(),
             entries: folder.children.clone(),
             folder: Some(folder),
+            style: MenuLayerStyle::Book,
         }
     }
 }
@@ -11848,9 +11892,26 @@ impl MenuState {
 
     /// The scenario behind the menu's selected row, if any.
     fn selected_scenario(&self) -> Option<&FrontendScenario> {
+        if let Some(map) = self.current_map() {
+            return map.selected_entry();
+        }
         let offset = usize::from(self.include_back);
         let index = self.menu.selected_index()?.checked_sub(offset)?;
         self.visible_entries.get(index)
+    }
+
+    fn current_map(&self) -> Option<&MapFolderData> {
+        match &self.stack.last()?.style {
+            MenuLayerStyle::Book => None,
+            MenuLayerStyle::Map(map) => Some(map),
+        }
+    }
+
+    fn current_map_mut(&mut self) -> Option<&mut MapFolderData> {
+        match &mut self.stack.last_mut()?.style {
+            MenuLayerStyle::Book => None,
+            MenuLayerStyle::Map(map) => Some(map),
+        }
     }
 
     /// The folder whose contents are currently listed (None at root).
@@ -11898,48 +11959,9 @@ impl MenuState {
         &self,
         identifier: &str,
     ) -> std::result::Result<Option<ScenarioKind>, ClassicParityBoundary> {
-        let Some(path) = self.activation_path(identifier) else {
-            return Ok(None);
-        };
-        let mut checked_groups = HashSet::new();
-        for entry in &path {
-            for entry_path in entry.path.iter().chain(entry.source_paths.iter()) {
-                // FolderMap is a SubFolder (*.c4f) feature. Start at a folder
-                // entry itself or at a leaf scenario's parent, then walk only
-                // a contiguous .c4f chain. An extensionless RegularFolder
-                // breaks C4ScenarioListLoader's SubFolder ancestry. UI-path
-                // entries and every merged source path are checked here.
-                let mut group_path = if matches!(entry.kind, ScenarioKind::Folder) {
-                    Some(entry_path.as_path())
-                } else {
-                    entry_path.parent()
-                };
-                while let Some(candidate) = group_path {
-                    if !candidate
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
-                    {
-                        break;
-                    }
-                    group_path = candidate.parent();
-                    let group_path = candidate;
-                    if !checked_groups.insert(scenario_root_key(group_path)) {
-                        continue;
-                    }
-                    if let Some(marker) = folder_map_marker(group_path)? {
-                        return Err(ClassicParityBoundary::FolderMap {
-                            identifier: group_path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| entry.identifier.clone()),
-                            marker,
-                        });
-                    }
-                }
-            }
-        }
-        Ok(path.last().map(|entry| entry.kind))
+        Ok(self
+            .activation_path(identifier)
+            .and_then(|path| path.last().map(|entry| entry.kind)))
     }
 
     fn visible_entries(&self) -> &[FrontendScenario] {
@@ -12255,6 +12277,90 @@ impl MenuState {
         &mut self.menu
     }
 
+    fn configure_current_folder_map(
+        &mut self,
+        show_folder_maps: bool,
+        screen_width: i32,
+        screen_height: i32,
+        mission_access: &MissionAccessStore,
+        languages: &[String],
+    ) -> bool {
+        let Some(layer) = self.stack.last_mut() else {
+            return false;
+        };
+        layer.style = MenuLayerStyle::Book;
+        if !show_folder_maps {
+            return false;
+        }
+        let Some(folder) = layer.folder.clone() else {
+            return false;
+        };
+        let Some(map) = load_map_folder_data(
+            &folder,
+            screen_width,
+            screen_height,
+            mission_access,
+            languages,
+        ) else {
+            return false;
+        };
+        layer.style = MenuLayerStyle::Map(map);
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
+        self.sync_definition_checkbox_to_selection();
+        true
+    }
+
+    fn activate_map_button(&mut self, index: usize) -> Option<StartupMenuAction> {
+        let map = self.current_map_mut()?;
+        let button = map.scenarios.get(index)?;
+        let entry = button.entry.clone();
+        let previous_identifier = map
+            .selected_entry()
+            .map(|entry| entry.identifier.clone());
+        let single_click = button.single_click;
+        map.selected_button = Some(index);
+        let entry = entry?;
+        let summary = lc_frontend::ScenarioSummary {
+            identifier: entry.identifier.clone(),
+            title: entry.title.clone(),
+            kind: entry.kind,
+        };
+        if single_click || previous_identifier.as_deref() == Some(entry.identifier.as_str()) {
+            Some(if summary.kind == ScenarioKind::Folder {
+                StartupMenuAction::OpenEntry(summary)
+            } else {
+                StartupMenuAction::StartScenario(summary)
+            })
+        } else {
+            Some(StartupMenuAction::SelectionChanged(summary))
+        }
+    }
+
+    fn start_selected_map_scenario(&self) -> Option<StartupMenuAction> {
+        let entry = self.current_map()?.selected_entry()?;
+        let summary = lc_frontend::ScenarioSummary {
+            identifier: entry.identifier.clone(),
+            title: entry.title.clone(),
+            kind: entry.kind,
+        };
+        Some(if summary.kind == ScenarioKind::Folder {
+            StartupMenuAction::OpenEntry(summary)
+        } else {
+            StartupMenuAction::StartScenario(summary)
+        })
+    }
+
+    fn deselect_map(&mut self) -> bool {
+        let Some(map) = self.current_map_mut() else {
+            return false;
+        };
+        let changed = map.selected_button.take().is_some();
+        self.selection_info_scroll = 0;
+        self.sync_definition_checkbox_to_selection();
+        changed
+    }
+
     fn enter_folder(&mut self, identifier: &str) {
         let Some(path) = find_frontend_folder_path(self.current_entries(), identifier) else {
             return;
@@ -12316,6 +12422,10 @@ impl MenuState {
     }
 
     fn select_default_entry(&mut self) -> Vec<StartupMenuAction> {
+        if self.current_map().is_some() {
+            self.sync_definition_checkbox_to_selection();
+            return Vec::new();
+        }
         if self.current_entries().is_empty() {
             return Vec::new();
         }
@@ -12386,30 +12496,479 @@ fn find_frontend_entry_path(
     None
 }
 
-fn folder_map_marker(path: &Path) -> std::result::Result<Option<PathBuf>, ClassicParityBoundary> {
-    let group = open_group_path_for_folder_map(path).map_err(|error| {
-        ClassicParityBoundary::FolderMapInspection {
-            path: path.to_path_buf(),
-            detail: error.to_string(),
+#[derive(Debug, Default)]
+struct ParsedMapFolder {
+    scenario_info_area: MapFolderRect,
+    min_res_x: i32,
+    min_res_y: i32,
+    fullscreen_background: bool,
+    hide_title: bool,
+    scenarios: Vec<ParsedMapFolderScenario>,
+    access_overlays: Vec<ParsedMapFolderAccess>,
+}
+
+#[derive(Debug)]
+struct ParsedMapFolderScenario {
+    filename: String,
+    base_image: String,
+    overlay_image: String,
+    single_click: bool,
+    area: MapFolderRect,
+    title: String,
+    title_font_size: i32,
+    title_color_inactive: u32,
+    title_color_active: u32,
+    title_offset_x: i32,
+    title_offset_y: i32,
+    title_align: u8,
+    title_use_book_font: bool,
+    image_dump: bool,
+}
+
+impl Default for ParsedMapFolderScenario {
+    fn default() -> Self {
+        Self {
+            filename: String::new(),
+            base_image: String::new(),
+            overlay_image: String::new(),
+            single_click: false,
+            area: MapFolderRect::default(),
+            title: String::new(),
+            title_font_size: 20,
+            title_color_inactive: 0x7fff_ffff,
+            title_color_active: 0x0fff_ffff,
+            title_offset_x: 0,
+            title_offset_y: 0,
+            title_align: 1,
+            title_use_book_font: true,
+            image_dump: false,
         }
-    })?;
-    let entries = group
-        .entries()
-        .map_err(|error| ClassicParityBoundary::FolderMapInspection {
-            path: path.to_path_buf(),
-            detail: error.to_string(),
-        })?;
-    Ok(entries
-        .into_iter()
-        .find(|entry| {
-            !entry.is_directory
-                && entry
-                    .relative_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.eq_ignore_ascii_case("FolderMap.txt"))
-        })
-        .map(|entry| path.join(entry.relative_path)))
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedMapFolderAccess {
+    password: String,
+    overlay_image: String,
+    area: MapFolderRect,
+}
+
+#[derive(Clone, Copy)]
+enum ParsedMapFolderSection {
+    None,
+    Root,
+    Scenario(usize),
+    Access(usize),
+}
+
+fn parse_map_folder(text: &str) -> Result<ParsedMapFolder> {
+    let mut parsed = ParsedMapFolder::default();
+    let mut section = ParsedMapFolderSection::None;
+    let mut section_indentation = 0;
+    let mut root_active = false;
+    let mut saw_root = false;
+    let mut seen_values = HashSet::new();
+
+    for raw_line in text.lines() {
+        let raw_line = raw_line.trim_end_matches('\r');
+        let indentation = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let line = raw_line[indentation..].trim_end();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = &line[1..line.len() - 1];
+            if indentation == 0 {
+                root_active = name == "FolderMap";
+                section_indentation = 0;
+                section = if root_active {
+                    saw_root = true;
+                    ParsedMapFolderSection::Root
+                } else {
+                    ParsedMapFolderSection::None
+                };
+                continue;
+            }
+            if !root_active
+                || (indentation > section_indentation && section_indentation > 0)
+            {
+                section = ParsedMapFolderSection::None;
+                section_indentation = indentation;
+                continue;
+            }
+            section_indentation = indentation;
+            section = match name {
+                "Scenario" => {
+                    parsed.scenarios.push(ParsedMapFolderScenario::default());
+                    ParsedMapFolderSection::Scenario(parsed.scenarios.len() - 1)
+                }
+                "AccessGfx" => {
+                    parsed.access_overlays.push(ParsedMapFolderAccess::default());
+                    ParsedMapFolderSection::Access(parsed.access_overlays.len() - 1)
+                }
+                _ => ParsedMapFolderSection::None,
+            };
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = map_folder_string(raw_value);
+        if indentation == 0 && root_active {
+            section = ParsedMapFolderSection::Root;
+            section_indentation = 0;
+        }
+        let section_key = match section {
+            ParsedMapFolderSection::None => None,
+            ParsedMapFolderSection::Root if indentation == 0 => Some((0_u8, 0_usize)),
+            ParsedMapFolderSection::Root => None,
+            ParsedMapFolderSection::Scenario(index)
+                if indentation >= section_indentation && section_indentation > 0 =>
+            {
+                Some((1, index))
+            }
+            ParsedMapFolderSection::Access(index)
+                if indentation >= section_indentation && section_indentation > 0 =>
+            {
+                Some((2, index))
+            }
+            ParsedMapFolderSection::Scenario(_) | ParsedMapFolderSection::Access(_) => None,
+        };
+        let Some((section_kind, section_index)) = section_key else {
+            continue;
+        };
+        if !seen_values.insert((section_kind, section_index, key.to_string())) {
+            continue;
+        }
+        match section {
+            ParsedMapFolderSection::None => {}
+            ParsedMapFolderSection::Root => match key {
+                "ScenInfoArea" => parsed.scenario_info_area = parse_map_folder_rect(&value)?,
+                "MinResX" => parsed.min_res_x = parse_map_folder_i32(&value, key)?,
+                "MinResY" => parsed.min_res_y = parse_map_folder_i32(&value, key)?,
+                "FullscreenBG" => {
+                    parsed.fullscreen_background = parse_map_folder_bool(&value, key)?
+                }
+                "HideTitle" => parsed.hide_title = parse_map_folder_bool(&value, key)?,
+                _ => {}
+            },
+            ParsedMapFolderSection::Scenario(index) => {
+                let scenario = &mut parsed.scenarios[index];
+                match key {
+                    "File" => scenario.filename = value,
+                    "BaseImage" => scenario.base_image = value,
+                    "OverlayImage" => scenario.overlay_image = value,
+                    "SingleClick" => {
+                        scenario.single_click = parse_map_folder_bool(&value, key)?
+                    }
+                    "Area" => scenario.area = parse_map_folder_rect(&value)?,
+                    "Title" => scenario.title = value,
+                    "TitleFontSize" => {
+                        scenario.title_font_size = parse_map_folder_i32(&value, key)?
+                    }
+                    "TitleColorInactive" => {
+                        scenario.title_color_inactive = parse_map_folder_u32(&value, key)?
+                    }
+                    "TitleColorActive" => {
+                        scenario.title_color_active = parse_map_folder_u32(&value, key)?
+                    }
+                    "TitleOffX" => {
+                        scenario.title_offset_x = parse_map_folder_i32(&value, key)?
+                    }
+                    "TitleOffY" => {
+                        scenario.title_offset_y = parse_map_folder_i32(&value, key)?
+                    }
+                    "TitleAlign" => {
+                        scenario.title_align = value.parse::<u8>().with_context(|| {
+                            format!("invalid FolderMap {key} value `{value}`")
+                        })?
+                    }
+                    "TitleUseBookFont" => {
+                        scenario.title_use_book_font = parse_map_folder_bool(&value, key)?
+                    }
+                    "ImageDump" => {
+                        scenario.image_dump = parse_map_folder_bool(&value, key)?
+                    }
+                    _ => {}
+                }
+            }
+            ParsedMapFolderSection::Access(index) => {
+                let access = &mut parsed.access_overlays[index];
+                match key {
+                    "Access" => access.password = value,
+                    "OverlayImage" => access.overlay_image = value,
+                    "Area" => access.area = parse_map_folder_rect(&value)?,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    anyhow::ensure!(saw_root, "FolderMap.txt has no [FolderMap] root");
+    Ok(parsed)
+}
+
+fn map_folder_string(raw: &str) -> String {
+    let value = raw.trim();
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn parse_map_folder_i32(value: &str, key: &str) -> Result<i32> {
+    value
+        .parse::<i32>()
+        .with_context(|| format!("invalid FolderMap {key} value `{value}`"))
+}
+
+fn parse_map_folder_u32(value: &str, key: &str) -> Result<u32> {
+    let parsed = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map(|hex| u32::from_str_radix(hex, 16))
+        .unwrap_or_else(|| value.parse::<u32>());
+    parsed.with_context(|| format!("invalid FolderMap {key} value `{value}`"))
+}
+
+fn parse_map_folder_bool(value: &str, key: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => anyhow::bail!("invalid FolderMap {key} value `{value}`"),
+    }
+}
+
+fn parse_map_folder_rect(value: &str) -> Result<MapFolderRect> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<i32>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("invalid FolderMap rectangle `{value}`"))?;
+    anyhow::ensure!(
+        values.len() == 4,
+        "invalid FolderMap rectangle `{value}`: expected four values"
+    );
+    Ok(MapFolderRect {
+        x: values[0],
+        y: values[1],
+        w: values[2],
+        h: values[3],
+    })
+}
+
+fn load_map_folder_data(
+    folder: &FrontendScenario,
+    screen_width: i32,
+    screen_height: i32,
+    mission_access: &MissionAccessStore,
+    languages: &[String],
+) -> Option<MapFolderData> {
+    if !folder
+        .path
+        .as_deref()
+        .and_then(Path::extension)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+    {
+        return None;
+    }
+
+    let mut seen = HashSet::new();
+    for path in folder.path.iter().chain(folder.source_paths.iter()) {
+        if !seen.insert(scenario_root_key(path)) {
+            continue;
+        }
+        let group = match open_group_path_for_folder_map(path) {
+            Ok(group) => group,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "failed to inspect FolderMap group");
+                continue;
+            }
+        };
+        let bytes = match group.load_entry_string("FolderMap.txt") {
+            Ok(bytes) => bytes,
+            Err(GroupError::EntryNotFound(_)) => continue,
+            Err(GroupError::Io(ref error)) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "FolderMap data could not be loaded; using book view");
+                continue;
+            }
+        };
+        let text = lc_resources::decode_legacy_script_text(&bytes);
+        match build_map_folder_data(
+            path,
+            &group,
+            folder,
+            &text,
+            screen_width,
+            screen_height,
+            mission_access,
+            languages,
+        ) {
+            Ok(map) => return Some(map),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "FolderMap could not be initialized; using book view");
+            }
+        }
+    }
+    None
+}
+
+fn build_map_folder_data(
+    source_path: &Path,
+    group: &Group,
+    folder: &FrontendScenario,
+    text: &str,
+    screen_width: i32,
+    screen_height: i32,
+    mission_access: &MissionAccessStore,
+    languages: &[String],
+) -> Result<MapFolderData> {
+    let text = lc_resources::localize_script_source(group, text, languages)?;
+    let parsed = parse_map_folder(&text)?;
+    anyhow::ensure!(
+        parsed.min_res_x == 0 || parsed.min_res_x <= screen_width,
+        "FolderMap requires width {}, current width is {screen_width}",
+        parsed.min_res_x
+    );
+    anyhow::ensure!(
+        parsed.min_res_y == 0 || parsed.min_res_y <= screen_height,
+        "FolderMap requires height {}, current height is {screen_height}",
+        parsed.min_res_y
+    );
+
+    let background = load_map_folder_background(group)?;
+    let mut scenario_info_area = parsed.scenario_info_area;
+    if scenario_info_area.w == 0 {
+        let width = i32::try_from(background.width()).unwrap_or(i32::MAX);
+        let height = i32::try_from(background.height()).unwrap_or(i32::MAX);
+        scenario_info_area = MapFolderRect {
+            x: width * 2 / 3,
+            y: height / 16,
+            w: width / 3,
+            h: height * 7 / 8,
+        };
+    }
+
+    let mut scenarios = Vec::with_capacity(parsed.scenarios.len());
+    for scenario in parsed.scenarios {
+        let entry = folder.children.iter().find(|entry| {
+            entry
+                .identifier
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&scenario.filename))
+        });
+        let replacement = entry
+            .map(|entry| entry.title.as_str())
+            .unwrap_or("<c ff0000>ERROR</c>");
+        let title = scenario.title.replace("TITLE", replacement);
+        let base_image = if scenario.base_image.is_empty() || scenario.image_dump {
+            None
+        } else {
+            Some(load_map_folder_image(group, &scenario.base_image)?)
+        };
+        let overlay_image = if scenario.overlay_image.is_empty() {
+            None
+        } else {
+            Some(load_map_folder_image(group, &scenario.overlay_image)?)
+        };
+        scenarios.push(MapFolderScenarioButton {
+            entry: entry.cloned(),
+            base_image,
+            overlay_image,
+            single_click: scenario.single_click,
+            area: scenario.area,
+            title,
+            title_font_size: scenario.title_font_size,
+            title_color_inactive: scenario.title_color_inactive,
+            title_color_active: scenario.title_color_active,
+            title_offset_x: scenario.title_offset_x,
+            title_offset_y: scenario.title_offset_y,
+            title_align: scenario.title_align,
+            title_use_book_font: scenario.title_use_book_font,
+        });
+    }
+
+    let mut access_overlays = Vec::new();
+    for access in parsed.access_overlays {
+        let image = (!access.overlay_image.is_empty())
+            .then(|| load_map_folder_image(group, &access.overlay_image))
+            .transpose()?;
+        if access.password.is_empty() || mission_access.contains(&access.password) {
+            access_overlays.push(MapFolderAccessOverlay {
+                image,
+                area: access.area,
+            });
+        }
+    }
+
+    Ok(MapFolderData {
+        source_path: source_path.to_path_buf(),
+        background,
+        scenario_info_area,
+        fullscreen_background: parsed.fullscreen_background,
+        hide_title: parsed.hide_title,
+        scenarios,
+        access_overlays,
+        selected_button: None,
+    })
+}
+
+fn load_map_folder_background(group: &Group) -> Result<ImageData> {
+    for extension in ["png", "bmp", "jpeg", "jpg"] {
+        let name = format!("FolderMap.{extension}");
+        match group.read_file(&name) {
+            Ok(bytes) => return decode_map_folder_image(&name, &bytes),
+            Err(GroupError::EntryNotFound(_)) => {}
+            Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("loading {name}")),
+        }
+    }
+    anyhow::bail!("FolderMap background graphic is missing")
+}
+
+fn load_map_folder_image(group: &Group, name: &str) -> Result<ImageData> {
+    if Path::new(name).extension().is_none() {
+        for extension in ["png", "bmp", "jpeg", "jpg"] {
+            let candidate = format!("{name}.{extension}");
+            match group.read_file(&candidate) {
+                Ok(bytes) => return decode_map_folder_image(&candidate, &bytes),
+                Err(GroupError::EntryNotFound(_)) => {}
+                Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("loading FolderMap image `{candidate}`"));
+                }
+            }
+        }
+        anyhow::bail!("FolderMap image `{name}` is missing")
+    }
+    let bytes = group
+        .read_file(name)
+        .with_context(|| format!("loading FolderMap image `{name}`"))?;
+    decode_map_folder_image(name, &bytes)
+}
+
+fn decode_map_folder_image(name: &str, bytes: &[u8]) -> Result<ImageData> {
+    let image = image::load_from_memory(bytes)
+        .with_context(|| format!("decoding FolderMap image `{name}`"))?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let mut pixels = image.into_raw();
+    for pixel in pixels.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            pixel[..3].fill(0);
+        }
+    }
+    Ok(ImageData::new(width, height, pixels))
 }
 
 fn open_group_path_for_folder_map(path: &Path) -> std::result::Result<Group, GroupError> {
@@ -14812,6 +15371,17 @@ fn load_graphics_color_animation(paths: Option<&AppPaths>) -> bool {
     })
 }
 
+fn load_show_folder_maps(paths: Option<&AppPaths>) -> bool {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("Graphics"), "ShowFolderMaps")
+                .map(parse_config_bool)
+        })
+        .unwrap_or(true)
+}
+
 fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     let Some(paths) = paths else {
         return false;
@@ -16741,6 +17311,7 @@ impl GameApp {
                 }
             })
             .unwrap_or_default();
+        let show_folder_maps = load_show_folder_maps(paths);
         let bindings = KeyboardBindings::load(paths);
         let show_commands_requests = ShowCommandsRequestStore::default();
         let mut engine = Engine::new();
@@ -16876,6 +17447,7 @@ impl GameApp {
             default_rank_names,
             loaded_default_rank_names,
             mission_access,
+            show_folder_maps,
             show_commands_requests,
             input: InputDispatcher::new(),
             bindings,
@@ -18284,7 +18856,10 @@ impl GameApp {
     }
 
     fn scensel_search_char_pos(&self, point: GuiPoint, require_inside: bool) -> Option<usize> {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || self.menu_state.current_map().is_some()
+        {
             return None;
         }
         let fonts = self.assets.clonk_fonts.as_deref()?;
@@ -18364,7 +18939,10 @@ impl GameApp {
         &self,
         target: ScenselScrollbarTarget,
     ) -> Option<ScenselScrollbarSpec> {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || self.menu_state.current_map().is_some()
+        {
             return None;
         }
         let fonts = self.assets.clonk_fonts.as_deref()?;
@@ -18592,6 +19170,9 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
+        if self.menu_state.current_map().is_some() {
+            return Ok(true);
+        }
         let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
             return Ok(true);
         };
@@ -18797,6 +19378,37 @@ impl GameApp {
                 && point.y >= rect.y as f32
                 && point.y < (rect.y + rect.h) as f32
         };
+        if let Some(map) = self.menu_state.current_map() {
+            let transform = MapFolderTransform::for_map(
+                map,
+                &layout,
+                self.graphics.surface().width(),
+                self.graphics.surface().height(),
+            );
+            let info_rect = transform.rect(map.scenario_info_area);
+            if !point_in_map_rect(point, &info_rect) {
+                return Ok(());
+            }
+            let mut info_layout = layout;
+            info_layout.selection_info = lc_frontend::classic_gui::IntRect {
+                x: info_rect.origin.x.round() as i32,
+                y: info_rect.origin.y.round() as i32,
+                w: info_rect.size.width.round() as i32,
+                h: info_rect.size.height.round() as i32,
+            };
+            let metrics = {
+                let info = scensel_selection_info(&self.menu_state);
+                lc_frontend::startup_scensel::selection_info_scroll_metrics(
+                    &info_layout,
+                    book_fonts,
+                    &info,
+                )
+            };
+            if self.menu_state.scroll_selection_info_by(amount, metrics) {
+                self.mark_menu_dirty();
+            }
+            return Ok(());
+        }
         if contains(layout.list) {
             let item_height = lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
             let viewport_height = layout.list.h - 6;
@@ -19185,12 +19797,18 @@ impl GameApp {
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         let no_modifiers = c4_modifiers.is_empty();
-        let selected = self.menu_state.selected_scenario().is_some();
+        let book_selection = self.menu_state.current_map().is_none()
+            && self.menu_state.selected_scenario().is_some();
         let shortcut = match key {
             VirtualKeyCode::F5 if no_modifiers => Some(("F5", "Refresh")),
-            VirtualKeyCode::F2 if no_modifiers && selected => Some(("F2", "Rename")),
-            VirtualKeyCode::Delete if no_modifiers && selected => Some(("Delete", "Delete")),
-            VirtualKeyCode::M if c4_modifiers == ModifiersState::ALT => {
+            VirtualKeyCode::F2 if no_modifiers && book_selection => Some(("F2", "Rename")),
+            VirtualKeyCode::Delete if no_modifiers && book_selection => {
+                Some(("Delete", "Delete"))
+            }
+            VirtualKeyCode::M
+                if c4_modifiers == ModifiersState::ALT
+                    && self.menu_state.current_map().is_none() =>
+            {
                 Some(("Alt+M", "Mission Access"))
             }
             _ => None,
@@ -20213,6 +20831,7 @@ impl GameApp {
                         && key == VirtualKeyCode::F
                         && self.keyboard_modifiers.ctrl()
                         && self.context_menu.is_none()
+                        && self.menu_state.current_map().is_none()
                     {
                         self.menu_state.set_search_focused(true);
                         return Ok(());
@@ -20411,22 +21030,32 @@ impl GameApp {
                                 KeyCode::Left => self.scensel_do_back()?,
                                 // K_RIGHT = KeyForward = DoOK (cpp:1392,415).
                                 KeyCode::Right => {
-                                    self.handle_menu_input(|menu| {
-                                        menu.menu().handle_key_down(KeyCode::Enter)
-                                    })?;
-                                    self.handle_menu_input(|menu| {
-                                        menu.menu().handle_key_up(KeyCode::Enter)
-                                    })?;
+                                    if self.menu_state.current_map().is_some() {
+                                        self.start_selected_map_scenario_from_ui()?;
+                                    } else {
+                                        self.handle_menu_input(|menu| {
+                                            menu.menu().handle_key_down(KeyCode::Enter)
+                                        })?;
+                                        self.handle_menu_input(|menu| {
+                                            menu.menu().handle_key_up(KeyCode::Enter)
+                                        })?;
+                                    }
                                 }
+                                KeyCode::Enter if self.menu_state.current_map().is_some() => {
+                                    self.start_selected_map_scenario_from_ui()?;
+                                }
+                                _ if self.menu_state.current_map().is_some() => {}
                                 _ => self.handle_menu_input(|menu| {
                                     menu.menu().handle_key_down(gui_key)
                                 })?,
                             },
                             ElementState::Released => {
-                                if !matches!(
+                                if self.menu_state.current_map().is_none()
+                                    && !matches!(
                                     gui_key,
                                     KeyCode::Escape | KeyCode::Left | KeyCode::Right
-                                ) {
+                                )
+                                {
                                     self.handle_menu_input(|menu| {
                                         menu.menu().handle_key_up(gui_key)
                                     })?
@@ -25547,6 +26176,19 @@ impl GameApp {
                     }
                     match self.startup_view {
                         StartupView::ScenarioBrowser => match (state, key) {
+                            _ if self.menu_state.current_map().is_some()
+                                && state == ElementState::Pressed
+                                && key == KeyCode::Left =>
+                            {
+                                self.scensel_do_back()?
+                            }
+                            _ if self.menu_state.current_map().is_some()
+                                && state == ElementState::Pressed
+                                && key == KeyCode::Right =>
+                            {
+                                self.start_selected_map_scenario_from_ui()?
+                            }
+                            _ if self.menu_state.current_map().is_some() => {}
                             (ElementState::Pressed, KeyCode::Up) => {
                                 self.handle_menu_input(|menu| menu.move_list_selection_clamped(-1))?
                             }
@@ -25732,6 +26374,10 @@ impl GameApp {
                     }
                     match self.startup_view {
                         StartupView::ScenarioBrowser => match state {
+                            ElementState::Pressed if self.menu_state.current_map().is_some() => {
+                                self.start_selected_map_scenario_from_ui()?
+                            }
+                            ElementState::Released if self.menu_state.current_map().is_some() => {}
                             ElementState::Pressed => self.handle_menu_input(|menu| {
                                 menu.menu().handle_key_down(KeyCode::Enter)
                             })?,
@@ -25866,6 +26512,10 @@ impl GameApp {
                         self.menu_state.set_pointer_position(Some(point));
                         let actions = self.scenario_game_options.handle_pointer_move(point);
                         self.finish_game_option_input(actions)?;
+                        if self.menu_state.current_map().is_some() {
+                            self.mark_menu_dirty();
+                            return Ok(());
+                        }
                         if self.handle_scensel_search_pointer_move(point)
                             || self.handle_scensel_scrollbar_move(point)
                         {
@@ -27434,7 +28084,9 @@ impl GameApp {
                             match button_state {
                                 ElementState::Pressed => {
                                     if !self.handle_scensel_search_pointer_down(point) {
-                                        self.handle_scensel_scrollbar_down(point);
+                                        if !self.handle_scensel_scrollbar_down(point) {
+                                            self.handle_scensel_map_pointer_down(point);
+                                        }
                                     }
                                 }
                                 ElementState::Released => {
@@ -27877,7 +28529,9 @@ impl GameApp {
                 match phase {
                     TouchPhase::Started => {
                         if !self.handle_scensel_search_pointer_down(position) {
-                            self.handle_scensel_scrollbar_down(position);
+                            if !self.handle_scensel_scrollbar_down(position) {
+                                self.handle_scensel_map_pointer_down(position);
+                            }
                         }
                         Ok(())
                     }
@@ -28211,6 +28865,23 @@ impl GameApp {
 
         if let Some(identifier) = start_identifier {
             if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
+                if self.startup_view == StartupView::ScenarioBrowser {
+                    if let Some(message) = self
+                        .scenario_mission_access_error(&scenario)
+                        .map_err(classic_parity_engine_error)?
+                    {
+                        self.status_text.clear();
+                        self.push_message_dialog(
+                            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                                message,
+                                "Cannot start scenario.",
+                                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                            ),
+                            MessageDialogContinuation::None,
+                        )?;
+                        return Ok(());
+                    }
+                }
                 if self.startup_view == StartupView::ScenarioBrowser
                     && self.scenario_selector_mode == ScenarioSelectorMode::Local
                 {
@@ -28371,6 +29042,7 @@ impl GameApp {
                             self.show_main_menu();
                         } else {
                             self.menu_state.leave_folder();
+                            self.configure_current_folder_map();
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
@@ -28393,7 +29065,7 @@ impl GameApp {
                     match entry_kind {
                         Some(ScenarioKind::Folder) => {
                             self.play_ui_sound("DoorOpen");
-                            self.menu_state.enter_folder(&summary.identifier);
+                            self.enter_scenario_folder(&summary.identifier);
                             self.scenario_game_options.set_focused_button(None);
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
@@ -28419,7 +29091,7 @@ impl GameApp {
                         }
                         None => {
                             self.play_ui_sound("DoorOpen");
-                            self.menu_state.enter_folder(&summary.identifier);
+                            self.enter_scenario_folder(&summary.identifier);
                             self.scenario_game_options.set_focused_button(None);
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
@@ -32643,12 +33315,37 @@ impl GameApp {
 
     /// C4StartupScenSelDlg::DoBack(true) (cpp:1705-1725): backtrace the
     /// folder stack first; from the root, return to the main screen.
+    fn configure_current_folder_map(&mut self) {
+        let width = self.graphics.surface().width() as i32;
+        let height = self.graphics.surface().height() as i32;
+        let languages = self
+            .app_paths
+            .as_ref()
+            .and_then(|paths| classic_runtime_language_sequence(paths).ok())
+            .filter(|languages| !languages.is_empty())
+            .unwrap_or_else(|| vec!["US".to_string()]);
+        self.menu_state.configure_current_folder_map(
+            self.show_folder_maps,
+            width,
+            height,
+            &self.mission_access,
+            &languages,
+        );
+    }
+
+    fn enter_scenario_folder(&mut self, identifier: &str) {
+        self.menu_state.enter_folder(identifier);
+        self.configure_current_folder_map();
+        self.mark_menu_dirty();
+    }
+
     fn scensel_do_back(&mut self) -> Result<(), EngineError> {
         if self.menu_state.stack.len() <= 1 {
             self.close_scenario_browser();
         } else {
             self.play_ui_sound("DoorClose");
             self.menu_state.leave_folder();
+            self.configure_current_folder_map();
             self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             self.scenario_label = self.menu_state.label_path();
             self.handle_menu_input(|menu| menu.select_default_entry())?;
@@ -32688,6 +33385,9 @@ impl GameApp {
             self.graphics.surface().height() as i32,
             &fonts,
         );
+        if self.menu_state.current_map().is_some() {
+            return self.handle_scensel_map_click(point, layout);
+        }
         let (px, py) = (point.x as i32, point.y as i32);
         let inside =
             |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
@@ -32738,6 +33438,112 @@ impl GameApp {
             }
         }
         Ok(())
+    }
+
+    fn handle_scensel_map_click(
+        &mut self,
+        point: GuiPoint,
+        layout: lc_frontend::startup_scensel::ScenSelLayout,
+    ) -> Result<(), EngineError> {
+        let inside = |rect: lc_frontend::classic_gui::IntRect| {
+            point.x >= rect.x as f32
+                && point.x < (rect.x + rect.w) as f32
+                && point.y >= rect.y as f32
+                && point.y < (rect.y + rect.h) as f32
+        };
+        if inside(layout.user_change_checkbox) {
+            if self.menu_state.definition_checkbox_enabled {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions);
+            }
+            if self.menu_state.toggle_definition_checkbox() {
+                self.play_ui_sound("ArrowHit");
+            }
+            return Ok(());
+        }
+        if inside(layout.back_button) {
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Back);
+            return self.scensel_do_back();
+        }
+        if inside(layout.open_button) {
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Open);
+            let action = self.menu_state.start_selected_map_scenario();
+            return self.handle_menu_input(move |_| action.into_iter().collect());
+        }
+
+        let surface = self.graphics.surface();
+        let button = {
+            let map = self
+                .menu_state
+                .current_map()
+                .expect("map click requires active map data");
+            let transform =
+                MapFolderTransform::for_map(map, &layout, surface.width(), surface.height());
+            if point_in_map_rect(point, &transform.rect(map.scenario_info_area)) {
+                None
+            } else {
+                map_folder_button_at(map, transform, point)
+            }
+        };
+        if let Some(index) = button {
+            self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+            let action = self.menu_state.activate_map_button(index);
+            if action.is_none() {
+                self.menu_state.sync_definition_checkbox_to_selection();
+                self.sync_scenario_game_option_constraint();
+            }
+            return self.handle_menu_input(move |_| action.into_iter().collect());
+        }
+        Ok(())
+    }
+
+    /// `MapPic::MouseInput` invokes `DeselectAll` on left-down. Scenario
+    /// buttons sit above map pictures and consume the press instead, while a
+    /// fullscreen dialog background is not a `MapPic` at all.
+    fn handle_scensel_map_pointer_down(&mut self, point: GuiPoint) -> bool {
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            return false;
+        };
+        let Some(map) = self.menu_state.current_map() else {
+            return false;
+        };
+        let surface = self.graphics.surface();
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+        );
+        let transform = MapFolderTransform::for_map(
+            map,
+            &layout,
+            surface.width(),
+            surface.height(),
+        );
+        if point_in_map_rect(point, &transform.rect(map.scenario_info_area)) {
+            return true;
+        }
+        if map_folder_button_at(map, transform, point).is_some() {
+            return true;
+        }
+        let map_picture = (!map.fullscreen_background
+            && point_in_map_rect(point, &transform.background))
+            || map
+                .access_overlays
+                .iter()
+                .any(|overlay| point_in_map_rect(point, &transform.rect(overlay.area)));
+        if !map_picture {
+            return false;
+        }
+        if self.menu_state.deselect_map() {
+            self.play_ui_sound("ArrowHit");
+        }
+        self.sync_scenario_game_option_constraint();
+        self.mark_menu_dirty();
+        true
+    }
+
+    fn start_selected_map_scenario_from_ui(&mut self) -> Result<(), EngineError> {
+        let action = self.menu_state.start_selected_map_scenario();
+        self.handle_menu_input(move |_| action.into_iter().collect())
     }
 
     fn open_scenario_browser(&mut self) {
@@ -39570,6 +40376,40 @@ impl GameApp {
         self.start_scenario_with_definition_load(scenario, definition_load)
     }
 
+    /// The first `C4ScenarioListLoader::Scenario::CanOpen` gate: scenarios
+    /// with a nonempty `[Head] MissionAccess` password stay visible but do not
+    /// start until the process-local mission-access module has been granted.
+    fn scenario_mission_access_error(
+        &self,
+        scenario: &FrontendScenario,
+    ) -> std::result::Result<Option<String>, ClassicParityBoundary> {
+        let Some(path) = scenario.path.as_deref() else {
+            return Ok(None);
+        };
+        let Some(paths) = self.app_paths.as_ref() else {
+            return Ok(None);
+        };
+        let inspect_error = |error: &dyn fmt::Display| {
+            report_classic_parity_boundary(ClassicParityBoundary::ScenarioStartInspection {
+                path: path.to_path_buf(),
+                detail: error.to_string(),
+            })
+        };
+        let group = Group::open(path).map_err(|error| inspect_error(&error))?;
+        let head = load_classic_scenario_loader_head(&group, paths)
+            .map_err(|error| inspect_error(&error))?;
+        if head.mission_access().is_empty()
+            || self.mission_access.contains(head.mission_access())
+        {
+            return Ok(None);
+        }
+        let message = load_runtime_language_table(Some(paths))
+            .ok()
+            .and_then(|table| table.entries.get("IDS_PRC_NOMISSIONACCESS").cloned())
+            .unwrap_or_else(|| "Access to this mission not yet granted.".to_string());
+        Ok(Some(message))
+    }
+
     /// Local `C4ScenarioListLoader::Scenario::CanOpen` player-count gate.
     /// Replays bypass the regular-game checks. Savegames lift a stale zero
     /// maximum to their effective minimum before the upper-bound comparison.
@@ -41894,6 +42734,288 @@ fn scensel_selection_info(menu: &MenuState) -> lc_frontend::startup_scensel::Sel
         .unwrap_or_default()
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MapFolderTransform {
+    background: GuiRect,
+    scale_x: f32,
+    scale_y: f32,
+}
+
+impl MapFolderTransform {
+    fn for_map(
+        map: &MapFolderData,
+        layout: &lc_frontend::startup_scensel::ScenSelLayout,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Self {
+        let container = if map.fullscreen_background {
+            lc_frontend::classic_gui::IntRect {
+                x: 0,
+                y: 0,
+                w: surface_width as i32,
+                h: surface_height as i32,
+            }
+        } else {
+            layout.map_sheet
+        };
+        let image_width = map.background.width().max(1) as f32;
+        let image_height = map.background.height().max(1) as f32;
+        let (scale_x, scale_y) = if map.fullscreen_background {
+            (
+                container.w as f32 / image_width,
+                container.h as f32 / image_height,
+            )
+        } else {
+            let scale = (container.w as f32 / image_width)
+                .min(container.h as f32 / image_height);
+            (scale, scale)
+        };
+        let width = image_width * scale_x;
+        let height = image_height * scale_y;
+        Self {
+            background: GuiRect::new(
+                container.x as f32 + (container.w as f32 - width) / 2.0,
+                container.y as f32 + (container.h as f32 - height) / 2.0,
+                width,
+                height,
+            ),
+            scale_x,
+            scale_y,
+        }
+    }
+
+    fn rect(self, rect: MapFolderRect) -> GuiRect {
+        GuiRect::new(
+            self.background.origin.x + rect.x as f32 * self.scale_x,
+            self.background.origin.y + rect.y as f32 * self.scale_y,
+            rect.w as f32 * self.scale_x,
+            rect.h as f32 * self.scale_y,
+        )
+    }
+
+    fn point(self, x: i32, y: i32) -> (i32, i32) {
+        (
+            (self.background.origin.x + x as f32 * self.scale_x).round() as i32,
+            (self.background.origin.y + y as f32 * self.scale_y).round() as i32,
+        )
+    }
+}
+
+fn point_in_map_rect(point: GuiPoint, rect: &GuiRect) -> bool {
+    point.x >= rect.origin.x
+        && point.x < rect.origin.x + rect.size.width
+        && point.y >= rect.origin.y
+        && point.y < rect.origin.y + rect.size.height
+}
+
+fn map_folder_button_at(
+    map: &MapFolderData,
+    transform: MapFolderTransform,
+    point: GuiPoint,
+) -> Option<usize> {
+    map.scenarios
+        .iter()
+        .rposition(|button| point_in_map_rect(point, &transform.rect(button.area)))
+}
+
+fn map_folder_text_color(color: u32) -> [u8; 4] {
+    [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        255 - ((color >> 24) & 0xff) as u8,
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_scensel_map_dynamic(
+    surface: &mut Surface,
+    scenario_menu: &mut MenuState,
+    assets: &lc_frontend::startup_scensel::ScenSelAssets,
+    button_down: &ImageData,
+    fonts: &lc_frontend::ClonkFontSet,
+    book_fonts: &lc_frontend::startup_scensel::BookFontSet,
+    gamma: &'static lc_graphics::GammaRamp,
+    draw_focus: bool,
+    title: &str,
+) -> Result<()> {
+    use lc_frontend::startup_scensel as scensel;
+
+    let layout = scensel::scen_sel_layout(surface.width() as i32, surface.height() as i32, fonts);
+    let Some(map) = scenario_menu.current_map() else {
+        return Ok(());
+    };
+    let transform = MapFolderTransform::for_map(map, &layout, surface.width(), surface.height());
+    let pointer = scenario_menu.pointer_position();
+    let selected_button = map.selected_button;
+    let hide_title = map.hide_title;
+    let scenario_info_area = map.scenario_info_area;
+
+    lc_frontend::draw_image_bilinear(
+        surface,
+        &transform.background,
+        &map.background,
+        Some(gamma),
+    );
+    for overlay in &map.access_overlays {
+        if let Some(image) = overlay.image.as_ref() {
+            lc_frontend::draw_image_bilinear(
+                surface,
+                &transform.rect(overlay.area),
+                image,
+                Some(gamma),
+            );
+        }
+    }
+    for (index, button) in map.scenarios.iter().enumerate() {
+        let rect = transform.rect(button.area);
+        let active = draw_focus
+            && ((selected_button == Some(index)
+                && scenario_menu.dialog_focus() == ScenselDialogFocus::List)
+                || pointer.is_some_and(|point| point_in_map_rect(point, &rect)));
+        let image = if active {
+            button.overlay_image.as_ref()
+        } else {
+            button.base_image.as_ref()
+        };
+        if let Some(image) = image {
+            lc_frontend::draw_image_bilinear(surface, &rect, image, Some(gamma));
+        }
+        if !button.title.is_empty() {
+            let scaled_size = (button.title_font_size as f32 * transform.scale_y).round() as i32;
+            let font = if button.title_use_book_font {
+                if scaled_size >= 20 {
+                    &book_fonts.title
+                } else if scaled_size >= 15 {
+                    &book_fonts.caption
+                } else {
+                    &book_fonts.text
+                }
+            } else if scaled_size >= 20 {
+                &fonts.title
+            } else if scaled_size >= 15 {
+                &fonts.caption
+            } else {
+                &fonts.text
+            };
+            let (x, y) = transform.point(
+                button.area.x + button.title_offset_x,
+                button.area.y + button.title_offset_y,
+            );
+            let align = match button.title_align {
+                0 => lc_graphics::clonk_font::TextAlign::Left,
+                2 => lc_graphics::clonk_font::TextAlign::Right,
+                _ => lc_graphics::clonk_font::TextAlign::Center,
+            };
+            font.draw_with_gamma(
+                surface,
+                x,
+                y,
+                &button.title,
+                map_folder_text_color(if active {
+                    button.title_color_active
+                } else {
+                    button.title_color_inactive
+                }),
+                align,
+                true,
+                Some(gamma),
+            );
+        }
+    }
+
+    let info_rect = transform.rect(scenario_info_area);
+    let mut info_layout = layout;
+    info_layout.selection_info = lc_frontend::classic_gui::IntRect {
+        x: info_rect.origin.x.round() as i32,
+        y: info_rect.origin.y.round() as i32,
+        w: info_rect.size.width.round() as i32,
+        h: info_rect.size.height.round() as i32,
+    };
+    let info = scensel_selection_info(scenario_menu);
+    let metrics = scensel::draw_selection_info_scrolled(
+        surface,
+        &info_layout,
+        assets,
+        book_fonts,
+        &info,
+        scenario_menu.selection_info_scroll,
+        Some(gamma),
+    );
+    scenario_menu.selection_info_scroll =
+        metrics.clamp_offset(scenario_menu.selection_info_scroll);
+
+    if !hide_title {
+        fonts.title.draw_with_gamma(
+            surface,
+            layout.title_anchor.0,
+            layout.title_anchor.1,
+            title,
+            [255, 255, 0, 255],
+            lc_graphics::clonk_font::TextAlign::Center,
+            true,
+            Some(gamma),
+        );
+    }
+
+    let pointer_over = |rect: lc_frontend::classic_gui::IntRect| {
+        draw_focus
+            && pointer.is_some_and(|point| {
+                point.x >= rect.x as f32
+                    && point.x < (rect.x + rect.w) as f32
+                    && point.y >= rect.y as f32
+                    && point.y < (rect.y + rect.h) as f32
+            })
+    };
+    scensel::draw_back_button_with_state(
+        surface,
+        &layout,
+        "Back",
+        assets,
+        button_down,
+        fonts,
+        scensel::ScenSelButtonState {
+            highlighted: draw_focus
+                && (scenario_menu.dialog_focus() == ScenselDialogFocus::Back
+                    || pointer_over(layout.back_button)),
+            pressed: false,
+        },
+        Some(gamma),
+    )?;
+    let is_scenario = scenario_menu.selected_scenario().is_some();
+    scensel::draw_open_button_with_state(
+        surface,
+        &layout,
+        if is_scenario { "&Start" } else { "Open" },
+        assets,
+        button_down,
+        fonts,
+        scensel::ScenSelButtonState {
+            highlighted: draw_focus
+                && (scenario_menu.dialog_focus() == ScenselDialogFocus::Open
+                    || pointer_over(layout.open_button)),
+            pressed: false,
+        },
+        Some(gamma),
+    )?;
+    let cb_enabled = scenario_menu.definition_checkbox_enabled;
+    let cb_checked = scenario_menu.definition_checkbox_checked;
+    let cb_highlighted = cb_enabled
+        && (scenario_menu.definition_checkbox_focused
+            || pointer_over(layout.user_change_checkbox));
+    scensel::draw_user_change_checkbox(
+        surface,
+        &layout,
+        assets,
+        fonts,
+        cb_enabled,
+        cb_checked,
+        cb_highlighted,
+        Some(gamma),
+    );
+    Ok(())
+}
+
 /// Draws the selection-dependent layer of the scenario book over the cached
 /// chrome: caption, list rows + selection bar, the right info page, the
 /// Open/Start button and the "Choose definitions" checkbox.
@@ -42248,32 +43370,65 @@ fn render_startup_frame(
                 assets.book_fonts.as_ref(),
             ) {
                 (Some(dlg_assets), Some(button_down), Some(fonts), Some(book_fonts)) => {
-                    // Selection-independent chrome only; the caption, list,
-                    // right page, Open button and checkbox change with the
-                    // selection and are drawn fresh over the restored copy.
-                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                        lc_frontend::startup_scensel::ScenSelScreen::render_chrome_without_game_options(
+                    let title = if scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
+                        "Start Network Game"
+                    } else {
+                        "Start Game"
+                    };
+                    let draw_focus = !context_menu_open
+                        && !definition_selector_open
+                        && !game_option_input_open;
+                    if scenario_menu.current_map().is_some() {
+                        // The book sheet is hidden in map mode. Paint only the
+                        // dialog background before the map so cached search/
+                        // list chrome cannot leak through aspect-fit margins.
+                        lc_frontend::draw_image_bilinear(
                             surface,
-                            &dlg_assets,
-                            fonts,
-                            if scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
-                                "Start Network Game"
-                            } else {
-                                "Start Game"
-                            },
+                            &GuiRect::new(
+                                -1.0,
+                                -1.0,
+                                surface.width() as f32 + 2.0,
+                                surface.height() as f32 + 2.0,
+                            ),
+                            &dlg_assets.background,
                             Some(startup_gamma()),
                         );
-                    });
-                    draw_scensel_dynamic(
-                        surface,
-                        scenario_menu,
-                        &dlg_assets,
-                        button_down,
-                        fonts,
-                        book_fonts,
-                        startup_gamma(),
-                        !context_menu_open && !definition_selector_open && !game_option_input_open,
-                    )?;
+                        draw_scensel_map_dynamic(
+                            surface,
+                            scenario_menu,
+                            &dlg_assets,
+                            button_down,
+                            fonts,
+                            book_fonts,
+                            startup_gamma(),
+                            draw_focus,
+                            title,
+                        )?;
+                    } else {
+                        // Selection-independent chrome only; the caption,
+                        // list, right page, Open button and checkbox change
+                        // with the selection and are drawn fresh over the
+                        // restored copy.
+                        restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
+                            lc_frontend::startup_scensel::ScenSelScreen::render_chrome_without_game_options(
+                                surface,
+                                &dlg_assets,
+                                fonts,
+                                title,
+                                Some(startup_gamma()),
+                            );
+                        });
+                        draw_scensel_dynamic(
+                            surface,
+                            scenario_menu,
+                            &dlg_assets,
+                            button_down,
+                            fonts,
+                            book_fonts,
+                            startup_gamma(),
+                            draw_focus,
+                        )?;
+                    }
                     let resources = assets.game_option_resources().with_context(
                         || "classic scenario game-option resources are unavailable",
                     )?;
@@ -65584,89 +66739,373 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(native_frame.iter().all(|byte| *byte == 0x47));
     }
 
-    #[test]
-    fn folder_map_blocks_direct_and_recursive_search_folder_activation() {
-        let root = tempdir().expect("FolderMap fixture");
-        let western = root.path().join("Western.c4f");
-        let deep_path = western.join("Deep.c4f");
-        fs::create_dir_all(&deep_path).expect("nested folder groups");
-        fs::write(western.join("fOlDeRmAp.TxT"), "[FolderMap]\n").expect("FolderMap marker");
+    fn write_map_png(path: &Path, width: u32, height: u32, pixel: [u8; 4]) {
+        image::RgbaImage::from_pixel(width, height, image::Rgba(pixel))
+            .save(path)
+            .expect("write FolderMap image");
+    }
 
-        let mut deep = FrontendScenario::fallback();
-        deep.identifier = "Western.c4f/Deep.c4f".to_string();
-        deep.title = "Deep Pack".to_string();
-        deep.kind = ScenarioKind::Folder;
-        deep.is_playable = false;
-        deep.path = Some(deep_path);
-        let mut mission = FrontendScenario::fallback();
-        mission.identifier = "Western.c4f/Deep.c4f/Hidden.c4s".to_string();
-        mission.title = "Hidden Mission".to_string();
-        deep.children = vec![mission.clone()];
-        let mut outer = FrontendScenario::fallback();
-        outer.identifier = "Western.c4f".to_string();
-        outer.title = "Western".to_string();
-        outer.kind = ScenarioKind::Folder;
-        outer.is_playable = false;
-        outer.path = Some(western);
-        outer.children = vec![deep.clone()];
-        let scenarios = vec![outer.clone()];
+    fn map_test_scenario(folder: &Path, filename: &str, title: &str) -> FrontendScenario {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = format!("Map.c4f/{filename}");
+        scenario.title = title.to_string();
+        scenario.description = Some(format!("Description for {title}"));
+        scenario.path = Some(folder.join(filename));
+        scenario
+    }
 
+    fn map_test_folder(path: &Path, children: Vec<FrontendScenario>) -> FrontendScenario {
+        let mut folder = FrontendScenario::fallback();
+        folder.identifier = "Map.c4f".to_string();
+        folder.title = "Map Folder".to_string();
+        folder.kind = ScenarioKind::Folder;
+        folder.is_playable = false;
+        folder.path = Some(path.to_path_buf());
+        folder.children = children;
+        folder
+    }
+
+    fn open_map_test_folder(app: &mut GameApp, folder: FrontendScenario) {
+        let scenarios = vec![folder.clone()];
         let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
             .expect("FolderMap menu");
-        let mut app = new_menu_app(640, 480);
         app.menu_state = MenuState::new(menu, scenarios.clone());
         app.scenario_catalog = build_scenario_catalog(&scenarios);
         app.open_scenario_browser();
+        app.handle_menu_input(|_| {
+            vec![StartupMenuAction::OpenEntry(lc_frontend::ScenarioSummary {
+                identifier: folder.identifier.clone(),
+                title: folder.title.clone(),
+                kind: ScenarioKind::Folder,
+            })]
+        })
+        .expect("FolderMap folder activation");
+    }
 
-        let direct = app
-            .handle_menu_input(|_| {
-                vec![StartupMenuAction::OpenEntry(lc_frontend::ScenarioSummary {
-                    identifier: outer.identifier.clone(),
-                    title: outer.title.clone(),
-                    kind: ScenarioKind::Folder,
-                })]
-            })
-            .expect_err("direct FolderMap folder must fail");
-        assert!(direct.to_string().contains("FolderMap"));
-        assert_eq!(app.menu_state.stack.len(), 1);
+    #[test]
+    fn folder_map_disabled_opens_a_normal_book_without_inspecting_the_marker() {
+        let root = tempdir().expect("FolderMap fixture");
+        let map_path = root.path().join("Map.c4f");
+        fs::create_dir(&map_path).expect("map folder");
+        fs::write(
+            map_path.join("FolderMap.txt"),
+            "this is deliberately malformed and has no background",
+        )
+        .expect("malformed FolderMap marker");
+        let alpha = map_test_scenario(&map_path, "Alpha.c4s", "Alpha");
+        let folder = map_test_folder(&map_path, vec![alpha.clone()]);
+        let mut app = new_menu_app(640, 480);
+        app.show_folder_maps = false;
 
-        app.menu_state.set_search_text("deep pack");
-        app.submit_scenario_search()
-            .expect("recursive search itself remains available");
+        open_map_test_folder(&mut app, folder.clone());
+
+        assert_eq!(app.menu_state.stack.len(), 2);
+        assert!(app.menu_state.current_map().is_none());
+        assert_eq!(app.menu_state.visible_entries().len(), 1);
         assert_eq!(
             app.menu_state
                 .selected_scenario()
                 .map(|entry| entry.identifier.as_str()),
-            Some(deep.identifier.as_str())
+            Some(alpha.identifier.as_str())
         );
-        let recursive = app
-            .handle_menu_input(|_| {
-                vec![StartupMenuAction::OpenEntry(lc_frontend::ScenarioSummary {
-                    identifier: deep.identifier.clone(),
-                    title: deep.title.clone(),
-                    kind: ScenarioKind::Folder,
-                })]
-            })
-            .expect_err("recursive search must not bypass an ancestor FolderMap");
-        assert!(recursive.to_string().contains("FolderMap"));
-        assert_eq!(app.menu_state.stack.len(), 1);
-
-        app.menu_state.set_search_text("hidden mission");
-        app.submit_scenario_search()
-            .expect("recursive scenario search itself remains available");
-        let recursive_start = app
-            .handle_menu_input(|_| {
-                vec![StartupMenuAction::StartScenario(
-                    lc_frontend::ScenarioSummary {
-                        identifier: mission.identifier.clone(),
-                        title: mission.title.clone(),
-                        kind: ScenarioKind::Scenario,
-                    },
-                )]
-            })
-            .expect_err("recursive scenario start must not bypass an ancestor FolderMap");
-        assert!(recursive_start.to_string().contains("FolderMap"));
         assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        let mut invalid_map_app = new_menu_app(640, 480);
+        open_map_test_folder(&mut invalid_map_app, folder);
+        assert!(invalid_map_app.menu_state.current_map().is_none());
+        assert_eq!(invalid_map_app.menu_state.visible_entries().len(), 1);
+        assert_eq!(invalid_map_app.mode, AppMode::Menu);
+    }
+
+    #[test]
+    fn show_folder_maps_config_defaults_on_and_reads_an_explicit_false() {
+        assert!(load_show_folder_maps(None));
+        let user_data = tempdir().expect("ShowFolderMaps config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Graphics", "ShowFolderMaps", "0")
+            .expect("disable folder maps");
+        assert!(!load_show_folder_maps(Some(&paths)));
+    }
+
+    #[test]
+    fn folder_map_parser_honors_indentation_dedents_and_first_scalar() {
+        let parsed = parse_map_folder(
+            "[FolderMap]\nMinResX=640\nMinResX=999\n    [Other]\n        [Scenario]\n        File=Nested.c4s\n    [Scenario]\n    File=Direct.c4s\nMinResY=480\n",
+        )
+        .expect("parse indentation hierarchy");
+        assert_eq!(parsed.min_res_x, 640);
+        assert_eq!(parsed.min_res_y, 480);
+        assert_eq!(parsed.scenarios.len(), 1);
+        assert_eq!(parsed.scenarios[0].filename, "Direct.c4s");
+    }
+
+    #[test]
+    fn folder_map_loads_renders_titles_access_overlays_and_cpp_click_semantics() {
+        let root = tempdir().expect("FolderMap fixture");
+        let map_path = root.path().join("Map.c4f");
+        fs::create_dir(&map_path).expect("map folder");
+        write_map_png(&map_path.join("FolderMap.png"), 100, 100, [20, 30, 40, 255]);
+        for (name, pixel) in [
+            ("AlphaBase.png", [80, 0, 0, 255]),
+            ("AlphaOver.png", [120, 0, 0, 255]),
+            ("BetaBase.png", [0, 80, 0, 255]),
+            ("BetaOver.png", [0, 120, 0, 255]),
+            ("Always.png", [0, 0, 80, 255]),
+            ("Granted.png", [0, 0, 120, 255]),
+            ("Denied.png", [120, 120, 0, 255]),
+        ] {
+            write_map_png(&map_path.join(name), 1, 1, pixel);
+        }
+        fs::write(map_path.join("StringTblUS.txt"), "PLAY=Play\n")
+            .expect("FolderMap localization table");
+        fs::write(
+            map_path.join("fOlDeRmAp.TxT"),
+            r#"[FolderMap]
+ScenInfoArea=70,5,25,90
+    [AccessGfx]
+    Access=
+    OverlayImage=Always.png
+    Area=20,20,5,5
+    [AccessGfx]
+    Access=MapPass
+    OverlayImage=Granted.png
+    Area=30,20,5,5
+    [AccessGfx]
+    Access=MissingPass
+    OverlayImage=Denied.png
+    Area=40,20,5,5
+    [Scenario]
+    File=Alpha.c4s
+    BaseImage=AlphaBase
+    OverlayImage=AlphaOver.png
+    Area=5,5,10,10
+    Title=$PLAY$ TITLE
+    [Scenario]
+    File=Beta.c4s
+    BaseImage=BetaBase.png
+    OverlayImage=BetaOver.png
+    SingleClick=1
+    Area=20,5,10,10
+    Title=Visit TITLE now
+    [Scenario]
+    File=Gamma.c4s
+    BaseImage=AlphaBase
+    OverlayImage=AlphaOver.png
+    Area=35,5,10,10
+    Title=TITLE
+"#,
+        )
+        .expect("FolderMap data");
+        let alpha = map_test_scenario(&map_path, "Alpha.c4s", "Alpha Mission");
+        let beta = map_test_scenario(&map_path, "Beta.c4s", "Beta Mission");
+        let gamma = map_test_scenario(&map_path, "Gamma.c4s", "Gamma Mission");
+        let folder = map_test_folder(
+            &map_path,
+            vec![alpha.clone(), beta.clone(), gamma.clone()],
+        );
+        let mut app = new_menu_app(640, 480);
+        app.mission_access = MissionAccessStore::new("Other; mappass ");
+
+        open_map_test_folder(&mut app, folder);
+
+        let map = app.menu_state.current_map().expect("map view active");
+        assert_eq!(map.source_path, map_path);
+        assert_eq!(map.scenarios.len(), 3);
+        assert_eq!(map.scenarios[0].title, "Play Alpha Mission");
+        assert_eq!(map.scenarios[1].title, "Visit Beta Mission now");
+        assert_eq!(
+            map.scenarios[2]
+                .entry
+                .as_ref()
+                .map(|entry| entry.identifier.as_str()),
+            Some(gamma.identifier.as_str()),
+            "every configured scenario entry gets a map button"
+        );
+        assert_eq!(map.access_overlays.len(), 2);
+        assert_eq!(
+            map.access_overlays[0]
+                .image
+                .as_ref()
+                .expect("unconditional access image")
+                .pixels()[..4],
+            [0, 0, 80, 255]
+        );
+        assert_eq!(
+            map.access_overlays[1]
+                .image
+                .as_ref()
+                .expect("granted access image")
+                .pixels()[..4],
+            [0, 0, 120, 255]
+        );
+
+        let first = app
+            .menu_state
+            .activate_map_button(0)
+            .expect("first Alpha click");
+        assert!(matches!(
+            &first,
+            StartupMenuAction::SelectionChanged(summary)
+                if summary.identifier == alpha.identifier
+        ));
+        app.process_menu_actions(vec![first])
+            .expect("selection action");
+        assert_eq!(
+            scensel_selection_info(&app.menu_state).title,
+            Some("Alpha Mission")
+        );
+        let second = app
+            .menu_state
+            .activate_map_button(0)
+            .expect("second Alpha click");
+        let (start, _) = app
+            .process_menu_actions(vec![second])
+            .expect("shared DoOK path");
+        assert_eq!(start.as_deref(), Some(alpha.identifier.as_str()));
+
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            640,
+            480,
+            app.assets.clonk_fonts.as_deref().expect("GUI fonts"),
+        );
+        let transform = MapFolderTransform::for_map(
+            app.menu_state.current_map().expect("map remains active"),
+            &layout,
+            640,
+            480,
+        );
+        let (background_x, background_y) = transform.point(50, 50);
+        assert!(app.handle_scensel_map_pointer_down(GuiPoint::new(
+            background_x as f32,
+            background_y as f32,
+        )));
+        assert!(app
+            .menu_state
+            .current_map()
+            .expect("map remains active")
+            .selected_entry()
+            .is_none());
+        let single = app
+            .menu_state
+            .activate_map_button(1)
+            .expect("single-click Beta");
+        assert!(matches!(
+            single,
+            StartupMenuAction::StartScenario(summary)
+                if summary.identifier == beta.identifier
+        ));
+
+        let (sample_x, sample_y) = transform.point(50, 50);
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut frame).expect("render map view");
+        let pixel = app
+            .graphics
+            .surface()
+            .get_pixel(sample_x as u32, sample_y as u32)
+            .expect("background sample");
+        assert_eq!([pixel.r, pixel.g, pixel.b], [20, 30, 40]);
+    }
+
+    #[test]
+    fn folder_map_locked_button_stays_visible_but_shared_do_ok_rejects_it() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let root = tempdir().expect("locked FolderMap fixture");
+        let map_path = root.path().join("Map.c4f");
+        fs::create_dir(&map_path).expect("map folder");
+        write_map_png(&map_path.join("FolderMap.png"), 8, 8, [20, 30, 40, 255]);
+        fs::write(
+            map_path.join("FolderMap.txt"),
+            "[FolderMap]\n    [Scenario]\n    File=Locked.c4s\n    SingleClick=1\n    Area=0,0,8,8\n",
+        )
+        .expect("FolderMap data");
+        let locked_path = map_path.join("Locked.c4s");
+        fs::create_dir(&locked_path).expect("locked scenario group");
+        fs::write(
+            locked_path.join("Scenario.txt"),
+            "[Head]\nTitle=Locked Mission\nMissionAccess=MissingPass\n",
+        )
+        .expect("locked scenario core");
+        let locked = map_test_scenario(&map_path, "Locked.c4s", "Locked Mission");
+        let folder = map_test_folder(&map_path, vec![locked]);
+        let user_data = tempdir().expect("locked FolderMap user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "MissionAccess", "OtherPass")
+            .expect("configure unrelated mission access");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+
+        open_map_test_folder(&mut app, folder);
+
+        assert_eq!(
+            app.menu_state
+                .current_map()
+                .expect("map view active")
+                .scenarios
+                .len(),
+            1,
+            "current C++ creates the button before CanOpen enforces access"
+        );
+        app.handle_menu_input(|menu| {
+            menu.activate_map_button(0).into_iter().collect()
+        })
+        .expect("mission denial is a handled modal");
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Access to this mission not yet granted."
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn folder_map_minimum_resolution_and_image_failures_fall_back_to_book() {
+        let root = tempdir().expect("FolderMap fixture");
+        let map_path = root.path().join("Map.c4f");
+        fs::create_dir(&map_path).expect("map folder");
+        write_map_png(&map_path.join("FolderMap.png"), 4, 4, [10, 20, 30, 255]);
+        let child = map_test_scenario(&map_path, "Alpha.c4s", "Alpha");
+        let folder = map_test_folder(&map_path, vec![child]);
+        let access = MissionAccessStore::default();
+
+        for (min_x, min_y, loads) in [(641, 0, false), (0, 481, false), (640, 480, true)] {
+            fs::write(
+                map_path.join("FolderMap.txt"),
+                format!("[FolderMap]\nMinResX={min_x}\nMinResY={min_y}\n"),
+            )
+            .expect("resolution map");
+            assert_eq!(
+                load_map_folder_data(
+                    &folder,
+                    640,
+                    480,
+                    &access,
+                    &["US".to_string()],
+                )
+                .is_some(),
+                loads,
+                "minimum {min_x}x{min_y}"
+            );
+        }
+
+        fs::write(
+            map_path.join("FolderMap.txt"),
+            "[FolderMap]\n    [AccessGfx]\n    Access=Never\n    OverlayImage=Missing.png\n",
+        )
+        .expect("missing-image map");
+        assert!(
+            load_map_folder_data(
+                &folder,
+                640,
+                480,
+                &access,
+                &["US".to_string()],
+            )
+            .is_none(),
+            "even an inaccessible named image is loaded before access filtering"
+        );
     }
 
     #[test]
@@ -65693,84 +67132,55 @@ public func Grant(password) { return GainMissionAccess(password); }
         let entries = vec![regular];
         let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
             .expect("regular-folder menu");
-        let state = MenuState::new(menu, entries);
+        let mut state = MenuState::new(menu, entries);
+        state.enter_folder("Regular");
 
-        assert_eq!(
-            state
-                .require_supported_activation(&child.identifier)
-                .expect("FolderMap does not apply to RegularFolder"),
-            Some(ScenarioKind::Scenario)
-        );
+        assert!(!state.configure_current_folder_map(
+            true,
+            640,
+            480,
+            &MissionAccessStore::default(),
+            &["US".to_string()],
+        ));
+        assert!(state.current_map().is_none());
+        assert_eq!(state.current_entries()[0].identifier, child.identifier);
     }
 
     #[test]
-    fn merged_container_and_later_child_check_every_root_provenance() {
-        let root = tempdir().expect("merged-root fixture");
-        let first_folder = root.path().join("first/Worlds.c4f");
-        let later_folder = root.path().join("later/Worlds.c4f");
-        let alpha_path = first_folder.join("Alpha.c4s");
-        let beta_path = later_folder.join("Beta.c4s");
-        fs::create_dir_all(&alpha_path).expect("first-root scenario");
-        fs::create_dir_all(&beta_path).expect("later-root scenario");
-        fs::write(later_folder.join("FolderMap.txt"), "[FolderMap]\n")
-            .expect("later-root FolderMap");
+    fn merged_folder_map_uses_a_later_contributing_group() {
+        let root = tempdir().expect("merged FolderMap fixture");
+        let first = root.path().join("first/Worlds.c4f");
+        let later = root.path().join("later/Worlds.c4f");
+        fs::create_dir_all(&first).expect("first contributing folder");
+        fs::create_dir_all(&later).expect("later contributing folder");
+        fs::write(later.join("FolderMap.txt"), "[FolderMap]\n")
+            .expect("later FolderMap data");
+        write_map_png(&later.join("FolderMap.png"), 2, 2, [1, 2, 3, 255]);
+        let mut folder = map_test_folder(&first, Vec::new());
+        folder.identifier = "Worlds.c4f".to_string();
+        folder.source_paths = vec![first, later.clone()];
 
-        let mut alpha = FrontendScenario::fallback();
-        alpha.identifier = "Worlds.c4f/Alpha.c4s".to_string();
-        alpha.path = Some(alpha_path);
-        let mut first = FrontendScenario::fallback();
-        first.identifier = "Worlds.c4f".to_string();
-        first.kind = ScenarioKind::Folder;
-        first.is_playable = false;
-        first.path = Some(first_folder.clone());
-        first.children = vec![alpha];
-
-        let mut beta = FrontendScenario::fallback();
-        beta.identifier = "Worlds.c4f/Beta.c4s".to_string();
-        beta.path = Some(beta_path);
-        let mut later = FrontendScenario::fallback();
-        later.identifier = "Worlds.c4f".to_string();
-        later.kind = ScenarioKind::Folder;
-        later.is_playable = false;
-        later.path = Some(later_folder.clone());
-        later.children = vec![beta.clone()];
-
-        let entries = merge_frontend_scenarios(vec![first, later]);
-        assert_eq!(
-            entries[0].path.as_deref(),
-            Some(first_folder.as_path()),
-            "merged UI parent keeps first-root presentation provenance"
-        );
-        assert_eq!(
-            entries[0].source_paths,
-            vec![first_folder.clone(), later_folder.clone()],
-            "merged container retains every contributing root"
-        );
-        let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
-            .expect("merged-root menu");
-        let state = MenuState::new(menu, entries);
-        let direct_error = state
-            .require_supported_activation("Worlds.c4f")
-            .expect_err("direct merged-container open must inspect every root");
-        assert!(matches!(
-            direct_error,
-            ClassicParityBoundary::FolderMap { marker, .. }
-                if marker == later_folder.join("FolderMap.txt")
-        ));
-        let error = state
-            .require_supported_activation(&beta.identifier)
-            .expect_err("later-root child must retain its FolderMap ancestry");
-        assert!(matches!(
-            error,
-            ClassicParityBoundary::FolderMap { marker, .. }
-                if marker == later_folder.join("FolderMap.txt")
-        ));
+        let map = load_map_folder_data(
+            &folder,
+            640,
+            480,
+            &MissionAccessStore::default(),
+            &["US".to_string()],
+        )
+        .expect("later contributing map loads");
+        assert_eq!(map.source_path, later);
     }
 
     #[test]
-    fn packed_logical_folder_ancestry_uses_case_insensitive_group_traversal() {
+    fn packed_logical_folder_map_uses_case_insensitive_group_traversal() {
         let root = tempdir().expect("packed FolderMap fixture");
-        let inner = packed_test_group(&[("fOlDeRmAp.TxT", false, b"[FolderMap]\n")]);
+        let png_path = root.path().join("map.png");
+        write_map_png(&png_path, 2, 2, [9, 8, 7, 255]);
+        let png = fs::read(&png_path).expect("packed map PNG");
+        let inner = packed_test_group(&[
+            ("fOlDeRmAp.TxT", false, b"[FolderMap]\n"),
+            ("FolderMap.png", false, png.as_slice()),
+        ]);
         let outer = packed_test_file_group(&[("INNER.C4F", true, inner.as_slice())]);
         let outer_path = root.path().join("Outer.c4f");
         fs::write(&outer_path, outer).expect("packed outer folder");
@@ -65790,16 +67200,19 @@ public func Grant(password) { return GainMissionAccess(password); }
         let entries = vec![outer_entry];
         let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
             .expect("packed ancestry menu");
-        let state = MenuState::new(menu, entries);
-
-        let error = state
-            .require_supported_activation(&inner_entry.identifier)
-            .expect_err("packed logical child FolderMap must be detected");
-        assert!(matches!(
-            error,
-            ClassicParityBoundary::FolderMap { marker, .. }
-                if marker == logical_inner.join("fOlDeRmAp.TxT")
+        let mut state = MenuState::new(menu, entries);
+        state.enter_folder(&inner_entry.identifier);
+        assert!(state.configure_current_folder_map(
+            true,
+            640,
+            480,
+            &MissionAccessStore::default(),
+            &["US".to_string()],
         ));
+        assert_eq!(
+            state.current_map().expect("packed map").source_path,
+            logical_inner
+        );
     }
 
     #[test]

@@ -761,6 +761,7 @@ pub struct ScenarioLoaderHead {
     loader: ScenarioLoaderMetadata,
     font: String,
     origin: Option<String>,
+    mission_access: String,
     definition_modules: Vec<String>,
     local_only: bool,
     effective_min_players: i32,
@@ -835,6 +836,7 @@ impl ScenarioLoaderHead {
             },
             font: manifest.core.head.font.clone(),
             origin: manifest.core.head.origin.clone(),
+            mission_access: manifest.core.head.mission_access.clone(),
             definition_modules: manifest.definition_specs,
             local_only: manifest.core.definitions.local_only,
             effective_min_players: legacy_effective_min_players(&manifest.core),
@@ -858,6 +860,12 @@ impl ScenarioLoaderHead {
     /// Raw Scenario.txt Origin after StdCompiler string adaptation.
     pub fn origin(&self) -> Option<&str> {
         self.origin.as_deref()
+    }
+
+    /// Raw `[Head] MissionAccess` password used by
+    /// `C4ScenarioListLoader::Scenario::CanOpen`.
+    pub fn mission_access(&self) -> &str {
+        &self.mission_access
     }
 
     pub fn configured_definition_modules(&self) -> &[String] {
