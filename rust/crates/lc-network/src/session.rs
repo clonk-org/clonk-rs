@@ -381,6 +381,10 @@ pub enum HostCommand {
     InspectAcceptedRoutes {
         completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
     },
+    #[cfg(test)]
+    InspectConnectedClients {
+        completion: oneshot::Sender<Vec<ClientId>>,
+    },
     Shutdown,
 }
 
@@ -514,6 +518,16 @@ impl HostHandle {
             .await
             .expect("test host loop accepts route inspection");
         routes.await.expect("test host loop returns route inspection")
+    }
+
+    #[cfg(test)]
+    async fn connected_clients(&self) -> Vec<ClientId> {
+        let (completion, clients) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::InspectConnectedClients { completion })
+            .await
+            .expect("test host loop accepts client inspection");
+        clients.await.expect("test host loop returns client inspection")
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {
@@ -1186,6 +1200,7 @@ impl ClientHandle {
 enum HostOutboundMessage {
     Message(ControlMessage),
     Raw(Vec<u8>),
+    Close(crate::ConnectionReply),
 }
 
 #[derive(Clone, Debug)]
@@ -1211,6 +1226,13 @@ impl HostOutboundSender {
         packet: Vec<u8>,
     ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
         self.sender.send(HostOutboundMessage::Raw(packet)).await
+    }
+
+    async fn close(
+        &self,
+        reply: crate::ConnectionReply,
+    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
+        self.sender.send(HostOutboundMessage::Close(reply)).await
     }
 
     fn try_send(
@@ -2097,14 +2119,20 @@ async fn run_host(
                         message,
                         ping_ms,
                     } => {
-                        handle_client_message(
-                            connection_id,
-                            client_id,
-                            message,
-                            ping_ms,
-                            &mut state,
-                        )
-                        .await;
+                        if state
+                            .accepted_routes
+                            .get(&connection_id)
+                            .is_some_and(|route| route.client_id == client_id)
+                        {
+                            handle_client_message(
+                                connection_id,
+                                client_id,
+                                message,
+                                ping_ms,
+                                &mut state,
+                            )
+                            .await;
+                        }
                     }
                     HostLoopMessage::ClientDisconnected {
                         connection_id,
@@ -2201,6 +2229,10 @@ async fn run_host(
                             })
                             .collect();
                         let _ = completion.send(routes);
+                    }
+                    #[cfg(test)]
+                    HostCommand::InspectConnectedClients { completion } => {
+                        let _ = completion.send(state.clients.keys().copied().collect());
                     }
                     HostCommand::Shutdown => break,
                 }
@@ -3180,6 +3212,9 @@ async fn handle_client_disconnected(
     state: &mut HostState,
 ) {
     let disconnected_route = state.accepted_routes.remove(&connection_id);
+    if disconnected_route.is_none() {
+        return;
+    }
     if let Some(route) = &disconnected_route {
         state
             .closed_routes
@@ -3884,6 +3919,7 @@ async fn apply_host_membership_controls(
                 if remove.by_client == HOST_CLIENT_ID as i32 =>
             {
                 if let Ok(client_id) = ClientId::try_from(remove.client_id) {
+                    close_removed_client_connections(client_id, state).await;
                     coordination_unregister(client_id, state).await;
                 }
                 if let Some(core) = state.client_cores.remove(&remove.client_id) {
@@ -3899,6 +3935,36 @@ async fn apply_host_membership_controls(
             _ => {}
         }
     }
+}
+
+async fn close_removed_client_connections(client_id: ClientId, state: &mut HostState) {
+    let routes = state
+        .accepted_routes
+        .iter()
+        .filter(|(_, route)| route.client_id == client_id)
+        .map(|(connection_id, route)| (*connection_id, route.outbound.clone()))
+        .collect::<Vec<_>>();
+    for (connection_id, _) in &routes {
+        state.accepted_routes.remove(connection_id);
+    }
+    let removed_client = state.clients.remove(&client_id);
+    let barrier_effects = state.status_barrier.remove_remote(client_id);
+    let reply = crate::ConnectionReply {
+        ok: false,
+        message: lc_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+            .unwrap_or_default(),
+        wrong_password: false,
+    };
+    for (_, outbound) in routes {
+        let _ = outbound.close(reply.clone()).await;
+    }
+    if removed_client.is_some() {
+        let _ = state
+            .event_tx
+            .send(HostEvent::ClientLeft { client_id })
+            .await;
+    }
+    Box::pin(apply_barrier_effects(barrier_effects, state)).await;
 }
 
 async fn coordination_unregister(client_id: ClientId, state: &mut HostState) {
@@ -4122,6 +4188,13 @@ where
                         }
                         HostOutboundMessage::Raw(packet) => {
                             self.transport.send_complete_packet_bytes(&packet).await
+                        }
+                        HostOutboundMessage::Close(reply) => {
+                            let _ = self
+                                .transport
+                                .send_message(ControlMessage::ConnectionReply(reply))
+                                .await;
+                            break;
                         }
                     };
                     if let Err(error) = result {
@@ -8943,6 +9016,61 @@ mod tests {
 
         host.shutdown().await.unwrap();
         client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn synchronized_client_remove_closes_every_route_with_cpp_reason() {
+        // DeleteClient closes every route with a negative PID_ConnRe carrying
+        // the fixed "removing client" reason before removing the logical
+        // network client (src/C4Network2Client.cpp:104-119,457-465).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut canonical, client_id) = raw_client_transport(addr, b"Alice").await;
+        let mut secondary =
+            raw_existing_client_transport(addr, client_id, 29, b"Alice").await;
+
+        timeout(EVENT_WAIT, async {
+            loop {
+                if host.accepted_routes().await.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both routes were not retained");
+        assert_eq!(host.connected_clients().await, vec![client_id]);
+
+        let remove = EngineControlPacket::ClientRemove(lc_engine::ClientRemoveControlData {
+            client_id: i32::try_from(client_id).unwrap(),
+            reason: lc_engine::LegacyCString::from_bytes(b"voted out".to_vec()).unwrap(),
+            by_client: i32::try_from(HOST_CLIENT_ID).unwrap(),
+        });
+        host.submit_packet(
+            ControlDelivery::Sync,
+            encode_control_entry_payload(&remove).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let close = ControlMessage::ConnectionReply(crate::ConnectionReply {
+            ok: false,
+            message: lc_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+            wrong_password: false,
+        });
+        for route in [&mut canonical, &mut secondary] {
+            assert!(raw_client_received_message(route, &close, EVENT_WAIT).await);
+            match timeout(EVENT_WAIT, route.read_message()).await {
+                Ok(Err(TransportError::Io(error)))
+                    if error.kind() == io::ErrorKind::UnexpectedEof => {}
+                other => panic!("removed route did not close after ConnRe: {other:?}"),
+            }
+        }
+
+        assert!(host.accepted_routes().await.is_empty());
+        assert!(host.connected_clients().await.is_empty());
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13835,6 +13963,63 @@ mod tests {
             .unwrap();
         let client_id = ClientId::try_from(handshake.join_data.client_id).unwrap();
         (transport, client_id)
+    }
+
+    async fn raw_existing_client_transport(
+        address: SocketAddr,
+        client_id: ClientId,
+        remote_connection_id: u32,
+        name: &[u8],
+    ) -> crate::ControlTransport<TcpStream> {
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut transport = crate::ControlTransport::new(stream);
+        assert!(matches!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        let name = lc_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+        transport
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: i32::try_from(client_id).unwrap(),
+                        activated: true,
+                        observer: false,
+                        name: name.clone(),
+                        nick: name,
+                        lobby_ready: false,
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: remote_connection_id,
+                },
+            ))
+            .await
+            .unwrap();
+        loop {
+            match transport.read_message().await.unwrap() {
+                ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                ControlMessage::Ping(ping) => {
+                    transport
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                other => panic!("expected positive host connection reply, got {other:?}"),
+            }
+        }
+        transport
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: true,
+                message: lc_engine::LegacyCString::from_bytes(
+                    b"connection accepted".to_vec(),
+                )
+                .unwrap(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+        transport
     }
 
     async fn drain_raw_client(transport: &mut crate::ControlTransport<TcpStream>) {
