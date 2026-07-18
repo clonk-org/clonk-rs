@@ -459,7 +459,9 @@ where
             }
             ControlMessage::Request { from_tick } => {
                 frame.push(PID_CONTROL_REQ);
-                encode_varint(from_tick, &mut frame);
+                let from_tick = i32::try_from(from_tick)
+                    .map_err(|_| TransportError::ControlTickOutOfRange(from_tick))?;
+                encode_packed_i32(from_tick, &mut frame);
             }
             ControlMessage::Packet { delivery, data } => {
                 frame.push(PID_CONTROL_PKT);
@@ -708,12 +710,12 @@ fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
 }
 
 fn parse_request(data: &[u8]) -> Result<ControlMessage, TransportError> {
-    let (tick, consumed) = decode_varint(data)?;
-    if consumed != data.len() {
-        return Err(TransportError::Malformed(
-            "unexpected trailing bytes in control request",
-        ));
+    let (tick, _) = decode_packed_i32(data)?;
+    if tick < 0 {
+        return Err(TransportError::NegativeControlTick(tick));
     }
+    // CompileFromBuf does not require the C++ packet reader to consume the
+    // complete buffer, so PID_ControlReq tolerates bytes after CtrlTick.
     Ok(ControlMessage::Request {
         from_tick: tick as Tick,
     })
@@ -1822,17 +1824,23 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn parses_control_request() {
-        let payload = [PID_CONTROL_REQ, 0x96, 0x01]; // tick 150
-        let frame = expect_frame(&payload);
-        let (client, mut server) = duplex(32);
-        server.write_all(&frame).await.unwrap();
-        let mut transport = ControlTransport::new(client);
-        match transport.read_message().await.unwrap() {
-            ControlMessage::Request { from_tick } => assert_eq!(from_tick, 150),
-            other => panic!("unexpected message: {:?}", other),
+    #[test]
+    fn parses_cpp_control_request_signed_ticks() {
+        for (payload, from_tick) in [
+            (&[PID_CONTROL_REQ, 0x40, 0x00][..], 64),
+            (&[PID_CONTROL_REQ, 0x96, 0x01][..], 150),
+            (&[PID_CONTROL_REQ, 0x40, 0x00, 0xaa][..], 64),
+        ] {
+            assert_eq!(
+                parse_complete_packet(payload).unwrap(),
+                ControlMessage::Request { from_tick }
+            );
         }
+
+        assert!(matches!(
+            parse_complete_packet(&[PID_CONTROL_REQ, 0xff]),
+            Err(TransportError::NegativeControlTick(-1))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2066,19 +2074,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn send_control_request_matches_protocol() {
-        let (client, mut server) = duplex(64);
-        let mut transport = ControlTransport::new(client);
-        transport
-            .send_message(ControlMessage::Request { from_tick: 150 })
-            .await
-            .unwrap();
-        drop(transport);
+    async fn control_request_round_trip_matches_cpp_signed_pack_reference() {
+        let cases: &[(Tick, &[u8])] = &[
+            (0, &[0x00]),
+            (63, &[0x3f]),
+            (64, &[0x40, 0x00]),
+            (127, &[0x7f, 0x00]),
+            (128, &[0x80, 0x01]),
+            (191, &[0xbf, 0x01]),
+            (192, &[0x40, 0x01]),
+            (8191, &[0x7f, 0x3f]),
+            (8192, &[0x80, 0x40, 0x00]),
+            (16383, &[0x7f, 0x7f, 0x00]),
+            (16384, &[0x80, 0x80, 0x01]),
+            (100000, &[0xa0, 0x8d, 0x06]),
+        ];
 
-        let mut buf = Vec::new();
-        server.read_to_end(&mut buf).await.unwrap();
-        let expected = expect_frame(&[PID_CONTROL_REQ, 0x96, 0x01]);
-        assert_eq!(buf, expected);
+        for &(from_tick, encoded) in cases {
+            let mut payload = vec![PID_CONTROL_REQ];
+            payload.extend_from_slice(encoded);
+
+            let (client, mut server) = duplex(64);
+            let mut transport = ControlTransport::new(client);
+            transport
+                .send_message(ControlMessage::Request { from_tick })
+                .await
+                .unwrap();
+            drop(transport);
+
+            let mut frame = Vec::new();
+            server.read_to_end(&mut frame).await.unwrap();
+            assert_eq!(frame, expect_frame(&payload), "from_tick={from_tick}");
+            assert_eq!(
+                parse_complete_packet(&payload).unwrap(),
+                ControlMessage::Request { from_tick },
+                "from_tick={from_tick}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_control_request_tick_above_cpp_i32_range() {
+        let (client, _server) = duplex(16);
+        let mut transport = ControlTransport::new(client);
+        let from_tick = i32::MAX as Tick + 1;
+
+        assert!(matches!(
+            transport
+                .send_message(ControlMessage::Request { from_tick })
+                .await,
+            Err(TransportError::ControlTickOutOfRange(tick)) if tick == from_tick
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
