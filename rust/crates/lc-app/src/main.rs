@@ -31501,14 +31501,36 @@ impl GameApp {
     fn recheck_team_memberships_from_player_infos(
         &mut self,
     ) -> Vec<lc_engine::PlayerInfoControlData> {
-        let recheck_random_teams = matches!(
-            self.runtime_network_role(),
-            RuntimeNetworkRole::Host
-        ) && self.engine.is_control_host();
+        self.reconcile_player_info_teams(true, true)
+    }
+
+    fn recheck_team_memberships_without_random_rebalance(&mut self) {
+        self.reconcile_player_info_teams(true, false);
+    }
+
+    fn recheck_random_teams_from_player_infos(
+        &mut self,
+    ) -> Vec<lc_engine::PlayerInfoControlData> {
+        self.reconcile_player_info_teams(false, true)
+    }
+
+    fn reconcile_player_info_teams(
+        &mut self,
+        recheck_memberships: bool,
+        recheck_random_teams: bool,
+    ) -> Vec<lc_engine::PlayerInfoControlData> {
+        let recheck_random_teams = recheck_random_teams
+            && matches!(
+                self.runtime_network_role(),
+                RuntimeNetworkRole::Host
+            )
+            && self.engine.is_control_host();
         let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
         let exact_metadata = self.network_team_assignment.as_mut().map(|assignment| {
-            self.control_player_infos
-                .recheck_team_players(assignment.teams_mut());
+            if recheck_memberships {
+                self.control_player_infos
+                    .recheck_team_players(assignment.teams_mut());
+            }
             let updates = if recheck_random_teams {
                 assignment.recheck_random_teams(&mut self.control_player_infos)
             } else {
@@ -31535,6 +31557,10 @@ impl GameApp {
                 host_snapshot.parameters.teams = snapshot;
             }
             return updates;
+        }
+
+        if !recheck_memberships {
+            return Vec::new();
         }
 
         if let Some(prepared) = self
@@ -32120,11 +32146,63 @@ impl GameApp {
                                 .client_packet(remove.client_id)
                                 .is_some();
                             self.control_player_infos.on_client_part(remove.client_id);
-                            let updates = if had_player_info {
-                                self.recheck_team_memberships_from_player_infos()
-                            } else {
-                                Vec::new()
-                            };
+                            let mut updated_clients = HashSet::new();
+                            if had_player_info {
+                                self.recheck_team_memberships_without_random_rebalance();
+                                let executes_host_cascade = matches!(
+                                    self.runtime_network_role(),
+                                    RuntimeNetworkRole::Host
+                                );
+                                if executes_host_cascade {
+                                    let restore_players = host_restore_player_info_entries(
+                                        self.host_join_snapshot.as_ref(),
+                                    );
+                                    let teams = self
+                                        .network_team_assignment
+                                        .as_ref()
+                                        .map(|assignment| assignment.teams().clone());
+                                    let attribute_updates = {
+                                        let mut oracle =
+                                            ProcessInitialHostTeamAssignmentOracle::new(
+                                                self.generated_team_name_template.clone(),
+                                            );
+                                        self.control_player_infos.refresh_player_attributes(
+                                            teams.as_ref(),
+                                            &restore_players,
+                                            &mut oracle,
+                                        )
+                                    };
+                                    match attribute_updates {
+                                        Ok(updates) => {
+                                            updated_clients.extend(
+                                                updates
+                                                    .into_iter()
+                                                    .map(|update| update.client_id),
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, "cannot refresh client-part player attributes");
+                                            self.status_text = format!(
+                                                "Client-part player attributes need unavailable native state: {error}"
+                                            );
+                                        }
+                                    }
+                                    updated_clients.extend(
+                                        self.recheck_random_teams_from_player_infos()
+                                            .into_iter()
+                                            .map(|update| update.client_id),
+                                    );
+                                    updated_clients.extend(
+                                        self.control_player_infos
+                                            .reset_league_projected_gains()
+                                            .into_iter()
+                                            .map(|update| update.client_id),
+                                    );
+                                }
+                            }
+                            let updates = self
+                                .control_player_infos
+                                .client_packets(&updated_clients);
                             if let Some(network) = self.network.as_ref() {
                                 for update in updates {
                                     if let Err(error) = network.broadcast_player_info(update) {
@@ -78354,15 +78432,29 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn synchronized_client_remove_prunes_only_unjoined_player_info() {
+    fn synchronized_client_remove_prunes_and_rechecks_teams_without_client_host_cascade() {
         // ClientRemove is host-authored synchronized state. OnClientPart
-        // discards never-joined infos but retains joined history
+        // discards never-joined infos, retains joined history, and rechecks
+        // team membership on every peer. Attribute/gain mutation and direct
+        // PlayerInfo broadcasts remain host-only
         // (src/C4Control.cpp:637-680;
         // src/C4Network2Players.cpp:425-459).
         let mut app = new_running_sandbox_app();
-        let (manager, _event_tx) = NetworkManager::test_stub();
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(2);
         app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        // The sandbox fixture starts from an offline team-assignment owner;
+        // an actual network client does not retain that host/offline state.
+        app.network_team_assignment = None;
         app.control_clients.register(3, true, false);
+        let metadata = set_control_test_metadata(
+            false,
+            vec![set_control_test_team(1, vec![7, 8, 9], 0)],
+        );
         app.engine
             .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
             .expect("register remote runtime player");
@@ -78372,16 +78464,35 @@ protected func InputCallback(string answer, int player)
                 players: vec![
                     lc_engine::ControlPlayerInfoEntry {
                         id: 7,
+                        team: 1,
                         flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
                         ..Default::default()
                     },
                     lc_engine::ControlPlayerInfoEntry {
                         id: 8,
+                        team: 1,
                         ..Default::default()
                     },
                 ],
                 ..Default::default()
             });
+        let retained_color = 0x0000_f400;
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 4,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 9,
+                    team: 1,
+                    color: retained_color,
+                    original_color: 0x00f4_0000,
+                    forced_name: lc_engine::LegacyCString::from_bytes(b"Alias".to_vec()).unwrap(),
+                    league_projected_gain: 5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&metadata));
 
         app.apply_ready_controls(
             0,
@@ -78409,6 +78520,132 @@ protected func InputCallback(string answer, int player)
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
         assert!(app.control_player_infos.get(8).is_none());
+        assert_eq!(app.engine.teams()[0].player_ids, vec![9]);
+        let unaffected = app.control_player_infos.get(9).unwrap();
+        assert_eq!(unaffected.color, retained_color);
+        assert_eq!(unaffected.forced_name.as_bytes(), b"Alias");
+        assert_eq!(unaffected.league_projected_gain, 5);
+        assert!(commands.take_broadcast_player_infos().is_empty());
+    }
+
+    #[test]
+    fn synchronized_client_remove_without_player_info_skips_the_part_cascade() {
+        // OnClientPart returns before team/attribute/league work when no
+        // C4ClientPlayerInfos packet exists for the departing client
+        // (src/C4Network2Players.cpp:425-430).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.control_clients.register(3, true, false);
+        let metadata = set_control_test_metadata(
+            false,
+            vec![set_control_test_team(1, vec![77], 0)],
+        );
+        app.engine
+            .set_teams(runtime_teams_from_initial_metadata(&metadata));
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            metadata,
+        ));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 4,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 77,
+                    team: 1,
+                    color: 0x0000_f400,
+                    original_color: 0x00f4_0000,
+                    league_projected_gain: 5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 3,
+                    reason: lc_engine::LegacyCString::default(),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute client removal without player infos");
+
+        let retained = app.control_player_infos.get(77).unwrap();
+        assert_eq!(retained.color, 0x0000_f400);
+        assert_eq!(retained.league_projected_gain, 5);
+        assert_eq!(
+            app.network_team_assignment
+                .as_ref()
+                .unwrap()
+                .teams()
+                .teams[0]
+                .player_ids,
+            vec![77],
+        );
+        assert!(commands.take_broadcast_player_infos().is_empty());
+    }
+
+    #[test]
+    fn network_host_without_control_host_still_runs_client_part_updates() {
+        // OnClientPart's attribute/gain/send guard is network-host ownership;
+        // only the nested random-team recheck requires control-host status
+        // (src/C4Network2Players.cpp:449-459; src/C4Teams.cpp:688-692).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.engine.set_control_host(false);
+        app.control_clients.register(3, true, false);
+        app.control_player_infos.replace_snapshot(
+            40,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![set_control_test_player(30, 0, 0)],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 4,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 40,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED
+                            | lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                        league_projected_gain: 5,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+        );
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 3,
+                    reason: lc_engine::LegacyCString::default(),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute non-control-host client removal");
+
+        assert_eq!(
+            app.control_player_infos
+                .get(40)
+                .unwrap()
+                .league_projected_gain,
+            -1,
+        );
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [update] = broadcasts.as_slice() else {
+            panic!("expected one gain-reset packet, got {broadcasts:?}");
+        };
+        assert_eq!(update.client_id, 4);
+        assert_eq!(update.players[0].league_projected_gain, -1);
     }
 
     #[test]
@@ -78437,21 +78674,54 @@ protected func InputCallback(string answer, int player)
         app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
             metadata,
         ));
+        let player = |id, team, color, original_color, projected_gain, name: &[u8], forced: &[u8]| {
+            let mut player = set_control_test_player(id, team, 0);
+            player.color = color;
+            player.original_color = original_color;
+            player.league_projected_gain = projected_gain;
+            player.name = lc_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+            player.forced_name = lc_engine::LegacyCString::from_bytes(forced.to_vec()).unwrap();
+            player
+        };
+        let mut gain_only = player(50, 0, 0x0000_00f4, 0x0000_00f4, 4, b"History", b"");
+        gain_only.flags =
+            lc_engine::PLAYER_INFO_FLAG_JOINED | lc_engine::PLAYER_INFO_FLAG_REMOVED;
         app.control_player_infos.replace_snapshot(
-            40,
+            50,
             [
                 lc_engine::PlayerInfoControlData {
                     client_id: 3,
                     players: vec![
-                        set_control_test_player(10, 1, 0),
-                        set_control_test_player(20, 1, 0),
-                        set_control_test_player(30, 1, 0),
+                        player(
+                            10,
+                            1,
+                            0x0000_f400,
+                            0x00f4_0000,
+                            6,
+                            b"Alice",
+                            b"Alice (2)",
+                        ),
+                        player(20, 1, 0x0000_00f4, 0x0000_00f4, -1, b"Bob", b""),
+                        player(30, 1, 0x00f4_f400, 0x00f4_f400, 0, b"Cara", b""),
                     ],
                     ..Default::default()
                 },
                 lc_engine::PlayerInfoControlData {
                     client_id: 4,
-                    players: vec![set_control_test_player(40, 2, 0)],
+                    players: vec![player(
+                        40,
+                        2,
+                        0x00f4_0000,
+                        0x00f4_0000,
+                        9,
+                        b"Alice",
+                        b"",
+                    )],
+                    ..Default::default()
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 5,
+                    players: vec![gain_only],
                     ..Default::default()
                 },
             ],
@@ -78479,10 +78749,27 @@ protected func InputCallback(string answer, int player)
         assert_eq!(teams.teams[0].player_ids, vec![20, 30]);
         assert_eq!(teams.teams[1].player_ids, vec![10]);
         assert_eq!(app.control_player_infos.get(10).unwrap().team, 2);
+        assert_eq!(app.control_player_infos.get(10).unwrap().color, 0x00f4_0000);
+        assert!(app
+            .control_player_infos
+            .get(10)
+            .unwrap()
+            .forced_name
+            .is_empty());
+        assert_eq!(
+            app.control_player_infos
+                .client_packet(3)
+                .unwrap()
+                .players
+                .iter()
+                .map(|player| player.league_projected_gain)
+                .collect::<Vec<_>>(),
+            vec![-1, -1, -1],
+        );
 
         let broadcasts = commands.take_broadcast_player_infos();
-        let [updated] = broadcasts.as_slice() else {
-            panic!("expected one rebalanced PlayerInfo packet, got {broadcasts:?}");
+        let [updated, gain_only] = broadcasts.as_slice() else {
+            panic!("expected two final PlayerInfo packets, got {broadcasts:?}");
         };
         assert_eq!((updated.client_id, updated.by_client), (3, 0));
         assert_eq!(
@@ -78495,10 +78782,27 @@ protected func InputCallback(string answer, int player)
             updated
                 .players
                 .iter()
-                .map(|player| (player.id, player.team))
+                .map(|player| {
+                    (
+                        player.id,
+                        player.team,
+                        player.color,
+                        player.forced_name.as_bytes().to_vec(),
+                        player.league_projected_gain,
+                    )
+                })
                 .collect::<Vec<_>>(),
-            vec![(10, 2), (20, 1), (30, 1)],
+            vec![
+                (10, 2, 0x00f4_0000, Vec::new(), -1),
+                (20, 1, 0x0000_00f4, Vec::new(), -1),
+                (30, 1, 0x00f4_f400, Vec::new(), -1),
+            ],
         );
+        assert_eq!((gain_only.client_id, gain_only.by_client), (5, 0));
+        assert_eq!(gain_only.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
+        assert_eq!(gain_only.players.len(), 1);
+        assert_eq!(gain_only.players[0].id, 50);
+        assert_eq!(gain_only.players[0].league_projected_gain, -1);
     }
 
     #[test]

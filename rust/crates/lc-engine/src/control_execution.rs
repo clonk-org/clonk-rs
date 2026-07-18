@@ -1351,6 +1351,7 @@ impl ControlPlayerInfoRegistry {
         let resolver_updated_packets = Self::resolve_player_attribute_conflicts(
             &mut resolving_packets,
             existing_count,
+            Some(existing_count),
             teams,
             restore_players,
             oracle,
@@ -1382,16 +1383,78 @@ impl ControlPlayerInfoRegistry {
         })
     }
 
+    /// Re-run the host's parameterless `C4PlayerInfoList::UpdatePlayerAttributes`
+    /// over every retained packet. Forced restore/team colors are installed
+    /// first, then the complete packet list is conflict-resolved in reverse
+    /// storage order. The registry commits only after resolution succeeds.
+    pub fn refresh_player_attributes(
+        &mut self,
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Result<Vec<PlayerInfoControlData>, TeamColorUpdateError> {
+        let mut updated_clients = self.clients.clone();
+        let mut updated_packets = HashSet::new();
+        for (client_index, client) in updated_clients.iter_mut().enumerate() {
+            for player in &mut client.players {
+                if player.flags & PLAYER_INFO_FLAG_JOINED != 0 {
+                    continue;
+                }
+                let restore_color = (player.savegame_player != 0)
+                    .then(|| {
+                        restore_players
+                            .iter()
+                            .find(|restore| restore.id == player.savegame_player)
+                            .map(|restore| restore.color)
+                    })
+                    .flatten();
+                let team_color = teams
+                    .filter(|teams| teams.team_colors)
+                    .and_then(|teams| teams.teams.iter().find(|team| team.id == player.team))
+                    .map(|team| team.color);
+                if let Some(color) = restore_color.or(team_color) {
+                    if player.color != color {
+                        updated_packets.insert(client_index);
+                    }
+                    player.color = color;
+                }
+            }
+        }
+
+        let primary_count = updated_clients.len();
+        updated_packets.extend(Self::resolve_player_attribute_conflicts(
+            &mut updated_clients,
+            primary_count,
+            None,
+            teams,
+            restore_players,
+            oracle,
+        )?);
+        let touched_clients = updated_clients
+            .iter()
+            .enumerate()
+            .filter_map(|(client_index, client)| {
+                updated_packets
+                    .contains(&client_index)
+                    .then_some(client.client_id)
+            })
+            .collect::<HashSet<_>>();
+        self.clients = updated_clients;
+        Ok(self.client_packets(&touched_clients))
+    }
+
     fn resolve_player_attribute_conflicts(
         packets: &mut [ClientPlayerInfos],
-        existing_count: usize,
+        primary_count: usize,
+        secondary_index: Option<usize>,
         teams: Option<&InitialNetworkTeamMetadata>,
         restore_players: &[ControlPlayerInfoEntry],
         oracle: &mut impl InitialHostTeamAssignmentOracle,
     ) -> Result<HashSet<usize>, TeamColorUpdateError> {
-        let incoming_index = existing_count;
-        let mut check_packets = (0..existing_count).collect::<Vec<_>>();
-        check_packets.push(incoming_index);
+        let mut check_packets = (0..primary_count).collect::<Vec<_>>();
+        if let Some(secondary_index) = secondary_index {
+            check_packets.push(secondary_index);
+        }
         let mut updated_packets = HashSet::new();
 
         while let Some(packet_index) = check_packets.pop() {
@@ -1415,8 +1478,8 @@ impl ControlPlayerInfoRegistry {
                 {
                     Self::resolve_player_color(
                         packets,
-                        existing_count,
-                        incoming_index,
+                        primary_count,
+                        secondary_index,
                         restore_players,
                         packet_index,
                         player_index,
@@ -1431,8 +1494,8 @@ impl ControlPlayerInfoRegistry {
                 {
                     Self::resolve_player_name(
                         packets,
-                        existing_count,
-                        incoming_index,
+                        primary_count,
+                        secondary_index,
                         restore_players,
                         packet_index,
                         player_index,
@@ -1468,8 +1531,8 @@ impl ControlPlayerInfoRegistry {
     #[allow(clippy::too_many_arguments)]
     fn resolve_player_color(
         packets: &mut [ClientPlayerInfos],
-        existing_count: usize,
-        incoming_index: usize,
+        primary_count: usize,
+        secondary_index: Option<usize>,
         restore_players: &[ControlPlayerInfoEntry],
         packet_index: usize,
         player_index: usize,
@@ -1480,8 +1543,8 @@ impl ControlPlayerInfoRegistry {
         loop {
             let marks = Self::mark_attribute_conflicts(
                 packets,
-                existing_count,
-                incoming_index,
+                primary_count,
+                secondary_index,
                 restore_players,
                 packet_index,
                 player_index,
@@ -1524,8 +1587,8 @@ impl ControlPlayerInfoRegistry {
     #[allow(clippy::too_many_arguments)]
     fn resolve_player_name(
         packets: &mut [ClientPlayerInfos],
-        existing_count: usize,
-        incoming_index: usize,
+        primary_count: usize,
+        secondary_index: Option<usize>,
         restore_players: &[ControlPlayerInfoEntry],
         packet_index: usize,
         player_index: usize,
@@ -1536,8 +1599,8 @@ impl ControlPlayerInfoRegistry {
         loop {
             let marks = Self::mark_attribute_conflicts(
                 packets,
-                existing_count,
-                incoming_index,
+                primary_count,
+                secondary_index,
                 restore_players,
                 packet_index,
                 player_index,
@@ -1583,8 +1646,8 @@ impl ControlPlayerInfoRegistry {
     #[allow(clippy::too_many_arguments)]
     fn mark_attribute_conflicts(
         packets: &[ClientPlayerInfos],
-        existing_count: usize,
-        incoming_index: usize,
+        primary_count: usize,
+        secondary_index: Option<usize>,
         restore_players: &[ControlPlayerInfoEntry],
         resolve_packet_index: usize,
         resolve_player_index: usize,
@@ -1594,7 +1657,7 @@ impl ControlPlayerInfoRegistry {
         let resolve = &packets[resolve_packet_index].players[resolve_player_index];
         let mut marks = AttributeConflictMarks::default();
 
-        for packet_index in 0..existing_count {
+        for packet_index in 0..primary_count {
             for (player_index, check) in packets[packet_index].players.iter().enumerate() {
                 Self::mark_attribute_conflict(
                     &mut marks,
@@ -1624,18 +1687,20 @@ impl ControlPlayerInfoRegistry {
                 );
             }
         }
-        for (player_index, check) in packets[incoming_index].players.iter().enumerate() {
-            Self::mark_attribute_conflict(
-                &mut marks,
-                resolve,
-                resolve_packet_index,
-                resolve_player_index,
-                check,
-                Some((incoming_index, player_index)),
-                AttributeBlockingPacket::Resolving(incoming_index),
-                attribute,
-                test_original,
-            );
+        if let Some(secondary_index) = secondary_index {
+            for (player_index, check) in packets[secondary_index].players.iter().enumerate() {
+                Self::mark_attribute_conflict(
+                    &mut marks,
+                    resolve,
+                    resolve_packet_index,
+                    resolve_player_index,
+                    check,
+                    Some((secondary_index, player_index)),
+                    AttributeBlockingPacket::Resolving(secondary_index),
+                    attribute,
+                    test_original,
+                );
+            }
         }
         marks
     }
@@ -2603,6 +2668,22 @@ impl ControlPlayerInfoRegistry {
                 };
                 if player.league_projected_gain != gain {
                     player.league_projected_gain = gain;
+                    touched_clients.insert(client.client_id);
+                }
+            }
+        }
+        self.client_packets(&touched_clients)
+    }
+
+    /// Reset every valid projected league gain and return each changed owner
+    /// once in retained packet order. Native validity is exactly `>= 0`;
+    /// negative sentinel values remain untouched.
+    pub fn reset_league_projected_gains(&mut self) -> Vec<PlayerInfoControlData> {
+        let mut touched_clients = HashSet::new();
+        for client in &mut self.clients {
+            for player in &mut client.players {
+                if player.league_projected_gain >= 0 {
+                    player.league_projected_gain = -1;
                     touched_clients.insert(client.client_id);
                 }
             }
@@ -3609,6 +3690,42 @@ mod tests {
     }
 
     #[test]
+    fn league_projected_gain_reset_clears_nonnegative_values_once_per_owner() {
+        let mut unknown = player(10);
+        unknown.league_projected_gain = -1;
+        let mut other_negative = player(11);
+        other_negative.league_projected_gain = -2;
+        let mut zero = player(20);
+        zero.league_projected_gain = 0;
+        let mut positive = player(21);
+        positive.league_projected_gain = 7;
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 4,
+            players: vec![unknown, other_negative],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 7,
+            flags: CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            players: vec![zero, positive],
+            ..Default::default()
+        });
+
+        let updates = registry.reset_league_projected_gains();
+
+        assert_eq!(registry.get(10).unwrap().league_projected_gain, -1);
+        assert_eq!(registry.get(11).unwrap().league_projected_gain, -2);
+        assert_eq!(registry.get(20).unwrap().league_projected_gain, -1);
+        assert_eq!(registry.get(21).unwrap().league_projected_gain, -1);
+        assert_eq!(
+            updates.iter().map(|packet| packet.client_id).collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert_eq!(updates[0].flags & CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
+    }
+
+    #[test]
     fn recreation_order_contains_only_currently_joined_players() {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(PlayerInfoControlData {
@@ -4332,6 +4449,70 @@ mod tests {
                 .as_bytes(),
             b"Same (3)"
         );
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn retained_attribute_refresh_keeps_readded_packet_updates_in_registry_order() {
+        let named = |id, player_type, name: &[u8], forced_name: &[u8], color| {
+            ControlPlayerInfoEntry {
+                id,
+                player_type,
+                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+                forced_name: LegacyCString::from_bytes(forced_name.to_vec()).unwrap(),
+                color,
+                original_color: color,
+                ..Default::default()
+            }
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 10,
+            players: vec![named(
+                1,
+                PLAYER_INFO_TYPE_USER,
+                b"Same (2)",
+                b"Same (3)",
+                0x00f4_0000,
+            )],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 20,
+            players: vec![named(
+                2,
+                crate::PLAYER_INFO_TYPE_SCRIPT,
+                b"Same",
+                b"Same (3)",
+                0x0000_c800,
+            )],
+            ..Default::default()
+        });
+        let mut fixed = named(3, PLAYER_INFO_TYPE_USER, b"Same", b"", 0x0000_00f4);
+        fixed.flags |= PLAYER_INFO_FLAG_ATTRIBUTES_FIXED;
+        registry.apply(PlayerInfoControlData {
+            client_id: 30,
+            players: vec![fixed],
+            ..Default::default()
+        });
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let updates = registry
+            .refresh_player_attributes(None, &[], &mut oracle)
+            .expect("the retained ordered name re-add is exactly modelled");
+
+        assert_eq!(
+            updates
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        assert!(updates[0].players[0].forced_name.is_empty());
+        assert_eq!(updates[1].players[0].forced_name.as_bytes(), b"Same (3)");
         assert!(oracle.ranges.is_empty());
     }
 
