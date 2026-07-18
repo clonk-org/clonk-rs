@@ -32,6 +32,7 @@ use crate::{
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_ROUTE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const CHASE_TARGET_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
 const HOST_CLIENT_ID: ClientId = 0;
 static RESOURCE_RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
@@ -2551,6 +2552,7 @@ struct HostState {
     closed_routes: crate::post_mortem::ClosedConnectionRouter,
     pending_sync: Vec<lc_engine::ControlPacket>,
     status_barrier: StatusBarrier,
+    last_chase_target_update: Option<tokio::time::Instant>,
     game_started: bool,
     control_mode: i32,
     admission: HostAdmission,
@@ -2926,6 +2928,7 @@ async fn run_host(
         closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
         pending_sync: Vec::new(),
         status_barrier: StatusBarrier::stable(config.initial_status),
+        last_chase_target_update: None,
         game_started: matches!(
             config.initial_status.state,
             NETWORK_STATE_GO | NETWORK_STATE_PAUSE
@@ -2967,6 +2970,17 @@ async fn run_host(
     }
 
     loop {
+        if !state
+            .status_barrier
+            .remotes
+            .values()
+            .any(|remote| *remote == RemoteBarrierState::Chasing)
+        {
+            state.last_chase_target_update = None;
+        }
+        let chase_target_update_deadline = state
+            .last_chase_target_update
+            .map(|last_update| last_update + CHASE_TARGET_UPDATE_INTERVAL);
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
@@ -3184,6 +3198,9 @@ async fn run_host(
                     }
                     HostCommand::Shutdown => break,
                 }
+            }
+            _ = wait_for_chase_target_update(chase_target_update_deadline) => {
+                update_chase_targets(&mut state).await;
             }
             _ = resync_timer.tick() => {
                 request_missing_controls(&mut state).await;
@@ -3651,6 +3668,46 @@ fn mark_join_data_sent(client_id: ClientId, state: &mut HostState) {
     state
         .status_barrier
         .set_remote_state(client_id, RemoteBarrierState::Chasing);
+    if state.last_chase_target_update.is_none() {
+        state.last_chase_target_update = Some(tokio::time::Instant::now());
+    }
+}
+
+async fn wait_for_chase_target_update(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn update_chase_targets(state: &mut HostState) {
+    let chasing_clients = state
+        .status_barrier
+        .remotes
+        .iter()
+        .filter_map(|(client_id, remote)| {
+            (*remote == RemoteBarrierState::Chasing).then_some(*client_id)
+        })
+        .collect::<Vec<_>>();
+    if chasing_clients.is_empty() {
+        state.last_chase_target_update = None;
+        return;
+    }
+
+    let status = NetworkStatus {
+        target_tick: i32::try_from(state.coordinator.current_tick()).unwrap_or(i32::MAX),
+        ..state.status_barrier.status
+    };
+    for client_id in chasing_clients {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Status(status),
+        )
+        .await;
+    }
+    state.last_chase_target_update = Some(tokio::time::Instant::now());
 }
 
 async fn emit_join_data_needed(client_id: ClientId, state: &mut HostState) {
@@ -14057,6 +14114,84 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn chase_target_deadline_waits_exactly_five_seconds() {
+        let deadline = tokio::time::Instant::now() + CHASE_TARGET_UPDATE_INTERVAL;
+        let task = tokio::spawn(wait_for_chase_target_update(Some(deadline)));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(CHASE_TARGET_UPDATE_INTERVAL - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        task.await.unwrap();
+        assert_eq!(tokio::time::Instant::now(), deadline);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn chase_target_timer_arms_only_when_delayed_join_data_is_sent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
+        config.initial_join_snapshot = None;
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut client_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before JoinData was requested"),
+            }
+        }
+
+        tokio::time::advance(CHASE_TARGET_UPDATE_INTERVAL + Duration::from_secs(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !client_task.is_finished(),
+            "connection completed before the host published JoinData"
+        );
+
+        let chase_deadline = tokio::time::Instant::now() + CHASE_TARGET_UPDATE_INTERVAL;
+        host.publish_join_snapshot(snapshot).await.unwrap();
+        let mut client = timeout(EVENT_WAIT, &mut client_task)
+            .await
+            .expect("published JoinData did not release the client")
+            .unwrap()
+            .unwrap();
+        let initial_status = client.take_join_data().unwrap().status;
+        let mut client_events = client.take_event_receiver();
+
+        let remaining = chase_deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(remaining > Duration::from_millis(1));
+        tokio::time::advance(remaining - Duration::from_millis(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_no_queued_client_status(&mut client_events);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let status = wait_for_client_status(&mut client_events).await;
+        assert_eq!(
+            status,
+            NetworkStatus {
+                target_tick: 0,
+                ..initial_status
+            }
+        );
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn direct_client_join_reaches_already_connected_clients_before_new_join_finishes() {
         // CtrlAdd executes CID_ClientJoin as direct control before the host
@@ -14229,6 +14364,158 @@ mod tests {
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_chase_target_updates_only_chasing_clients_and_stops_after_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
+        config.initial_join_snapshot = None;
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let alpha_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Alpha", ParticipantKind::Player),
+        ));
+        let beta_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Beta", ParticipantKind::Player),
+        ));
+        let mut waiting_clients = BTreeSet::new();
+        while waiting_clients.len() < 2 {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::JoinDataNeeded { client_id, .. }) => {
+                    waiting_clients.insert(client_id);
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before both clients needed JoinData"),
+            }
+        }
+
+        let first_deadline = tokio::time::Instant::now() + CHASE_TARGET_UPDATE_INTERVAL;
+        host.publish_join_snapshot(snapshot).await.unwrap();
+        let mut alpha = timeout(EVENT_WAIT, alpha_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut beta = timeout(EVENT_WAIT, beta_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let alpha_id = alpha.client_id();
+        let initial_status = alpha.take_join_data().unwrap().status;
+        let mut alpha_events = alpha.take_event_receiver();
+        let beta_id = beta.client_id();
+        assert_eq!(beta.take_join_data().unwrap().status, initial_status);
+        let mut beta_events = beta.take_event_receiver();
+
+        beta.submit_status_ack(initial_status).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusAck { client_id, status })
+                    if client_id == beta_id && status == initial_status =>
+                {
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before Beta's status acknowledgement"),
+            }
+        }
+        wait_for_client_status_ack(&mut beta_events, initial_status).await;
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x31))
+            .await
+            .unwrap();
+        wait_for_host_ready_tick(&mut host_events, 0).await;
+
+        let remaining = first_deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(remaining > Duration::from_millis(1));
+        tokio::time::advance(remaining - Duration::from_millis(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_no_queued_client_status(&mut alpha_events);
+        assert_no_queued_client_status(&mut beta_events);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let first_update = wait_for_client_status(&mut alpha_events).await;
+        assert_eq!(
+            first_update,
+            NetworkStatus {
+                target_tick: 1,
+                ..initial_status
+            }
+        );
+        let beta_barrier = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Other(101),
+        };
+        host.submit_ready_check(beta_barrier).await.unwrap();
+        assert_no_client_status_through_ready_check(&mut beta_events, beta_barrier).await;
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0x32))
+            .await
+            .unwrap();
+        wait_for_host_ready_tick(&mut host_events, 1).await;
+        let second_deadline = first_deadline + CHASE_TARGET_UPDATE_INTERVAL;
+        let remaining = second_deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(remaining > Duration::from_millis(1));
+        tokio::time::advance(remaining - Duration::from_millis(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_no_queued_client_status(&mut alpha_events);
+        assert_no_queued_client_status(&mut beta_events);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let second_update = wait_for_client_status(&mut alpha_events).await;
+        assert_eq!(
+            second_update,
+            NetworkStatus {
+                target_tick: 2,
+                ..initial_status
+            }
+        );
+        let second_beta_barrier = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Other(102),
+        };
+        host.submit_ready_check(second_beta_barrier).await.unwrap();
+        assert_no_client_status_through_ready_check(&mut beta_events, second_beta_barrier).await;
+
+        alpha.submit_status_ack(second_update).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusAck { client_id, status })
+                    if client_id == alpha_id && status == second_update =>
+                {
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before Alpha's status acknowledgement"),
+            }
+        }
+        wait_for_client_status_ack(&mut alpha_events, second_update).await;
+
+        tokio::time::advance(CHASE_TARGET_UPDATE_INTERVAL).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let stopped_barrier = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Other(103),
+        };
+        host.submit_ready_check(stopped_barrier).await.unwrap();
+        assert_no_client_status_through_ready_check(&mut alpha_events, stopped_barrier).await;
+        assert_no_client_status_through_ready_check(&mut beta_events, stopped_barrier).await;
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -17478,6 +17765,103 @@ mod tests {
             })],
         })
         .expect("test legacy control encodes")
+    }
+
+    fn assert_no_queued_client_status(events: &mut mpsc::Receiver<ClientEvent>) {
+        while let Ok(event) = events.try_recv() {
+            match event {
+                ClientEvent::Status(status) => {
+                    panic!("received chase-target status before its deadline: {status:?}")
+                }
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected while checking chase-target status: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn wait_for_client_status(events: &mut mpsc::Receiver<ClientEvent>) -> NetworkStatus {
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(ClientEvent::Status(status))) => return status,
+                Ok(Some(ClientEvent::Disconnected { reason })) => {
+                    panic!("client disconnected before chase-target status: {reason:?}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("client event stream ended before chase-target status"),
+                Err(_) => panic!("timed out waiting for chase-target status"),
+            }
+        }
+    }
+
+    async fn wait_for_client_status_ack(
+        events: &mut mpsc::Receiver<ClientEvent>,
+        expected: NetworkStatus,
+    ) {
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(ClientEvent::StatusAck(status))) if status == expected => return,
+                Ok(Some(ClientEvent::Disconnected { reason })) => {
+                    panic!("client disconnected before status acknowledgement: {reason:?}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("client event stream ended before status acknowledgement"),
+                Err(_) => panic!("timed out waiting for status acknowledgement"),
+            }
+        }
+    }
+
+    async fn wait_for_host_ready_tick(events: &mut mpsc::Receiver<HostEvent>, tick: Tick) {
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::Ready { packet })) if packet.tick() == tick => return,
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("host transport failed before control tick {tick}: {error}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before control tick {tick}"),
+                Err(_) => panic!("timed out waiting for host control tick {tick}"),
+            }
+        }
+    }
+
+    async fn assert_no_client_status_through_ready_check(
+        events: &mut mpsc::Receiver<ClientEvent>,
+        barrier: ReadyCheckPacket,
+    ) {
+        tokio::time::resume();
+        let outcome = timeout(Duration::from_secs(1), async {
+            loop {
+                match events.recv().await {
+                    Some(ClientEvent::ReadyCheck { packet }) if packet == barrier => return Ok(()),
+                    Some(ClientEvent::Status(status)) => {
+                        return Err(format!(
+                            "non-chasing client received chase-target status: {status:?}"
+                        ));
+                    }
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        return Err(format!(
+                            "client disconnected before ready-check barrier: {reason:?}"
+                        ));
+                    }
+                    Some(_) => continue,
+                    None => {
+                        return Err(
+                            "client event stream ended before ready-check barrier".to_string()
+                        );
+                    }
+                }
+            }
+        })
+        .await;
+        tokio::time::pause();
+
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("{error}"),
+            Err(_) => panic!("timed out waiting for ready-check barrier"),
+        }
     }
 
     async fn raw_client_transport(
