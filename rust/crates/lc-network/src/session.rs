@@ -282,6 +282,7 @@ fn synthetic_join_snapshot(
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    StatusChanged(NetworkStatus),
     StatusCommitted(NetworkStatus),
     StatusAck {
         client_id: ClientId,
@@ -965,6 +966,9 @@ where
 /// Events observed by a connected client.
 #[derive(Debug)]
 pub enum ClientEvent {
+    PingMeasured {
+        round_trip_ms: i32,
+    },
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
     LobbyCountdown {
@@ -4116,6 +4120,7 @@ async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostStat
             BarrierEffect::SetControlMode(mode) => apply_host_control_mode(mode, state).await,
             BarrierEffect::BroadcastStatus(status) => {
                 broadcast_status(status, false, state).await;
+                let _ = state.event_tx.send(HostEvent::StatusChanged(status)).await;
             }
             BarrierEffect::ExecutePendingSyncControls => {
                 if let Ok(control_tick) = Tick::try_from(state.status_barrier.status.target_tick) {
@@ -4791,7 +4796,10 @@ async fn run_client_loop_with_addresses<S>(
                         }
                     }
                     Ok(ControlMessage::Pong(packet)) => {
-                        resource_state.liveness.record_pong(packet);
+                        let round_trip_ms = resource_state.liveness.record_pong(packet);
+                        let _ = event_tx
+                            .send(ClientEvent::PingMeasured { round_trip_ms })
+                            .await;
                     }
                     Ok(ControlMessage::ConnectionRequest(_)) => {
                         let _ = event_tx
@@ -10227,7 +10235,7 @@ mod tests {
         let transport = crate::ControlTransport::new(client_stream);
         let mut host = crate::ControlTransport::new(host_stream);
         let (command_tx, command_rx) = mpsc::channel(4);
-        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(run_client_loop(
             transport,
@@ -10243,7 +10251,12 @@ mod tests {
             other => panic!("expected accepted-session PID_Ping, got {other:?}"),
         };
         assert_eq!(ping.packet_counter, 0);
+        tokio::time::advance(Duration::from_millis(37)).await;
         host.send_message(ControlMessage::Pong(ping)).await.unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::PingMeasured { round_trip_ms: 37 }))
+        ));
 
         shutdown_tx.send(()).unwrap();
         drop(command_tx);
@@ -10761,7 +10774,9 @@ mod tests {
                     assert_eq!((received_id, received), (client_id, status));
                     break;
                 }
-                Some(HostEvent::ClientJoined { .. }) | Some(HostEvent::Direct { .. }) => continue,
+                Some(HostEvent::StatusChanged(_))
+                | Some(HostEvent::ClientJoined { .. })
+                | Some(HostEvent::Direct { .. }) => continue,
                 other => panic!("expected host status ack event, got {other:?}"),
             }
         }
@@ -12613,7 +12628,8 @@ mod tests {
         // Ensure the client loop processed the send before issuing the request.
         while let Ok(Some(event)) = timeout(Duration::from_millis(20), event_rx.recv()).await {
             match event {
-                ClientEvent::Ready { .. }
+                ClientEvent::PingMeasured { .. }
+                | ClientEvent::Ready { .. }
                 | ClientEvent::Direct { .. }
                 | ClientEvent::ExecSync { .. }
                 | ClientEvent::Status(_)
@@ -14206,6 +14222,7 @@ mod tests {
                 | Ok(Some(HostEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(HostEvent::ResourceDeriveUnsupported { .. }))
                 | Ok(Some(HostEvent::StatusAck { .. }))
+                | Ok(Some(HostEvent::StatusChanged(_)))
                 | Ok(Some(HostEvent::SyncScheduled { .. }))
                 | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
@@ -14221,6 +14238,7 @@ mod tests {
         loop {
             match timeout(duration, events.recv()).await {
                 Ok(Some(ClientEvent::Ready { packet })) => break packet,
+                Ok(Some(ClientEvent::PingMeasured { .. })) => continue,
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
                 Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,

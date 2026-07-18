@@ -77,12 +77,20 @@ enum NetworkRole {
 }
 
 const MAX_CONTROL_RATE: i32 = 20;
+const MAX_CONTROL_PRESEND: i32 = 15;
+const DEFAULT_CONTROL_TARGET_FPS: i64 = 38;
 
 /// C4GameControl's frame-to-ControlTick cadence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NetworkControlClock {
     control_tick: i32,
     control_rate: u64,
+    control_sent: i32,
+    control_presend: i32,
+    avg_control_send_time_us: i64,
+    host_round_trip_ms: Option<i32>,
+    target_tick: Option<i32>,
+    local_activated: Option<bool>,
 }
 
 impl NetworkControlClock {
@@ -90,7 +98,92 @@ impl NetworkControlClock {
         Self {
             control_tick: start_tick,
             control_rate: control_rate.clamp(1, MAX_CONTROL_RATE) as u64,
+            control_sent: start_tick.saturating_sub(1),
+            control_presend: 1,
+            avg_control_send_time_us: 0,
+            host_round_trip_ms: None,
+            target_tick: None,
+            local_activated: None,
         }
+    }
+
+    /// Return every local contribution whose predicted execution frame lies
+    /// inside the current PreSend horizon. The cursor is advanced when the
+    /// app queues `FinalizeTick`, matching `DoInput`'s synchronous increment
+    /// of C++ `iControlSent`.
+    pub(crate) fn take_due_ticks(&mut self, frame: u64, activated: bool) -> Vec<i32> {
+        match self.local_activated.replace(activated) {
+            Some(false) if activated => {
+                // C4GameControlNetwork::SetActivated starts at the next
+                // control tick instead of backfilling the inactive interval.
+                self.control_sent = self.control_tick.saturating_sub(1);
+            }
+            _ => {}
+        }
+        if !activated {
+            return Vec::new();
+        }
+
+        // `control_tick` is Rust's next tick to execute. Between cadence
+        // frames that is one ahead of C++ ControlTick, so derive the horizon
+        // from the distance to that next execution instead of applying
+        // C++ getCtrlTick directly to this representation.
+        let phase = frame % self.control_rate;
+        let frames_until_control = if phase == 0 {
+            0
+        } else {
+            self.control_rate - phase
+        };
+        let presend = self.control_presend as u64;
+        let send_through = if presend < frames_until_control {
+            self.control_tick.saturating_sub(1)
+        } else {
+            let additional = (presend - frames_until_control) / self.control_rate;
+            self.control_tick
+                .saturating_add(i32::try_from(additional).unwrap_or(i32::MAX))
+        };
+
+        let mut due = Vec::new();
+        while self.control_sent < send_through
+            && self
+                .target_tick
+                .is_none_or(|target_tick| self.control_sent < target_tick)
+        {
+            self.control_sent = self.control_sent.saturating_add(1);
+            due.push(self.control_sent);
+        }
+        due
+    }
+
+    pub(crate) fn next_unsent_tick(self) -> i32 {
+        self.control_sent.saturating_add(1)
+    }
+
+    pub(crate) fn set_target_tick(&mut self, target_tick: Option<i32>) {
+        self.target_tick = target_tick;
+    }
+
+    /// Store the latest host message-connection Ping/Pong RTT. C++ samples
+    /// that same latest value once per successfully consumed control tick.
+    pub(crate) fn observe_round_trip_ms(&mut self, round_trip_ms: i32) {
+        self.host_round_trip_ms = Some(round_trip_ms);
+    }
+
+    pub(crate) fn control_presend(self) -> i32 {
+        self.control_presend
+    }
+
+    fn update_control_presend(&mut self) {
+        let Some(round_trip_ms) = self.host_round_trip_ms.filter(|rtt| *rtt != 0) else {
+            return;
+        };
+        self.avg_control_send_time_us = (self.avg_control_send_time_us * 149
+            + i64::from(round_trip_ms) * 1_000)
+            / 150;
+        self.control_presend = ((DEFAULT_CONTROL_TARGET_FPS * self.avg_control_send_time_us)
+            / 1_000_000
+            + 1)
+            .clamp(1, i64::from(MAX_CONTROL_PRESEND)) as i32;
     }
 
     /// Current control tick on frames where C4GameControl executes control.
@@ -107,6 +200,7 @@ impl NetworkControlClock {
     /// Keep this independent of the current rate: a CID_Set in that frame may
     /// already have changed the cadence before execution completes.
     pub(crate) fn complete_control_frame(&mut self) {
+        self.update_control_presend();
         self.control_tick = self.control_tick.wrapping_add(1);
     }
 
@@ -116,6 +210,12 @@ impl NetworkControlClock {
         let control_rate = (self.control_rate as i32)
             .saturating_add(delta)
             .clamp(1, MAX_CONTROL_RATE);
+        self.control_rate = control_rate as u64;
+        control_rate
+    }
+
+    pub(crate) fn set_control_rate(&mut self, control_rate: i32) -> i32 {
+        let control_rate = control_rate.clamp(1, MAX_CONTROL_RATE);
         self.control_rate = control_rate as u64;
         control_rate
     }
@@ -321,6 +421,16 @@ type RuntimeHostJoinResult = (
 
 #[cfg(test)]
 impl TestNetworkCommands {
+    pub(crate) fn take_finalized_ticks(&mut self) -> Vec<Tick> {
+        let mut ticks = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::FinalizeTick { tick } = command {
+                ticks.push(tick);
+            }
+        }
+        ticks
+    }
+
     pub(crate) fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
         let mut observed = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -782,6 +892,10 @@ impl TestNetworkCommands {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
+    HostPingMeasured {
+        round_trip_ms: i32,
+    },
+    HostStatusChanged(NetworkStatus),
     JoinData(lc_network::JoinDataEnvelope),
     LeagueRoundResults(lc_network::LeagueRoundResultsPacket),
     LobbyCountdown(lc_network::LobbyCountdownPacket),
@@ -2087,6 +2201,9 @@ async fn handle_host_event(
     _telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        HostEvent::StatusChanged(status) => {
+            let _ = event_tx.send(NetworkEvent::HostStatusChanged(status));
+        }
         HostEvent::StatusCommitted(status) => {
             let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
         }
@@ -2598,6 +2715,9 @@ async fn handle_client_event(
     _telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        ClientEvent::PingMeasured { round_trip_ms } => {
+            let _ = event_tx.send(NetworkEvent::HostPingMeasured { round_trip_ms });
+        }
         ClientEvent::Status(status) => {
             let _ = event_tx.send(NetworkEvent::StatusRequested(status));
         }
@@ -5609,6 +5729,62 @@ mod tests {
         assert_eq!(clock.tick_for_frame(4), Some(10));
         assert_eq!(clock.adjust_control_rate(i32::MAX), MAX_CONTROL_RATE);
         assert_eq!(clock.adjust_control_rate(i32::MIN), 1);
+    }
+
+    #[test]
+    fn control_presend_uses_cpp_rolling_average_and_one_to_fifteen_clamp() {
+        // CalcPerformance retains 149/150 of the previous microsecond
+        // average and adds 1/150 of the latest millisecond RTT. These exact
+        // transition edges distinguish the rolling average from replacing it
+        // with the latest sample (src/C4GameControlNetwork.cpp:382-447).
+        let mut clock = NetworkControlClock::new(0, 1);
+        assert_eq!(clock.control_presend(), 1);
+        clock.observe_round_trip_ms(300);
+        for _ in 0..13 {
+            clock.complete_control_frame();
+        }
+        assert_eq!(clock.control_presend(), 1);
+        clock.complete_control_frame();
+        assert_eq!(clock.control_presend(), 2);
+
+        let mut saturated = NetworkControlClock::new(0, 1);
+        saturated.observe_round_trip_ms(1_000);
+        for _ in 0..68 {
+            saturated.complete_control_frame();
+        }
+        assert_eq!(saturated.control_presend(), 14);
+        saturated.complete_control_frame();
+        assert_eq!(saturated.control_presend(), 15);
+        for _ in 0..150 {
+            saturated.complete_control_frame();
+        }
+        assert_eq!(saturated.control_presend(), 15);
+    }
+
+    #[test]
+    fn control_presend_stops_inclusively_at_target_tick_and_while_inactive() {
+        let mut clock = NetworkControlClock::new(9, 2);
+
+        assert!(clock.take_due_ticks(0, false).is_empty());
+        assert_eq!(clock.take_due_ticks(0, true), vec![9]);
+        clock.complete_control_frame();
+
+        clock.set_target_tick(Some(10));
+        assert_eq!(
+            clock.take_due_ticks(1, true),
+            vec![10],
+            "presend emits the target tick itself"
+        );
+        assert!(clock.take_due_ticks(2, true).is_empty());
+        clock.complete_control_frame();
+        assert!(clock.take_due_ticks(3, true).is_empty());
+
+        clock.set_target_tick(None);
+        assert_eq!(
+            clock.take_due_ticks(3, true),
+            vec![11],
+            "clearing the target resumes one-frame lookahead"
+        );
     }
 
     #[test]

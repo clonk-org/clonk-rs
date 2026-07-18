@@ -20063,12 +20063,16 @@ impl GameApp {
     }
 
     fn local_control_submission_tick(&self) -> Tick {
-        self.executing_ready_tick
-            .map(|tick| tick.saturating_add(1))
-            .or_else(|| {
-                self.network_control_clock
-                    .and_then(|clock| Tick::try_from(clock.current_tick()).ok())
-            })
+        let after_executing = self
+            .executing_ready_tick
+            .map(|tick| tick.saturating_add(1));
+        let next_unsent = self
+            .network_control_clock
+            .and_then(|clock| Tick::try_from(clock.next_unsent_tick()).ok());
+        after_executing
+            .into_iter()
+            .chain(next_unsent)
+            .max()
             .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
     }
 
@@ -22161,6 +22165,9 @@ impl GameApp {
             );
             return Ok(());
         };
+        if let Some(clock) = self.network_control_clock.as_mut() {
+            clock.set_target_tick(None);
+        }
         if status.state == lc_network::NETWORK_STATE_GO {
             let runtime_join_allowed = self.network_mode.as_ref().and_then(|mode| match mode {
                 NetworkMode::Host(HostSettings {
@@ -22965,6 +22972,8 @@ impl GameApp {
                         continue;
                     }
                     let boundary = match &event {
+                        NetworkEvent::HostPingMeasured { .. } => None,
+                        NetworkEvent::HostStatusChanged(_) => None,
                         NetworkEvent::PeerConnected { client_id: 0, .. } => None,
                         NetworkEvent::JoinData(_) => Some("join data"),
                         NetworkEvent::LeagueRoundResults(_) => Some("league round results"),
@@ -22995,6 +23004,16 @@ impl GameApp {
                     continue;
                 }
                 match event {
+                    NetworkEvent::HostPingMeasured { round_trip_ms } => {
+                        if let Some(clock) = self.network_control_clock.as_mut() {
+                            clock.observe_round_trip_ms(round_trip_ms);
+                        }
+                    }
+                    NetworkEvent::HostStatusChanged(status) => {
+                        if let Some(clock) = self.network_control_clock.as_mut() {
+                            clock.set_target_tick(Some(status.target_tick));
+                        }
+                    }
                     NetworkEvent::JoinData(join_data) => {
                         // Game.Parameters is the authoritative client/player
                         // snapshot. Scenario and dynamic resource application
@@ -23123,6 +23142,9 @@ impl GameApp {
                         // local preparation reaches the exact status target
                         // (src/C4Network2.cpp:2053-2086). Do not acknowledge
                         // or commit it from the event-dispatch path.
+                        if let Some(clock) = self.network_control_clock.as_mut() {
+                            clock.set_target_tick(Some(status.target_tick));
+                        }
                         self.network_control_running = false;
                         if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
                             if let Some(requested) =
@@ -28466,6 +28488,9 @@ impl GameApp {
                 self.status_text = format!("Unable to start prepared host: {error}");
                 return Ok(());
             }
+            if let Some(clock) = self.network_control_clock.as_mut() {
+                clock.set_target_tick(Some(target_tick));
+            }
             self.play_ui_sound("Click");
             self.fade_out_game_music();
             self.status_text.clear();
@@ -31248,12 +31273,20 @@ impl GameApp {
             control_mode: self.league_vote_control_mode(),
             target_tick,
         };
-        if let Some(Err(error)) = self
+        match self
             .network
             .as_ref()
             .map(|network| network.change_status(status))
         {
-            tracing::error!(%error, "failed to pause host for league vote");
+            Some(Ok(())) => {
+                if let Some(clock) = self.network_control_clock.as_mut() {
+                    clock.set_target_tick(Some(target_tick));
+                }
+            }
+            Some(Err(error)) => {
+                tracing::error!(%error, "failed to pause host for league vote");
+            }
+            None => {}
         }
         self.league_votes.paused_for_vote = true;
         self.host_reference_paused = true;
@@ -31278,12 +31311,20 @@ impl GameApp {
             control_mode: self.league_vote_control_mode(),
             target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
         };
-        if let Some(Err(error)) = self
+        match self
             .network
             .as_ref()
             .map(|network| network.change_status(status))
         {
-            tracing::error!(%error, "failed to restore host after league vote");
+            Some(Ok(())) => {
+                if let Some(clock) = self.network_control_clock.as_mut() {
+                    clock.set_target_tick(Some(status.target_tick));
+                }
+            }
+            Some(Err(error)) => {
+                tracing::error!(%error, "failed to restore host after league vote");
+            }
+            None => {}
         }
         self.league_votes.paused_for_vote = false;
         self.host_reference_paused = false;
@@ -31595,13 +31636,38 @@ impl GameApp {
                 if self.network.is_some() && !self.network_control_running {
                     return Ok(());
                 }
-                // Local Game.Input is taken only on cadence frames and only
-                // while execution is not halted. Network hosts may also have
-                // requests produced outside the previous update and can
-                // submit them before this tick is finalized.
+                // Prepare local network input every frame. C++ looks ahead by
+                // PreSend frames before its cadence gate, so the aggregate is
+                // normally complete by the frame that wants to execute it.
                 self.flush_pending_remove_player_controls(true)?;
                 if self.network.is_some() {
                     let frame = self.engine.frame();
+                    let local_activated = self
+                        .network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                        .is_some_and(|client_id| self.control_clients.is_activated(client_id));
+                    let due_ticks = match self.network_control_clock.as_mut() {
+                        Some(clock) => clock
+                            .take_due_ticks(frame, local_activated)
+                            .into_iter()
+                            .filter_map(|tick| match Tick::try_from(tick) {
+                                Ok(tick) => Some(tick),
+                                Err(_) => {
+                                    tracing::error!(tick, "negative network presend tick");
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                        None => vec![u32::try_from(frame).unwrap_or(u32::MAX)],
+                    };
+                    let Some(network) = self.network.as_ref() else {
+                        return Ok(());
+                    };
+                    for tick in due_ticks {
+                        network.finalize_tick(tick);
+                    }
+
                     let control_tick = match self.network_control_clock {
                         None => Some(u32::try_from(frame).unwrap_or(u32::MAX)),
                         Some(clock) => match clock.tick_for_frame(frame) {
@@ -31620,10 +31686,6 @@ impl GameApp {
                         if !sync_controls.is_empty() {
                             self.apply_ready_controls(tick, sync_controls)?;
                         }
-                        let Some(network) = self.network.as_ref() else {
-                            return Ok(());
-                        };
-                        network.finalize_tick(tick);
 
                         // Network mode mirrors C4Game::Execute's Prepare gate:
                         // CtrlReady(ControlTick) must succeed or the frame returns
@@ -37332,11 +37394,8 @@ impl GameApp {
         self.engine
             .restore_state(&save.engine_state)
             .context("failed to restore saved engine state")?;
-        if let Some(clock) = self.network_control_clock {
-            self.network_control_clock = Some(NetworkControlClock::new(
-                clock.current_tick(),
-                self.engine.control_rate(),
-            ));
+        if let Some(clock) = self.network_control_clock.as_mut() {
+            clock.set_control_rate(self.engine.control_rate());
         }
         // Savegame runtime players live in C++'s RestorePlayerInfos until
         // current takeover entries absorb their joined ID/flags/team via
@@ -75416,6 +75475,58 @@ protected func InputCallback(string answer, int player)
             .expect("queue next control tick");
         app.update().expect("execute next control tick");
         assert_eq!(app.engine.frame(), 3);
+    }
+
+    #[test]
+    fn network_presends_next_tick_on_the_frame_before_execution() {
+        // With ControlRate 2 and the default one-frame PreSend, tick 10 is
+        // transmitted on non-control frame 1 so a one-frame network trip can
+        // return the complete packet before frame 2 executes it
+        // (src/C4GameControl.cpp:253-258;
+        // src/C4GameControlNetwork.cpp:145-176).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_control_clock = Some(network::NetworkControlClock::new(9, 2));
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(9, 2).expect("valid network timing"),
+        );
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 9,
+                controls: Vec::new(),
+            })
+            .expect("queue initial ready tick");
+        app.update().expect("execute initial control frame");
+        assert_eq!(app.engine.frame(), 1);
+        assert_eq!(commands.take_finalized_ticks(), vec![9]);
+
+        app.update().expect("presend from the intervening frame");
+        assert_eq!(app.engine.frame(), 2);
+        assert_eq!(
+            commands.take_finalized_ticks(),
+            vec![10],
+            "tick 10 must leave one frame before its execution frame"
+        );
+
+        // Deliver the echoed aggregate after that one-frame delay. Frame 2
+        // must execute immediately rather than first submitting tick 10 and
+        // stalling for another round trip.
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 10,
+                controls: Vec::new(),
+            })
+            .expect("return the presend aggregate");
+        app.update().expect("execute the already-ready tick");
+        assert_eq!(app.engine.frame(), 3);
+        assert_eq!(
+            app.network_control_clock
+                .map(network::NetworkControlClock::current_tick),
+            Some(11)
+        );
+        assert!(commands.take_finalized_ticks().is_empty());
     }
 
     #[test]
