@@ -14,10 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    CLIENT_PLAYER_INFO_FLAG_INITIAL, ClientCoreControlData, ControlPlayerInfoEntry,
+    CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED, ClientCoreControlData,
+    ControlPlayerInfoEntry,
     InitialHostTeamAssignmentOracle, InitialNetworkGameData, InitialNetworkTeam,
     InitialNetworkTeamMetadata, LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
-    PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError, TeamColorUpdateError,
     assign_initial_host_player_teams,
 };
 use lc_network::{
@@ -384,6 +385,8 @@ pub enum PrepareHostBootstrapError {
     LocalPlayerPublicationMissing,
     #[error("the selected local player could not be admitted into the scenario player slots")]
     LocalPlayerAdmissionRejected,
+    #[error("initial local player attributes could not be resolved: {0}")]
+    LocalPlayerAttributeConflict(#[source] TeamColorUpdateError),
     #[error("scenario Parameters.txt is nonempty and cannot be applied exactly yet")]
     ScenarioParametersUnsupported,
     #[error("scenario Game.txt has non-player runtime data that cannot be applied exactly yet")]
@@ -751,6 +754,19 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     if generated_team_requested {
         return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
     }
+    let admission = player_allocator
+        .resolve_admitted_player_attributes(
+            initial_host_player_info_control,
+            Some(&team_metadata),
+            &[],
+            team_assignment_oracle,
+        )
+        .map_err(PrepareHostBootstrapError::LocalPlayerAttributeConflict)?;
+    assert!(
+        admission.updated_existing.is_empty(),
+        "a fresh initial-host registry cannot produce retained PlayerInfo updates"
+    );
+    initial_host_player_info_control = admission.admitted;
     let last_player_id = initial_host_player_info_control
         .players
         .iter()
@@ -761,7 +777,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         last_player_id,
         clients: vec![ClientPlayerInfosSnapshot {
             client_id: initial_host_player_info_control.client_id,
-            flags: initial_host_player_info_control.flags,
+            flags: initial_host_player_info_control.flags & !CLIENT_PLAYER_INFO_FLAG_UPDATED,
             players: initial_host_player_info_control.players.clone(),
         }],
     };

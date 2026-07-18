@@ -1,7 +1,7 @@
 use lc_engine::{
     ControlPlayerInfoEntry, ControlPlayerInfoRegistry, InitialHostTeamAssignmentOracle,
     InitialNetworkTeam, InitialNetworkTeamDistribution, InitialNetworkTeamMetadata, LegacyCString,
-    PlayerInfoControlData, PlayerInfoUpdateRequest, TeamColorUpdateError,
+    PlayerInfoAdmission, PlayerInfoControlData, PlayerInfoUpdateRequest, TeamColorUpdateError,
 };
 use thiserror::Error;
 
@@ -141,11 +141,13 @@ impl NetworkTeamAssignmentState {
         player_infos: &mut ControlPlayerInfoRegistry,
         request: PlayerInfoUpdateRequest,
         max_players: usize,
-    ) -> Option<PlayerInfoControlData> {
-        player_infos.admit_remote_request_with_runtime_teams(
+        restore_players: &[ControlPlayerInfoEntry],
+    ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
+        player_infos.admit_remote_request_with_runtime_teams_and_attributes(
             request,
             max_players,
             &mut self.teams,
+            restore_players,
             &mut ProcessInitialHostTeamAssignmentOracle,
         )
     }

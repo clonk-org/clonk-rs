@@ -460,14 +460,14 @@ struct ClientPlayerInfos {
     players: Vec<ControlPlayerInfoEntry>,
 }
 
-/// A TeamColors transition reached the part of
-/// `C4PlayerInfoList::ResolvePlayerAttributeConflicts` that depends on
-/// host-local `AlternateColorDw` or process-random replacement colors. Those
-/// values are deliberately not invented from the synchronized PlayerInfo.
+/// Attribute resolution reached state unavailable from synchronized
+/// `C4PlayerInfo`. Admission receives the process-random oracle explicitly;
+/// only host-local `AlternateColorDw` remains unavailable there. The older
+/// TeamColors-only path also uses this error for its conservative subset.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TeamColorUpdateError {
     #[error(
-        "player {player_id} needs alternate/random color conflict resolution against player {other_player_id}"
+        "player {player_id} may need an unavailable host-local alternate color while resolving a conflict with player {other_player_id}"
     )]
     ConflictResolutionUnavailable {
         player_id: i32,
@@ -480,6 +480,87 @@ pub enum TeamColorUpdateError {
         player_id: i32,
         other_player_id: i32,
     },
+}
+
+/// The host-side result of admitting one `C4ClientPlayerInfos` packet.
+///
+/// `updated_existing` is the ordered `SendUpdatedPlayers` prefix: packets
+/// already retained by the host that conflict resolution changed. `admitted`
+/// remains separate until its own direct `CID_PlrInfo` executes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerInfoAdmission {
+    pub updated_existing: Vec<PlayerInfoControlData>,
+    pub admitted: PlayerInfoControlData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedPlayerAttribute {
+    Color,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributeBlockingPacket {
+    Resolving(usize),
+    Restore,
+}
+
+#[derive(Debug, Default)]
+struct AttributeConflictMarks {
+    current: bool,
+    original: bool,
+    low_priority_original: Option<AttributeBlockingPacket>,
+    original_other_player_id: Option<i32>,
+}
+
+fn player_effective_name(player: &ControlPlayerInfoEntry) -> &[u8] {
+    if !player.league_account.is_empty() {
+        player.league_account.as_bytes()
+    } else if !player.forced_name.is_empty() {
+        player.forced_name.as_bytes()
+    } else {
+        player.name.as_bytes()
+    }
+}
+
+fn c4_name_byte_capital(byte: u8) -> u8 {
+    match byte {
+        b'a'..=b'z' => byte - (b'a' - b'A'),
+        0xe4 => 0xc4,
+        0xf6 => 0xd6,
+        0xfc => 0xdc,
+        _ => byte,
+    }
+}
+
+/// `SEqualNoCase`/`CharCapital` compare raw validated bytes and fold only
+/// ASCII plus the three Latin-1 umlauts used by the original engine.
+fn c4_names_equal(first: &[u8], second: &[u8]) -> bool {
+    first.len() == second.len()
+        && first
+            .iter()
+            .zip(second)
+            .all(|(&first, &second)| c4_name_byte_capital(first) == c4_name_byte_capital(second))
+}
+
+fn generated_forced_player_name(original: &LegacyCString, suffix: i32) -> LegacyCString {
+    let mut bytes = original.as_bytes().to_vec();
+    bytes.extend_from_slice(format!(" ({suffix})").as_bytes());
+    // SetForcedName uses VAL_NameAllowEmpty, whose only reachable change for
+    // an already-validated original plus this ASCII suffix is C4MaxName's
+    // byte-length truncation.
+    bytes.truncate(30);
+    LegacyCString::from_bytes(bytes)
+        .expect("a validated player name plus an ASCII suffix contains no NUL")
+}
+
+fn generate_random_player_color(oracle: &mut impl InitialHostTeamAssignmentOracle) -> u32 {
+    let mut channel = || oracle.safe_random(302).min(256) as u8;
+    let red = channel();
+    let green = channel();
+    let blue = channel();
+    // StdColors.h's RGB helper stores the first component in the low byte.
+    u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16)
 }
 
 impl ControlPlayerInfoRegistry {
@@ -526,6 +607,259 @@ impl ControlPlayerInfoRegistry {
                 assign_initial_player_teams(teams, players, oracle, false);
             }
         })
+    }
+
+    /// Reject the synchronized shifted-color states whose missing host-local
+    /// alternate could make a later admission non-transactional. This check
+    /// deliberately runs before team assignment or process-random draws.
+    ///
+    /// It is conservative when another mutable current-color conflict could
+    /// randomize before a shifted row is revisited: such rare packets are
+    /// rejected even if one particular random sequence would avoid the
+    /// shifted row's original color.
+    fn preflight_player_attribute_admission(
+        &self,
+        incoming_players: &[ControlPlayerInfoEntry],
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        include_possible_team_colors: bool,
+    ) -> Result<(), TeamColorUpdateError> {
+        let mut players = Vec::new();
+        let mut existing_packet_ranges = Vec::new();
+        for client in &self.clients {
+            let start = players.len();
+            players.extend(client.players.iter());
+            existing_packet_ranges.push((start, players.len()));
+        }
+        let incoming_start = players.len();
+        players.extend(incoming_players);
+        let mut processing_rank = vec![usize::MAX; players.len()];
+        let mut next_rank = 0;
+        for player_index in incoming_start..players.len() {
+            processing_rank[player_index] = next_rank;
+            next_rank += 1;
+        }
+        for &(start, end) in existing_packet_ranges.iter().rev() {
+            for player_index in start..end {
+                processing_rank[player_index] = next_rank;
+                next_rank += 1;
+            }
+        }
+        let shifted_players = players
+            .iter()
+            .enumerate()
+            .filter_map(|(player_index, &player)| {
+                (Self::player_color_is_resolver_mutable(player, teams)
+                    && player.color != player.original_color)
+                    .then_some((player_index, player))
+            })
+            .collect::<Vec<_>>();
+        if shifted_players.is_empty() {
+            return Ok(());
+        }
+        let shifted_indices = shifted_players
+            .iter()
+            .map(|(player_index, _)| *player_index)
+            .collect::<HashSet<_>>();
+        for &(shifted_index, shifted) in &shifted_players {
+            let mut original_marks = AttributeConflictMarks::default();
+            for (other_index, &other) in players.iter().enumerate() {
+                if other_index == shifted_index {
+                    continue;
+                }
+                Self::mark_attribute_conflict(
+                    &mut original_marks,
+                    shifted,
+                    usize::MAX,
+                    usize::MAX,
+                    other,
+                    None,
+                    AttributeBlockingPacket::Restore,
+                    ResolvedPlayerAttribute::Color,
+                    true,
+                );
+            }
+            for other in restore_players {
+                Self::mark_attribute_conflict(
+                    &mut original_marks,
+                    shifted,
+                    usize::MAX,
+                    usize::MAX,
+                    other,
+                    None,
+                    AttributeBlockingPacket::Restore,
+                    ResolvedPlayerAttribute::Color,
+                    true,
+                );
+            }
+            if original_marks.original
+                || (shifted_players.len() > 1
+                    && original_marks.low_priority_original.is_some())
+            {
+                return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                    player_id: shifted.id,
+                    other_player_id: original_marks.original_other_player_id.unwrap_or(0),
+                });
+            }
+
+            if include_possible_team_colors {
+                if let Some(team_color_blocker) = teams
+                    .filter(|teams| teams.team_colors)
+                    .and_then(|teams| {
+                        teams.teams.iter().find(|team| {
+                            player_colors_conflict(shifted.original_color, team.color)
+                        })
+                    })
+                {
+                    return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                        player_id: shifted.id,
+                        other_player_id: team_color_blocker
+                            .player_ids
+                            .first()
+                            .copied()
+                            .unwrap_or(0),
+                    });
+                }
+            }
+        }
+        for (shifted_offset, (_, shifted)) in shifted_players.iter().enumerate() {
+            if let Some((_, other)) = shifted_players
+                .iter()
+                .skip(shifted_offset + 1)
+                .find(|(_, other)| {
+                    player_colors_conflict(shifted.original_color, other.original_color)
+                })
+            {
+                return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                    player_id: shifted.id,
+                    other_player_id: other.id,
+                });
+            }
+        }
+
+        let randomization_conflict = players.iter().enumerate().find_map(
+            |(player_index, &player)| {
+                if shifted_indices.contains(&player_index)
+                    || !Self::player_color_is_resolver_mutable(player, teams)
+                {
+                    return None;
+                }
+                players
+                    .iter()
+                    .enumerate()
+                    .find(|(other_index, other)| {
+                        *other_index != player_index
+                            && (!shifted_indices.contains(other_index)
+                                || processing_rank[*other_index]
+                                    >= processing_rank[player_index])
+                            && (player.id == 0 || player.id != other.id)
+                            && player_info_uses_color(other)
+                            && player_colors_conflict(player.color, other.color)
+                    })
+                    .map(|(_, other)| other.id)
+                    .or_else(|| {
+                        restore_players
+                            .iter()
+                            .find(|other| {
+                                (player.id == 0 || player.id != other.id)
+                                    && player_info_uses_color(other)
+                                    && player_colors_conflict(player.color, other.color)
+                            })
+                            .map(|other| other.id)
+                    })
+                    .or_else(|| {
+                        include_possible_team_colors.then(|| teams)
+                            .flatten()
+                            .filter(|teams| teams.team_colors)
+                            .and_then(|teams| {
+                                teams.teams.iter().find(|team| {
+                                    player_colors_conflict(player.color, team.color)
+                                })
+                            })
+                            .map(|team| team.player_ids.first().copied().unwrap_or(0))
+                    })
+            },
+        );
+        if let Some(other_player_id) = randomization_conflict {
+            return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                player_id: shifted_players[0].1.id,
+                other_player_id,
+            });
+        }
+        Ok(())
+    }
+
+    /// Transactionally allocate and resolve one admission whose team fields
+    /// are already final. `None` supplies the no-team-list host path.
+    ///
+    /// On an unavailable host-local alternate-color branch, neither retained
+    /// packets nor the player-ID high-water mark are changed.
+    pub fn admit_request_with_attributes(
+        &mut self,
+        request: PlayerInfoUpdateRequest,
+        max_players: usize,
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
+        let mut updated_registry = self.clone();
+        let Some(admitted) = updated_registry.admit_request(request, max_players) else {
+            return Ok(None);
+        };
+        let admission = updated_registry.resolve_admitted_player_attributes(
+            admitted,
+            teams,
+            restore_players,
+            oracle,
+        )?;
+        *self = updated_registry;
+        Ok(Some(admission))
+    }
+
+    /// Transactionally execute the remote runtime order: allocate IDs,
+    /// assign Random/RandomInvisible teams, then update and resolve player
+    /// attributes. The retained registry and team list commit together.
+    pub fn admit_remote_request_with_runtime_teams_and_attributes(
+        &mut self,
+        request: PlayerInfoUpdateRequest,
+        max_players: usize,
+        teams: &mut InitialNetworkTeamMetadata,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
+        let mut updated_registry = self.clone();
+        let mut updated_teams = teams.clone();
+        let Some(mut admitted) = updated_registry.admit_request(request, max_players) else {
+            return Ok(None);
+        };
+        let assign_runtime_teams = matches!(
+            updated_teams.team_distribution,
+            InitialNetworkTeamDistribution::Random
+                | InitialNetworkTeamDistribution::RandomInvisible
+        );
+        updated_registry.preflight_player_attribute_admission(
+            &admitted.players,
+            Some(&updated_teams),
+            restore_players,
+            assign_runtime_teams,
+        )?;
+        if assign_runtime_teams {
+            assign_initial_player_teams(
+                &mut updated_teams,
+                &mut admitted.players,
+                oracle,
+                false,
+            );
+        }
+        let admission = updated_registry.resolve_admitted_player_attributes(
+            admitted,
+            Some(&updated_teams),
+            restore_players,
+            oracle,
+        )?;
+        *self = updated_registry;
+        *teams = updated_teams;
+        Ok(Some(admission))
     }
 
     /// Reconciles each ordered team's membership against the complete player
@@ -717,6 +1051,442 @@ impl ControlPlayerInfoRegistry {
         }
 
         self.snapshot_client_packets(&touched_clients)
+    }
+
+    /// Resolve attributes after a caller has allocated IDs and completed any
+    /// team assignment that must precede `UpdatePlayerAttributes`. Existing
+    /// retained packets commit only after the complete resolver succeeds;
+    /// the admitted packet remains separate in the returned result.
+    pub fn resolve_admitted_player_attributes(
+        &mut self,
+        mut admitted: PlayerInfoControlData,
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Result<PlayerInfoAdmission, TeamColorUpdateError> {
+        let mut admitted_forced_color_changed = false;
+        for player in &mut admitted.players {
+            if player.flags & PLAYER_INFO_FLAG_JOINED != 0 {
+                continue;
+            }
+            let restore_color = (player.savegame_player != 0)
+                .then(|| {
+                    restore_players
+                        .iter()
+                        .find(|restore| restore.id == player.savegame_player)
+                        .map(|restore| restore.color)
+                })
+                .flatten();
+            let team_color = teams
+                .filter(|teams| teams.team_colors)
+                .and_then(|teams| teams.teams.iter().find(|team| team.id == player.team))
+                .map(|team| team.color);
+            if let Some(color) = restore_color.or(team_color) {
+                admitted_forced_color_changed |= player.color != color;
+                player.color = color;
+            }
+        }
+        self.preflight_player_attribute_admission(
+            &admitted.players,
+            teams,
+            restore_players,
+            false,
+        )?;
+
+        let existing_count = self.clients.len();
+        let mut resolving_packets = self.clients.clone();
+        resolving_packets.push(ClientPlayerInfos {
+            client_id: admitted.client_id,
+            flags: admitted.flags,
+            players: admitted.players,
+        });
+        let resolver_updated_packets = Self::resolve_player_attribute_conflicts(
+            &mut resolving_packets,
+            existing_count,
+            teams,
+            restore_players,
+            oracle,
+        )?;
+
+        let resolved_admitted = resolving_packets
+            .pop()
+            .expect("the admitted packet was appended to the resolver");
+        let touched_clients = resolving_packets
+            .iter()
+            .enumerate()
+            .filter_map(|(packet_index, packet)| {
+                resolver_updated_packets
+                    .contains(&packet_index)
+                    .then_some(packet.client_id)
+            })
+            .collect::<HashSet<_>>();
+        self.clients = resolving_packets;
+        let updated_existing = self.snapshot_client_packets(&touched_clients);
+
+        admitted.players = resolved_admitted.players;
+        if admitted_forced_color_changed || resolver_updated_packets.contains(&existing_count) {
+            admitted.flags |= CLIENT_PLAYER_INFO_FLAG_UPDATED;
+        }
+        Ok(PlayerInfoAdmission {
+            updated_existing,
+            admitted,
+        })
+    }
+
+    fn resolve_player_attribute_conflicts(
+        packets: &mut [ClientPlayerInfos],
+        existing_count: usize,
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Result<HashSet<usize>, TeamColorUpdateError> {
+        let incoming_index = existing_count;
+        let mut check_packets = (0..existing_count).collect::<Vec<_>>();
+        check_packets.push(incoming_index);
+        let mut updated_packets = HashSet::new();
+
+        while let Some(packet_index) = check_packets.pop() {
+            let packet_players_before = packets[packet_index].players.clone();
+            let player_count = packets[packet_index].players.len();
+            for player_index in 0..player_count {
+                if packets[packet_index].players[player_index].flags & PLAYER_INFO_FLAG_JOINED != 0
+                {
+                    continue;
+                }
+
+                let attributes_fixed = packets[packet_index].players[player_index].flags
+                    & PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+                    != 0;
+                if !attributes_fixed
+                    && packets[packet_index].players[player_index].savegame_player == 0
+                    && !Self::player_has_forced_team_color(
+                        &packets[packet_index].players[player_index],
+                        teams,
+                    )
+                {
+                    Self::resolve_player_color(
+                        packets,
+                        existing_count,
+                        incoming_index,
+                        restore_players,
+                        packet_index,
+                        player_index,
+                        &mut check_packets,
+                        oracle,
+                    )?;
+                }
+                if !attributes_fixed
+                    && packets[packet_index].players[player_index]
+                        .league_account
+                        .is_empty()
+                {
+                    Self::resolve_player_name(
+                        packets,
+                        existing_count,
+                        incoming_index,
+                        restore_players,
+                        packet_index,
+                        player_index,
+                        &mut check_packets,
+                    );
+                }
+            }
+            if packets[packet_index].players != packet_players_before {
+                updated_packets.insert(packet_index);
+            }
+        }
+        Ok(updated_packets)
+    }
+
+    fn player_has_forced_team_color(
+        player: &ControlPlayerInfoEntry,
+        teams: Option<&InitialNetworkTeamMetadata>,
+    ) -> bool {
+        teams.is_some_and(|teams| {
+            teams.team_colors && teams.teams.iter().any(|team| team.id == player.team)
+        })
+    }
+
+    fn player_color_is_resolver_mutable(
+        player: &ControlPlayerInfoEntry,
+        teams: Option<&InitialNetworkTeamMetadata>,
+    ) -> bool {
+        player.flags & (PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_ATTRIBUTES_FIXED) == 0
+            && player.savegame_player == 0
+            && !Self::player_has_forced_team_color(player, teams)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_player_color(
+        packets: &mut [ClientPlayerInfos],
+        existing_count: usize,
+        incoming_index: usize,
+        restore_players: &[ControlPlayerInfoEntry],
+        packet_index: usize,
+        player_index: usize,
+        check_packets: &mut Vec<usize>,
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Result<(), TeamColorUpdateError> {
+        let mut tries = 0;
+        loop {
+            let marks = Self::mark_attribute_conflicts(
+                packets,
+                existing_count,
+                incoming_index,
+                restore_players,
+                packet_index,
+                player_index,
+                ResolvedPlayerAttribute::Color,
+                tries == 0,
+            );
+            let player = &packets[packet_index].players[player_index];
+            let current = player.color;
+            let original = player.original_color;
+
+            if tries == 0 && current != original {
+                if !marks.original {
+                    packets[packet_index].players[player_index].color = original;
+                    Self::readd_blocking_packet(check_packets, marks.low_priority_original);
+                    break;
+                }
+                // AlternateColorDw is host-local and is not present in the
+                // synchronized Rust row. This is the sole branch where its
+                // value can change native behavior: current differs from the
+                // original and the original cannot be reclaimed.
+                return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                    player_id: player.id,
+                    other_player_id: marks.original_other_player_id.unwrap_or(0),
+                });
+            }
+            if !marks.current {
+                break;
+            }
+            tries += 1;
+            if tries > 100 {
+                packets[packet_index].players[player_index].color = original;
+                break;
+            }
+            packets[packet_index].players[player_index].color =
+                generate_random_player_color(oracle);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_player_name(
+        packets: &mut [ClientPlayerInfos],
+        existing_count: usize,
+        incoming_index: usize,
+        restore_players: &[ControlPlayerInfoEntry],
+        packet_index: usize,
+        player_index: usize,
+        check_packets: &mut Vec<usize>,
+    ) {
+        let mut tries = 0;
+        let mut original_conflict = false;
+        loop {
+            let marks = Self::mark_attribute_conflicts(
+                packets,
+                existing_count,
+                incoming_index,
+                restore_players,
+                packet_index,
+                player_index,
+                ResolvedPlayerAttribute::Name,
+                tries == 0,
+            );
+            if tries == 0 {
+                original_conflict = marks.original;
+            }
+            let player = &packets[packet_index].players[player_index];
+            if !c4_names_equal(player_effective_name(player), player.name.as_bytes())
+                && !original_conflict
+            {
+                packets[packet_index].players[player_index].forced_name = LegacyCString::default();
+                Self::readd_blocking_packet(check_packets, marks.low_priority_original);
+                break;
+            }
+            if !marks.current {
+                break;
+            }
+            tries += 1;
+            if tries > 100 {
+                break;
+            }
+            let original = packets[packet_index].players[player_index].name.clone();
+            packets[packet_index].players[player_index].forced_name =
+                generated_forced_player_name(&original, tries + 1);
+        }
+    }
+
+    fn readd_blocking_packet(
+        check_packets: &mut Vec<usize>,
+        blocking_packet: Option<AttributeBlockingPacket>,
+    ) {
+        let Some(AttributeBlockingPacket::Resolving(packet_index)) = blocking_packet else {
+            return;
+        };
+        if !check_packets.contains(&packet_index) {
+            check_packets.push(packet_index);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mark_attribute_conflicts(
+        packets: &[ClientPlayerInfos],
+        existing_count: usize,
+        incoming_index: usize,
+        restore_players: &[ControlPlayerInfoEntry],
+        resolve_packet_index: usize,
+        resolve_player_index: usize,
+        attribute: ResolvedPlayerAttribute,
+        test_original: bool,
+    ) -> AttributeConflictMarks {
+        let resolve = &packets[resolve_packet_index].players[resolve_player_index];
+        let mut marks = AttributeConflictMarks::default();
+
+        for packet_index in 0..existing_count {
+            for (player_index, check) in packets[packet_index].players.iter().enumerate() {
+                Self::mark_attribute_conflict(
+                    &mut marks,
+                    resolve,
+                    resolve_packet_index,
+                    resolve_player_index,
+                    check,
+                    Some((packet_index, player_index)),
+                    AttributeBlockingPacket::Resolving(packet_index),
+                    attribute,
+                    test_original,
+                );
+            }
+        }
+        if attribute == ResolvedPlayerAttribute::Color {
+            for check in restore_players {
+                Self::mark_attribute_conflict(
+                    &mut marks,
+                    resolve,
+                    resolve_packet_index,
+                    resolve_player_index,
+                    check,
+                    None,
+                    AttributeBlockingPacket::Restore,
+                    attribute,
+                    test_original,
+                );
+            }
+        }
+        for (player_index, check) in packets[incoming_index].players.iter().enumerate() {
+            Self::mark_attribute_conflict(
+                &mut marks,
+                resolve,
+                resolve_packet_index,
+                resolve_player_index,
+                check,
+                Some((incoming_index, player_index)),
+                AttributeBlockingPacket::Resolving(incoming_index),
+                attribute,
+                test_original,
+            );
+        }
+        marks
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mark_attribute_conflict(
+        marks: &mut AttributeConflictMarks,
+        resolve: &ControlPlayerInfoEntry,
+        resolve_packet_index: usize,
+        resolve_player_index: usize,
+        check: &ControlPlayerInfoEntry,
+        check_location: Option<(usize, usize)>,
+        check_packet: AttributeBlockingPacket,
+        attribute: ResolvedPlayerAttribute,
+        test_original: bool,
+    ) {
+        if check_location == Some((resolve_packet_index, resolve_player_index))
+            || (resolve.id != 0 && resolve.id == check.id)
+            || !Self::player_uses_attribute(check, attribute)
+        {
+            return;
+        }
+
+        let resolve_has_higher_priority =
+            Self::player_attribute_priority_difference(resolve, check) > 0;
+        if !resolve_has_higher_priority
+            && Self::players_have_current_attribute_conflict(resolve, check, attribute)
+        {
+            marks.current = true;
+        }
+        if !test_original
+            || !Self::players_have_original_attribute_conflict(resolve, check, attribute)
+        {
+            return;
+        }
+        marks.original_other_player_id.get_or_insert(check.id);
+        if resolve_has_higher_priority && !marks.original && marks.low_priority_original.is_none() {
+            marks.low_priority_original = Some(check_packet);
+        } else {
+            marks.low_priority_original = None;
+            marks.original = true;
+        }
+    }
+
+    fn player_uses_attribute(
+        player: &ControlPlayerInfoEntry,
+        attribute: ResolvedPlayerAttribute,
+    ) -> bool {
+        if player.flags & PLAYER_INFO_FLAG_REMOVED != 0 {
+            return false;
+        }
+        match attribute {
+            ResolvedPlayerAttribute::Color => player.savegame_player == 0,
+            ResolvedPlayerAttribute::Name => player.league_account.is_empty(),
+        }
+    }
+
+    fn player_attribute_priority_difference(
+        first: &ControlPlayerInfoEntry,
+        second: &ControlPlayerInfoEntry,
+    ) -> i32 {
+        if first.is_joined() {
+            return i32::from(!second.is_joined());
+        }
+        if second.is_joined() {
+            return -1;
+        }
+        let type_difference = i32::from(second.player_type) - i32::from(first.player_type);
+        if type_difference != 0 {
+            return type_difference;
+        }
+        first.league_score.wrapping_sub(second.league_score)
+    }
+
+    fn players_have_current_attribute_conflict(
+        first: &ControlPlayerInfoEntry,
+        second: &ControlPlayerInfoEntry,
+        attribute: ResolvedPlayerAttribute,
+    ) -> bool {
+        match attribute {
+            ResolvedPlayerAttribute::Color => player_colors_conflict(first.color, second.color),
+            ResolvedPlayerAttribute::Name => {
+                c4_names_equal(player_effective_name(first), player_effective_name(second))
+            }
+        }
+    }
+
+    fn players_have_original_attribute_conflict(
+        resolve: &ControlPlayerInfoEntry,
+        check: &ControlPlayerInfoEntry,
+        attribute: ResolvedPlayerAttribute,
+    ) -> bool {
+        match attribute {
+            ResolvedPlayerAttribute::Color => {
+                player_colors_conflict(check.color, resolve.original_color)
+            }
+            ResolvedPlayerAttribute::Name => {
+                c4_names_equal(player_effective_name(check), resolve.name.as_bytes())
+            }
+        }
     }
 
     /// Apply the exactly modelled portion of
@@ -971,7 +1741,9 @@ impl ControlPlayerInfoRegistry {
             .filter(|client| client_ids.contains(&client.client_id))
             .map(|client| PlayerInfoControlData {
                 client_id: client.client_id,
-                flags: client.flags,
+                // SendUpdatedPlayers resets the host-local marker before it
+                // constructs the direct control packet.
+                flags: client.flags & !CLIENT_PLAYER_INFO_FLAG_UPDATED,
                 players: client.players.clone(),
                 by_client: 0,
             })
@@ -1174,6 +1946,23 @@ impl ControlPlayerInfoRegistry {
             .find(|client| client.client_id == client_id)
             .map(|client| client.players.iter().map(|player| player.id).collect())
             .unwrap_or_default()
+    }
+
+    /// Clone one retained client packet for a host-authored follow-up direct
+    /// control. Stored rows are authoritative; AddPlayers and the host-local
+    /// Updated marker are never emitted on this clean snapshot.
+    pub fn client_packet(&self, client_id: i32) -> Option<PlayerInfoControlData> {
+        self.clients
+            .iter()
+            .find(|client| client.client_id == client_id)
+            .map(|client| PlayerInfoControlData {
+                client_id,
+                flags: client.flags
+                    & !(CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+                        | CLIENT_PLAYER_INFO_FLAG_UPDATED),
+                players: client.players.clone(),
+                by_client: 0,
+            })
     }
 
     /// Empty Initial packets are semantically present in C++ and mark a
@@ -2495,6 +3284,589 @@ mod tests {
             panic!("expected one admitted player");
         };
         assert_eq!(admitted_player.id, 8);
+    }
+
+    #[test]
+    fn admission_resolves_incoming_duplicate_name_with_c4_byte_folding() {
+        let named = |id, name: &[u8], color| ControlPlayerInfoEntry {
+            id,
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            color,
+            original_color: color,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 1,
+            players: vec![named(1, b"\xc4lice", 0x00f4_0000)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(1);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![named(0, b"\xe4LICE", 0x0000_00f4)],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("the deterministic name cascade is available")
+            .expect("the player is admitted");
+
+        assert!(admission.updated_existing.is_empty());
+        assert_eq!(admission.admitted.players[0].id, 2);
+        assert_eq!(
+            admission.admitted.players[0].forced_name.as_bytes(),
+            b"\xe4LICE (2)"
+        );
+        assert_ne!(
+            admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
+        assert!(registry.get(2).is_none(), "the direct control applies it later");
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn higher_priority_incoming_name_displaces_existing_packets_in_registry_order() {
+        let named = |id, player_type, color| ControlPlayerInfoEntry {
+            id,
+            player_type,
+            name: LegacyCString::from_bytes(b"Same".to_vec()).unwrap(),
+            color,
+            original_color: color,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 9,
+            flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![named(1, crate::PLAYER_INFO_TYPE_SCRIPT, 0x00f4_0000)],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![named(2, crate::PLAYER_INFO_TYPE_SCRIPT, 0x0000_c800)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(2);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 7,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![named(0, PLAYER_INFO_TYPE_USER, 0x0000_00f4)],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("name resolution succeeds")
+            .expect("the player is admitted");
+
+        assert_eq!(
+            admission
+                .updated_existing
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
+            vec![9, 3]
+        );
+        assert_eq!(
+            admission.updated_existing[0].players[0]
+                .forced_name
+                .as_bytes(),
+            b"Same (3)"
+        );
+        assert_eq!(
+            admission.updated_existing[1].players[0]
+                .forced_name
+                .as_bytes(),
+            b"Same (2)"
+        );
+        assert_eq!(admission.updated_existing[0].flags, CLIENT_PLAYER_INFO_FLAG_INITIAL);
+        assert_eq!(
+            admission.admitted.players[0].forced_name.as_bytes(),
+            b""
+        );
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn readded_packet_keeps_updated_marker_after_returning_to_initial_bytes() {
+        let named = |id, player_type, name: &[u8], forced_name: &[u8], color| {
+            ControlPlayerInfoEntry {
+                id,
+                player_type,
+                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+                forced_name: LegacyCString::from_bytes(forced_name.to_vec()).unwrap(),
+                color,
+                original_color: color,
+                ..Default::default()
+            }
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 10,
+            players: vec![named(
+                1,
+                PLAYER_INFO_TYPE_USER,
+                b"Same (2)",
+                b"Same (3)",
+                0x00f4_0000,
+            )],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 20,
+            players: vec![named(
+                2,
+                crate::PLAYER_INFO_TYPE_SCRIPT,
+                b"Same",
+                b"Same (3)",
+                0x0000_c800,
+            )],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(2);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+        let mut fixed_incoming = named(
+            0,
+            PLAYER_INFO_TYPE_USER,
+            b"Same",
+            b"",
+            0x0000_00f4,
+        );
+        fixed_incoming.flags |= PLAYER_INFO_FLAG_ATTRIBUTES_FIXED;
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 30,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![fixed_incoming],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("the ordered name re-add is exactly modelled")
+            .expect("the player is admitted");
+
+        assert_eq!(
+            admission
+                .updated_existing
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        assert!(admission.updated_existing[0].players[0]
+            .forced_name
+            .is_empty());
+        assert_eq!(
+            admission.updated_existing[1].players[0]
+                .forced_name
+                .as_bytes(),
+            b"Same (3)"
+        );
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn admission_color_conflict_uses_three_injected_safe_random_draws() {
+        let named = |id, name: &[u8]| ControlPlayerInfoEntry {
+            id,
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            color: 0x00f4_0000,
+            original_color: 0x00f4_0000,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 1,
+            players: vec![named(1, b"One")],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(1);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [10, 20, 30].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![named(0, b"Two")],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("random replacement color is available")
+            .expect("the player is admitted");
+
+        assert_eq!(oracle.ranges, vec![302, 302, 302]);
+        assert_eq!(admission.admitted.players[0].color, 0x001e_140a);
+        assert_eq!(
+            admission.admitted.players[0].original_color,
+            0x00f4_0000
+        );
+        assert_ne!(
+            admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
+        assert!(admission.updated_existing.is_empty());
+    }
+
+    #[test]
+    fn admission_reclaims_free_original_color_without_random_draws() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 1,
+            players: vec![ControlPlayerInfoEntry {
+                id: 1,
+                name: LegacyCString::from_bytes(b"Existing".to_vec()).unwrap(),
+                color: 0x0000_00f4,
+                original_color: 0x0000_00f4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(1);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Incoming".to_vec()).unwrap(),
+                        color: 0x0000_00f4,
+                        original_color: 0x00f4_0000,
+                        ..Default::default()
+                    }],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("the free original color is exactly modelled")
+            .expect("the player is admitted");
+
+        assert_eq!(admission.admitted.players[0].color, 0x00f4_0000);
+        assert_ne!(
+            admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
+        assert!(admission.updated_existing.is_empty());
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn earlier_unshifted_row_conflicting_with_later_shifted_current_rejects_before_random() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            1,
+            [PlayerInfoControlData {
+                client_id: 1,
+                players: vec![ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"Shifted".to_vec()).unwrap(),
+                    color: 0x0000_00f4,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let before = registry.retained_rows_snapshot();
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [10, 20, 30].into(),
+            ranges: Vec::new(),
+        };
+
+        let error = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Ordinary".to_vec()).unwrap(),
+                        color: 0x0000_00f4,
+                        original_color: 0x0000_00f4,
+                        ..Default::default()
+                    }],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect_err("the earlier row could randomize onto the shifted original");
+
+        assert!(matches!(
+            error,
+            TeamColorUpdateError::ConflictResolutionUnavailable { player_id: 1, .. }
+        ));
+        assert_eq!(registry.retained_rows_snapshot(), before);
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn higher_priority_shifted_color_reclaims_from_one_lower_blocker_and_readds_it() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 1,
+            players: vec![ControlPlayerInfoEntry {
+                id: 1,
+                player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+                name: LegacyCString::from_bytes(b"Lower".to_vec()).unwrap(),
+                color: 0x00f4_0000,
+                original_color: 0x00f4_0000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(1);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [10, 20, 30].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Higher".to_vec()).unwrap(),
+                        color: 0x0000_00f4,
+                        original_color: 0x00f4_0000,
+                        ..Default::default()
+                    }],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("one lower-priority blocker is resolved by native re-add")
+            .expect("the player is admitted");
+
+        assert_eq!(admission.admitted.players[0].color, 0x00f4_0000);
+        assert_ne!(
+            admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
+        assert_eq!(admission.updated_existing.len(), 1);
+        assert_eq!(admission.updated_existing[0].client_id, 1);
+        assert_eq!(admission.updated_existing[0].players[0].color, 0x001e_140a);
+        assert_eq!(oracle.ranges, vec![302, 302, 302]);
+    }
+
+    #[test]
+    fn unavailable_alternate_color_rolls_back_id_and_registry() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            1,
+            [PlayerInfoControlData {
+                client_id: 1,
+                players: vec![ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let before = registry.retained_rows_snapshot();
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let error = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                        color: 0x0000_c800,
+                        original_color: 0x00f4_0000,
+                        ..Default::default()
+                    }],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect_err("the missing host-local alternate can change the result");
+
+        assert_eq!(
+            error,
+            TeamColorUpdateError::ConflictResolutionUnavailable {
+                player_id: 2,
+                other_player_id: 1,
+            }
+        );
+        assert_eq!(registry.retained_rows_snapshot(), before);
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn runtime_team_admission_preflights_alternate_error_before_random_draw() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            1,
+            [PlayerInfoControlData {
+                client_id: 1,
+                players: vec![ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let team = |id| crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color: 0x0010_0000 + u32::try_from(id).unwrap(),
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Random,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![team(1), team(2)],
+        };
+        let teams_before = teams.clone();
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [1].into(),
+            ranges: Vec::new(),
+        };
+
+        let error = registry
+            .admit_remote_request_with_runtime_teams_and_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                        color: 0x0000_c800,
+                        original_color: 0x00f4_0000,
+                        ..Default::default()
+                    }],
+                },
+                8,
+                &mut teams,
+                &[],
+                &mut oracle,
+            )
+            .expect_err("preflight rejects before the random team tie draw");
+
+        assert_eq!(
+            error,
+            TeamColorUpdateError::ConflictResolutionUnavailable {
+                player_id: 2,
+                other_player_id: 1,
+            }
+        );
+        assert_eq!(teams, teams_before);
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn same_client_add_keeps_updated_existing_and_admitted_packets_separate() {
+        let named = |id, player_type, color| ControlPlayerInfoEntry {
+            id,
+            player_type,
+            name: LegacyCString::from_bytes(b"Same".to_vec()).unwrap(),
+            color,
+            original_color: color,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![named(1, crate::PLAYER_INFO_TYPE_SCRIPT, 0x00f4_0000)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(1);
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![named(0, PLAYER_INFO_TYPE_USER, 0x0000_00f4)],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+            )
+            .expect("name resolution succeeds")
+            .expect("the add packet is admitted");
+
+        assert_eq!(admission.updated_existing.len(), 1);
+        assert_eq!(admission.updated_existing[0].client_id, 3);
+        assert_eq!(admission.updated_existing[0].players.len(), 1);
+        assert_eq!(admission.updated_existing[0].players[0].id, 1);
+        assert_eq!(admission.admitted.client_id, 3);
+        assert_eq!(admission.admitted.players.len(), 1);
+        assert_eq!(admission.admitted.players[0].id, 2);
+        assert_eq!(registry.client_info_ids(3), vec![1]);
+        assert!(registry.get(2).is_none());
+        assert!(oracle.ranges.is_empty());
     }
 
     #[test]

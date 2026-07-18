@@ -164,6 +164,7 @@ use object_menu::{
 use offline_startup::{
     OfflineStartupPlayers, offline_player_paths_identical, offline_player_real_path,
 };
+use prepared_host_bootstrap::ProcessInitialHostTeamAssignmentOracle;
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
@@ -8086,6 +8087,26 @@ fn initial_network_max_players(network_mode: Option<&NetworkMode>) -> usize {
             NetworkMode::Host(_) | NetworkMode::Client(_) => None,
         })
         .unwrap_or(DEFAULT_SCENARIO_MAX_PLAYERS)
+}
+
+fn host_restore_player_info_entries(
+    snapshot: Option<&lc_network::HostJoinSnapshot>,
+) -> Vec<lc_engine::ControlPlayerInfoEntry> {
+    snapshot
+        .into_iter()
+        .flat_map(|snapshot| &snapshot.parameters.restore_player_infos.clients)
+        .flat_map(|client| client.players.iter().cloned())
+        .collect()
+}
+
+fn broadcast_player_info_admission(
+    network: &NetworkManager,
+    admission: lc_engine::PlayerInfoAdmission,
+) -> Result<()> {
+    for update in admission.updated_existing {
+        network.broadcast_player_info(update)?;
+    }
+    network.broadcast_player_info(admission.admitted)
 }
 
 fn synchronized_parameters_are_league(parameters: &lc_network::JoinGameParametersEnvelope) -> bool {
@@ -22336,20 +22357,25 @@ impl GameApp {
                 .map_err(|error| error.to_string());
         }
 
-        let info = match self.network_team_assignment.as_mut() {
+        let restore_players = host_restore_player_info_entries(self.host_join_snapshot.as_ref());
+        let admission = match self.network_team_assignment.as_mut() {
             Some(team_assignment) => team_assignment.admit_request(
                 &mut self.control_player_infos,
                 request,
                 self.network_max_players,
+                &restore_players,
             ),
-            None => self
-                .control_player_infos
-                .admit_request(request, self.network_max_players),
+            None => self.control_player_infos.admit_request_with_attributes(
+                request,
+                self.network_max_players,
+                None,
+                &restore_players,
+                &mut ProcessInitialHostTeamAssignmentOracle,
+            ),
         }
+        .map_err(|error| format!("host rejected the runtime player attributes: {error}"))?
         .ok_or_else(|| "host rejected the runtime player request".to_string())?;
-        network
-            .broadcast_player_info(info)
-            .map_err(|error| error.to_string())
+        broadcast_player_info_admission(network, admission).map_err(|error| error.to_string())
     }
 
     fn control_message_has_lobby(&self) -> bool {
@@ -23198,23 +23224,52 @@ impl GameApp {
                         by_host,
                     } => {
                         tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
-                        let info = match (by_host, self.network_team_assignment.as_mut()) {
-                            (false, Some(team_assignment)) => team_assignment.admit_request(
-                                &mut self.control_player_infos,
+                        let restore_players =
+                            host_restore_player_info_entries(self.host_join_snapshot.as_ref());
+                        let admission = if !by_host {
+                            match self.network_team_assignment.as_mut() {
+                                Some(team_assignment) => team_assignment.admit_request(
+                                    &mut self.control_player_infos,
+                                    request,
+                                    self.network_max_players,
+                                    &restore_players,
+                                ),
+                                None => self.control_player_infos.admit_request_with_attributes(
+                                    request,
+                                    self.network_max_players,
+                                    None,
+                                    &restore_players,
+                                    &mut ProcessInitialHostTeamAssignmentOracle,
+                                ),
+                            }
+                        } else {
+                            let teams = self
+                                .network_team_assignment
+                                .as_ref()
+                                .map(|assignment| assignment.teams().clone());
+                            self.control_player_infos.admit_request_with_attributes(
                                 request,
                                 self.network_max_players,
-                            ),
-                            _ => self
-                                .control_player_infos
-                                .admit_request(request, self.network_max_players),
+                                teams.as_ref(),
+                                &restore_players,
+                                &mut ProcessInitialHostTeamAssignmentOracle,
+                            )
                         };
-                        if let Some(info) = info {
-                            if let Some(Err(error)) = self
-                                .network
-                                .as_ref()
-                                .map(|network| network.broadcast_player_info(info))
-                            {
-                                tracing::error!(%error, "failed to broadcast authoritative PlayerInfo");
+                        match admission {
+                            Ok(Some(admission)) => {
+                                if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                                    broadcast_player_info_admission(network, admission)
+                                }) {
+                                    tracing::error!(%error, "failed to broadcast authoritative PlayerInfo");
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    %origin,
+                                    %error,
+                                    "rejected PlayerInfo update with unavailable attribute-conflict state"
+                                );
                             }
                         }
                     }
@@ -23241,10 +23296,30 @@ impl GameApp {
                         }
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
+                            let had_client_packet = self
+                                .control_player_infos
+                                .client_packet(client_id)
+                                .is_some();
+                            let send_clean_follow_up = matches!(
+                                self.network_mode.as_ref(),
+                                Some(NetworkMode::Host(_))
+                            ) && info.by_client == 0
+                                && info.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
+                                && (info.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS == 0
+                                    || !had_client_packet);
                             self.admission_resources
                                 .register_player_info_resources(&info.players);
                             self.control_player_infos.apply(info);
                             self.recheck_team_memberships_from_player_infos();
+                            if send_clean_follow_up {
+                                if let Some(Err(error)) = self.network.as_ref().and_then(|network| {
+                                    self.control_player_infos
+                                        .client_packet(client_id)
+                                        .map(|clean| network.broadcast_player_info(clean))
+                                }) {
+                                    tracing::error!(%error, "failed to broadcast clean PlayerInfo follow-up");
+                                }
+                            }
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
                                 &self.network_league_name,
@@ -71779,6 +71854,196 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn host_player_info_conflict_update_precedes_admission_and_converges_join_data() {
+        // ResolvePlayerAttributeConflicts may change an older, lower-priority
+        // packet while admitting a higher-priority player. SendUpdatedPlayers
+        // submits those retained packets before the new packet's CID_PlrInfo;
+        // each direct control updates the live JoinData projection in the same
+        // order (src/C4Network2Players.cpp:203-239;
+        // src/C4PlayerInfoConflicts.cpp:193-344).
+        let same_name =
+            lc_engine::LegacyCString::from_bytes(b"Same".to_vec()).expect("valid player name");
+        let mut app = new_running_sandbox_app();
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 2,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    name: same_name.clone(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 3,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        name: same_name,
+                        color: 0x0000_00f4,
+                        original_color: 0x0000_00f4,
+                        league_score: 10,
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue conflicting PlayerInfo update request");
+
+        app.process_network_events()
+            .expect("resolve conflicting PlayerInfo request");
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [updated_existing, admitted] = broadcasts.as_slice() else {
+            panic!("expected existing update followed by admitted PlayerInfo");
+        };
+        assert_eq!((updated_existing.client_id, admitted.client_id), (2, 3));
+        assert_eq!(
+            updated_existing.players[0].forced_name.as_bytes(),
+            b"Same (2)"
+        );
+        assert!(admitted.players[0].forced_name.is_empty());
+        assert_eq!(admitted.players[0].id, 2);
+        assert!(
+            app.control_player_infos.get(2).is_none(),
+            "the admitted packet remains pending until its direct control"
+        );
+
+        for info in broadcasts {
+            event_tx
+                .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                    info,
+                )))
+                .expect("queue authoritative direct PlayerInfo");
+        }
+        app.process_network_events()
+            .expect("apply ordered authoritative PlayerInfo controls");
+
+        assert_eq!(
+            app.control_player_infos
+                .get(1)
+                .expect("existing player remains retained")
+                .forced_name
+                .as_bytes(),
+            b"Same (2)"
+        );
+        assert_eq!(
+            app.control_player_infos
+                .get(2)
+                .expect("new player control is applied")
+                .name
+                .as_bytes(),
+            b"Same"
+        );
+        let published = commands.take_published_join_snapshots();
+        assert_eq!(published.len(), 2);
+        let latest = published.last().expect("final JoinData is published");
+        assert_eq!(latest.parameters.player_infos.last_player_id, 2);
+        let existing = latest
+            .parameters
+            .player_infos
+            .clients
+            .iter()
+            .find(|client| client.client_id == 2)
+            .expect("existing client row is published");
+        assert_eq!(existing.players[0].forced_name.as_bytes(), b"Same (2)");
+        let admitted = latest
+            .parameters
+            .player_infos
+            .clients
+            .iter()
+            .find(|client| client.client_id == 3)
+            .expect("admitted client row is published");
+        assert_eq!(admitted.players[0].id, 2);
+        assert_eq!(published.last(), app.host_join_snapshot.as_ref());
+    }
+
+    #[test]
+    fn host_updated_admission_emits_clean_full_follow_up_after_direct_apply() {
+        let same_name =
+            lc_engine::LegacyCString::from_bytes(b"Same".to_vec()).expect("valid player name");
+        let mut app = new_running_sandbox_app();
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 2,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    name: same_name.clone(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    league_score: 10,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        app.host_join_snapshot = lc_network::HostConfig::default().initial_join_snapshot;
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 3,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        name: same_name,
+                        color: 0x0000_00f4,
+                        original_color: 0x0000_00f4,
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue lower-priority duplicate admission");
+        app.process_network_events()
+            .expect("resolve the incoming duplicate name");
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [admitted] = broadcasts.as_slice() else {
+            panic!("expected one updated admitted packet");
+        };
+        assert_ne!(
+            admitted.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
+        assert_eq!(admitted.players[0].forced_name.as_bytes(), b"Same (2)");
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                admitted.clone(),
+            )))
+            .expect("queue updated admitted direct control");
+        app.process_network_events()
+            .expect("apply updated admitted direct control");
+
+        let (clean_follow_ups, published) = commands.take_team_control_updates();
+        let [clean_follow_up] = clean_follow_ups.as_slice() else {
+            panic!("expected one clean full follow-up");
+        };
+        assert_eq!(clean_follow_up.client_id, 3);
+        assert_eq!(
+            clean_follow_up.flags
+                & (lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+                    | lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED),
+            0
+        );
+        assert_eq!(clean_follow_up.players, admitted.players);
+        assert_eq!(published.len(), 1);
+    }
+
+    #[test]
     fn host_direct_remote_player_info_refreshes_join_data_for_later_consumers() {
         // Game.PlayerInfos aliases Game.Parameters.PlayerInfos, and SendJoinData
         // copies those live parameters. A runtime admission therefore has to be
@@ -71890,6 +72155,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                 client_id: 0,
                 players: vec![lc_engine::ControlPlayerInfoEntry {
                     id: 1,
+                    name: lc_engine::LegacyCString::from_bytes(b"Existing".to_vec())
+                        .expect("valid existing player name"),
                     team: 1,
                     ..Default::default()
                 }],
@@ -71925,6 +72192,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                     client_id: 3,
                     flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
                     players: vec![lc_engine::ControlPlayerInfoEntry {
+                        name: lc_engine::LegacyCString::from_bytes(b"New".to_vec())
+                            .expect("valid new player name"),
                         color: original_color,
                         original_color,
                         ..Default::default()

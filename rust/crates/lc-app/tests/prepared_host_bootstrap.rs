@@ -701,6 +701,62 @@ fn selected_players_are_published_and_admitted_in_module_order() {
 }
 
 #[test]
+fn selected_players_resolve_duplicate_names_in_the_initial_host_packet() {
+    // HandlePlayerInfoUpdRequest assigns initial teams before resolving the
+    // complete packet. Equal-priority players are visited in packet order, so
+    // the first duplicate takes the forced-name suffix while the second keeps
+    // its original name (src/C4Network2Players.cpp:189-205;
+    // src/C4PlayerInfoConflicts.cpp:322-344).
+    let fixture = minimal_install(None);
+    let players = [
+        (b"Players.c4f/First.c4p".as_slice(), 15_990_784),
+        (b"Players.c4f/Second.c4p".as_slice(), 244),
+    ];
+    let sources = players
+        .iter()
+        .map(|(wire_name, color)| {
+            let path = fixture
+                .install_roots[0]
+                .join(String::from_utf8_lossy(wire_name).as_ref());
+            fs::create_dir_all(&path).unwrap();
+            fs::write(
+                path.join("Player.txt"),
+                format!("[Player]\nName=Same\n\n[Preferences]\nColorDw={color}\n"),
+            )
+            .unwrap();
+            player_source(path, wire_name)
+        })
+        .collect::<Vec<_>>();
+
+    let prepared = prepare(&fixture, &sources).expect("duplicate names are resolved");
+    let control = prepared.initial_host_player_info_control();
+    assert_eq!(control.players.len(), 2);
+    assert_ne!(
+        control.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED,
+        0,
+        "the direct control retains native's transient update marker"
+    );
+    assert_eq!(control.players[0].name.as_bytes(), b"Same");
+    assert_eq!(control.players[0].forced_name.as_bytes(), b"Same (2)");
+    assert_eq!(control.players[1].name.as_bytes(), b"Same");
+    assert!(control.players[1].forced_name.is_empty());
+    let retained = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters
+        .player_infos
+        .clients[0];
+    assert_eq!(retained.players, control.players);
+    assert_eq!(
+        retained.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED,
+        0,
+        "retained JoinData clears the transient update marker"
+    );
+}
+
+#[test]
 fn unreadable_selected_player_does_not_hide_later_valid_players() {
     // C4ClientPlayerInfos deletes only the C4PlayerInfo whose module fails
     // LoadFromLocalFile, then continues SGetModule with the next index
