@@ -33,6 +33,7 @@ mod session;
 mod status;
 mod transport;
 mod udp;
+mod udp_runtime;
 
 pub use address_packet::{
     append_received_address, decode_address_packet_payload, encode_address_packet_payload,
@@ -180,13 +181,22 @@ pub use transport::{
     NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 pub use udp::{
-    decode_reliable_udp_check, decode_reliable_udp_connect, decode_reliable_udp_connect_ok,
-    decode_reliable_udp_data_fragment, encode_reliable_udp_check, encode_reliable_udp_connect,
-    encode_reliable_udp_connect_ok, encode_reliable_udp_data_fragments, ReliableUdpChannel,
-    ReliableUdpCheck, ReliableUdpConnect, ReliableUdpConnectOk,
+    decode_reliable_udp_check, decode_reliable_udp_close, decode_reliable_udp_connect,
+    decode_reliable_udp_connect_ok, decode_reliable_udp_data_fragment, encode_reliable_udp_check,
+    encode_reliable_udp_close, encode_reliable_udp_connect, encode_reliable_udp_connect_ok,
+    encode_reliable_udp_data_fragments, reliable_udp_packet_kind, ReliableUdpChannel,
+    ReliableUdpCheck, ReliableUdpClose, ReliableUdpConnect, ReliableUdpConnectOk,
     ReliableUdpDataFragment, ReliableUdpDecodeError, ReliableUdpEncodeError,
-    ReliableUdpMulticastMode, ReliableUdpReassembledPacket, ReliableUdpReassemblyError,
-    ReliableUdpReceiveWindow, RELIABLE_UDP_DATA_PAYLOAD_LIMIT, RELIABLE_UDP_PROTOCOL_VERSION,
+    ReliableUdpMulticastMode, ReliableUdpPacketKind, ReliableUdpReassembledPacket,
+    ReliableUdpReassemblyError, ReliableUdpReceiveWindow, RELIABLE_UDP_DATA_PAYLOAD_LIMIT,
+    RELIABLE_UDP_PROTOCOL_VERSION,
+};
+pub use udp_runtime::{
+    canonical_reliable_udp_peer_address, reliable_udp_send_address, ReliableUdpDatagram,
+    ReliableUdpDisconnectReason, ReliableUdpDriverError, ReliableUdpEndpointCore, ReliableUdpEvent,
+    ReliableUdpPeerStatus, ReliableUdpRuntimeError, ReliableUdpSocketDriver, ReliableUdpStep,
+    RELIABLE_UDP_CHECK_INTERVAL, RELIABLE_UDP_CONNECT_RETRIES, RELIABLE_UDP_CONNECT_TIMEOUT,
+    RELIABLE_UDP_OUTGOING_PACKET_CAPACITY,
 };
 
 pub type ClientId = u32;

@@ -12,12 +12,14 @@ const IPID_CONN: u8 = 0x02;
 const IPID_CONN_OK: u8 = 0x03;
 const IPID_DATA: u8 = 0x04;
 const IPID_CHECK: u8 = 0x05;
+const IPID_CLOSE: u8 = 0x06;
 const INTERNAL_PACKET_TYPE_MASK: u8 = 0x7f;
 const BIN_ADDR_SIZE: usize = 19;
 const CONNECT_PACKET_SIZE: usize = 47;
 const CONNECT_OK_PACKET_SIZE: usize = 28;
 const DATA_PACKET_HEADER_SIZE: usize = 13;
 const CHECK_PACKET_HEADER_SIZE: usize = 21;
+const CLOSE_PACKET_SIZE: usize = 24;
 const MAX_DATAGRAM_SIZE: usize = 512;
 const MAX_CHECK_ASK_COUNT: usize = 10;
 
@@ -37,6 +39,18 @@ pub struct ReliableUdpConnect {
     pub multicast_address: Option<SocketAddr>,
 }
 
+impl ReliableUdpConnect {
+    /// Builds the unicast-only request used when multicast is unavailable.
+    pub fn unicast(packet_number: u32, address: SocketAddr) -> Self {
+        Self {
+            packet_number,
+            protocol_version: RELIABLE_UDP_PROTOCOL_VERSION,
+            address,
+            multicast_address: None,
+        }
+    }
+}
+
 /// C++ `ConnOKPacket::MCMode` values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReliableUdpMulticastMode {
@@ -52,6 +66,24 @@ pub struct ReliableUdpConnectOk {
     pub multicast_mode: ReliableUdpMulticastMode,
     /// Source endpoint observed by the peer for the bound UDP socket.
     pub observed_address: SocketAddr,
+}
+
+/// Fields carried by the packed C++ close datagram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReliableUdpClose {
+    pub packet_number: u32,
+    pub address: SocketAddr,
+}
+
+/// Internal reliable-UDP packet kind after masking the multicast bit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReliableUdpPacketKind {
+    Connect,
+    ConnectOk,
+    Data,
+    Check,
+    Close,
+    Other(u8),
 }
 
 /// One decoded `C4NetIOUDP::DataPacketHdr` and its fragment payload.
@@ -522,6 +554,45 @@ pub fn decode_reliable_udp_connect_ok(
         packet_number,
         multicast_mode,
         observed_address,
+    })
+}
+
+/// Encodes C++'s best-effort close notification.
+pub fn encode_reliable_udp_close(close: &ReliableUdpClose) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(CLOSE_PACKET_SIZE);
+    wire.push(IPID_CLOSE);
+    wire.extend_from_slice(&close.packet_number.to_ne_bytes());
+    encode_bin_address(close.address, &mut wire);
+    wire
+}
+
+/// Decodes C++'s packed close notification.
+pub fn decode_reliable_udp_close(wire: &[u8]) -> Result<ReliableUdpClose, ReliableUdpDecodeError> {
+    if wire.len() != CLOSE_PACKET_SIZE {
+        return Err(ReliableUdpDecodeError::InvalidLength {
+            expected: CLOSE_PACKET_SIZE,
+            actual: wire.len(),
+        });
+    }
+    if wire[0] & INTERNAL_PACKET_TYPE_MASK != IPID_CLOSE {
+        return Err(ReliableUdpDecodeError::UnexpectedType(wire[0]));
+    }
+    Ok(ReliableUdpClose {
+        packet_number: decode_native_u32(wire, 1).expect("checked close packet length"),
+        address: decode_bin_address(&wire[5..])?,
+    })
+}
+
+/// Reads the five-byte common header kind without decoding a packet body.
+pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
+    let packet_type = *wire.first()? & INTERNAL_PACKET_TYPE_MASK;
+    Some(match packet_type {
+        IPID_CONN => ReliableUdpPacketKind::Connect,
+        IPID_CONN_OK => ReliableUdpPacketKind::ConnectOk,
+        IPID_DATA => ReliableUdpPacketKind::Data,
+        IPID_CHECK => ReliableUdpPacketKind::Check,
+        IPID_CLOSE => ReliableUdpPacketKind::Close,
+        other => ReliableUdpPacketKind::Other(other),
     })
 }
 
