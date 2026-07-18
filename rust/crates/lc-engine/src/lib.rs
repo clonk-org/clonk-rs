@@ -29936,7 +29936,10 @@ impl Engine {
             match command {
                 AudioCommand::PlaySound {
                     target: Some(target),
-                    looped: false,
+                    ..
+                }
+                | AudioCommand::SetSoundVolume {
+                    target: Some(target),
                     ..
                 } => self.audio_registry.note_attached_sound(*target),
                 AudioCommand::DetachObjectSounds { target, .. } => {
@@ -50120,7 +50123,10 @@ impl Engine {
                 command,
                 AudioCommand::PlaySound {
                     target: Some(event_target),
-                    looped: false,
+                    ..
+                }
+                | AudioCommand::SetSoundVolume {
+                    target: Some(event_target),
                     ..
                 } if *event_target == target
             )
@@ -64212,6 +64218,17 @@ mod audio_detach_regression {
         }
     }
 
+    fn fire_loop_command(object: ObjectId) -> AudioCommand {
+        AudioCommand::PlaySound {
+            name: "Fire".into(),
+            target: Some(object),
+            volume: 100,
+            looped: true,
+            multiple: false,
+            custom_falloff: None,
+        }
+    }
+
     #[test]
     fn native_destroy_detaches_loop_at_the_objects_final_position() {
         let (mut engine, object, position) = sound_source_engine();
@@ -64226,12 +64243,6 @@ mod audio_detach_regression {
         let snapshot = engine.tick().expect("native removal frame succeeds");
 
         assert!(snapshot.object(object).is_none());
-        assert!(!engine
-            .audio_registry
-            .is_looping("Fire", Some(object)));
-        assert!(!engine
-            .audio_registry
-            .is_playing("Fire", Some(object)));
         assert_eq!(
             snapshot.audio,
             vec![AudioCommand::DetachObjectSounds {
@@ -64277,9 +64288,52 @@ mod audio_detach_regression {
     }
 
     #[test]
+    fn same_frame_direct_loop_detaches_once_in_command_order() {
+        let (mut engine, object, position) = sound_source_engine();
+        let play = fire_loop_command(object);
+        engine.pending_audio.push(play.clone());
+        let index = engine.find_object_index(object).expect("source remains");
+        engine.objects[index].mark_destroyed();
+
+        let snapshot = engine.tick().expect("native removal frame succeeds");
+
+        assert_eq!(
+            snapshot.audio,
+            vec![
+                play,
+                AudioCommand::DetachObjectSounds {
+                    target: object,
+                    position,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn delivered_one_shot_target_is_remembered_until_later_removal() {
         let (mut engine, object, position) = sound_source_engine();
         let play = impact_command(object);
+        engine.pending_audio.push(play.clone());
+        assert_eq!(
+            engine.tick().expect("delivery frame succeeds").audio,
+            vec![play]
+        );
+
+        let index = engine.find_object_index(object).expect("source remains");
+        engine.objects[index].mark_destroyed();
+        assert_eq!(
+            engine.tick().expect("removal frame succeeds").audio,
+            vec![AudioCommand::DetachObjectSounds {
+                target: object,
+                position,
+            }]
+        );
+    }
+
+    #[test]
+    fn delivered_loop_target_is_remembered_until_later_removal() {
+        let (mut engine, object, position) = sound_source_engine();
+        let play = fire_loop_command(object);
         engine.pending_audio.push(play.clone());
         assert_eq!(
             engine.tick().expect("delivery frame succeeds").audio,

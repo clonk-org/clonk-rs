@@ -19890,12 +19890,11 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
         let looped = loop_flag > 0;
         let custom_falloff = custom_falloff.filter(|value| *value > 0);
 
-        let audio = context.audio_mut();
-        if !multiple && audio.is_playing(&name, target_id) {
-            return Ok(Value::Bool(true));
-        }
-
-        audio.play_sound(&name, target_id, volume, looped, multiple, custom_falloff);
+        // Live sound instances and resolved filenames are client-local. Emit
+        // every ordered request so the frontend can perform FindInst exactly.
+        context
+            .audio_mut()
+            .play_sound(&name, target_id, volume, looped, multiple, custom_falloff);
         Ok(Value::Bool(true))
     })
 }
@@ -41950,18 +41949,6 @@ impl Drop for AudioContextGuard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AudioInstanceKey {
-    name: String,
-    target: Option<ObjectId>,
-}
-
-#[derive(Debug, Clone)]
-struct AudioInstance {
-    volume: u8,
-    custom_falloff: Option<i32>,
-}
-
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct AudioRegistry {
@@ -41977,10 +41964,9 @@ pub struct AudioRegistry {
     music_playlist: Option<String>,
     /// `Game.iMusicLevel`: save-persisted independently of the local mixer.
     music_level: u8,
-    looping: HashMap<AudioInstanceKey, AudioInstance>,
-    /// Object ids that may still own a frontend one-shot instance. The engine
-    /// cannot observe channel completion, so retain an id until its object is
-    /// removed; loops remain exact in `looping`.
+    /// Object ids that may still own a frontend sound instance. This is
+    /// deliberately coarse because sample resolution and lifetime are local to
+    /// the frontend; a false positive only emits a harmless no-op detach.
     attached_targets: HashSet<ObjectId>,
     events: Vec<AudioCommand>,
 }
@@ -41999,7 +41985,6 @@ impl Default for AudioRegistry {
             available_music: Arc::new(Vec::new()),
             music_playlist: None,
             music_level: DEFAULT_MUSIC_LEVEL,
-            looping: HashMap::new(),
             attached_targets: HashSet::new(),
             events: Vec::new(),
         }
@@ -42009,53 +41994,6 @@ impl Default for AudioRegistry {
 impl AudioRegistry {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn is_looping(&self, name: &str, target: Option<ObjectId>) -> bool {
-        let key = AudioInstanceKey {
-            name: normalize_sound_name(name),
-            target,
-        };
-        self.looping.contains_key(&key)
-    }
-
-    pub fn is_playing(&self, name: &str, target: Option<ObjectId>) -> bool {
-        let key = AudioInstanceKey {
-            name: normalize_sound_name(name),
-            target,
-        };
-        if self.looping.contains_key(&key) {
-            return true;
-        }
-
-        // One-shot lifetime is owned by the frontend mixer. Within one host
-        // transaction, pending commands model the instances that C++ has
-        // already started; across transactions the mixer performs the same
-        // channel-is-playing check before allocating another instance.
-        self.events
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                AudioCommand::DetachObjectSounds {
-                    target: event_target,
-                    ..
-                } if key.target == Some(*event_target) => Some(false),
-                AudioCommand::PlaySound {
-                    name,
-                    target: event_target,
-                    ..
-                } if normalize_sound_name(name) == key.name && *event_target == key.target => {
-                    Some(true)
-                }
-                AudioCommand::StopSound {
-                    name,
-                    target: event_target,
-                } if normalize_sound_name(name) == key.name && *event_target == key.target => {
-                    Some(false)
-                }
-                _ => None,
-            })
-            .unwrap_or(false)
     }
 
     pub(crate) fn set_available_samples<I, S>(&mut self, samples: I)
@@ -42149,39 +42087,8 @@ impl AudioRegistry {
         multiple: bool,
         custom_falloff: Option<i32>,
     ) {
-        let key = AudioInstanceKey {
-            name: normalize_sound_name(name),
-            target,
-        };
-        // A preceding positive SoundLevel has not yet been resolved against
-        // frontend channels. Emit later Sound commands so a failed fallback
-        // can retry, but do not speculate loop state when the frontend may
-        // suppress them against an existing one-shot.
-        let defer_loop_state = self.has_pending_sound_level(&key);
-        if !looped {
-            if let Some(target) = target {
-                self.attached_targets.insert(target);
-            }
-        }
-        if looped && !multiple && !defer_loop_state {
-            if self.looping.contains_key(&key) {
-                return;
-            }
-            self.looping.insert(
-                key,
-                AudioInstance {
-                    volume,
-                    custom_falloff,
-                },
-            );
-        } else if looped && !defer_loop_state {
-            self.looping.insert(
-                key,
-                AudioInstance {
-                    volume,
-                    custom_falloff,
-                },
-            );
+        if let Some(target) = target {
+            self.attached_targets.insert(target);
         }
 
         self.events.push(AudioCommand::PlaySound {
@@ -42194,31 +42101,6 @@ impl AudioRegistry {
         });
     }
 
-    fn has_pending_sound_level(&self, key: &AudioInstanceKey) -> bool {
-        self.events
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                AudioCommand::SetSoundVolume {
-                    name,
-                    target,
-                    ..
-                } if normalize_sound_name(name) == key.name && *target == key.target => Some(true),
-                AudioCommand::StopSound { name, target }
-                    if normalize_sound_name(name) == key.name && *target == key.target =>
-                {
-                    Some(false)
-                }
-                AudioCommand::DetachObjectSounds { target, .. }
-                    if key.target == Some(*target) =>
-                {
-                    Some(false)
-                }
-                _ => None,
-            })
-            .unwrap_or(false)
-    }
-
     pub(crate) fn note_attached_sound(&mut self, target: ObjectId) {
         self.attached_targets.insert(target);
     }
@@ -42228,7 +42110,6 @@ impl AudioRegistry {
     }
 
     pub(crate) fn clear_sound_instances(&mut self) {
-        self.looping.clear();
         self.attached_targets.clear();
         self.events.retain(|event| {
             matches!(
@@ -42243,74 +42124,31 @@ impl AudioRegistry {
 
     pub(crate) fn detach_object_sounds(&mut self, target: ObjectId, position: Vector2) {
         let was_attached = self.attached_targets.remove(&target);
-        let looping_before = self.looping.len();
-        self.looping
-            .retain(|key, _| key.target != Some(target));
-        if was_attached || self.looping.len() != looping_before {
+        if was_attached {
             self.events.push(AudioCommand::DetachObjectSounds { target, position });
         }
     }
 
     pub fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
-        let key = AudioInstanceKey {
-            name: normalize_sound_name(name),
-            target,
-        };
-        self.looping.remove(&key);
         self.events.push(AudioCommand::StopSound {
             name: name.to_string(),
             target,
         });
     }
 
-    pub fn set_volume(
-        &mut self,
-        name: &str,
-        target: Option<ObjectId>,
-        volume: u8,
-        custom_falloff: Option<i32>,
-    ) -> bool {
-        let key = AudioInstanceKey {
-            name: normalize_sound_name(name),
-            target,
-        };
-        let Some(instance) = self.looping.get_mut(&key) else {
-            return false;
-        };
-        if let Some(falloff) = custom_falloff {
-            instance.custom_falloff = Some(falloff);
+    pub(crate) fn sound_level(&mut self, name: &str, target: Option<ObjectId>, volume: u8) {
+        if volume == 0 {
+            self.stop_sound(name, target);
+            return;
         }
-        instance.volume = volume;
+        if let Some(target) = target {
+            self.attached_targets.insert(target);
+        }
         self.events.push(AudioCommand::SetSoundVolume {
             name: name.to_string(),
             target,
             volume,
         });
-        true
-    }
-
-    pub(crate) fn sound_level(&mut self, name: &str, target: Option<ObjectId>, volume: u8) {
-        if volume == 0 {
-            // C4 SoundLevel always attempts StopSoundEffect for a nonpositive
-            // level. The frontend owns prior-frame one-shot lifetime, so the
-            // engine must not suppress this command from its looping-only map.
-            self.stop_sound(name, target);
-            return;
-        }
-        if !self.set_volume(name, target, volume, None) {
-            // The frontend is authoritative for live one-shots. It resolves
-            // this command atomically: update any matching live instance, or
-            // start a loop only when none exists. Do not speculate a looping
-            // entry here; doing so creates a phantom when a one-shot matched.
-            if let Some(target) = target {
-                self.attached_targets.insert(target);
-            }
-            self.events.push(AudioCommand::SetSoundVolume {
-                name: name.to_string(),
-                target,
-                volume,
-            });
-        }
     }
 
     pub fn take_events(&mut self) -> Vec<AudioCommand> {
@@ -54345,7 +54183,7 @@ func Announce()
     }
 
     #[test]
-    fn sound_dedupes_pending_one_shots_and_negative_level_does_not_stop() {
+    fn sound_emits_pending_requests_for_frontend_dedup_and_negative_level_is_a_noop() {
         let (result, outcome) = with_object_host_context(|| {
             assert_eq!(sound(&[Value::String("Hit".into())])?, Value::Bool(true));
             assert_eq!(sound(&[Value::String("Hit".into())])?, Value::Bool(true));
@@ -54371,7 +54209,7 @@ func Announce()
             Ok::<Value, RuntimeError>(Value::Nil)
         });
 
-        result.expect("Sound dedupe probes run");
+        result.expect("Sound command probes run");
         let played = outcome
             .audio
             .events
@@ -54382,13 +54220,7 @@ func Announce()
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(played, vec!["Hit", "Loop"]);
-        assert!(
-            outcome
-                .audio
-                .state
-                .is_looping("Loop", Some(ObjectId::new(1)))
-        );
+        assert_eq!(played, vec!["Hit", "Hit", "Loop"]);
     }
 
     #[test]
@@ -54434,11 +54266,6 @@ func Announce()
                 },
             ]
         );
-        assert!(
-            !outcome.audio.state.is_looping("Global", None),
-            "frontend arbitration must not speculate a loop before it sees live channels"
-        );
-        assert!(!outcome.audio.state.is_playing("Shot", Some(target)));
     }
 
     #[test]
@@ -54465,24 +54292,14 @@ func Announce()
                 },
             ]
         );
-        assert!(!audio.is_looping("VolumeShot", None));
-        assert!(!audio.is_looping("StopShot", None));
     }
 
     #[test]
-    fn pending_sound_level_defers_followup_loop_state_without_suppressing_retry() {
+    fn sound_level_and_followup_sound_are_emitted_in_frontend_order() {
         let mut audio = AudioRegistry::new();
         audio.sound_level("Shot", None, 50);
-        assert!(
-            !audio.is_playing("Shot", None),
-            "the frontend may still fail to update or start this sound"
-        );
         audio.play_sound("Shot", None, 100, true, false, None);
 
-        assert!(
-            !audio.is_looping("Shot", None),
-            "an app-suppressed retry must not leave speculative loop state"
-        );
         assert_eq!(
             audio.take_events(),
             vec![
@@ -54504,18 +54321,52 @@ func Announce()
     }
 
     #[test]
-    fn sound_registry_keys_compare_native_bytes() {
-        let mut audio = AudioRegistry::new();
-        let split_utf8 = format!(
-            "{}{}",
-            lc_script::c4_string_from_bytes(&[0xc3]),
-            lc_script::c4_string_from_bytes(&[0xbf])
-        );
+    fn sound_aliases_and_wildcards_are_always_emitted_for_frontend_arbitration() {
+        let (result, outcome) = with_object_host_context(|| {
+            let call = |name: &str, loop_flag: i32| {
+                sound(&[
+                    Value::String(name.into()),
+                    Value::Bool(false),
+                    Value::Nil,
+                    Value::Int(100),
+                    Value::Int(0),
+                    Value::Int(loop_flag),
+                ])
+            };
+
+            call("Fire", 1)?;
+            call("Fire.wav", -1)?;
+            call("Fire", 1)?;
+            call("Fire.wav", 1)?;
+            call("Blast*", 1)?;
+            call("Blast*", 1)?;
+            Ok::<_, RuntimeError>(Value::Nil)
+        });
+
+        result.expect("alias and wildcard Sound calls succeed");
         let target = Some(ObjectId::new(1));
-        audio.play_sound("\u{ff}", target, 100, true, false, None);
-        assert!(audio.is_looping(&split_utf8, target));
-        audio.stop_sound(&split_utf8, target);
-        assert!(!audio.is_looping("\u{ff}", target));
+        let play = |name: &str| AudioCommand::PlaySound {
+            name: name.into(),
+            target,
+            volume: 100,
+            looped: true,
+            multiple: false,
+            custom_falloff: None,
+        };
+        assert_eq!(
+            outcome.audio.events,
+            vec![
+                play("Fire"),
+                AudioCommand::StopSound {
+                    name: "Fire.wav".into(),
+                    target,
+                },
+                play("Fire"),
+                play("Fire.wav"),
+                play("Blast*"),
+                play("Blast*"),
+            ]
+        );
     }
 
     #[test]
@@ -54576,10 +54427,6 @@ func Announce()
                 },
             ]
         );
-        assert!(outcome.audio.state.is_looping("GlobalLoop", None));
-        assert!(!outcome.audio.state.is_looping("Fire", Some(target)));
-        assert!(!outcome.audio.state.is_playing("Fire", Some(target)));
-        assert!(!outcome.audio.state.is_playing("Impact", Some(target)));
     }
 
     #[test]

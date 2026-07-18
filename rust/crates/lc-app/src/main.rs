@@ -5648,6 +5648,7 @@ struct AudioContext {
     music_load_pending: Arc<AtomicU64>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
+    next_sound_instance_order: u64,
     resolver: SoundResolver,
     music_resolver: MusicResolver,
     missing_sounds: HashSet<String>,
@@ -5666,6 +5667,7 @@ impl AudioContext {
             music_load_pending: Arc::new(AtomicU64::new(0)),
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
+            next_sound_instance_order: 1,
             resolver: SoundResolver::new(),
             music_resolver: MusicResolver::discover(),
             missing_sounds: HashSet::new(),
@@ -5837,7 +5839,13 @@ impl AudioContext {
         path: Option<&Path>,
         definition_roots: Option<&[Group]>,
     ) {
-        if self.resolver.configure_scenario(path) {
+        let sound_catalog_changed = match definition_roots {
+            Some(definition_roots) => self
+                .resolver
+                .configure_scenario_with_definition_roots(path, definition_roots),
+            None => self.resolver.configure_scenario(path),
+        };
+        if sound_catalog_changed {
             self.loaded_sounds.clear();
             self.missing_sounds.clear();
         }
@@ -6193,14 +6201,15 @@ impl AudioContext {
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
     ) -> Result<bool, AudioError> {
-        let key = SoundInstanceKey::new(name, target);
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
         // caller explicitly requests multiple instances (C4Script.cpp:
-        // 2317-2319). Do this before asking the fixed-size mixer for a slot.
+        // 2317-2319). FindInst matches the prepared request against resolved
+        // sample names, so do this before resolution (and its SafeRandom
+        // draw), as well as before asking the fixed-size mixer for a slot.
         if !multiple && self.active_channel_key(name, target).is_some() {
             return Ok(false);
         }
-        let Some((handle, sample_key)) = self.ensure_sound_with_key(name)? else {
+        let Some(resolved) = self.ensure_sound_with_key(name)? else {
             return Ok(false);
         };
         // C4SoundSystem caps non-looping instances per resolved sample before
@@ -6210,7 +6219,7 @@ impl AudioContext {
             && self
                 .active_channels
                 .values()
-                .filter(|info| info.sample_key == sample_key)
+                .filter(|info| info.sample_key == resolved.sample_key)
                 .count()
                 >= MAX_SOUND_INSTANCES
         {
@@ -6221,18 +6230,30 @@ impl AudioContext {
         // fMultiple flag bypassed its exact-object check
         // (C4SoundSystem.cpp:341-350).
         let already_playing_near = self.active_channels.values().any(|info| {
-            info.sample_key == sample_key
+            info.sample_key == resolved.sample_key
                 && sound_targets_are_near(info.target, target, snapshot)
         });
         if already_playing_near {
             return Ok(false);
         }
-        let duration_ms = handle.duration_ms().unwrap_or(0);
+        let duration_ms = resolved.handle.duration_ms().unwrap_or(0);
+        let instance_order = self.next_sound_instance_order;
+        self.next_sound_instance_order = self
+            .next_sound_instance_order
+            .checked_add(1)
+            .expect("sound instance insertion order overflowed");
+        let mut key = SoundInstanceKey::new(name, target);
+        if self.active_channels.contains_key(&key) {
+            key.discriminator = instance_order;
+        }
         let mut info = ChannelInfo {
             channel: None,
-            handle,
+            handle: resolved.handle,
             duration_ms,
-            sample_key,
+            sample_key: resolved.sample_key,
+            sample_name: resolved.sample_name,
+            sample_order: resolved.sample_order,
+            instance_order,
             looped,
             target,
             volume,
@@ -6249,7 +6270,8 @@ impl AudioContext {
                 .channel_set_volume_and_pan(channel, mix_volume, pan);
             info.channel = Some(channel);
         }
-        self.active_channels.insert(key, info);
+        let replaced = self.active_channels.insert(key, info);
+        assert!(replaced.is_none(), "sound instance key must be unique");
         Ok(true)
     }
 
@@ -6269,21 +6291,17 @@ impl AudioContext {
         name: &str,
         target: Option<ObjectId>,
     ) -> Option<SoundInstanceKey> {
-        let requested = SoundInstanceKey::new(name, target);
-        // Detached one-shots retain their storage key so they cannot replace
-        // an already-playing global channel, but C++ FindInst observes their
-        // cleared object pointer. Prefer the true global entry when both
-        // coexist, then fall back to a detached entry with the same request.
-        if self
-            .active_channels
-            .get(&requested)
-            .is_some_and(|info| info.target == target)
-        {
-            return Some(requested);
-        }
-        self.active_channels.iter().find_map(|(key, info)| {
-            (key.name == requested.name && info.target == target).then(|| key.clone())
-        })
+        let pattern = SoundSearchTerms::new(name).prepared_pattern();
+        // C4SoundSystem::FindInst walks samples in catalog order, then each
+        // sample's instances in insertion order. Detached one-shots have a
+        // null object just like true global instances; neither is preferred.
+        self.active_channels
+            .iter()
+            .filter(|(_, info)| {
+                info.target == target && matches_sound_pattern(&pattern, &info.sample_name)
+            })
+            .min_by_key(|(_, info)| (info.sample_order, info.instance_order))
+            .map(|(key, _)| key.clone())
     }
 
     fn detach_object_sounds(
@@ -6460,24 +6478,36 @@ impl AudioContext {
 
     fn ensure_sound(&mut self, name: &str) -> Result<Option<SoundHandle>, AudioError> {
         self.ensure_sound_with_key(name)
-            .map(|resolved| resolved.map(|(handle, _)| handle))
+            .map(|resolved| resolved.map(|resolved| resolved.handle))
     }
 
     fn ensure_sound_with_key(
         &mut self,
         name: &str,
-    ) -> Result<Option<(SoundHandle, String)>, AudioError> {
+    ) -> Result<Option<LoadedSound>, AudioError> {
         let request_key = name.to_ascii_lowercase();
         if let Some(resolved) = self.resolver.resolve_entry(name) {
             let cache_key = resolved.cache_key();
+            let sample_name = resolved.file_name().to_string();
+            let sample_order = self.resolver.sample_order(&sample_name);
             if let Some(handle) = self.loaded_sounds.get(&cache_key) {
-                return Ok(Some((handle.clone(), cache_key)));
+                return Ok(Some(LoadedSound {
+                    handle: handle.clone(),
+                    sample_key: cache_key,
+                    sample_name,
+                    sample_order,
+                }));
             }
             match resolved.load_audio() {
                 Ok(bytes) => {
                     let handle = self.system.load_sound(bytes.as_slice())?;
                     self.loaded_sounds.insert(cache_key.clone(), handle.clone());
-                    return Ok(Some((handle, cache_key)));
+                    return Ok(Some(LoadedSound {
+                        handle,
+                        sample_key: cache_key,
+                        sample_name,
+                        sample_order,
+                    }));
                 }
                 Err(err) => {
                     if self
@@ -6534,6 +6564,10 @@ fn configure_scenario_sound_samples(
 struct SoundInstanceKey {
     name: String,
     target: Option<ObjectId>,
+    /// The first live request keeps discriminator zero for stable lookup in
+    /// diagnostics/tests. Concurrent identical requests receive their C++
+    /// instance insertion order so no channel can be orphaned by replacement.
+    discriminator: u64,
 }
 
 impl SoundInstanceKey {
@@ -6541,8 +6575,16 @@ impl SoundInstanceKey {
         Self {
             name: name.to_ascii_lowercase(),
             target,
+            discriminator: 0,
         }
     }
+}
+
+struct LoadedSound {
+    handle: SoundHandle,
+    sample_key: String,
+    sample_name: String,
+    sample_order: usize,
 }
 
 #[derive(Clone)]
@@ -6551,6 +6593,12 @@ struct ChannelInfo {
     handle: SoundHandle,
     duration_ms: u32,
     sample_key: String,
+    /// Lowercase basename stored by C4SoundSystem::Sample::name.
+    sample_name: String,
+    /// Effective sample-catalog order used by C++ FindInst.
+    sample_order: usize,
+    /// Stable order within one sample's instance list.
+    instance_order: u64,
     looped: bool,
     target: Option<ObjectId>,
     volume: u8,
@@ -6606,17 +6654,31 @@ struct SoundResolver {
     scenario: Vec<SoundLibrary>,
     scenario_root: Option<PathBuf>,
     registered_definitions: HashSet<String>,
+    definition_library_count: usize,
+    base_sample_loads: Vec<String>,
+    definition_sample_loads: Vec<String>,
+    scenario_sample_loads: Vec<String>,
+    sample_ranks: HashMap<String, usize>,
+    sample_ranks_prebuilt: bool,
 }
 
 impl SoundResolver {
     fn new() -> Self {
-        let global = discover_global_sound_libraries();
-        Self {
+        let (global, base_sample_loads) = discover_global_sound_libraries();
+        let mut resolver = Self {
             global,
             scenario: Vec::new(),
             scenario_root: None,
             registered_definitions: HashSet::new(),
-        }
+            definition_library_count: 0,
+            base_sample_loads,
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
+        };
+        resolver.rebuild_sample_ranks();
+        resolver
     }
 
     fn configure_scenario(&mut self, path: Option<&Path>) -> bool {
@@ -6624,7 +6686,45 @@ impl SoundResolver {
         if self.scenario_root.as_deref() == new_root.as_deref() {
             return false;
         }
+        self.clear_registered_definition_libraries();
+        self.configure_scenario_catalog(new_root);
+        self.definition_sample_loads.clear();
+        self.scenario_sample_loads = path
+            .and_then(|root| Group::open(root).ok())
+            .map(|group| definition_tree_sound_sample_loads(&group))
+            .unwrap_or_default();
+        self.sample_ranks_prebuilt = path.is_some();
+        self.rebuild_sample_ranks();
+        true
+    }
 
+    fn configure_scenario_with_definition_roots(
+        &mut self,
+        path: Option<&Path>,
+        definition_roots: &[Group],
+    ) -> bool {
+        let new_root = path.map(Path::to_path_buf);
+        let changed = self.scenario_root.as_deref() != new_root.as_deref();
+        self.clear_registered_definition_libraries();
+        if changed {
+            self.configure_scenario_catalog(new_root);
+        }
+        self.definition_sample_loads.clear();
+        self.scenario_sample_loads.clear();
+        for root in definition_roots {
+            self.scenario_sample_loads
+                .extend(definition_tree_sound_sample_loads(root));
+        }
+        if let Some(group) = path.and_then(|root| Group::open(root).ok()) {
+            self.scenario_sample_loads
+                .extend(definition_tree_sound_sample_loads(&group));
+        }
+        self.sample_ranks_prebuilt = path.is_some() || !definition_roots.is_empty();
+        self.rebuild_sample_ranks();
+        changed
+    }
+
+    fn configure_scenario_catalog(&mut self, new_root: Option<PathBuf>) {
         self.scenario = match new_root.as_ref() {
             Some(root) => {
                 let mut libraries = collect_sound_libraries_for_path(root);
@@ -6634,7 +6734,14 @@ impl SoundResolver {
             None => Vec::new(),
         };
         self.scenario_root = new_root;
-        true
+    }
+
+    fn clear_registered_definition_libraries(&mut self) {
+        if self.definition_library_count != 0 {
+            self.global.drain(0..self.definition_library_count);
+            self.definition_library_count = 0;
+        }
+        self.registered_definitions.clear();
     }
 
     fn resolve_entry(&self, name: &str) -> Option<ResolvedSound<'_>> {
@@ -6660,6 +6767,9 @@ impl SoundResolver {
             if matches.is_empty() {
                 return None;
             }
+            matches.sort_by_key(|(library, entry_index)| {
+                self.sample_order(&library.entries[*entry_index].file_name)
+            });
             let selected = next_random(matches.len());
             let (library, entry_index) = matches.get(selected).copied()?;
             return Some(ResolvedSound {
@@ -6696,6 +6806,47 @@ impl SoundResolver {
         names
     }
 
+    fn sample_order(&self, file_name: &str) -> usize {
+        *self
+            .sample_ranks
+            .get(file_name)
+            .expect("every resolver-visible sound sample has a catalog rank")
+    }
+
+    fn rebuild_sample_ranks(&mut self) {
+        self.sample_ranks.clear();
+        for (serial, file_name) in self
+            .base_sample_loads
+            .iter()
+            .chain(&self.definition_sample_loads)
+            .chain(&self.scenario_sample_loads)
+            .enumerate()
+        {
+            // C++ appends a successfully loaded replacement and then erases
+            // the old sample. The final sample-vector order is therefore the
+            // order of each filename's last load occurrence.
+            self.sample_ranks.insert(file_name.clone(), serial);
+        }
+        let mut next_rank = self
+            .sample_ranks
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |rank| rank + 1);
+        // Resolver-only fallback sources are not part of native C4DefList
+        // traversal, but still need a deterministic total order.
+        for library in self.scenario.iter().chain(self.global.iter()) {
+            for entry in &library.entries {
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    self.sample_ranks.entry(entry.file_name.clone())
+                {
+                    slot.insert(next_rank);
+                    next_rank += 1;
+                }
+            }
+        }
+    }
+
     fn register_definition_group(&mut self, definition_id: &str, group: &Group) {
         let key = format!(
             "{}::{}",
@@ -6708,7 +6859,13 @@ impl SoundResolver {
         let label = format!("definition::{}", definition_id);
         let libs = collect_sound_libraries_from_group(group, label);
         if !libs.is_empty() {
+            self.definition_library_count += libs.len();
             self.global.splice(0..0, libs);
+            if !self.sample_ranks_prebuilt {
+                self.definition_sample_loads
+                    .extend(direct_sound_sample_loads(group));
+            }
+            self.rebuild_sample_ranks();
         }
     }
 }
@@ -6839,6 +6996,10 @@ impl<'a> ResolvedSound<'a> {
         self.library.cache_marker(self.entry_index)
     }
 
+    fn file_name(&self) -> &str {
+        &self.library.entries[self.entry_index].file_name
+    }
+
     fn describe(&self) -> String {
         self.library.describe_entry(self.entry_index)
     }
@@ -6855,10 +7016,8 @@ struct SoundSearchTerms {
 
 impl SoundSearchTerms {
     fn new(name: &str) -> Self {
-        let trimmed = name.trim();
-        let (_, has_extension) = split_stem_and_extension(trimmed);
-        let mut prepared = trimmed.to_string();
-        if !has_extension {
+        let mut prepared = name.to_string();
+        if !sound_name_has_extension(name) {
             prepared.push_str(".wav");
         }
         prepared = prepared.replace('*', "?");
@@ -6881,21 +7040,25 @@ impl SoundSearchTerms {
             search_names,
         }
     }
-}
 
-fn split_stem_and_extension(name: &str) -> (String, bool) {
-    if let Some(pos) = name.rfind('.') {
-        let stem = &name[..pos];
-        let ext = &name[pos + 1..];
-        if !stem.is_empty() && !ext.is_empty() {
-            return (stem.to_ascii_lowercase(), true);
-        }
+    fn prepared_pattern(&self) -> String {
+        self.wildcard_pattern
+            .clone()
+            .or_else(|| self.search_names.first().cloned())
+            .expect("a prepared sound request always has a name")
     }
-    (name.to_ascii_lowercase(), false)
 }
 
-fn discover_global_sound_libraries() -> Vec<SoundLibrary> {
+fn sound_name_has_extension(name: &str) -> bool {
+    let component_start = name.rfind(std::path::MAIN_SEPARATOR).map_or(0, |index| index + 1);
+    name[component_start..]
+        .rfind('.')
+        .is_some_and(|index| component_start + index + 1 < name.len())
+}
+
+fn discover_global_sound_libraries() -> (Vec<SoundLibrary>, Vec<String>) {
     let mut libraries = Vec::new();
+    let mut sample_loads = Vec::new();
     match AppPaths::discover() {
         Ok(paths) => {
             let mut seen = HashSet::new();
@@ -6915,6 +7078,9 @@ fn discover_global_sound_libraries() -> Vec<SoundLibrary> {
                     if !seen.insert(key) {
                         continue;
                     }
+                    if let Ok(group) = Group::open(&candidate) {
+                        sample_loads.extend(direct_sound_sample_loads(&group));
+                    }
                     let mut libs = collect_sound_libraries_for_path(&candidate);
                     libraries.append(&mut libs);
                 }
@@ -6924,7 +7090,48 @@ fn discover_global_sound_libraries() -> Vec<SoundLibrary> {
             tracing::warn!(error = %err, "sound asset discovery skipped");
         }
     }
-    libraries
+    (libraries, sample_loads)
+}
+
+fn direct_sound_sample_loads(group: &Group) -> Vec<String> {
+    let Ok(entries) = group.entries() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    // C4SoundSystem::LoadEffects performs three complete group scans in this
+    // order, preserving each scan's group-entry order.
+    for wanted_rank in 0..3 {
+        names.extend(entries.iter().filter_map(|entry| {
+            if entry.is_directory
+                || extension_rank(entry.relative_path.extension().and_then(|ext| ext.to_str()))
+                    != wanted_rank
+            {
+                return None;
+            }
+            entry
+                .relative_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        }));
+    }
+    names
+}
+
+fn definition_tree_sound_sample_loads(group: &Group) -> Vec<String> {
+    let mut names = direct_sound_sample_loads(group);
+    let Ok(entries) = group.entries() else {
+        return names;
+    };
+    for entry in entries {
+        if !has_extension(&entry.relative_path, "c4d") {
+            continue;
+        }
+        let Ok(child) = group.open_child(&entry.relative_path) else {
+            continue;
+        };
+        names.extend(definition_tree_sound_sample_loads(&child));
+    }
+    names
 }
 
 fn collect_sound_libraries_for_path(path: &Path) -> Vec<SoundLibrary> {
@@ -47039,6 +47246,22 @@ func Award()
     }
 
     #[test]
+    fn sound_search_terms_preserves_cpp_literal_whitespace_and_dotfile_extensions() {
+        assert_eq!(
+            SoundSearchTerms::new(" Fire ").search_names,
+            [" fire .wav"]
+        );
+        assert_eq!(SoundSearchTerms::new(".wav").search_names, [".wav"]);
+        assert_eq!(SoundSearchTerms::new("Fire.").search_names, ["fire..wav"]);
+        let nested = format!("dir.name{}Fire", std::path::MAIN_SEPARATOR);
+        let nested_wav = format!("dir.name{}fire.wav", std::path::MAIN_SEPARATOR);
+        assert_eq!(
+            SoundSearchTerms::new(&nested).search_names,
+            [nested_wav]
+        );
+    }
+
+    #[test]
     fn extensionless_sound_names_resolve_only_wav_across_libraries() {
         assert_eq!(SoundSearchTerms::new("Boom").search_names, ["boom.wav"]);
         assert_eq!(
@@ -47069,6 +47292,12 @@ func Award()
             scenario: collect_sound_libraries_for_path(&scenario),
             scenario_root: Some(scenario),
             registered_definitions: HashSet::new(),
+            definition_library_count: 0,
+            base_sample_loads: Vec::new(),
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
         };
 
         assert!(resolver.resolve_entry("OnlyOgg").is_none());
@@ -47130,6 +47359,12 @@ func Award()
             scenario: Vec::new(),
             scenario_root: None,
             registered_definitions: HashSet::new(),
+            definition_library_count: 0,
+            base_sample_loads: Vec::new(),
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
         };
         let mut resolver = make_resolver();
         assert!(resolver.configure_scenario(Some(&scenario)));
@@ -47167,6 +47402,12 @@ func Award()
             scenario: collect_sound_libraries_for_path(&scenario),
             scenario_root: Some(scenario),
             registered_definitions: HashSet::new(),
+            definition_library_count: 0,
+            base_sample_loads: Vec::new(),
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
         };
         let definition_group = Group::open(&definition).expect("definition group");
         resolver.register_definition_group("BLST", &definition_group);
@@ -47259,7 +47500,16 @@ func Award()
             scenario: Vec::new(),
             scenario_root: None,
             registered_definitions: HashSet::new(),
+            definition_library_count: 0,
+            base_sample_loads: direct_sound_sample_loads(
+                &Group::open(&global).expect("open global sound group"),
+            ),
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
         };
+        resolver.rebuild_sample_ranks();
         assert_eq!(
             resolver
                 .resolve_entry("Clang")
@@ -47310,6 +47560,154 @@ func Award()
             wildcard.load_audio().expect("read wildcard sample"),
             b"scenario clang"
         );
+    }
+
+    #[test]
+    fn sound_sample_rank_tracks_cpp_last_load_order_separately_from_precedence() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Sound.c4g");
+        let definition = dir.path().join("Objects.c4d");
+        let scenario = dir.path().join("Order.c4s");
+        for path in [&global, &definition, &scenario] {
+            fs::create_dir_all(path).expect("create sound group");
+        }
+        fs::write(global.join("A.wav"), b"global a").expect("write global A");
+        fs::write(global.join("B.wav"), b"global b").expect("write global B");
+        fs::write(definition.join("A.wav"), b"definition a").expect("write definition A");
+        fs::write(definition.join("C.wav"), b"definition c").expect("write definition C");
+        fs::write(scenario.join("B.wav"), b"scenario b").expect("write scenario B");
+        fs::write(scenario.join("D.wav"), b"scenario d").expect("write scenario D");
+
+        let global_group = Group::open(&global).expect("open global group");
+        let mut resolver = SoundResolver {
+            global: collect_sound_libraries_for_path(&global),
+            scenario: Vec::new(),
+            scenario_root: None,
+            registered_definitions: HashSet::new(),
+            definition_library_count: 0,
+            base_sample_loads: direct_sound_sample_loads(&global_group),
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
+        };
+        resolver.rebuild_sample_ranks();
+        let definition_group = Group::open(&definition).expect("open definition group");
+        assert!(resolver.configure_scenario_with_definition_roots(
+            Some(&scenario),
+            std::slice::from_ref(&definition_group),
+        ));
+        resolver.register_definition_group("OBJS", &definition_group);
+
+        for definition_sample in ["a.wav", "c.wav"] {
+            for scenario_sample in ["b.wav", "d.wav"] {
+                assert!(
+                    resolver.sample_order(definition_sample)
+                        < resolver.sample_order(scenario_sample),
+                    "definition samples load before the scenario tree"
+                );
+            }
+        }
+        let mut expected_wildcard_order = ["a.wav", "b.wav", "c.wav", "d.wav"];
+        expected_wildcard_order.sort_by_key(|name| resolver.sample_order(name));
+        let wildcard_order = (0..expected_wildcard_order.len())
+            .map(|selected| {
+                resolver
+                    .resolve_entry_with_random("*", |range| {
+                        assert_eq!(range, expected_wildcard_order.len());
+                        selected
+                    })
+                    .expect("wildcard sample")
+                    .file_name()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(wildcard_order, expected_wildcard_order);
+
+        assert_eq!(
+            resolver
+                .resolve_entry("A")
+                .expect("definition override")
+                .load_audio()
+                .expect("read definition A"),
+            b"definition a"
+        );
+        assert_eq!(
+            resolver
+                .resolve_entry("B")
+                .expect("scenario override")
+                .load_audio()
+                .expect("read scenario B"),
+            b"scenario b"
+        );
+    }
+
+    #[test]
+    fn sound_sample_rank_prebuilds_definition_trees_and_resets_between_scenarios() {
+        let dir = tempdir().expect("tempdir");
+        let definitions = dir.path().join("Objects.c4d");
+        let definition_child = definitions.join("Child.c4d");
+        let first_scenario = dir.path().join("First.c4s");
+        let scenario_child = first_scenario.join("Local.c4d");
+        let second_scenario = dir.path().join("Second.c4s");
+        for path in [
+            &definitions,
+            &definition_child,
+            &first_scenario,
+            &scenario_child,
+            &second_scenario,
+        ] {
+            fs::create_dir_all(path).expect("create definition tree");
+        }
+        fs::write(definitions.join("Def.ogg"), b"definition root").expect("write root def");
+        fs::write(definitions.join("Def.wav"), b"definition wav").expect("write wav def");
+        fs::write(definition_child.join("Nested.wav"), b"nested def")
+            .expect("write nested def");
+        fs::write(first_scenario.join("Root.wav"), b"scenario root")
+            .expect("write scenario root");
+        fs::write(scenario_child.join("Local.wav"), b"scenario child")
+            .expect("write scenario child");
+        fs::write(second_scenario.join("Next.wav"), b"next scenario")
+            .expect("write next scenario");
+
+        let definitions = Group::open(&definitions).expect("open definitions");
+        let mut resolver = SoundResolver {
+            global: Vec::new(),
+            scenario: Vec::new(),
+            scenario_root: None,
+            registered_definitions: HashSet::new(),
+            definition_library_count: 0,
+            base_sample_loads: Vec::new(),
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
+        };
+        resolver.rebuild_sample_ranks();
+        assert!(resolver.configure_scenario_with_definition_roots(
+            Some(&first_scenario),
+            std::slice::from_ref(&definitions),
+        ));
+
+        let ordered = [
+            "def.wav",
+            "def.ogg",
+            "nested.wav",
+            "root.wav",
+            "local.wav",
+        ];
+        assert!(ordered
+            .windows(2)
+            .all(|pair| resolver.sample_order(pair[0]) < resolver.sample_order(pair[1])));
+
+        assert!(resolver.configure_scenario_with_definition_roots(
+            Some(&second_scenario),
+            &[],
+        ));
+        assert_eq!(resolver.sample_order("next.wav"), 0);
+        for stale in ordered {
+            assert!(!resolver.sample_ranks.contains_key(stale));
+        }
     }
 
     #[test]
@@ -47466,7 +47864,7 @@ func Award()
         let original_channel = original.channel.expect("one-shot mixer channel");
         let original_started_at = original.started_at;
         snapshot.audio = vec![AudioCommand::SetSoundVolume {
-            name: "Loop".to_string(),
+            name: "Loo?".to_string(),
             target: None,
             volume: 50,
         }];
@@ -47486,7 +47884,7 @@ func Award()
         assert!(audio.system.channel_is_playing(original_channel));
 
         snapshot.audio = vec![AudioCommand::StopSound {
-            name: "Loop".to_string(),
+            name: "Loop.wav".to_string(),
             target: None,
         }];
         audio.process_audio(
@@ -47811,6 +48209,12 @@ func Award()
             scenario: Vec::new(),
             scenario_root: None,
             registered_definitions: HashSet::new(),
+            definition_library_count: 0,
+            base_sample_loads: Vec::new(),
+            definition_sample_loads: Vec::new(),
+            scenario_sample_loads: Vec::new(),
+            sample_ranks: HashMap::new(),
+            sample_ranks_prebuilt: false,
         };
         assert!(resolver.configure_scenario(Some(&scenario)));
 
@@ -48088,6 +48492,285 @@ func Award()
         );
         assert_eq!(audio.active_channels.len(), 1);
         assert_eq!(audio.active_channels[&key].channel, first.channel);
+    }
+
+    #[test]
+    fn sound_instance_lookup_matches_prepared_resolved_sample_names() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Lookup.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Fire.wav"), silent_pcm_wav(10_000))
+            .expect("write fire sound");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let source = make_object(1, "FIRE", Vector2::new(100, 100));
+        let snapshot = make_snapshot(vec![source.clone()], Vec::new());
+        audio
+            .start_sound(
+                "Fire",
+                Some(source.id),
+                100,
+                true,
+                false,
+                None,
+                &snapshot,
+                Some(&source),
+                source.position,
+            )
+            .expect("extensionless loop starts");
+        let channel = audio
+            .active_channels
+            .values()
+            .next()
+            .and_then(|info| info.channel)
+            .expect("loop has a channel");
+
+        audio.stop_sound("Fire.wav", Some(source.id));
+
+        assert!(audio.active_channels.is_empty());
+        assert!(!audio.system.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn wildcard_non_multiple_lookup_suppresses_before_reresolution() {
+        let dir = tempdir().expect("tempdir");
+        let first_scenario = dir.path().join("First.c4s");
+        let second_scenario = dir.path().join("Second.c4s");
+        fs::create_dir_all(&first_scenario).expect("create first scenario group");
+        fs::create_dir_all(&second_scenario).expect("create second scenario group");
+        fs::write(first_scenario.join("Blast1.wav"), silent_pcm_wav(10_000))
+            .expect("write first blast");
+        fs::write(second_scenario.join("Blast2.wav"), silent_pcm_wav(10_000))
+            .expect("write second blast");
+
+        let options = AudioOptions {
+            max_channels: 2,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&first_scenario)));
+        let source = make_object(1, "BLST", Vector2::new(100, 100));
+        let snapshot = make_snapshot(vec![source.clone()], Vec::new());
+        assert!(
+            audio
+                .try_start_sound(
+                    "Blast1",
+                    Some(source.id),
+                    100,
+                    false,
+                    false,
+                    None,
+                    &snapshot,
+                    Some(&source),
+                    source.position,
+                )
+                .expect("concrete blast starts")
+        );
+
+        assert!(audio.resolver.configure_scenario(Some(&second_scenario)));
+        assert!(
+            !audio
+                .try_start_sound(
+                    "Blast*",
+                    Some(source.id),
+                    100,
+                    false,
+                    false,
+                    None,
+                    &snapshot,
+                    Some(&source),
+                    source.position,
+                )
+                .expect("wildcard lookup succeeds"),
+            "the live Blast1 sample suppresses the request before Blast2 is resolved"
+        );
+        assert_eq!(audio.active_channels.len(), 1);
+        assert_eq!(
+            audio.active_channels.values().next().unwrap().sample_name,
+            "blast1.wav"
+        );
+    }
+
+    #[test]
+    fn detached_one_shot_does_not_get_orphaned_by_an_identical_new_request() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("DetachCollision.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Fire.wav"), silent_pcm_wav(10_000))
+            .expect("write fire sound");
+
+        let options = AudioOptions {
+            max_channels: 2,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let source = make_object(1, "FIRE", Vector2::new(100, 100));
+        let snapshot = make_snapshot(vec![source.clone()], Vec::new());
+        let start = |audio: &mut AudioContext| {
+            audio.start_sound(
+                "Fire",
+                Some(source.id),
+                100,
+                false,
+                false,
+                None,
+                &snapshot,
+                Some(&source),
+                source.position,
+            )
+        };
+
+        start(&mut audio).expect("first one-shot starts");
+        let first_channel = audio
+            .active_channels
+            .values()
+            .next()
+            .and_then(|info| info.channel)
+            .expect("first one-shot channel");
+        audio.detach_object_sounds(
+            source.id,
+            source.position,
+            &snapshot,
+            Some(&source),
+            source.position,
+        );
+        start(&mut audio).expect("second one-shot starts");
+
+        assert_eq!(audio.active_channels.len(), 2);
+        let second_channel = audio
+            .active_channels
+            .values()
+            .find(|info| info.target == Some(source.id))
+            .and_then(|info| info.channel)
+            .expect("second one-shot channel");
+        assert!(audio.system.channel_is_playing(first_channel));
+        assert!(audio.system.channel_is_playing(second_channel));
+
+        audio.stop_sound("Fire.wav", Some(source.id));
+        assert_eq!(audio.active_channels.len(), 1);
+        assert!(audio.system.channel_is_playing(first_channel));
+        assert!(!audio.system.channel_is_playing(second_channel));
+
+        audio.stop_sound("Fir?", None);
+        assert!(audio.active_channels.is_empty());
+        assert!(!audio.system.channel_is_playing(first_channel));
+    }
+
+    #[test]
+    fn global_lookup_stops_the_oldest_detached_instance_of_one_sample() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("InstanceOrder.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Fire.wav"), silent_pcm_wav(10_000))
+            .expect("write fire sound");
+
+        let options = AudioOptions {
+            max_channels: 2,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let first = make_object(1, "FIRE", Vector2::new(100, 100));
+        let second = make_object(2, "FIRE", Vector2::new(300, 100));
+        let snapshot = make_snapshot(vec![first.clone(), second.clone()], Vec::new());
+
+        let mut detached_channels = Vec::new();
+        for source in [&first, &second] {
+            audio
+                .start_sound(
+                    "Fire",
+                    Some(source.id),
+                    100,
+                    false,
+                    false,
+                    None,
+                    &snapshot,
+                    Some(source),
+                    source.position,
+                )
+                .expect("one-shot starts");
+            let channel = audio
+                .active_channels
+                .values()
+                .find(|info| info.target == Some(source.id))
+                .and_then(|info| info.channel)
+                .expect("one-shot channel");
+            detached_channels.push(channel);
+            audio.detach_object_sounds(
+                source.id,
+                source.position,
+                &snapshot,
+                Some(source),
+                source.position,
+            );
+        }
+
+        audio.stop_sound("Fire", None);
+
+        assert!(!audio.system.channel_is_playing(detached_channels[0]));
+        assert!(audio.system.channel_is_playing(detached_channels[1]));
+        assert_eq!(audio.active_channels.len(), 1);
+    }
+
+    #[test]
+    fn wildcard_lookup_uses_sample_order_before_instance_order() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("SampleOrder.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        for name in ["Tone1.wav", "Tone2.wav"] {
+            fs::write(scenario.join(name), silent_pcm_wav(10_000)).expect("write tone");
+        }
+
+        let options = AudioOptions {
+            max_channels: 2,
+            ..AudioOptions::default()
+        };
+        let mut audio = AudioContext::try_new(options).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let source = make_object(1, "TONE", Vector2::new(100, 100));
+        let snapshot = make_snapshot(vec![source.clone()], Vec::new());
+        let (lower_name, higher_name) = if audio.resolver.sample_order("tone1.wav")
+            < audio.resolver.sample_order("tone2.wav")
+        {
+            ("Tone1", "Tone2")
+        } else {
+            ("Tone2", "Tone1")
+        };
+        for name in [higher_name, lower_name] {
+            audio
+                .start_sound(
+                    name,
+                    Some(source.id),
+                    100,
+                    false,
+                    false,
+                    None,
+                    &snapshot,
+                    Some(&source),
+                    source.position,
+                )
+                .expect("tone starts");
+        }
+        let lower_channel = audio
+            .active_channels
+            .values()
+            .find(|info| info.sample_name == format!("{}.wav", lower_name.to_ascii_lowercase()))
+            .and_then(|info| info.channel)
+            .expect("lower-rank tone channel");
+        let higher_channel = audio
+            .active_channels
+            .values()
+            .find(|info| info.sample_name == format!("{}.wav", higher_name.to_ascii_lowercase()))
+            .and_then(|info| info.channel)
+            .expect("higher-rank tone channel");
+
+        audio.stop_sound("Tone?", Some(source.id));
+
+        assert!(!audio.system.channel_is_playing(lower_channel));
+        assert!(audio.system.channel_is_playing(higher_channel));
+        assert_eq!(audio.active_channels.len(), 1);
     }
 
     #[test]
@@ -86914,6 +87597,9 @@ protected func InputCallback(string answer, int player)
                 handle,
                 duration_ms,
                 sample_key: "loop".to_string(),
+                sample_name: "loop.wav".to_string(),
+                sample_order: 0,
+                instance_order: 1,
                 looped: true,
                 target: None,
                 volume: 100,
