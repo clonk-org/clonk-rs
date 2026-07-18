@@ -667,10 +667,11 @@ impl ControlPlayerInfoRegistry {
         clients.into_iter().for_each(|client| self.apply(client));
     }
 
-    /// Apply the ID-allocation and slot-pruning portion of the host's
-    /// `HandlePlayerInfoUpdRequest` path. Nonzero IDs remain untouched exactly
-    /// like `C4PlayerInfoList::AssignPlayerIDs`
-    /// (src/C4PlayerInfo.cpp:781-807,1765-1775).
+    /// Apply duplicate-resource filtering, ID allocation and slot pruning from
+    /// the host's `HandlePlayerInfoUpdRequest` path. Nonzero IDs remain
+    /// untouched exactly like `C4PlayerInfoList::AssignPlayerIDs`
+    /// (src/C4Network2Players.cpp:166-191;
+    /// src/C4PlayerInfo.cpp:781-807,1765-1775).
     pub fn admit_request(
         &mut self,
         request: PlayerInfoUpdateRequest,
@@ -1941,6 +1942,40 @@ impl ControlPlayerInfoRegistry {
     ) -> Option<PlayerInfoControlData> {
         if request.players.is_empty() && request.flags & CLIENT_PLAYER_INFO_FLAG_INITIAL == 0 {
             return None;
+        }
+        if request.flags & CLIENT_PLAYER_INFO_FLAG_INITIAL == 0 {
+            if let Some(existing) = self
+                .clients
+                .iter()
+                .find(|client| client.client_id == request.client_id)
+            {
+                // Native scans backward and RemoveIndexedInfo swaps the last
+                // row into the removed slot. Preserve that observable order
+                // before IDs, slots, teams, or attributes are assigned.
+                let mut index = request.players.len();
+                while index != 0 {
+                    index -= 1;
+                    let player = &request.players[index];
+                    let is_duplicate = player.id == 0
+                        && player.resource.as_ref().is_some_and(|resource| {
+                            existing.players.iter().any(|existing_player| {
+                                existing_player.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                                    && existing_player
+                                        .resource
+                                        .as_ref()
+                                        .is_some_and(|existing_resource| {
+                                            existing_resource.id == resource.id
+                                        })
+                            })
+                        });
+                    if is_duplicate {
+                        request.players.swap_remove(index);
+                    }
+                }
+            }
+            if request.players.is_empty() {
+                return None;
+            }
         }
         let startup_count = self
             .clients
@@ -3723,6 +3758,201 @@ mod tests {
             panic!("expected one admitted player");
         };
         assert_eq!(admitted_player.id, 8);
+    }
+
+    #[test]
+    fn host_admission_duplicate_resource_filter_uses_native_swap_order() {
+        // HandlePlayerInfoUpdRequest scans backward and RemoveIndexedInfo
+        // replaces a removed row with the final row before AssignPlayerIDs
+        // (src/C4Network2Players.cpp:166-191;
+        // src/C4PlayerInfo.cpp:492-500,568-580).
+        let resource_player = |id, resource_id| ControlPlayerInfoEntry {
+            id,
+            flags: crate::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            resource: Some(NetworkResourceCore {
+                resource_type: 3,
+                id: resource_id,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![resource_player(7, 61)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(7);
+        let mut callback_resource_ids = Vec::new();
+
+        let admitted = registry
+            .admit_request_with(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![
+                        resource_player(0, 61),
+                        resource_player(0, 62),
+                        resource_player(0, 63),
+                    ],
+                },
+                8,
+                |players| {
+                    callback_resource_ids = players
+                        .iter()
+                        .map(|player| player.resource.as_ref().unwrap().id)
+                        .collect();
+                },
+            )
+            .expect("the two distinct resources remain in the request");
+
+        assert_eq!(
+            admitted
+                .players
+                .iter()
+                .map(|player| (player.id, player.resource.as_ref().unwrap().id))
+                .collect::<Vec<_>>(),
+            vec![(8, 63), (9, 62)]
+        );
+        assert_eq!(callback_resource_ids, vec![63, 62]);
+    }
+
+    #[test]
+    fn host_admission_all_duplicate_resources_return_before_assignment() {
+        let resource_player = |id, resource_id, flags| ControlPlayerInfoEntry {
+            id,
+            flags: flags | crate::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            resource: Some(NetworkResourceCore {
+                resource_type: 3,
+                id: resource_id,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![resource_player(7, 61, 0), resource_player(8, 62, 0)],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(8);
+        let before = registry.retained_rows_snapshot();
+        let mut callback_called = false;
+
+        let admitted = registry.admit_request_with(
+            PlayerInfoUpdateRequest {
+                client_id: 3,
+                flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![
+                    resource_player(0, 61, 0),
+                    resource_player(0, 62, PLAYER_INFO_FLAG_REMOVED),
+                ],
+            },
+            8,
+            |_| callback_called = true,
+        );
+
+        assert_eq!(admitted, None);
+        assert!(!callback_called);
+        assert_eq!(registry.retained_rows_snapshot(), before);
+    }
+
+    #[test]
+    fn host_admission_duplicate_resource_filter_preserves_cpp_exemptions() {
+        // Initial packets bypass the filter, assigned IDs are updates, only
+        // the requesting client's active resources are searched, and native
+        // does not deduplicate two new rows within one request
+        // (src/C4Network2Players.cpp:166-181;
+        // src/C4PlayerInfo.h:207-213; src/C4PlayerInfo.cpp:568-580).
+        let resource_player = |id, resource_id, flags| ControlPlayerInfoEntry {
+            id,
+            flags: flags | crate::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            resource: Some(NetworkResourceCore {
+                resource_type: 3,
+                id: resource_id,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![
+                resource_player(7, 61, 0),
+                resource_player(8, 62, PLAYER_INFO_FLAG_REMOVED),
+            ],
+            ..Default::default()
+        });
+        registry.reserve_player_ids_through(8);
+
+        let same_client = registry
+            .admit_request(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![
+                        resource_player(77, 61, 0),
+                        resource_player(0, 62, 0),
+                        player(0),
+                    ],
+                },
+                8,
+            )
+            .expect("assigned, resource-less, and removed-resource rows are exempt");
+        assert_eq!(
+            same_client
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![77, 9, 10]
+        );
+
+        let other_client = registry
+            .admit_request(
+                PlayerInfoUpdateRequest {
+                    client_id: 4,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![resource_player(0, 61, 0)],
+                },
+                8,
+            )
+            .expect("another client's matching resource is not a duplicate");
+        assert_eq!(other_client.players[0].id, 11);
+
+        let initial = registry
+            .admit_request(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![resource_player(0, 61, 0)],
+                },
+                8,
+            )
+            .expect("initial packets bypass duplicate-resource filtering");
+        assert_eq!(initial.players[0].id, 12);
+
+        let within_request = registry
+            .admit_request(
+                PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![
+                        resource_player(0, 64, 0),
+                        resource_player(0, 64, 0),
+                    ],
+                },
+                8,
+            )
+            .expect("new rows are not deduplicated against each other");
+        assert_eq!(
+            within_request
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![13, 14]
+        );
     }
 
     #[test]
