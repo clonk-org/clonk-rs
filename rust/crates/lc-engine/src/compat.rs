@@ -32,8 +32,9 @@ use crate::{
     C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT, CNAT_BOTTOM,
     CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, ChangeDefContentsSort,
     CommandDirection, CrewInfoCoreFields, CrewInfoLink, CrewObjectInfo, CrewPermanentPortrait,
-    CrewPortrait, CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DefinitionId, DefinitionRect,
-    Direction, DrawTransform, EnvironmentSettings, FULL_CON, FloatVector2, GraphicsOverlayMode,
+    CrewPortrait, CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DEFAULT_MUSIC_LEVEL,
+    DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FULL_CON,
+    FloatVector2, GraphicsOverlayMode,
     FilmViewRequest, Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PauseGameRequest,
@@ -41961,7 +41962,7 @@ struct AudioInstance {
     custom_falloff: Option<i32>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct AudioRegistry {
     /// Filenames admitted by the active C4SoundSystem resource chain. This
@@ -41974,6 +41975,8 @@ pub struct AudioRegistry {
     /// `None` is C4MusicSystem's default playlist; `Some("")` is the
     /// explicit empty filter produced by script nil/omitted arguments.
     music_playlist: Option<String>,
+    /// `Game.iMusicLevel`: save-persisted independently of the local mixer.
+    music_level: u8,
     looping: HashMap<AudioInstanceKey, AudioInstance>,
     /// Object ids that may still own a frontend one-shot instance. The engine
     /// cannot observe channel completion, so retain an id until its object is
@@ -41987,6 +41990,20 @@ pub struct AudioRegistry {
 pub struct AudioOutcome {
     pub state: AudioRegistry,
     pub events: Vec<AudioCommand>,
+}
+
+impl Default for AudioRegistry {
+    fn default() -> Self {
+        Self {
+            available_samples: Arc::new(HashSet::new()),
+            available_music: Arc::new(Vec::new()),
+            music_playlist: None,
+            music_level: DEFAULT_MUSIC_LEVEL,
+            looping: HashMap::new(),
+            attached_targets: HashSet::new(),
+            events: Vec::new(),
+        }
+    }
 }
 
 impl AudioRegistry {
@@ -42073,6 +42090,15 @@ impl AudioRegistry {
 
     pub(crate) fn restore_music_playlist(&mut self, playlist: Option<String>) {
         self.music_playlist = playlist;
+    }
+
+    pub(crate) fn music_level(&self) -> u8 {
+        self.music_level
+    }
+
+    pub(crate) fn restore_music_level(&mut self, level: u8) -> u8 {
+        self.music_level = level.min(DEFAULT_MUSIC_LEVEL);
+        self.music_level
     }
 
     pub(crate) fn set_music_playlist(&mut self, playlist: String, restart: bool) -> i32 {
@@ -42263,8 +42289,9 @@ impl AudioRegistry {
 
     pub fn set_music_level(&mut self, level: i32) -> u8 {
         let level = level.clamp(0, 100) as u8;
+        self.music_level = level;
         self.events.push(AudioCommand::SetMusicLevel { level });
-        level
+        self.music_level
     }
 }
 
@@ -54483,6 +54510,7 @@ func Announce()
         });
 
         assert_eq!(result.expect("tutorial music hosts run"), Value::Int(100));
+        assert_eq!(outcome.audio.state.music_level(), 100);
         assert_eq!(
             outcome.audio.events,
             vec![

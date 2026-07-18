@@ -36924,6 +36924,13 @@ impl GameApp {
         } else if let Some(path) = frontend.path.as_ref() {
             self.play_scenario_audio(path);
         }
+        // C4Game::InitGameFinal starts scenario music before applying the
+        // restored Game.iMusicLevel. Scenario configuration installs its
+        // default first, so the saved level must win afterward.
+        let restored_music_level = self.engine.music_level();
+        if let Some(audio) = self.audio.as_mut() {
+            audio.set_scenario_music_level(Some(restored_music_level));
+        }
 
         self.engine.set_film_viewport_available(true);
         self.mouse_control = self.local_controls.mouse_owner().is_some();
@@ -86238,6 +86245,54 @@ protected func InputCallback(string answer, int player)
         assert_eq!(pending.load(AtomicOrdering::Acquire), 2);
         drop(PendingMusicLoadGuard(Arc::clone(&pending), 2));
         assert_eq!(pending.load(AtomicOrdering::Acquire), 0);
+    }
+
+    #[test]
+    fn saved_game_restores_music_level_after_scenario_reconfiguration() {
+        let mut app = real_tutorial_app(1, "MusicLevel restore parity");
+        let paths = cached_app_paths().expect("test app paths");
+        paths.ensure_user_dirs().expect("test config directory");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("configure restore language");
+        let scenario = app
+            .active_scenario
+            .clone()
+            .expect("real tutorial remains active");
+        let mut engine_state = app.engine.capture_state();
+        engine_state.music_level = 25;
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("restored music level".to_string()),
+            runtime_music_enabled: Some(false),
+            engine_state,
+        };
+        let save: SavedGameFile = serde_json::from_str(
+            &serde_json::to_string(&save).expect("serialize tutorial save"),
+        )
+        .expect("deserialize tutorial save");
+        app.audio
+            .as_mut()
+            .expect("test audio")
+            .set_scenario_music_level(Some(73));
+
+        app.apply_loaded_game(save).expect("restore tutorial save");
+
+        assert_eq!(app.engine.capture_state().music_level, 25);
+        let audio = app.audio.as_ref().expect("test audio");
+        let control = lock_unpoisoned(&audio.music_control);
+        assert_eq!(control.scenario_level, Some(25));
+        assert!(
+            (control.effective_volume() - audio.options.music_volume * 0.25).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

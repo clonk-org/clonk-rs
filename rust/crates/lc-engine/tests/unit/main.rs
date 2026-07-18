@@ -31714,6 +31714,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                     playlist: None,
                     restart: false,
                 },
+                AudioCommand::SetMusicLevel { level: 100 },
                 AudioCommand::PlaySound {
                     name: "Trumpet".to_string(),
                     target: Some(crew_id),
@@ -35868,10 +35869,13 @@ public func ReadIDs(int first, int second)
         let mut resumed = restored.tick().expect("tick after restore succeeds");
         assert_eq!(
             resumed.audio,
-            vec![AudioCommand::SetMusicPlaylist {
-                playlist: None,
-                restart: false,
-            }]
+            vec![
+                AudioCommand::SetMusicPlaylist {
+                    playlist: None,
+                    restart: false,
+                },
+                AudioCommand::SetMusicLevel { level: 100 },
+            ]
         );
         resumed.audio.clear();
         assert_eq!(resumed, expected_next);
@@ -35902,10 +35906,13 @@ public func ReadIDs(int first, int second)
         let mut resumed = restored.tick().expect("tick after restore succeeds");
         assert_eq!(
             resumed.audio,
-            vec![AudioCommand::SetMusicPlaylist {
-                playlist: None,
-                restart: false,
-            }]
+            vec![
+                AudioCommand::SetMusicPlaylist {
+                    playlist: None,
+                    restart: false,
+                },
+                AudioCommand::SetMusicLevel { level: 100 },
+            ]
         );
         resumed.audio.clear();
         assert_eq!(resumed, expected_next);
@@ -69704,10 +69711,13 @@ private func Sitting()
         let mut actual = restored.tick()?;
         assert_eq!(
             actual.audio,
-            vec![AudioCommand::SetMusicPlaylist {
-                playlist: None,
-                restart: false,
-            }]
+            vec![
+                AudioCommand::SetMusicPlaylist {
+                    playlist: None,
+                    restart: false,
+                },
+                AudioCommand::SetMusicLevel { level: 100 },
+            ]
         );
         actual.audio.clear();
         assert_eq!(expected, actual);
@@ -70024,11 +70034,14 @@ func ProbeSetSkyFade() {
         let mut next_restored = restored.tick()?;
         assert_eq!(
             next_restored.audio,
-            vec![AudioCommand::SetMusicPlaylist {
-                playlist: None,
-                restart: false,
-            }],
-            "state restore reapplies the default music playlist to the frontend"
+            vec![
+                AudioCommand::SetMusicPlaylist {
+                    playlist: None,
+                    restart: false,
+                },
+                AudioCommand::SetMusicLevel { level: 100 },
+            ],
+            "state restore reapplies the default music playlist and level to the frontend"
         );
         next_restored.audio.clear();
         assert_eq!(next_original, next_restored);

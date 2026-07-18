@@ -4294,6 +4294,16 @@ fn default_message_board_commands() -> Vec<InitialNetworkMessageBoardCommand> {
     vec![InitialNetworkMessageBoardCommand::speed()]
 }
 
+pub(crate) const DEFAULT_MUSIC_LEVEL: u8 = 100;
+
+const fn default_music_level() -> u8 {
+    DEFAULT_MUSIC_LEVEL
+}
+
+fn music_level_is_default(level: &u8) -> bool {
+    *level == DEFAULT_MUSIC_LEVEL
+}
+
 fn message_board_commands_are_default(commands: &[InitialNetworkMessageBoardCommand]) -> bool {
     commands == [InitialNetworkMessageBoardCommand::speed()]
 }
@@ -9865,6 +9875,13 @@ pub struct EngineState {
     /// no normally named song. Older Rust saves predate this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_list: Option<String>,
+    /// Saved `Game.iMusicLevel`, multiplied into configured music volume
+    /// while a game is running. C++ omits its default value from Game.txt.
+    #[serde(
+        default = "default_music_level",
+        skip_serializing_if = "music_level_is_default"
+    )]
+    pub music_level: u8,
     pub next_object_id: u64,
     #[serde(default)]
     pub landscape: Option<Landscape>,
@@ -10091,6 +10108,7 @@ impl EngineState {
             environment: snapshot.environment.settings,
             gamma: snapshot.environment.gamma,
             play_list: None,
+            music_level: DEFAULT_MUSIC_LEVEL,
             next_object_id,
             landscape: snapshot.landscape.clone(),
             solid_masks_removed_from_landscape: false,
@@ -18844,6 +18862,11 @@ impl Engine {
     #[doc(hidden)]
     pub fn music_playlist(&self) -> &str {
         self.audio_registry.music_playlist().unwrap_or_default()
+    }
+
+    #[doc(hidden)]
+    pub fn music_level(&self) -> u8 {
+        self.audio_registry.music_level()
     }
 
     pub fn set_construction_needs_material(&mut self, enabled: bool) {
@@ -32225,6 +32248,7 @@ impl Engine {
             environment: self.environment,
             gamma: self.gamma,
             play_list: self.audio_registry.music_playlist().map(str::to_owned),
+            music_level: self.audio_registry.music_level(),
             next_object_id: self.next_object_id,
             landscape: self.landscape_without_solid_masks(),
             solid_masks_removed_from_landscape: true,
@@ -32358,6 +32382,10 @@ impl Engine {
         self.pending_audio.push(AudioCommand::SetMusicPlaylist {
             playlist: music_playlist,
             restart: false,
+        });
+        let music_level = self.audio_registry.restore_music_level(state.music_level);
+        self.pending_audio.push(AudioCommand::SetMusicLevel {
+            level: music_level,
         });
         self.landscape_insert_thrust = state.landscape_insert_thrust;
         self.structures_snow_in = state.structures_snow_in;
@@ -57701,6 +57729,89 @@ mod music_playlist_regression {
     use super::*;
 
     #[test]
+    fn scripted_music_level_roundtrips_engine_state_and_restore_event() {
+        let mut engine = Engine::new();
+        engine
+            .load_scenario_script_with_convention(
+                "MusicLevel.c",
+                r#"#strict 3
+func Probe() {
+    var low = MusicLevel(-1);
+    var high = MusicLevel(130);
+    var saved = MusicLevel(25);
+    return [low, high, saved];
+}
+"#,
+                true,
+            )
+            .expect("MusicLevel probe compiles");
+
+        assert_eq!(
+            engine
+                .call_scenario_script_value("Probe", &[])
+                .expect("MusicLevel probe executes"),
+            Some(Value::Array(vec![
+                Value::Int(0),
+                Value::Int(100),
+                Value::Int(25),
+            ]))
+        );
+        assert_eq!(
+            engine.pending_audio.last(),
+            Some(&AudioCommand::SetMusicLevel { level: 25 })
+        );
+
+        let state = engine.capture_state();
+        assert_eq!(state.music_level, 25);
+        assert_eq!(
+            InitialNetworkGameData::from_engine(&engine)
+                .expect("music-level-only engine is representable in Game.txt")
+                .music_level,
+            25
+        );
+        let encoded = state
+            .to_json_string()
+            .expect("music level state serializes");
+        let decoded =
+            EngineState::from_json_str(&encoded).expect("music level state deserializes");
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&decoded)
+            .expect("music level state restores");
+
+        assert_eq!(restored.capture_state().music_level, 25);
+        assert_eq!(
+            restored.pending_audio.last(),
+            Some(&AudioCommand::SetMusicLevel { level: 25 })
+        );
+    }
+
+    #[test]
+    fn legacy_engine_state_without_music_level_defaults_to_100() {
+        let mut value = serde_json::to_value(Engine::new().capture_state())
+            .expect("engine state serializes to value");
+        value
+            .as_object_mut()
+            .expect("engine state is an object")
+            .remove("music_level");
+        let decoded: EngineState =
+            serde_json::from_value(value).expect("legacy engine state deserializes");
+        assert_eq!(decoded.music_level, DEFAULT_MUSIC_LEVEL);
+
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&decoded)
+            .expect("legacy music level restores");
+        assert_eq!(restored.capture_state().music_level, DEFAULT_MUSIC_LEVEL);
+        assert_eq!(
+            restored.pending_audio.last(),
+            Some(&AudioCommand::SetMusicLevel {
+                level: DEFAULT_MUSIC_LEVEL,
+            })
+        );
+    }
+
+    #[test]
     fn set_playlist_roundtrips_engine_state_and_initial_game_data() {
         let mut engine = Engine::new();
         engine.configure_music_tracks([
@@ -57754,11 +57865,16 @@ mod music_playlist_regression {
             .expect("music playlist state restores");
         assert_eq!(restored.music_playlist(), "*.mid;THEME*");
         assert_eq!(
-            restored.pending_audio.last(),
-            Some(&AudioCommand::SetMusicPlaylist {
-                playlist: Some("*.mid;THEME*".to_owned()),
-                restart: false,
-            })
+            restored.pending_audio,
+            vec![
+                AudioCommand::SetMusicPlaylist {
+                    playlist: Some("*.mid;THEME*".to_owned()),
+                    restart: false,
+                },
+                AudioCommand::SetMusicLevel {
+                    level: DEFAULT_MUSIC_LEVEL,
+                },
+            ]
         );
         assert_eq!(
             InitialNetworkGameData::from_engine(&restored)
@@ -57793,11 +57909,16 @@ mod music_playlist_regression {
             .expect("explicit empty playlist restores");
         assert_eq!(restored.capture_state().play_list, Some(String::new()));
         assert_eq!(
-            restored.pending_audio.last(),
-            Some(&AudioCommand::SetMusicPlaylist {
-                playlist: Some(String::new()),
-                restart: false,
-            })
+            restored.pending_audio,
+            vec![
+                AudioCommand::SetMusicPlaylist {
+                    playlist: Some(String::new()),
+                    restart: false,
+                },
+                AudioCommand::SetMusicLevel {
+                    level: DEFAULT_MUSIC_LEVEL,
+                },
+            ]
         );
     }
 }
@@ -64135,10 +64256,15 @@ mod audio_detach_regression {
 
         assert_eq!(
             snapshot.audio,
-            vec![AudioCommand::SetMusicPlaylist {
-                playlist: None,
-                restart: false,
-            }]
+            vec![
+                AudioCommand::SetMusicPlaylist {
+                    playlist: None,
+                    restart: false,
+                },
+                AudioCommand::SetMusicLevel {
+                    level: DEFAULT_MUSIC_LEVEL,
+                },
+            ]
         );
     }
 }

@@ -210,7 +210,7 @@ impl InitialNetworkGameData {
                 .unwrap_or_default(),
             resort_any_object: !engine.pending_object_order_commands.is_empty(),
             music_enabled: false,
-            music_level: 100,
+            music_level: i32::from(engine.music_level()),
             next_mission: engine.next_mission.clone(),
             message_board_commands: engine.message_board_commands.clone(),
             script_go: engine.scenario_script_go,
