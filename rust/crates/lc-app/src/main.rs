@@ -14650,6 +14650,98 @@ fn legacy_presentation_text(bytes: &[u8]) -> String {
     lc_resources::decode_legacy_script_text(bytes)
 }
 
+/// `C4ObjectInfo::Draw` resolves the portrait tint from the object passed as
+/// `pOfObj`, not from the viewport player. A missing live player leaves the
+/// native `0xffffffff` fallback in place, suppressing the owner-color layer.
+fn cursor_portrait_owner_color(snapshot: &SimulationSnapshot, owner: i32) -> u32 {
+    let Some(player) = snapshot.players.iter().find(|player| player.id == owner) else {
+        return u32::MAX;
+    };
+    let packed = player.color.map_or(0, |color| {
+        u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+    });
+    // C4Surface::SetClr substitutes the legacy blue owner color for zero.
+    if packed == 0 {
+        0xff
+    } else {
+        packed
+    }
+}
+
+#[derive(Clone)]
+struct CursorPortraitImages {
+    base: ImageData,
+    owner_overlay: Option<ImageData>,
+}
+
+/// Prepares the two surfaces consumed by `C4DefGraphics::DrawClr`. Keeping
+/// them separate lets the HUD scale/filter the base and owner overlay in the
+/// same two passes as C++.
+fn cursor_portrait_images(image: lc_engine::DefinitionPictureImage) -> CursorPortraitImages {
+    let width = image.width();
+    let height = image.height();
+    let mask = image.color_mask();
+    let pixels = image.into_pixels();
+    let Some(mask) = mask else {
+        return CursorPortraitImages {
+            base: ImageData::from_arc(width, height, pixels),
+            owner_overlay: None,
+        };
+    };
+    let Some(pixel_count) = usize::try_from(u64::from(width) * u64::from(height)).ok() else {
+        return CursorPortraitImages {
+            base: ImageData::from_arc(width, height, pixels),
+            owner_overlay: None,
+        };
+    };
+    if pixels.len() != pixel_count.saturating_mul(4) {
+        return CursorPortraitImages {
+            base: ImageData::from_arc(width, height, pixels),
+            owner_overlay: None,
+        };
+    }
+
+    let mut base = pixels.to_vec();
+
+    if mask.len() == pixel_count {
+        // CreateColorByOwner moves each detected pixel wholly out of the base
+        // surface. The retained scalar is the gray owner-overlay intensity.
+        let mut overlay = vec![255; base.len()];
+        for pixel in overlay.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        for ((base, overlay), gray) in base
+            .chunks_exact_mut(4)
+            .zip(overlay.chunks_exact_mut(4))
+            .zip(mask.iter().copied())
+        {
+            if gray == 0 {
+                continue;
+            }
+            overlay[..3].fill(gray);
+            overlay[3] = base[3];
+            // SetPixDw canonicalizes the 0xffffffff clear to transparent
+            // black on the main surface (src/C4Surface.cpp:728-735).
+            base.copy_from_slice(&[0, 0, 0, 0]);
+        }
+        CursorPortraitImages {
+            base: ImageData::new(width, height, base),
+            owner_overlay: Some(ImageData::new(width, height, overlay)),
+        }
+    } else if mask.len() == base.len() {
+        // An explicit OverlayN.png is the complete second RGBA surface.
+        CursorPortraitImages {
+            base: ImageData::new(width, height, base),
+            owner_overlay: Some(ImageData::new(width, height, mask.to_vec())),
+        }
+    } else {
+        CursorPortraitImages {
+            base: ImageData::from_arc(width, height, pixels),
+            owner_overlay: None,
+        }
+    }
+}
+
 fn player_join_board_line(frame: u64, player_name: &str) -> (String, u64) {
     const PREFIX: &str = "Player join: ";
     let line = format!("{PREFIX}{}", c4_presentation_text(player_name));
@@ -16241,57 +16333,59 @@ impl GameApp {
         }
     }
 
-    /// Fills the presentation half of the crew overlays: the def portrait
-    /// (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320), the crew name and
-    /// rank (src/C4ObjectInfo.cpp:330-370) and the def rank symbols
+    /// Fills the presentation half of the crew overlays: the selected info
+    /// portrait (C4ObjectInfo::Draw, src/C4ObjectInfo.cpp:308-320), the crew
+    /// name and rank (src/C4ObjectInfo.cpp:330-370) and the def rank symbols
     /// (src/C4ObjectInfo.cpp:334-341).
     fn populate_crew_portraits(&self, players: &mut [PlayerOverlay]) {
         // Config.Graphics.ShowPortraits from the Display menu
         // (C4MainMenu.cpp:872) gates only the portrait branch.
         let show_portraits = self.display_flags.portraits;
-        let hud_graphics = self.graphics.hud_graphics();
-        let fallback_portrait = show_portraits
-            .then(|| hud_graphics.crew.clone())
-            .flatten();
-        let mut portrait_cache: HashMap<String, Option<ImageData>> = HashMap::new();
+        let mut portrait_cache: HashMap<(String, String), Option<CursorPortraitImages>> =
+            HashMap::new();
         let mut rank_cache: HashMap<String, Option<ImageData>> = HashMap::new();
 
         for player in players.iter_mut() {
             for crew in player.crew.iter_mut() {
-                if let Some(info) = self.engine.crew_object_info(crew.object_id) {
-                    crew.label = c4_presentation_text(&info.name);
-                    crew.rank = info.rank;
-                }
+                let current_portrait = self
+                    .engine
+                    .crew_object_info(crew.object_id)
+                    .and_then(|info| {
+                        crew.label = c4_presentation_text(&info.name);
+                        crew.rank = info.rank;
+                        info.portraits.current.clone()
+                    });
                 let Some(object) = self.snapshot.object(crew.object_id) else {
-                    crew.portrait = fallback_portrait.clone();
+                    crew.portrait = None;
+                    crew.portrait_owner_overlay = None;
+                    crew.portrait_owner_color = u32::MAX;
                     continue;
                 };
 
                 let definition_id = object.definition_id.clone();
-                let portrait = show_portraits
-                    .then(|| {
+                let owner_color = cursor_portrait_owner_color(&self.snapshot, object.owner);
+                let portrait = if show_portraits {
+                    current_portrait.and_then(|portrait| {
+                        let source = portrait.source?;
                         portrait_cache
-                            .entry(definition_id.clone())
+                            .entry((source.clone(), portrait.name.clone()))
                             .or_insert_with(|| {
                                 self.engine
-                                    .definition_portrait_image(&definition_id)
-                                    .map(|image| {
-                                        ImageData::from_arc(
-                                            image.width(),
-                                            image.height(),
-                                            image.pixels(),
-                                        )
-                                    })
-                                    .or_else(|| {
-                                        self.engine
-                                            .definition_picture_image(&definition_id)
-                                            .map(definition_menu_picture)
-                                    })
+                                    .definition_named_portrait_graphics_image(
+                                        &source,
+                                        &portrait.name,
+                                    )
+                                    .map(cursor_portrait_images)
                             })
                             .clone()
                     })
-                    .flatten();
-                crew.portrait = portrait.or_else(|| fallback_portrait.clone());
+                } else {
+                    None
+                };
+                crew.portrait = portrait.as_ref().map(|portrait| portrait.base.clone());
+                crew.portrait_owner_overlay =
+                    portrait.and_then(|portrait| portrait.owner_overlay);
+                crew.portrait_owner_color = owner_color;
                 crew.rank_symbols = rank_cache
                     .entry(definition_id.clone())
                     .or_insert_with(|| {
@@ -37350,6 +37444,8 @@ fn collect_player_overlays(
                 hide_hud_elements,
                 hide_hud_bars,
                 portrait: None,
+                portrait_owner_overlay: None,
+                portrait_owner_color: u32::MAX,
                 rank: 0,
                 rank_symbols: None,
                 rank_symbol_count: None,
@@ -46030,6 +46126,149 @@ func Award()
             }
         }
         assert!(varied, "placeholder preview should contain color variation");
+    }
+
+    #[test]
+    fn cursor_portrait_colorization_uses_the_portrayed_objects_owner() {
+        let mut app = new_running_sandbox_app();
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("PortraitCrew.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=PCRO\nColorByOwner=1\n",
+        )
+        .expect("DefCore");
+        write_test_definition_graphics(&def_dir);
+        image::RgbaImage::from_raw(
+            2,
+            1,
+            vec![10, 20, 30, 255, 40, 50, 60, 255],
+        )
+        .expect("portrait pixels")
+            .save(def_dir.join("Portrait1.png"))
+            .expect("portrait");
+        image::RgbaImage::from_raw(
+            2,
+            1,
+            vec![136, 136, 136, 255, 64, 128, 192, 128],
+        )
+        .expect("overlay pixels")
+            .save(def_dir.join("Overlay1.png"))
+            .expect("portrait overlay");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let resource = ResourceDefinitionData::load(&group).expect("load definition");
+        app.engine
+            .register_definition(
+                Definition::from_resource(&resource).expect("compile definition"),
+            )
+            .expect("register definition");
+        app.engine
+            .register_definition(
+                Definition::from_script("PHST", "Portrait host", "")
+                    .expect("compile host definition"),
+            )
+            .expect("register host definition");
+        let viewed_owner = app.local_owner + 1;
+        app.engine
+            .register_player(
+                PlayerConfig::new(viewed_owner, "Viewed")
+                    .with_color(Some(RgbColor::new(255, 0, 0))),
+            )
+            .expect("register viewed owner");
+        let viewed_object = app
+            .engine
+            .spawn_object(SpawnConfig::new("PHST").with_owner(viewed_owner))
+            .expect("spawn viewed portrait object");
+        let mut state = app.engine.capture_state();
+        state.crew_object_infos.insert(
+            viewed_object,
+            lc_engine::CrewObjectInfo {
+                core: Default::default(),
+                definition_id: "PHST".to_string(),
+                name: "Viewed crew".to_string(),
+                death_message: String::new(),
+                rank: 0,
+                rank_name: "Clonk".to_string(),
+                experience: 0,
+                rounds: 0,
+                death_count: 0,
+                total_playing_time: 0,
+                birthday: 0,
+                age: 0,
+                participation: 0,
+                in_action_time: 0,
+                extra_data: Vec::new(),
+                portraits: lc_engine::CrewPortraitState {
+                    current: Some(lc_engine::CrewPortrait {
+                        source: Some("PCRO".to_string()),
+                        name: "1".to_string(),
+                    }),
+                    ..lc_engine::CrewPortraitState::default()
+                },
+            },
+        );
+        app.engine
+            .restore_state(&state)
+            .expect("install selected portrait");
+        app.snapshot = app.engine.snapshot();
+        let mut color_defaults = app.snapshot.clone();
+        color_defaults
+            .players
+            .iter_mut()
+            .find(|player| player.id == viewed_owner)
+            .expect("viewed player")
+            .color = None;
+        assert_eq!(
+            cursor_portrait_owner_color(&color_defaults, viewed_owner),
+            0xff
+        );
+        assert_eq!(cursor_portrait_owner_color(&color_defaults, 99), u32::MAX);
+
+        let mut players = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            Some(viewed_object),
+            &app.bindings,
+        );
+        let viewport_player = players
+            .iter_mut()
+            .find(|player| player.owner == app.local_owner)
+            .expect("local viewport player");
+        let crew = viewport_player.crew.first_mut().expect("local crew overlay");
+        crew.object_id = viewed_object;
+        app.display_flags.portraits = true;
+        app.populate_crew_portraits(&mut players);
+
+        let portrait = players
+            .iter()
+            .find(|player| player.owner == app.local_owner)
+            .and_then(|player| {
+                player
+                    .crew
+                    .iter()
+                    .find(|crew| crew.object_id == viewed_object)
+            })
+            .expect("cross-owner ViewCursor portrait");
+        assert_eq!(
+            portrait.portrait.as_ref().expect("base").pixels(),
+            &[10, 20, 30, 255, 40, 50, 60, 255],
+            "explicit OverlayN pixels stay in the second C++ surface and do not pre-darken the base"
+        );
+        assert_eq!(
+            portrait
+                .portrait_owner_overlay
+                .as_ref()
+                .expect("owner overlay")
+                .pixels(),
+            &[136, 136, 136, 255, 64, 128, 192, 128],
+            "colored and partial-alpha OverlayN pixels must reach DrawClr intact"
+        );
+        assert_eq!(
+            portrait.portrait_owner_color, 0x00ff_0000,
+            "viewport owner differs, so red proves the viewed object's owner won"
+        );
     }
 
     #[test]
@@ -61990,6 +62229,69 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn cursor_portrait_does_not_fall_back_to_definition_picture_or_crew_icon() {
+        let mut app = new_running_sandbox_app();
+        assert!(
+            app.graphics.hud_graphics().crew.is_some(),
+            "fixture must carry Crew.png so the forbidden fallback is observable"
+        );
+
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("NoPortrait.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=NPOR\nPicture=0,0,1,1\n",
+        )
+        .expect("DefCore");
+        write_test_definition_graphics(&def_dir);
+        let group = Group::open(&def_dir).expect("open definition");
+        let resource = ResourceDefinitionData::load(&group).expect("load definition");
+        app.engine
+            .register_definition(
+                Definition::from_resource(&resource).expect("compile definition"),
+            )
+            .expect("register definition");
+        assert!(
+            app.engine.definition_picture_image("NPOR").is_some(),
+            "fixture must carry a definition picture"
+        );
+        let object = app
+            .engine
+            .spawn_object(SpawnConfig::new("NPOR").with_owner(app.local_owner))
+            .expect("spawn picture-only object");
+        app.snapshot = app.engine.snapshot();
+
+        let mut players = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            Some(object),
+            &app.bindings,
+        );
+        let crew = players
+            .iter_mut()
+            .flat_map(|player| &mut player.crew)
+            .next()
+            .expect("sandbox crew overlay");
+        crew.object_id = object;
+        crew.portrait = app.graphics.hud_graphics().crew.clone();
+        crew.portrait_owner_overlay = app.graphics.hud_graphics().crew.clone();
+        app.display_flags.portraits = true;
+
+        app.populate_crew_portraits(&mut players);
+
+        let overlay = players
+            .iter()
+            .flat_map(|player| &player.crew)
+            .find(|crew| crew.object_id == object)
+            .expect("picture-only overlay");
+        assert!(
+            overlay.portrait.is_none() && overlay.portrait_owner_overlay.is_none(),
+            "neither the definition picture nor Crew.png is a portrait"
+        );
+    }
+
+    #[test]
     fn portrait_crew_label_decodes_native_info_name_for_presentation() {
         let mut app = new_running_sandbox_app();
         let crew = app
@@ -62004,6 +62306,12 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("cursor object is visible")
             .definition_id
             .clone();
+        assert!(
+            app.engine
+                .definition_portrait_graphics_image(&definition_id)
+                .is_some(),
+            "fixture definition must have a portrait so current=None is observable"
+        );
         state.crew_object_infos.insert(
             crew,
             lc_engine::CrewObjectInfo {
@@ -62043,6 +62351,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("cursor overlay exists");
         assert_eq!(overlay.info_name.as_deref(), Some("Ren\u{e9}"));
         assert_eq!(overlay.label, "Ren\u{e9}");
+        assert!(
+            overlay.portrait.is_none() && overlay.portrait_owner_overlay.is_none(),
+            "an info with no current portrait must not draw the definition's first portrait"
+        );
         assert_eq!(
             lc_script::c4_string_bytes(
                 &app.engine

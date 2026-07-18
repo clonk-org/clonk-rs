@@ -16,8 +16,8 @@
 //!   — one log line over the tiled background strip at the screen bottom.
 
 use crate::{
-    draw_image_bilinear, draw_image_bilinear_additive, draw_image_strip, fill_rect, ClonkFontSet,
-    HudGraphics, ImageData, InventoryOverlay,
+    draw_image_bilinear, draw_image_bilinear_additive, draw_image_bilinear_owner,
+    draw_image_strip, fill_rect, ClonkFontSet, HudGraphics, ImageData, InventoryOverlay,
 };
 use lc_graphics::{
     clonk_font::TextAlign, Color, GammaRamp, Rect as SurfaceRect, Surface, TextFont,
@@ -289,6 +289,16 @@ fn draw_hud_image_bilinear(
     draw_image_bilinear(surface, rect, image, gamma);
 }
 
+fn draw_hud_image_bilinear_owner(
+    surface: &mut Surface,
+    rect: &lc_gui::Rect,
+    image: &ImageData,
+    owner_color: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_image_bilinear_owner(surface, rect, image, owner_color, gamma);
+}
+
 /// `{:02}:{:02}:{:02}` of `Game.Time` (C4UpperBoard::Execute,
 /// src/C4UpperBoard.cpp:41).
 pub fn format_game_time(seconds: u64) -> String {
@@ -377,6 +387,28 @@ fn draw_image_aspect(
             target.height as f32,
         ),
         image,
+        gamma,
+    );
+}
+
+fn draw_image_aspect_owner(
+    surface: &mut Surface,
+    image: &ImageData,
+    rect: SurfaceRect,
+    owner_color: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    let target = aspect_fit(image.width() as i32, image.height() as i32, rect);
+    draw_hud_image_bilinear_owner(
+        surface,
+        &lc_gui::Rect::new(
+            target.x as f32,
+            target.y as f32,
+            target.width as f32,
+            target.height as f32,
+        ),
+        image,
+        owner_color,
         gamma,
     );
 }
@@ -675,6 +707,8 @@ pub fn draw_cursor_info(
         rank,
         None,
         portrait,
+        None,
+        u32::MAX,
         rank_symbols,
         None,
         false,
@@ -693,6 +727,8 @@ pub(crate) fn draw_cursor_info_with_gamma(
     rank: i32,
     rank_name: Option<&str>,
     portrait: Option<&ImageData>,
+    portrait_owner_overlay: Option<&ImageData>,
+    portrait_owner_color: u32,
     rank_symbols: Option<&ImageData>,
     rank_symbol_count: Option<u32>,
     is_captain: bool,
@@ -719,6 +755,15 @@ pub(crate) fn draw_cursor_info_with_gamma(
                 (SYMBOL_SIZE + 10) as u32,
             );
             draw_image_aspect(surface, portrait, rect, gamma);
+            if let Some(owner_overlay) = portrait_owner_overlay {
+                draw_image_aspect_owner(
+                    surface,
+                    owner_overlay,
+                    rect,
+                    portrait_owner_color,
+                    gamma,
+                );
+            }
             ix += 4 * SYMBOL_SIZE / 3;
         }
     }
@@ -2788,6 +2833,78 @@ mod tests {
     }
 
     #[test]
+    fn cursor_info_without_portrait_keeps_rank_in_the_first_column() {
+        // A null Portrait.GetGfx() skips both DrawClr and the iX increment
+        // (src/C4ObjectInfo.cpp:308-320).
+        let ranks = solid_image(4, 4, [220, 30, 20, 255]);
+        let mut target = surface(100, 60);
+        let font = bitmap_font();
+        draw_cursor_info(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &HudGraphics::default(),
+            SurfaceRect::new(0, 0, 100, 60),
+            "",
+            0,
+            None,
+            Some(&ranks),
+        );
+
+        assert_eq!(target.get_pixel(5, 5), Some(Color::opaque(220, 30, 20)));
+        assert_eq!(target.get_pixel(51, 5), Some(Color::opaque(0, 0, 0)));
+    }
+
+    #[test]
+    fn cursor_info_draws_owner_overlay_as_the_second_aspect_pass() {
+        let base = solid_image(1, 1, [20, 40, 60, 255]);
+        let owner_overlay = solid_image(1, 1, [147, 0, 0, 255]);
+        let mut target = surface(80, 60);
+        let font = bitmap_font();
+        draw_cursor_info_with_gamma(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &HudGraphics::default(),
+            SurfaceRect::new(0, 0, 80, 60),
+            "",
+            0,
+            None,
+            Some(&base),
+            Some(&owner_overlay),
+            0x00e8_0000,
+            None,
+            None,
+            false,
+            0,
+            None,
+        );
+
+        assert_eq!(target.get_pixel(20, 20), Some(Color::opaque(134, 0, 0)));
+
+        let base = solid_image(1, 1, [10, 20, 30, 255]);
+        let owner_overlay = solid_image(1, 1, [64, 128, 192, 128]);
+        let mut target = surface(80, 60);
+        draw_cursor_info_with_gamma(
+            &mut target,
+            &HudFont::Fallback(&font),
+            &HudGraphics::default(),
+            SurfaceRect::new(0, 0, 80, 60),
+            "",
+            0,
+            None,
+            Some(&base),
+            Some(&owner_overlay),
+            0x00e8_8040,
+            None,
+            None,
+            false,
+            0,
+            None,
+        );
+
+        assert_eq!(target.get_pixel(20, 20), Some(Color::opaque(34, 42, 39)));
+    }
+
+    #[test]
     fn cursor_info_hide_bits_gate_and_compact_columns() {
         let portrait = solid_image(150, 150, [10, 200, 30, 255]);
         let captain = solid_image(6, 6, [220, 30, 20, 255]);
@@ -2815,6 +2932,8 @@ mod tests {
                 1,
                 Some("I"),
                 Some(&portrait),
+                None,
+                u32::MAX,
                 Some(&ranks),
                 None,
                 true,
@@ -2917,6 +3036,8 @@ mod tests {
             25,
             None,
             None,
+            None,
+            u32::MAX,
             Some(&ranks),
             Some(24),
             false,
@@ -2950,6 +3071,8 @@ mod tests {
             144,
             None,
             None,
+            None,
+            u32::MAX,
             Some(&ranks),
             Some(24),
             false,
@@ -2982,6 +3105,8 @@ mod tests {
             None,
             None,
             None,
+            u32::MAX,
+            None,
             Some(1),
             false,
             lc_engine::HIDE_HUD_ELEMENT_CAPTAIN,
@@ -3010,6 +3135,8 @@ mod tests {
             Some("Captain"),
             None,
             None,
+            u32::MAX,
+            None,
             None,
             false,
             0,
@@ -3025,6 +3152,8 @@ mod tests {
             1,
             Some("Captain"),
             None,
+            None,
+            u32::MAX,
             None,
             None,
             false,

@@ -2028,6 +2028,11 @@ pub struct CrewOverlay {
     pub hide_hud_elements: i32,
     pub hide_hud_bars: i32,
     pub portrait: Option<ImageData>,
+    /// Raw owner-color surface paired with `portrait`, drawn as C++'s second
+    /// filtered pass before applying `portrait_owner_color`.
+    pub portrait_owner_overlay: Option<ImageData>,
+    /// Packed C4 player `ColorDw`, applied after filtering the owner surface.
+    pub portrait_owner_color: u32,
     /// `C4ObjectInfo::Rank` (src/C4ObjectInfo.cpp:330).
     pub rank: i32,
     /// The def's own rank symbols (`pDef->pRankSymbols`,
@@ -6881,6 +6886,8 @@ impl GraphicsSystem {
                         crew.rank,
                         crew.rank_name.as_deref(),
                         crew.portrait.as_ref(),
+                        crew.portrait_owner_overlay.as_ref(),
+                        crew.portrait_owner_color,
                         crew.rank_symbols.as_ref(),
                         crew.rank_symbol_count,
                         player.captain == Some(crew.object_id),
@@ -9302,6 +9309,7 @@ fn draw_image_bilinear_impl(
     image: &ImageData,
     gamma: Option<&lc_graphics::GammaRamp>,
     blend_mode: BilinearBlend,
+    modulation: Option<u32>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
     {
@@ -9314,6 +9322,7 @@ fn draw_image_bilinear_impl(
     let ts = cpp_tex_size(image.width(), image.height()) as i32;
     let tiles_x = (image.width() as i32 - 1) / ts + 1;
     let tiles_y = (image.height() as i32 - 1) / ts + 1;
+    let modulation = modulation.map(|color| split_c4_color(if color == 0 { 0xff } else { color }));
 
     for tile_iy in 0..tiles_y {
         for tile_ix in 0..tiles_x {
@@ -9341,7 +9350,13 @@ fn draw_image_bilinear_impl(
                     }
                     let u_rel = (px as f32 + 0.5 - tx) / scale_x - 0.5 - blit_x as f32;
                     let v_rel = (py as f32 + 0.5 - ty) / scale_y - 0.5 - blit_y as f32;
-                    let s = bilinear_sample_tile(image, blit_x, blit_y, ts, u_rel, v_rel);
+                    let mut s = bilinear_sample_tile(image, blit_x, blit_y, ts, u_rel, v_rel);
+                    if let Some([red, green, blue, transparency]) = modulation {
+                        s[0] *= f32::from(red) / 255.0;
+                        s[1] *= f32::from(green) / 255.0;
+                        s[2] *= f32::from(blue) / 255.0;
+                        s[3] = (s[3] - f32::from(transparency)).max(0.0);
+                    }
                     if s[3] <= 0.0 {
                         continue;
                     }
@@ -9659,7 +9674,33 @@ pub fn draw_image_bilinear(
     image: &ImageData,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
-    draw_image_bilinear_impl(surface, rect, image, gamma, BilinearBlend::AlphaOver);
+    draw_image_bilinear_impl(
+        surface,
+        rect,
+        image,
+        gamma,
+        BilinearBlend::AlphaOver,
+        None,
+    );
+}
+
+/// Owner-color surface counterpart of [`draw_image_bilinear`]. Filtering
+/// precedes packed C4 `ColorDw` modulation, matching the DrawClr shader.
+pub(crate) fn draw_image_bilinear_owner(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    owner_color: u32,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    draw_image_bilinear_impl(
+        surface,
+        rect,
+        image,
+        gamma,
+        BilinearBlend::AlphaOver,
+        Some(owner_color),
+    );
 }
 
 /// Stretches `image` into `rect` with bilinear sampling and additive blending
@@ -9671,7 +9712,14 @@ pub fn draw_image_bilinear_additive(
     image: &ImageData,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
-    draw_image_bilinear_impl(surface, rect, image, gamma, BilinearBlend::Additive);
+    draw_image_bilinear_impl(
+        surface,
+        rect,
+        image,
+        gamma,
+        BilinearBlend::Additive,
+        None,
+    );
 }
 
 fn blend_colors(foreground: Color, background: Color) -> Color {
@@ -18084,6 +18132,8 @@ mod tests {
                 hide_hud_elements: 0,
                 hide_hud_bars: 0,
                 portrait: None,
+                portrait_owner_overlay: None,
+                portrait_owner_color: u32::MAX,
                 rank: 0,
                 rank_symbols: None,
                 rank_symbol_count: None,
