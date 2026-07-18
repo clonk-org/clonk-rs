@@ -32327,7 +32327,7 @@ impl GameApp {
                         );
                     }
                     if removes_players && self.control_clients.is_observer(update.client_id) {
-                        self.remove_runtime_players_at_client(update.client_id, false);
+                        self.remove_runtime_players_at_client(update.client_id, true);
                         self.refresh_current_host_player_infos();
                     }
                     if matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
@@ -79670,7 +79670,7 @@ protected func InputCallback(string answer, int player)
     fn observer_soft_kicks_players_but_plain_deactivation_does_not() {
         // CUT_Activate(false) preserves existing players. CUT_SetObserver is
         // the soft-kick path: deactivate, keep the client, remove its runtime
-        // players, and mark history removed but not disconnected
+        // players, and mark history joined, removed, and disconnected
         // (src/C4Control.cpp:588-620; src/C4PlayerList.cpp:219-239).
         let mut app = new_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub();
@@ -79732,8 +79732,10 @@ protected func InputCallback(string answer, int player)
             .iter()
             .all(|player| player.player_info_id != 7));
         let retained = app.control_player_infos.get(7).expect("history remains");
-        assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
-        assert_eq!(retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        let expected_flags = lc_engine::PLAYER_INFO_FLAG_JOINED
+            | lc_engine::PLAYER_INFO_FLAG_REMOVED
+            | lc_engine::PLAYER_INFO_FLAG_DISCONNECTED;
+        assert_eq!(retained.flags & expected_flags, expected_flags);
     }
 
     #[test]
