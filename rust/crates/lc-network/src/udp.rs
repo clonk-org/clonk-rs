@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     mem::size_of,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -34,6 +35,9 @@ pub const RELIABLE_UDP_PROTOCOL_VERSION: u32 = 2;
 /// Maximum inner-packet bytes carried by one C++ reliable-UDP data fragment.
 pub const RELIABLE_UDP_DATA_PAYLOAD_LIMIT: usize =
     MAX_DATAGRAM_SIZE - DATA_PACKET_HEADER_SIZE;
+
+/// C4NetIOUDP::Peer::iReCheckInterval.
+pub const RELIABLE_UDP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Fields emitted by a unicast `C4NetIOUDP::ConnPacket`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +138,9 @@ pub struct ReliableUdpReceiveWindow {
     direct: ReliableUdpReceiveChannel,
     multicast: ReliableUdpReceiveChannel,
     direct_packets: BTreeMap<u32, ReliableUdpPartialPacket>,
+    next_recheck_at: Option<Duration>,
+    last_packet_asked: u32,
+    last_multicast_packet_asked: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +221,9 @@ impl ReliableUdpReceiveWindow {
             direct: ReliableUdpReceiveChannel::new(next_expected_packet_number),
             multicast: ReliableUdpReceiveChannel::new(next_expected_multicast_packet_number),
             direct_packets: BTreeMap::new(),
+            next_recheck_at: None,
+            last_packet_asked: 0,
+            last_multicast_packet_asked: 0,
         }
     }
 
@@ -286,10 +296,77 @@ impl ReliableUdpReceiveWindow {
 
     /// Constructs the C++ acknowledgment counters and bounded missing list.
     pub fn plan_check(&self, outgoing_packet_number: u32) -> ReliableUdpCheck {
-        let missing_packet_numbers = self.direct.missing_packet_numbers(MAX_CHECK_ASK_COUNT);
-        let missing_multicast_packet_numbers = self
-            .multicast
-            .missing_packet_numbers(MAX_CHECK_ASK_COUNT - missing_packet_numbers.len());
+        self.plan_check_from(
+            outgoing_packet_number,
+            self.direct.next_expected_packet_number,
+            self.multicast.next_expected_packet_number,
+        )
+    }
+
+    /// Applies C++'s one-second re-ask damping and direct-first continuation.
+    /// `force` affects emission only; it never bypasses the active cursors.
+    pub fn plan_check_at(
+        &mut self,
+        outgoing_packet_number: u32,
+        now: Duration,
+        force: bool,
+    ) -> Option<ReliableUdpCheck> {
+        let damping_active = self.next_recheck_at.is_some_and(|deadline| deadline > now);
+        if !damping_active {
+            self.last_packet_asked = 0;
+            self.last_multicast_packet_asked = 0;
+        }
+        let direct_start = if damping_active {
+            self.last_packet_asked
+                .wrapping_add(1)
+                .max(self.direct.next_expected_packet_number)
+        } else {
+            self.direct.next_expected_packet_number
+        };
+        let multicast_start = if damping_active {
+            self.last_multicast_packet_asked
+                .wrapping_add(1)
+                .max(self.multicast.next_expected_packet_number)
+        } else {
+            self.multicast.next_expected_packet_number
+        };
+        let check = self.plan_check_from(
+            outgoing_packet_number,
+            direct_start,
+            multicast_start,
+        );
+        if let Some(packet_number) = check.missing_packet_numbers.last() {
+            self.last_packet_asked = *packet_number;
+        }
+        if let Some(packet_number) = check.missing_multicast_packet_numbers.last() {
+            self.last_multicast_packet_asked = *packet_number;
+        }
+        let has_asks = !check.missing_packet_numbers.is_empty()
+            || !check.missing_multicast_packet_numbers.is_empty();
+        if !damping_active {
+            self.next_recheck_at = has_asks
+                .then(|| now.saturating_add(RELIABLE_UDP_RECHECK_INTERVAL));
+        }
+        (has_asks || force).then_some(check)
+    }
+
+    pub fn next_expected_packet_number(&self) -> u32 {
+        self.direct.next_expected_packet_number
+    }
+
+    fn plan_check_from(
+        &self,
+        outgoing_packet_number: u32,
+        direct_start: u32,
+        multicast_start: u32,
+    ) -> ReliableUdpCheck {
+        let missing_packet_numbers = self
+            .direct
+            .missing_packet_numbers_from(direct_start, MAX_CHECK_ASK_COUNT);
+        let missing_multicast_packet_numbers = self.multicast.missing_packet_numbers_from(
+            multicast_start,
+            MAX_CHECK_ASK_COUNT - missing_packet_numbers.len(),
+        );
         ReliableUdpCheck {
             packet_number: outgoing_packet_number,
             next_expected_packet_number: self.direct.next_expected_packet_number,
@@ -441,16 +518,17 @@ impl ReliableUdpReceiveChannel {
         }
     }
 
-    fn missing_packet_numbers(&self, limit: usize) -> Vec<u32> {
-        if limit == 0 || self.next_expected_packet_number >= self.high_water_packet_number {
+    fn missing_packet_numbers_from(&self, start: u32, limit: usize) -> Vec<u32> {
+        let start = start.max(self.next_expected_packet_number);
+        if limit == 0 || start >= self.high_water_packet_number {
             return Vec::new();
         }
 
         let mut missing_packet_numbers = Vec::with_capacity(limit);
-        let mut candidate = self.next_expected_packet_number;
+        let mut candidate = start;
         for present_packet_number in self
             .present_packet_numbers
-            .range(self.next_expected_packet_number..self.high_water_packet_number)
+            .range(start..self.high_water_packet_number)
             .copied()
         {
             while candidate < present_packet_number && missing_packet_numbers.len() < limit {
@@ -1249,6 +1327,68 @@ mod tests {
                 missing_multicast_packet_numbers: vec![4, 6, 7],
             }
         );
+    }
+
+    #[test]
+    fn cpp_recheck_damps_continues_new_holes_and_expires_strictly() {
+        let mut window = ReliableUdpReceiveWindow::new(8, 0);
+        window.observe_packet_header(ReliableUdpChannel::Direct, 10);
+
+        let first = window
+            .plan_check_at(23, Duration::ZERO, false)
+            .expect("fresh holes must emit a Check");
+        assert_eq!(first.missing_packet_numbers, vec![8, 9]);
+        assert_eq!(
+            window.plan_check_at(23, Duration::from_millis(500), false),
+            None,
+            "unchanged holes are damped inside the one-second window"
+        );
+
+        window.observe_packet_header(ReliableUdpChannel::Direct, 13);
+        let continuation = window
+            .plan_check_at(23, Duration::from_millis(750), false)
+            .expect("new higher holes must be asked immediately");
+        assert_eq!(continuation.missing_packet_numbers, vec![10, 11, 12]);
+        assert_eq!(
+            window.plan_check_at(23, Duration::from_millis(999), false),
+            None
+        );
+
+        let expired = window
+            .plan_check_at(23, Duration::from_secs(1), false)
+            .expect("the original deadline expires at exact equality");
+        assert_eq!(expired.missing_packet_numbers, vec![8, 9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn cpp_recheck_shares_direct_first_budget_and_force_only_changes_emission() {
+        let mut window = ReliableUdpReceiveWindow::new(4, 20);
+        window.observe_packet_header(ReliableUdpChannel::Direct, 8);
+        window.observe_packet_header(ReliableUdpChannel::Multicast, 28);
+
+        let first = window
+            .plan_check_at(90, Duration::ZERO, false)
+            .expect("fresh direct and multicast holes must emit");
+        assert_eq!(first.missing_packet_numbers, vec![4, 5, 6, 7]);
+        assert_eq!(
+            first.missing_multicast_packet_numbers,
+            vec![20, 21, 22, 23, 24, 25]
+        );
+        let second = window
+            .plan_check_at(90, Duration::from_millis(500), false)
+            .expect("the unasked multicast tail continues inside the window");
+        assert!(second.missing_packet_numbers.is_empty());
+        assert_eq!(second.missing_multicast_packet_numbers, vec![26, 27]);
+        assert_eq!(
+            window.plan_check_at(90, Duration::from_millis(500), false),
+            None
+        );
+
+        let forced = window
+            .plan_check_at(90, Duration::from_millis(500), true)
+            .expect("forced cadence emits an empty Check");
+        assert!(forced.missing_packet_numbers.is_empty());
+        assert!(forced.missing_multicast_packet_numbers.is_empty());
     }
 
     #[test]

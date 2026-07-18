@@ -207,6 +207,7 @@ pub use udp::{
     ReliableUdpEncodeError, ReliableUdpMulticastMode, ReliableUdpPacketKind,
     ReliableUdpReassembledPacket, ReliableUdpReassemblyError, ReliableUdpReceiveWindow,
     RELIABLE_UDP_DATA_PAYLOAD_LIMIT, RELIABLE_UDP_PROTOCOL_VERSION,
+    RELIABLE_UDP_RECHECK_INTERVAL,
 };
 pub use udp_runtime::{
     canonical_reliable_udp_peer_address, reliable_udp_send_address, ReliableUdpDatagram,

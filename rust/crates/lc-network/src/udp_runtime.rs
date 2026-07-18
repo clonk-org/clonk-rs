@@ -212,14 +212,13 @@ impl ReliableUdpPeer {
         Ok(step)
     }
 
-    fn plan_check(&self, force: bool) -> ReliableUdpStep {
-        let check = self.receive_window.plan_check(self.outgoing_packet_number);
-        if !force
-            && check.missing_packet_numbers.is_empty()
-            && check.missing_multicast_packet_numbers.is_empty()
-        {
+    fn plan_check(&mut self, force: bool, now: Duration) -> ReliableUdpStep {
+        let Some(check) = self
+            .receive_window
+            .plan_check_at(self.outgoing_packet_number, now, force)
+        else {
             return ReliableUdpStep::default();
-        }
+        };
         let mut step = ReliableUdpStep::default();
         if let Ok(payload) = encode_reliable_udp_check(&check) {
             step.datagrams.push(self.datagram(payload));
@@ -227,11 +226,29 @@ impl ReliableUdpPeer {
         step
     }
 
-    fn receive(&mut self, wire: &[u8]) -> ReliableUdpStep {
+    fn receive(&mut self, wire: &[u8], now: Duration) -> ReliableUdpStep {
         let Some(kind) = reliable_udp_packet_kind(wire) else {
             return ReliableUdpStep::default();
         };
-        match kind {
+        let mut step = ReliableUdpStep::default();
+        if wire.len() >= 5 {
+            let packet_number = u32::from_ne_bytes(
+                wire[1..5]
+                    .try_into()
+                    .expect("five-byte reliable UDP header was length-checked"),
+            );
+            let channel = if wire[0] & 0x80 == 0 {
+                ReliableUdpChannel::Direct
+            } else {
+                ReliableUdpChannel::Multicast
+            };
+            self.receive_window
+                .observe_packet_header(channel, packet_number);
+            if self.status == ReliableUdpPeerStatus::Working {
+                step.append(self.plan_check(false, now));
+            }
+        }
+        let handled = match kind {
             ReliableUdpPacketKind::Ping
             | ReliableUdpPacketKind::Test
             | ReliableUdpPacketKind::AddAddress
@@ -241,7 +258,9 @@ impl ReliableUdpPeer {
             ReliableUdpPacketKind::Data => self.receive_data(wire),
             ReliableUdpPacketKind::Check => self.receive_check(wire),
             ReliableUdpPacketKind::Close => self.receive_close(wire),
-        }
+        };
+        step.append(handled);
+        step
     }
 
     fn receive_connect(&mut self, wire: &[u8]) -> ReliableUdpStep {
@@ -265,10 +284,7 @@ impl ReliableUdpPeer {
                 events: Vec::new(),
             };
         }
-        let next_expected_packet_number = self
-            .receive_window
-            .plan_check(self.outgoing_packet_number)
-            .next_expected_packet_number;
+        let next_expected_packet_number = self.receive_window.next_expected_packet_number();
         let reconnect = self.status == ReliableUdpPeerStatus::Working
             && next_expected_packet_number != connection.packet_number;
         let mut step = ReliableUdpStep::default();
@@ -298,8 +314,6 @@ impl ReliableUdpPeer {
         let Ok(connection) = decode_reliable_udp_connect_ok(wire) else {
             return ReliableUdpStep::default();
         };
-        self.receive_window
-            .observe_packet_header(ReliableUdpChannel::Direct, connection.packet_number);
         self.mark_working(Some(connection.observed_address))
     }
 
@@ -307,13 +321,7 @@ impl ReliableUdpPeer {
         let Ok(fragment) = decode_reliable_udp_data_fragment(wire) else {
             return ReliableUdpStep::default();
         };
-        self.receive_window
-            .observe_packet_header(ReliableUdpChannel::Direct, fragment.packet_number);
-        let mut step = if self.status == ReliableUdpPeerStatus::Working {
-            self.plan_check(false)
-        } else {
-            ReliableUdpStep::default()
-        };
+        let mut step = ReliableUdpStep::default();
         let Ok(packets) = self.receive_window.receive_direct_data_fragment(fragment) else {
             return step;
         };
@@ -334,13 +342,7 @@ impl ReliableUdpPeer {
         let Ok(check) = decode_reliable_udp_check(wire) else {
             return ReliableUdpStep::default();
         };
-        self.receive_window
-            .observe_packet_header(ReliableUdpChannel::Direct, check.packet_number);
-        let mut step = if self.status == ReliableUdpPeerStatus::Working {
-            self.plan_check(false)
-        } else {
-            ReliableUdpStep::default()
-        };
+        let mut step = ReliableUdpStep::default();
         while self
             .outgoing_packets
             .front()
@@ -483,7 +485,7 @@ impl ReliableUdpEndpointCore {
                 .peers
                 .get_mut(&peer_key)
                 .expect("resolved reliable-UDP peer exists");
-            let step = peer.receive(wire);
+            let step = peer.receive(wire, now);
             if peer.status == ReliableUdpPeerStatus::Closed {
                 self.peers.remove(&peer_key);
             }
@@ -546,9 +548,9 @@ impl ReliableUdpEndpointCore {
     pub fn timer_at(&mut self, now: Duration) -> ReliableUdpStep {
         let mut step = ReliableUdpStep::default();
         if now >= self.next_check_at {
-            for peer in self.peers.values() {
+            for peer in self.peers.values_mut() {
                 if peer.status == ReliableUdpPeerStatus::Working {
-                    step.append(peer.plan_check(true));
+                    step.append(peer.plan_check(true, now));
                 }
             }
             self.next_check_at = now + RELIABLE_UDP_CHECK_INTERVAL;
@@ -1298,6 +1300,48 @@ mod tests {
     }
 
     #[test]
+    fn immediate_checks_damp_unknown_header_reasks_until_the_original_deadline() {
+        let (_, known_peer, mut endpoint, _) = handshake_pair();
+        let header = |packet_number: u32| {
+            let mut wire = vec![0x7f];
+            wire.extend_from_slice(&packet_number.to_ne_bytes());
+            wire
+        };
+
+        let first = endpoint.receive_at(known_peer, &header(3), Duration::ZERO);
+        assert_eq!(first.datagrams.len(), 1);
+        assert_eq!(
+            decode_reliable_udp_check(&first.datagrams[0].payload)
+                .unwrap()
+                .missing_packet_numbers,
+            vec![0, 1, 2]
+        );
+        assert!(endpoint
+            .receive_at(known_peer, &header(3), Duration::from_millis(500))
+            .datagrams
+            .is_empty());
+
+        let continuation =
+            endpoint.receive_at(known_peer, &header(5), Duration::from_millis(750));
+        assert_eq!(continuation.datagrams.len(), 1);
+        assert_eq!(
+            decode_reliable_udp_check(&continuation.datagrams[0].payload)
+                .unwrap()
+                .missing_packet_numbers,
+            vec![3, 4]
+        );
+
+        let expired = endpoint.receive_at(known_peer, &header(5), Duration::from_secs(1));
+        assert_eq!(expired.datagrams.len(), 1);
+        assert_eq!(
+            decode_reliable_udp_check(&expired.datagrams[0].payload)
+                .unwrap()
+                .missing_packet_numbers,
+            vec![0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
     fn changed_unicast_conn_emits_add_address_without_resetting_the_peer() {
         let (local_address, peer_address, mut endpoint, _) = handshake_pair();
         let new_local_address = address(8, 18_888);
@@ -1375,10 +1419,15 @@ mod tests {
         );
         let mut multicast_flagged = wire.clone();
         multicast_flagged[0] |= 0x80;
+        let flagged = endpoint.receive_at(new_address, &multicast_flagged, Duration::ZERO);
+        assert!(flagged.events.is_empty());
+        assert_eq!(flagged.datagrams.len(), 1);
         assert_eq!(
-            endpoint.receive_at(new_address, &multicast_flagged, Duration::ZERO),
-            ReliableUdpStep::default(),
-            "C++ intercepts only exact unicast IPID_AddAddr"
+            decode_reliable_udp_check(&flagged.datagrams[0].payload)
+                .unwrap()
+                .missing_multicast_packet_numbers,
+            (0..7).collect::<Vec<_>>(),
+            "C++ checks the generic flagged header before ignoring its AddAddr body"
         );
 
         let merged = endpoint.receive_at(new_address, &wire, Duration::ZERO);
@@ -1445,13 +1494,23 @@ mod tests {
             encode_reliable_udp_connect(&ReliableUdpConnect::unicast(7, a_address));
 
         let step = a.receive_at(b_address, &restarted_conn, Duration::ZERO);
-        assert_eq!(step.datagrams.len(), 2);
+        assert_eq!(step.datagrams.len(), 3);
         assert_eq!(
             reliable_udp_packet_kind(&step.datagrams[0].payload),
-            Some(ReliableUdpPacketKind::Connect)
+            Some(ReliableUdpPacketKind::Check)
+        );
+        assert_eq!(
+            decode_reliable_udp_check(&step.datagrams[0].payload)
+                .unwrap()
+                .missing_packet_numbers,
+            (0..7).collect::<Vec<_>>()
         );
         assert_eq!(
             reliable_udp_packet_kind(&step.datagrams[1].payload),
+            Some(ReliableUdpPacketKind::Connect)
+        );
+        assert_eq!(
+            reliable_udp_packet_kind(&step.datagrams[2].payload),
             Some(ReliableUdpPacketKind::ConnectOk)
         );
         assert_eq!(
