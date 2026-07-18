@@ -2,19 +2,37 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use lc_engine::{
-    ControlPlayerInfoEntry, LegacyCString, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_SCRIPT,
+    ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
+    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
+    CLIENT_PLAYER_INFO_FLAG_UPDATED, NETWORK_RESOURCE_TYPE_NULL, PLAYER_INFO_FLAG_ATTRIBUTES_FIXED,
+    PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
+    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
+    PLAYER_INFO_FLAG_NO_SCENARIO_INIT, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN,
+    PLAYER_INFO_FLAG_VOTED_OUT, PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_SCRIPT,
     PLAYER_INFO_TYPE_USER,
 };
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
-use crate::name_validation::validate_name_allow_empty;
+use crate::advertise::encode_host_game_reference_response;
+use crate::host_game_reference::{HostGameReference, HostGameReferenceError};
+use crate::join_player_registry::ClientPlayerInfosSnapshot;
+use crate::league_round_results_packet::{
+    LeagueRoundPlayerStatus, LeagueRoundResultsPlayer,
+};
+use crate::name_validation::{validate_name_allow_empty, validate_name_no_empty};
 
 const CHECKSUM_PLACEHOLDER: &[u8; 5] = b"-----";
 const CHECKSUM_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const CHECKSUM_TARGET: u32 = 0x7a69;
 const CHECKSUM_MASK: u32 = 0xf0ff;
+const MAX_LEAGUE_RESPONSE_PLAYERS: usize = 5_000;
+const NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE: u32 = 100 * 1024;
+const PLAYER_INFO_FLAG_JOIN_ISSUED: u16 = 1 << 4;
+
+/// `C4NetMinLeagueUpdateInterval`, installed by `InvalidateReference`.
+pub const LEAGUE_MIN_UPDATE_INTERVAL_SECONDS: i64 = 10;
 
 /// `C4HTTPQueryTimeout` used for every league query.
 pub const LEAGUE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -198,6 +216,200 @@ pub fn encode_league_join_request(
     )
 }
 
+/// Record metadata appended to an `Action=End` request.
+///
+/// The C++ writer emits the SHA whenever the record name is nonempty. Keeping
+/// the two values paired prevents its undefined null-SHA call shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeagueEndRecord {
+    pub name: LegacyCString,
+    pub sha1: [u8; 20],
+}
+
+/// Failure while building a Start/Update/End request around an exact host
+/// reference.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LeagueReferenceRequestEncodeError {
+    #[error(transparent)]
+    Reference(#[from] HostGameReferenceError),
+    #[error(transparent)]
+    Checksum(#[from] LeagueChecksumError),
+    #[error("league host session has no CSID")]
+    MissingCsid,
+}
+
+/// Builds the exact `C4LA_Start` request and solves its checksum over both
+/// sibling sections.
+pub fn encode_league_start_request(
+    reference: &HostGameReference,
+    checksum_start: u32,
+) -> Result<Vec<u8>, LeagueReferenceRequestEncodeError> {
+    finish_reference_request(
+        b"[Request]\r\nAction=Start\r\nChecksum=-----\r\n".to_vec(),
+        reference,
+        checksum_start,
+    )
+}
+
+/// Builds the exact `C4LA_Update` request for a registered host session.
+pub fn encode_league_update_request(
+    csid: &LegacyCString,
+    reference: &HostGameReference,
+    checksum_start: u32,
+) -> Result<Vec<u8>, LeagueReferenceRequestEncodeError> {
+    if csid.is_empty() {
+        return Err(LeagueReferenceRequestEncodeError::MissingCsid);
+    }
+    let mut request = b"[Request]\r\nAction=Update\r\nCSID=".to_vec();
+    request.extend_from_slice(csid.as_bytes());
+    request.extend_from_slice(b"\r\nChecksum=-----\r\n");
+    finish_reference_request(request, reference, checksum_start)
+}
+
+/// Builds the exact `C4LA_End` request. Empty record names are treated like
+/// the native no-record path and omit both record fields.
+pub fn encode_league_end_request(
+    csid: &LegacyCString,
+    reference: &HostGameReference,
+    record: Option<&LeagueEndRecord>,
+    checksum_start: u32,
+) -> Result<Vec<u8>, LeagueReferenceRequestEncodeError> {
+    if csid.is_empty() {
+        return Err(LeagueReferenceRequestEncodeError::MissingCsid);
+    }
+    let mut request = b"[Request]\r\nAction=End\r\nCSID=".to_vec();
+    request.extend_from_slice(csid.as_bytes());
+    request.extend_from_slice(b"\r\nChecksum=-----\r\n");
+    if let Some(record) = record.filter(|record| !record.name.is_empty()) {
+        request.extend_from_slice(b"RecordName=");
+        request.extend_from_slice(record.name.as_bytes());
+        request.extend_from_slice(b"\r\nRecordSHA=");
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in record.sha1 {
+            request.push(HEX[usize::from(byte >> 4)]);
+            request.push(HEX[usize::from(byte & 0x0f)]);
+        }
+        request.extend_from_slice(b"\r\n");
+    }
+    finish_reference_request(request, reference, checksum_start)
+}
+
+fn finish_reference_request(
+    mut request: Vec<u8>,
+    reference: &HostGameReference,
+    checksum_start: u32,
+) -> Result<Vec<u8>, LeagueReferenceRequestEncodeError> {
+    let reference = encode_host_game_reference_response(reference)?;
+    request.extend_from_slice(b"\r\n");
+    request.extend_from_slice(&reference);
+    solve_league_checksum(&mut request, checksum_start)?;
+    Ok(request)
+}
+
+/// Pure wall-clock state for the host's league reference heartbeat.
+///
+/// Times are integer seconds because the native scheduler compares
+/// `time(nullptr)` values. A Start does not arm a delay: the first sec1 tick is
+/// immediately due. Only a successfully dispatched Update advances the clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeagueHeartbeat {
+    configured_period_secs: i64,
+    last_update_started_at: Option<i64>,
+    delay_secs: i64,
+}
+
+impl LeagueHeartbeat {
+    pub fn new(configured_period_secs: i64) -> Self {
+        Self {
+            configured_period_secs,
+            last_update_started_at: None,
+            delay_secs: configured_period_secs,
+        }
+    }
+
+    /// Mirrors `!iLastLeagueUpdate || now > last + delay`, including its
+    /// strict boundary.
+    pub fn is_due(&self, now: i64) -> bool {
+        self.last_update_started_at
+            .is_none_or(|last| now > last.saturating_add(self.delay_secs))
+    }
+
+    /// Records successful query dispatch, before any HTTP or reply result is
+    /// known, and restores the configured period.
+    pub fn update_dispatched(&mut self, now: i64) {
+        self.last_update_started_at = Some(now);
+        self.delay_secs = self.configured_period_secs;
+    }
+
+    /// Shortens the interval relative to the previous dispatch timestamp.
+    pub fn invalidate_reference(&mut self) {
+        self.delay_secs = LEAGUE_MIN_UPDATE_INTERVAL_SECONDS;
+    }
+
+    pub fn last_update_started_at(&self) -> Option<i64> {
+        self.last_update_started_at
+    }
+
+    pub fn delay_secs(&self) -> i64 {
+        self.delay_secs
+    }
+
+    pub fn configured_period_secs(&self) -> i64 {
+        self.configured_period_secs
+    }
+
+    pub fn set_configured_period_secs(&mut self, configured_period_secs: i64) {
+        self.configured_period_secs = configured_period_secs;
+    }
+}
+
+/// Saved host-side registration identity. Start response validation is the
+/// only operation that installs a CSID; Update and End always reuse it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeagueHostSession {
+    csid: LegacyCString,
+}
+
+impl LeagueHostSession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn csid(&self) -> Option<&LegacyCString> {
+        (!self.csid.is_empty()).then_some(&self.csid)
+    }
+
+    pub fn clear(&mut self) {
+        self.csid = LegacyCString::default();
+    }
+
+    pub fn accept_start_response(
+        &mut self,
+        input: &[u8],
+    ) -> Result<LeagueStartResponse, LeagueResponseDecodeError> {
+        let response = decode_league_start_response(input)?;
+        self.csid = response.head.csid.clone();
+        Ok(response)
+    }
+
+    pub fn encode_update_request(
+        &self,
+        reference: &HostGameReference,
+        checksum_start: u32,
+    ) -> Result<Vec<u8>, LeagueReferenceRequestEncodeError> {
+        encode_league_update_request(&self.csid, reference, checksum_start)
+    }
+
+    pub fn encode_end_request(
+        &self,
+        reference: &HostGameReference,
+        record: Option<&LeagueEndRecord>,
+        checksum_start: u32,
+    ) -> Result<Vec<u8>, LeagueReferenceRequestEncodeError> {
+        encode_league_end_request(&self.csid, reference, record, checksum_start)
+    }
+}
+
 /// Serializes the exact `[PlrInfo]` sibling inserted into league Auth/Join
 /// requests by `C4LeagueClient` (`src/C4League.cpp:401-420,451-466`).
 pub fn encode_league_player_info_section(
@@ -370,6 +582,136 @@ pub fn decode_league_join_response(input: &[u8]) -> LeagueJoinResponse {
     }
 }
 
+/// Validated reply to `C4LA_Start`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeagueStartResponse {
+    pub head: LeagueAuthResponse,
+    pub league: LegacyCString,
+    pub stream_to: LegacyCString,
+    /// `None` means the `Seed` name was absent and the caller must retain its
+    /// existing random seed. `Some(0)` is a real override.
+    pub seed: Option<i32>,
+    pub max_players: i32,
+}
+
+/// Parsed reply to `C4LA_Update`. Native code accepts any response Status once
+/// the HTTP exchange and INI parse succeeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeagueUpdateResponse {
+    pub head: LeagueAuthResponse,
+    pub league: LegacyCString,
+    pub player_infos: ClientPlayerInfosSnapshot,
+}
+
+impl Default for LeagueUpdateResponse {
+    fn default() -> Self {
+        Self {
+            head: LeagueAuthResponse::default(),
+            league: LegacyCString::default(),
+            player_infos: ClientPlayerInfosSnapshot {
+                client_id: -1,
+                flags: 0,
+                players: Vec::new(),
+            },
+        }
+    }
+}
+
+/// Validated reply to `C4LA_End`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeagueEndResponse {
+    pub head: LeagueAuthResponse,
+    pub players: Vec<LeagueRoundResultsPlayer>,
+}
+
+/// Structural or semantic failure while reading a host registration reply.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LeagueResponseDecodeError {
+    #[error("league response field `{field}` is not a valid {expected}")]
+    InvalidField {
+        field: &'static str,
+        expected: &'static str,
+    },
+    #[error("league response contains {0} Player sections, above the C++ limit")]
+    PlayerCountOutOfRange(usize),
+    #[error("league response contains a loadable resource with zero chunk size")]
+    ZeroResourceChunkSize,
+    #[error("league Start response did not report Success")]
+    StartRejected(Box<LeagueStartResponse>),
+    #[error("league Start response reported Success without a CSID")]
+    MissingStartCsid(Box<LeagueStartResponse>),
+    #[error("league End response did not report Success")]
+    EndRejected(Box<LeagueEndResponse>),
+}
+
+/// Decodes and validates the Start response, preserving C++ Seed-presence
+/// semantics and escaped-string handling for League/StreamTo.
+pub fn decode_league_start_response(
+    input: &[u8],
+) -> Result<LeagueStartResponse, LeagueResponseDecodeError> {
+    let tree = LeagueIniTree::parse(input);
+    let response_node = tree.first_root_section(b"Response");
+    let seed = tree
+        .first_value(response_node, b"Seed")
+        .map(|raw| parse_i32_response(raw, "Seed").unwrap_or(0));
+    let response = LeagueStartResponse {
+        head: tree.common_response(response_node),
+        league: tree.escaped_value(response_node, b"League"),
+        stream_to: tree.escaped_value(response_node, b"StreamTo"),
+        seed,
+        max_players: tree
+            .first_value(response_node, b"MaxPlayers")
+            .map(|raw| parse_i32_response(raw, "MaxPlayers").unwrap_or(0))
+            .unwrap_or(0),
+    };
+    if !response.head.is_success() {
+        return Err(LeagueResponseDecodeError::StartRejected(Box::new(response)));
+    }
+    if response.head.csid.is_empty() {
+        return Err(LeagueResponseDecodeError::MissingStartCsid(Box::new(
+            response,
+        )));
+    }
+    Ok(response)
+}
+
+/// Decodes Update reply data without imposing a Status check, matching
+/// `C4LeagueClient::GetUpdateReply`.
+pub fn decode_league_update_response(
+    input: &[u8],
+) -> Result<LeagueUpdateResponse, LeagueResponseDecodeError> {
+    let tree = LeagueIniTree::parse(input);
+    let response_node = tree.first_root_section(b"Response");
+    let player_infos_node = tree.first_section(response_node, b"PlayerInfos");
+    Ok(LeagueUpdateResponse {
+        head: tree.common_response(response_node),
+        league: tree.escaped_value(response_node, b"League"),
+        player_infos: parse_client_player_infos(&tree, player_infos_node)?,
+    })
+}
+
+/// Decodes End reply round results and validates only the common Status. The
+/// native caller deliberately ignores failures from the nested PlayerInfos
+/// parse. Rust cannot safely expose the native parser's possibly partial list,
+/// so an explicitly corrupt nested structure becomes empty without making an
+/// otherwise-successful End fail.
+pub fn decode_league_end_response(
+    input: &[u8],
+) -> Result<LeagueEndResponse, LeagueResponseDecodeError> {
+    let tree = LeagueIniTree::parse(input);
+    let response_node = tree.first_root_section(b"Response");
+    let player_infos_node = tree.first_section(response_node, b"PlayerInfos");
+    let players = parse_round_results_players(&tree, player_infos_node).unwrap_or_default();
+    let response = LeagueEndResponse {
+        head: tree.common_response(response_node),
+        players,
+    };
+    if !response.head.is_success() {
+        return Err(LeagueResponseDecodeError::EndRejected(Box::new(response)));
+    }
+    Ok(response)
+}
+
 /// Replaces the first `-----` marker with the C++ league proof-of-work value.
 ///
 /// `start` is the already-combined value called `iStart` by C++; keeping it an
@@ -516,6 +858,32 @@ fn parse_escaped_value(raw: &[u8]) -> (Vec<u8>, &[u8], bool) {
             b't' => output.push(b'\t'),
             b'v' => output.push(b'\x0b'),
             b'\'' | b'"' | b'\\' | b'?' => output.push(escape),
+            b'x' => {
+                let Some((&first, _)) = remaining.split_first() else {
+                    output.push(b'x');
+                    continue;
+                };
+                if !first.is_ascii_hexdigit() {
+                    output.push(b'x');
+                    continue;
+                }
+                let mut code = 0_i32;
+                while let Some((&next, rest)) = remaining.split_first() {
+                    if !next.is_ascii_hexdigit() {
+                        break;
+                    }
+                    // Preserve the native reader's lowercase-only alpha
+                    // conversion, including its odd uppercase behavior.
+                    let digit = if next.is_ascii_digit() {
+                        i32::from(next - b'0')
+                    } else {
+                        i32::from(next) - i32::from(b'a') + 10
+                    };
+                    code = code.wrapping_mul(16).wrapping_add(digit);
+                    remaining = rest;
+                }
+                output.push(code as u8);
+            }
             digit @ b'0'..=b'7' => {
                 let mut code = u32::from(digit - b'0');
                 while let Some((&next @ b'0'..=b'7', rest)) = remaining.split_first() {
@@ -550,6 +918,631 @@ fn parse_i32_array(raw: &[u8]) -> [i32; MAX_LEAGUES] {
         remaining = &remaining[end + 1..];
     }
     values
+}
+
+#[derive(Debug)]
+struct LeagueIniNode<'a> {
+    parent: Option<usize>,
+    name: &'a [u8],
+    value: Option<&'a [u8]>,
+    indent: usize,
+}
+
+/// Byte-preserving projection of `StdCompilerINIRead::CreateNameTree`.
+#[derive(Debug)]
+struct LeagueIniTree<'a> {
+    nodes: Vec<LeagueIniNode<'a>>,
+}
+
+impl<'a> LeagueIniTree<'a> {
+    fn parse(input: &'a [u8]) -> Self {
+        let input = input.split(|byte| *byte == 0).next().unwrap_or_default();
+        let mut nodes = Vec::<LeagueIniNode<'a>>::new();
+        let mut section_stack = Vec::<usize>::new();
+
+        for line in input.split(|byte| *byte == b'\r' || *byte == b'\n') {
+            let indent = line
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            let content = &line[indent..];
+            let (section, name_start) = if content.first() == Some(&b'[')
+                && content.get(1).is_some_and(u8::is_ascii_alphabetic)
+            {
+                (true, 1)
+            } else if content.first().is_some_and(u8::is_ascii_alphabetic) {
+                (false, 0)
+            } else {
+                continue;
+            };
+            let mut name_end = name_start;
+            while content
+                .get(name_end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_'))
+            {
+                name_end += 1;
+            }
+            let mut delimiter = name_end;
+            while content
+                .get(delimiter)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                delimiter += 1;
+            }
+            let expected = if section { b']' } else { b'=' };
+            if content.get(delimiter) != Some(&expected) {
+                continue;
+            }
+
+            let effective_indent = indent + usize::from(!section);
+            while section_stack
+                .last()
+                .is_some_and(|index| nodes[*index].indent >= effective_indent)
+            {
+                section_stack.pop();
+            }
+            let parent = section_stack.last().copied();
+            let index = nodes.len();
+            nodes.push(LeagueIniNode {
+                parent,
+                name: &content[name_start..name_end],
+                value: (!section).then_some(&content[delimiter + 1..]),
+                indent: effective_indent,
+            });
+            if section {
+                section_stack.push(index);
+            }
+        }
+        Self { nodes }
+    }
+
+    fn first_root_section(&self, name: &[u8]) -> Option<usize> {
+        self.nodes
+            .iter()
+            .position(|node| node.parent.is_none() && node.value.is_none() && node.name == name)
+    }
+
+    fn first_section(&self, parent: Option<usize>, name: &[u8]) -> Option<usize> {
+        let parent = parent?;
+        self.nodes.iter().position(|node| {
+            node.parent == Some(parent) && node.value.is_none() && node.name == name
+        })
+    }
+
+    fn sections(&self, parent: Option<usize>, name: &[u8]) -> Vec<usize> {
+        let Some(parent) = parent else {
+            return Vec::new();
+        };
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                (node.parent == Some(parent) && node.value.is_none() && node.name == name)
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    fn first_value(&self, parent: Option<usize>, name: &[u8]) -> Option<&'a [u8]> {
+        let parent = parent?;
+        self.nodes.iter().find_map(|node| {
+            (node.parent == Some(parent) && node.name == name)
+                .then_some(node.value)
+                .flatten()
+        })
+    }
+
+    fn escaped_value(&self, parent: Option<usize>, name: &[u8]) -> LegacyCString {
+        self.first_value(parent, name)
+            .map(decode_cpp_escaped_string)
+            .unwrap_or_default()
+    }
+
+    fn validated_escaped_value(
+        &self,
+        parent: Option<usize>,
+        name: &[u8],
+        validate: fn(LegacyCString) -> LegacyCString,
+    ) -> LegacyCString {
+        self.first_value(parent, name)
+            .map(|raw| validate(decode_cpp_escaped_string(raw)))
+            .unwrap_or_default()
+    }
+
+    fn identifier_value(&self, parent: Option<usize>, name: &[u8]) -> LegacyCString {
+        self.first_value(parent, name)
+            .map(|raw| legacy_string(identifier_token(raw)))
+            .unwrap_or_default()
+    }
+
+    fn raw_value(&self, parent: Option<usize>, name: &[u8]) -> LegacyCString {
+        self.first_value(parent, name)
+            .map(|raw| legacy_string(trim_horizontal_start(raw)))
+            .unwrap_or_default()
+    }
+
+    fn validated_raw_value(
+        &self,
+        parent: Option<usize>,
+        name: &[u8],
+        validate: fn(LegacyCString) -> LegacyCString,
+    ) -> LegacyCString {
+        self.first_value(parent, name)
+            .map(|raw| validate(legacy_string(trim_horizontal_start(raw))))
+            .unwrap_or_default()
+    }
+
+    fn common_response(&self, response: Option<usize>) -> LeagueAuthResponse {
+        LeagueAuthResponse {
+            status: self.identifier_value(response, b"Status"),
+            csid: self.identifier_value(response, b"CSID"),
+            message: self.raw_value(response, b"Message"),
+            account: self.raw_value(response, b"Account"),
+            auid: self.raw_value(response, b"AUID"),
+            fbid: self.raw_value(response, b"FBID"),
+        }
+    }
+}
+
+fn decode_cpp_escaped_string(raw: &[u8]) -> LegacyCString {
+    // StdCompiler's std::string compatibility fallback checks the byte
+    // immediately after '=' before the reader skips whitespace.
+    if raw.first() != Some(&b'"') {
+        return legacy_string(trim_horizontal_start(raw));
+    }
+    let (mut decoded, _, _) = parse_escaped_value(raw);
+    if let Some(nul) = decoded.iter().position(|byte| *byte == 0) {
+        decoded.truncate(nul);
+    }
+    LegacyCString::from_bytes(decoded).expect("decoded string was truncated at its first NUL")
+}
+
+fn invalid_field(field: &'static str, expected: &'static str) -> LeagueResponseDecodeError {
+    LeagueResponseDecodeError::InvalidField { field, expected }
+}
+
+fn numeric_token(raw: &[u8]) -> Option<(&[u8], bool, u32)> {
+    let raw = trim_horizontal_start(raw);
+    let mut offset = 0;
+    let negative = match raw.first() {
+        Some(b'-') => {
+            offset = 1;
+            true
+        }
+        Some(b'+') => {
+            offset = 1;
+            false
+        }
+        _ => false,
+    };
+    let (radix, prefix) = if raw
+        .get(offset..offset + 2)
+        .is_some_and(|prefix| prefix[0] == b'0' && matches!(prefix[1], b'x' | b'X'))
+    {
+        (16, 2)
+    } else {
+        (10, 0)
+    };
+    offset += prefix;
+    let digit_start = offset;
+    while raw.get(offset).is_some_and(|byte| match radix {
+        16 => byte.is_ascii_hexdigit(),
+        _ => byte.is_ascii_digit(),
+    }) {
+        offset += 1;
+    }
+    (offset > digit_start).then_some((&raw[digit_start..offset], negative, radix))
+}
+
+fn parse_i32_response(raw: &[u8], field: &'static str) -> Result<i32, LeagueResponseDecodeError> {
+    let (digits, negative, radix) =
+        numeric_token(raw).ok_or_else(|| invalid_field(field, "signed integer"))?;
+    let digits = std::str::from_utf8(digits)
+        .ok()
+        .and_then(|digits| i64::from_str_radix(digits, radix).ok())
+        .ok_or_else(|| invalid_field(field, "signed integer"))?;
+    let value = if negative { -digits } else { digits };
+    i32::try_from(value).map_err(|_| invalid_field(field, "signed 32-bit integer"))
+}
+
+fn parse_u32_response(raw: &[u8], field: &'static str) -> Result<u32, LeagueResponseDecodeError> {
+    let (digits, negative, radix) =
+        numeric_token(raw).ok_or_else(|| invalid_field(field, "unsigned integer"))?;
+    if negative {
+        return Err(invalid_field(field, "unsigned integer"));
+    }
+    let digits = std::str::from_utf8(digits)
+        .ok()
+        .and_then(|digits| u64::from_str_radix(digits, radix).ok())
+        .ok_or_else(|| invalid_field(field, "unsigned integer"))?;
+    u32::try_from(digits).map_err(|_| invalid_field(field, "unsigned 32-bit integer"))
+}
+
+fn parse_bool_response(raw: &[u8], field: &'static str) -> Result<bool, LeagueResponseDecodeError> {
+    match trim_horizontal_end(trim_horizontal_start(raw)) {
+        b"1" | b"true" => Ok(true),
+        b"0" | b"false" => Ok(false),
+        _ => Err(invalid_field(field, "boolean")),
+    }
+}
+
+fn identifier_token(raw: &[u8]) -> &[u8] {
+    let raw = trim_horizontal_start(raw);
+    let end = raw
+        .iter()
+        .position(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-'))
+        .unwrap_or(raw.len());
+    &raw[..end]
+}
+
+fn parse_bitfield(raw: &[u8], names: &[(&[u8], u32)]) -> u32 {
+    let mut result = 0;
+    for token in raw.split(|byte| *byte == b'|') {
+        let token = trim_horizontal_end(trim_horizontal_start(token));
+        if let Some((_, value)) = names.iter().find(|(name, _)| *name == token) {
+            result |= value;
+        } else if let Some((digits, negative, radix)) = numeric_token(token) {
+            if let Some(magnitude) = std::str::from_utf8(digits)
+                .ok()
+                .and_then(|digits| u32::from_str_radix(digits, radix).ok())
+            {
+                let value = if negative {
+                    0_u32.wrapping_sub(magnitude)
+                } else {
+                    magnitude
+                };
+                result |= value;
+            }
+        }
+    }
+    result
+}
+
+fn parse_client_player_infos(
+    tree: &LeagueIniTree<'_>,
+    node: Option<usize>,
+) -> Result<ClientPlayerInfosSnapshot, LeagueResponseDecodeError> {
+    let players = tree.sections(node, b"Player");
+    if players.len() > MAX_LEAGUE_RESPONSE_PLAYERS {
+        return Err(LeagueResponseDecodeError::PlayerCountOutOfRange(
+            players.len(),
+        ));
+    }
+    let client_id = tree
+        .first_value(node, b"ID")
+        .map(|raw| parse_i32_response(raw, "PlayerInfos.ID").unwrap_or(-1))
+        .unwrap_or(-1);
+    let flags = tree
+        .first_value(node, b"Flags")
+        .map(|raw| {
+            parse_bitfield(
+                raw,
+                &[
+                    (b"AddPlayers", CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS),
+                    (b"Updated", CLIENT_PLAYER_INFO_FLAG_UPDATED),
+                    (b"Initial", CLIENT_PLAYER_INFO_FLAG_INITIAL),
+                ],
+            )
+        })
+        .unwrap_or(0);
+    let players = players
+        .into_iter()
+        .map(|player| parse_player_info(tree, player))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ClientPlayerInfosSnapshot {
+        client_id,
+        flags,
+        players,
+    })
+}
+
+fn parse_player_info(
+    tree: &LeagueIniTree<'_>,
+    node: usize,
+) -> Result<ControlPlayerInfoEntry, LeagueResponseDecodeError> {
+    let node = Some(node);
+    let mut flags = tree
+        .first_value(node, b"Flags")
+        .map(|raw| {
+            parse_bitfield(
+                raw,
+                &[
+                    (b"Joined", u32::from(PLAYER_INFO_FLAG_JOINED)),
+                    (b"Removed", u32::from(PLAYER_INFO_FLAG_REMOVED)),
+                    (b"HasResource", u32::from(PLAYER_INFO_FLAG_HAS_RESOURCE)),
+                    (b"JoinIssued", u32::from(PLAYER_INFO_FLAG_JOIN_ISSUED)),
+                    (b"SavegameJoin", u32::from(PLAYER_INFO_FLAG_SAVEGAME_JOIN)),
+                    (b"Disconnected", u32::from(PLAYER_INFO_FLAG_DISCONNECTED)),
+                    (b"VotedOut", u32::from(PLAYER_INFO_FLAG_VOTED_OUT)),
+                    (b"Won", u32::from(PLAYER_INFO_FLAG_WON)),
+                    (
+                        b"AttributesFixed",
+                        u32::from(PLAYER_INFO_FLAG_ATTRIBUTES_FIXED),
+                    ),
+                    (
+                        b"NoScenarioInit",
+                        u32::from(PLAYER_INFO_FLAG_NO_SCENARIO_INIT),
+                    ),
+                    (
+                        b"NoEliminationCheck",
+                        u32::from(PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK),
+                    ),
+                    (b"Invisible", u32::from(PLAYER_INFO_FLAG_INVISIBLE)),
+                ],
+            )
+        })
+        .unwrap_or(0)
+        .min(u32::from(u16::MAX)) as u16;
+    let player_type = match tree.first_value(node, b"Type") {
+        None => PLAYER_INFO_TYPE_USER,
+        Some(raw) => {
+            let token = identifier_token(raw);
+            if token == b"User" {
+                PLAYER_INFO_TYPE_USER
+            } else if token == b"Script" {
+                PLAYER_INFO_TYPE_SCRIPT
+            } else {
+                parse_u32_response(raw, "Player.Type")
+                    .map(|value| value.min(u32::from(u8::MAX)) as u8)
+                    .unwrap_or(PLAYER_INFO_TYPE_USER)
+            }
+        }
+    };
+    if player_type != PLAYER_INFO_TYPE_SCRIPT {
+        flags &= !PLAYER_INFO_FLAG_INVISIBLE;
+    }
+    let color = tree
+        .first_value(node, b"Color")
+        .map(|raw| parse_u32_response(raw, "Player.Color").unwrap_or(0))
+        .unwrap_or(0);
+    let int = |name: &[u8], field: &'static str, default: i32| {
+        tree.first_value(node, name)
+            .map(|raw| parse_i32_response(raw, field).unwrap_or(default))
+            .unwrap_or(default)
+    };
+    let uint = |name: &[u8], field: &'static str, default: u32| {
+        tree.first_value(node, name)
+            .map(|raw| parse_u32_response(raw, field).unwrap_or(default))
+            .unwrap_or(default)
+    };
+    let extra_data = tree
+        .first_value(node, b"ExtraData")
+        .map(parse_c4_id)
+        .unwrap_or(*b"NONE");
+    let resource = if flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 {
+        Some(parse_network_resource(
+            tree,
+            tree.first_section(node, b"ResCore"),
+        )?)
+    } else {
+        None
+    };
+    Ok(ControlPlayerInfoEntry {
+        name: tree.validated_escaped_value(node, b"Name", validate_name_no_empty),
+        forced_name: tree.validated_escaped_value(
+            node,
+            b"ForcedName",
+            validate_name_allow_empty,
+        ),
+        filename: tree.escaped_value(node, b"Filename"),
+        flags,
+        id: int(b"ID", "Player.ID", 0),
+        player_type,
+        color,
+        original_color: uint(b"OriginalColor", "Player.OriginalColor", color),
+        savegame_player: int(b"SavgamePlayer", "Player.SavgamePlayer", 0),
+        team: int(b"Team", "Player.Team", 0),
+        auth_id: tree.escaped_value(node, b"AUID"),
+        game_number: if flags & PLAYER_INFO_FLAG_JOINED != 0 {
+            int(b"GameNumber", "Player.GameNumber", -1)
+        } else {
+            -1
+        },
+        game_join_frame: if flags & PLAYER_INFO_FLAG_JOINED != 0 {
+            int(b"GameJoinFrame", "Player.GameJoinFrame", -1)
+        } else {
+            -1
+        },
+        game_part_frame: if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
+            int(b"GamePartFrame", "Player.GamePartFrame", -1)
+        } else {
+            -1
+        },
+        extra_data,
+        league_account: tree.validated_escaped_value(
+            node,
+            b"LeagueAccount",
+            validate_name_allow_empty,
+        ),
+        league_score: int(b"LeagueScore", "Player.LeagueScore", 0),
+        league_rank: int(b"LeagueRank", "Player.LeagueRank", 0),
+        league_rank_symbol: int(b"LeagueRankSymbol", "Player.LeagueRankSymbol", 0),
+        league_projected_gain: int(b"ProjectedGain", "Player.ProjectedGain", -1),
+        clan_tag: tree.validated_raw_value(node, b"ClanTag", validate_name_allow_empty),
+        league_performance: int(b"LeaguePerformance", "Player.LeaguePerformance", 0),
+        league_progress_data_is_null: false,
+        league_progress_data: tree.escaped_value(node, b"LeagueProgressData"),
+        resource,
+    })
+}
+
+fn parse_c4_id(raw: &[u8]) -> [u8; 4] {
+    let raw = trim_horizontal_start(raw);
+    let length = raw
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        .count();
+    if length < 4 {
+        *b"NONE"
+    } else {
+        let id = raw[..4].try_into().expect("slice length was checked");
+        if id == *b"0000" { *b"NONE" } else { id }
+    }
+}
+
+fn parse_network_resource(
+    tree: &LeagueIniTree<'_>,
+    node: Option<usize>,
+) -> Result<NetworkResourceCore, LeagueResponseDecodeError> {
+    let resource_type = match tree.first_value(node, b"Type") {
+        None => NETWORK_RESOURCE_TYPE_NULL,
+        Some(raw) => {
+            match identifier_token(raw) {
+                b"Scenario" => 1,
+                b"Dynamic" => 2,
+                b"Player" => 3,
+                b"Definitions" => 4,
+                b"System" => 5,
+                b"Material" => 6,
+                _ => parse_u32_response(raw, "ResCore.Type")
+                    .map(|value| value.min(u32::from(u8::MAX)) as u8)
+                    .unwrap_or(NETWORK_RESOURCE_TYPE_NULL),
+            }
+        }
+    };
+    let loadable = tree
+        .first_value(node, b"Loadable")
+        .map(|raw| parse_bool_response(raw, "ResCore.Loadable").unwrap_or(true))
+        .unwrap_or(true);
+    let int = |name: &[u8], field: &'static str, default: i32| {
+        tree.first_value(node, name)
+            .map(|raw| parse_i32_response(raw, field).unwrap_or(default))
+            .unwrap_or(default)
+    };
+    let uint = |name: &[u8], field: &'static str, default: u32| {
+        tree.first_value(node, name)
+            .map(|raw| parse_u32_response(raw, field).unwrap_or(default))
+            .unwrap_or(default)
+    };
+    let chunk_size = if loadable {
+        uint(
+            b"ChunkSize",
+            "ResCore.ChunkSize",
+            NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE,
+        )
+    } else {
+        NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE
+    };
+    if loadable && chunk_size == 0 {
+        return Err(LeagueResponseDecodeError::ZeroResourceChunkSize);
+    }
+    let file_sha = tree
+        .first_value(node, b"FileSHA")
+        .map(parse_sha1)
+        .transpose()?;
+    Ok(NetworkResourceCore {
+        resource_type,
+        id: int(b"ID", "ResCore.ID", -1),
+        derived_id: int(b"DerID", "ResCore.DerID", -1),
+        loadable,
+        file_size: if loadable {
+            uint(b"FileSize", "ResCore.FileSize", 0)
+        } else {
+            u32::MAX
+        },
+        file_crc: if loadable {
+            uint(b"FileCRC", "ResCore.FileCRC", 0)
+        } else {
+            u32::MAX
+        },
+        chunk_size,
+        contents_crc: uint(b"ContentsCRC", "ResCore.ContentsCRC", 0),
+        file_sha,
+        filename: normalize_network_filename(tree.escaped_value(node, b"Filename")),
+        author: normalize_network_filename(tree.escaped_value(node, b"Author")),
+    })
+}
+
+fn parse_sha1(raw: &[u8]) -> Result<[u8; 20], LeagueResponseDecodeError> {
+    let raw = trim_horizontal_start(raw);
+    if raw.len() < 40 {
+        return Err(invalid_field("ResCore.FileSHA", "40 hexadecimal digits"));
+    }
+    let mut digest = [0; 20];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        let pair = &raw[index * 2..index * 2 + 2];
+        *byte = std::str::from_utf8(pair)
+            .ok()
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .ok_or_else(|| invalid_field("ResCore.FileSHA", "40 hexadecimal digits"))?;
+    }
+    Ok(digest)
+}
+
+#[cfg(windows)]
+fn normalize_network_filename(value: LegacyCString) -> LegacyCString {
+    value
+}
+
+#[cfg(not(windows))]
+fn normalize_network_filename(value: LegacyCString) -> LegacyCString {
+    LegacyCString::from_bytes(
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
+            .collect(),
+    )
+    .expect("normalization cannot introduce NUL")
+}
+
+fn parse_round_results_players(
+    tree: &LeagueIniTree<'_>,
+    node: Option<usize>,
+) -> Result<Vec<LeagueRoundResultsPlayer>, LeagueResponseDecodeError> {
+    let players = tree.sections(node, b"Player");
+    if players.len() > MAX_LEAGUE_RESPONSE_PLAYERS {
+        return Err(LeagueResponseDecodeError::PlayerCountOutOfRange(
+            players.len(),
+        ));
+    }
+    players
+        .into_iter()
+        .map(|node| parse_round_results_player(tree, node))
+        .collect()
+}
+
+fn parse_round_results_player(
+    tree: &LeagueIniTree<'_>,
+    node: usize,
+) -> Result<LeagueRoundResultsPlayer, LeagueResponseDecodeError> {
+    let node = Some(node);
+    let int = |name: &[u8], field: &'static str, default: i32| {
+        tree.first_value(node, name)
+            .map(|raw| parse_i32_response(raw, field).unwrap_or(default))
+            .unwrap_or(default)
+    };
+    let total_playing_time = tree
+        .first_value(node, b"TotalPlayingTime")
+        .map(|raw| parse_u32_response(raw, "Player.TotalPlayingTime").unwrap_or(0))
+        .unwrap_or(0);
+    let status = match tree.first_value(node, b"Status") {
+        None => LeagueRoundPlayerStatus::Unknown,
+        Some(raw) => {
+            let token = identifier_token(raw);
+            if token == b"Lost" {
+                LeagueRoundPlayerStatus::Lost
+            } else if token == b"Won" {
+                LeagueRoundPlayerStatus::Won
+            } else if let Ok(value) = parse_u32_response(raw, "Player.Status") {
+                LeagueRoundPlayerStatus::from(value.min(u32::from(u8::MAX)) as u8)
+            } else {
+                LeagueRoundPlayerStatus::Unknown
+            }
+        }
+    };
+    Ok(LeagueRoundResultsPlayer {
+        player_info_id: int(b"ID", "Player.ID", 0),
+        total_playing_time,
+        settlement_score_old: int(b"SettlementScoreOld", "Player.SettlementScoreOld", -1),
+        settlement_score_new: int(b"SettlementScoreNew", "Player.SettlementScoreNew", -1),
+        league_score_new: int(b"Score", "Player.Score", -1),
+        league_score_gain: int(b"GameScore", "Player.GameScore", -1),
+        league_rank_new: int(b"Rank", "Player.Rank", 0),
+        league_rank_symbol_new: int(b"RankSymbol", "Player.RankSymbol", 0),
+        league_progress_data: tree.escaped_value(node, b"LeagueProgressData"),
+        status,
+    })
 }
 
 /// Tracks league feedback identifiers (FBIDs) for authenticated accounts.
@@ -609,14 +1602,18 @@ impl LeagueFbidRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_league_auth_response, decode_league_join_response, encode_league_auth_request,
+        decode_league_auth_response, decode_league_end_response, decode_league_join_response,
+        decode_league_start_response, decode_league_update_response, encode_league_auth_request,
         encode_league_auth_request_head, encode_league_join_request_head,
         encode_league_player_info_section, solve_league_checksum, LeagueAuthRequestHead,
-        LeagueFbidRegistry, LeagueHttpPostTransport, LeagueHttpTransportConfig,
-        LeagueHttpTransportError, LeagueJoinRequestHead,
+        LeagueFbidRegistry, LeagueHostSession, LeagueHttpPostTransport, LeagueHttpTransportConfig,
+        LeagueHttpTransportError, LeagueJoinRequestHead, LeagueResponseDecodeError,
     };
+    use crate::LeagueRoundPlayerStatus;
     use lc_engine::{
-        ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
+        ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
+        CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED,
+        PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -797,6 +1794,230 @@ ClanTag= \tTAG \x80 \r\n",
         assert_eq!(response.progress_data[0].as_bytes(), b"done,yes");
         assert_eq!(response.progress_data[1].as_bytes(), b"\xff1");
         assert_eq!(response.clan_tag.as_bytes(), b"TAG \x80 ");
+    }
+
+    #[test]
+    fn start_response_preserves_seed_presence_and_saves_only_valid_csid() {
+        // Start's League and StreamTo are ordinary escaped StdStrBuf values,
+        // while Seed uses NameCount so absent and explicit zero differ
+        // (src/C4League.cpp:116-129,307-334).
+        let mut session = LeagueHostSession::new();
+        let response = session
+            .accept_start_response(
+                b"[Response]\r\n\
+Status=Success\r\n\
+CSID=session-7.trailing\r\n\
+Message= Registered  \r\n\
+League=\"Cup, \\200\"\r\n\
+StreamTo=\"stream\\x2fround\"\r\n\
+MaxPlayers=6\r\n",
+            )
+            .expect("successful Start response");
+
+        assert_eq!(response.head.csid.as_bytes(), b"session-7");
+        assert_eq!(response.head.message.as_bytes(), b"Registered  ");
+        assert_eq!(response.league.as_bytes(), b"Cup, \x80");
+        assert_eq!(response.stream_to.as_bytes(), b"stream/round");
+        assert_eq!(response.seed, None);
+        assert_eq!(response.max_players, 6);
+        assert_eq!(session.csid(), Some(&response.head.csid));
+
+        let response = decode_league_start_response(
+            b"[Response]\r\nStatus=Success\r\nCSID=zero\r\nSeed=0\r\n",
+        )
+        .expect("explicit zero seed remains present");
+        assert_eq!(response.seed, Some(0));
+
+        let response = decode_league_start_response(
+            b"[Response]\r\nStatus=Success\r\nCSID=defaults\r\nSeed=broken\r\nMaxPlayers=broken\r\n",
+        )
+        .expect("malformed defaulted numbers use their naming defaults");
+        assert_eq!((response.seed, response.max_players), (Some(0), 0));
+
+        assert!(matches!(
+            decode_league_start_response(
+                b"[Response]\r\nStatus=Failure\r\nCSID=unused\r\nMessage=No\r\n"
+            ),
+            Err(LeagueResponseDecodeError::StartRejected(response))
+                if response.head.message.as_bytes() == b"No"
+        ));
+        assert!(matches!(
+            decode_league_start_response(b"[Response]\r\nStatus=Success\r\n"),
+            Err(LeagueResponseDecodeError::MissingStartCsid(_))
+        ));
+    }
+
+    #[test]
+    fn update_response_decodes_cpp_client_player_infos_and_ignores_status() {
+        // GetUpdateReply accepts the parsed response regardless of Status and
+        // copies one C4ClientPlayerInfos including repeated Player/ResCore
+        // sections (src/C4League.cpp:132-142,354-367).
+        let response = decode_league_update_response(
+            b"[Response]\r\n\
+Status=Failure\r\n\
+Message=Still parsed  \r\n\
+League=\"Cup \\200\"\r\n\
+\r\n\
+\x20\x20[PlayerInfos]\r\n\
+\x20\x20ID=9\r\n\
+\x20\x20Flags=Updated|Initial\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20Name=\" {<i>Alice</i>{ \"\r\n\
+\x20\x20\x20\x20ForcedName=\" Bob \"\r\n\
+\x20\x20\x20\x20Filename=\"Players\\\\Alice.c4p\"\r\n\
+\x20\x20\x20\x20Flags=Joined|HasResource|64\r\n\
+\x20\x20\x20\x20ID=17\r\n\
+\x20\x20\x20\x20Color=1193046\r\n\
+\x20\x20\x20\x20Team=2\r\n\
+\x20\x20\x20\x20GameNumber=3\r\n\
+\x20\x20\x20\x20GameJoinFrame=44\r\n\
+\x20\x20\x20\x20LeagueAccount=\" {<i>Alice</i>{ \"\r\n\
+\x20\x20\x20\x20ProjectedGain=-7\r\n\
+\x20\x20\x20\x20ClanTag= TAG  \r\n\
+\x20\x20\x20\x20LeagueProgressData=\"level=2\"\r\n\
+\r\n\
+\x20\x20\x20\x20\x20\x20[ResCore]\r\n\
+\x20\x20\x20\x20\x20\x20Type=Player\r\n\
+\x20\x20\x20\x20\x20\x20ID=23\r\n\
+\x20\x20\x20\x20\x20\x20FileSize=123\r\n\
+\x20\x20\x20\x20\x20\x20FileCRC=456\r\n\
+\x20\x20\x20\x20\x20\x20ChunkSize=1024\r\n\
+\x20\x20\x20\x20\x20\x20ContentsCRC=789\r\n\
+\x20\x20\x20\x20\x20\x20FileSHA=000102030405060708090a0b0c0d0e0f10111213\r\n\
+\x20\x20\x20\x20\x20\x20Filename=\"Players\\\\Alice.c4p\"\r\n\
+\x20\x20\x20\x20\x20\x20Author=\"Host\"\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20ID=18\r\n\
+\x20\x20\x20\x20Color=broken\r\n\
+\x20\x20\x20\x20ExtraData=0000\r\n\
+\x20\x20\x20\x20ProjectedGain=broken\r\n",
+        )
+        .expect("C4ClientPlayerInfos response parses");
+
+        assert!(!response.head.is_success());
+        assert_eq!(response.head.message.as_bytes(), b"Still parsed  ");
+        assert_eq!(response.league.as_bytes(), b"Cup \x80");
+        assert_eq!(response.player_infos.client_id, 9);
+        assert_eq!(
+            response.player_infos.flags,
+            CLIENT_PLAYER_INFO_FLAG_UPDATED | CLIENT_PLAYER_INFO_FLAG_INITIAL
+        );
+        assert_eq!(response.player_infos.players.len(), 2);
+        let alice = &response.player_infos.players[0];
+        assert_eq!(alice.name.as_bytes(), b"Alice");
+        assert_eq!(alice.forced_name.as_bytes(), b"Bob");
+        assert_eq!(
+            alice.flags,
+            PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_HAS_RESOURCE | (1 << 6)
+        );
+        assert_eq!(
+            (alice.id, alice.color, alice.original_color),
+            (17, 1_193_046, 1_193_046)
+        );
+        assert_eq!((alice.game_number, alice.game_join_frame), (3, 44));
+        assert_eq!(alice.league_projected_gain, -7);
+        assert_eq!(alice.league_account.as_bytes(), b"Alice");
+        assert_eq!(alice.clan_tag.as_bytes(), b"TAG");
+        let resource = alice.resource.as_ref().expect("HasResource parses ResCore");
+        assert_eq!((resource.resource_type, resource.id), (3, 23));
+        assert_eq!((resource.file_size, resource.file_crc), (123, 456));
+        assert_eq!(resource.chunk_size, 1024);
+        assert_eq!(resource.contents_crc, 789);
+        assert_eq!(
+            resource.file_sha,
+            Some(std::array::from_fn(|index| index as u8))
+        );
+        assert_eq!(resource.filename.as_bytes(), b"Players/Alice.c4p");
+        assert_eq!(resource.author.as_bytes(), b"Host");
+
+        let defaults = &response.player_infos.players[1];
+        assert_eq!(defaults.id, 18);
+        assert_eq!((defaults.color, defaults.original_color), (0, 0));
+        assert_eq!(defaults.extra_data, *b"NONE");
+        assert_eq!(defaults.league_projected_gain, -1);
+        assert!(!defaults.league_progress_data_is_null);
+
+        let reordered = decode_league_update_response(
+            b"[Response]\r\n\r\n\x20\x20[PlayerInfos]\r\n\x20\x20ID=4\r\nStatus=Success\r\nMessage=After nested\r\n",
+        )
+        .expect("response fields remain children when written after a nested section");
+        assert!(reordered.head.is_success());
+        assert_eq!(reordered.head.message.as_bytes(), b"After nested");
+        assert_eq!(reordered.player_infos.client_id, 4);
+    }
+
+    #[test]
+    fn end_response_decodes_round_results_and_defaults_malformed_fields() {
+        // GetEndReply validates only the common response Status. Each named
+        // round-result scalar still carries its C++ naming default
+        // (src/C4League.cpp:385-399; src/C4RoundResults.cpp:31-52).
+        let response = decode_league_end_response(
+            b"[Response]\r\n\
+Status=Success\r\n\
+Message=Scored  \r\n\
+\r\n\
+\x20\x20[PlayerInfos]\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20ID=17\r\n\
+\x20\x20\x20\x20TotalPlayingTime=123\r\n\
+\x20\x20\x20\x20SettlementScoreOld=40\r\n\
+\x20\x20\x20\x20SettlementScoreNew=52\r\n\
+\x20\x20\x20\x20Score=900\r\n\
+\x20\x20\x20\x20GameScore=12\r\n\
+\x20\x20\x20\x20Rank=3\r\n\
+\x20\x20\x20\x20RankSymbol=4\r\n\
+\x20\x20\x20\x20LeagueProgressData=\"done\\x21\"\r\n\
+\x20\x20\x20\x20Status=Won\r\n\
+\r\n\
+\x20\x20\x20\x20[Player]\r\n\
+\x20\x20\x20\x20ID=18\r\n\
+\x20\x20\x20\x20Status=Lost\r\n",
+        )
+        .expect("successful End response");
+
+        assert_eq!(response.head.message.as_bytes(), b"Scored  ");
+        assert_eq!(response.players.len(), 2);
+        let winner = &response.players[0];
+        assert_eq!(winner.player_info_id, 17);
+        assert_eq!(winner.total_playing_time, 123);
+        assert_eq!(
+            (winner.settlement_score_old, winner.settlement_score_new),
+            (40, 52)
+        );
+        assert_eq!(
+            (winner.league_score_new, winner.league_score_gain),
+            (900, 12)
+        );
+        assert_eq!(
+            (winner.league_rank_new, winner.league_rank_symbol_new),
+            (3, 4)
+        );
+        assert_eq!(winner.league_progress_data.as_bytes(), b"done!");
+        assert_eq!(winner.status, LeagueRoundPlayerStatus::Won);
+        let loser = &response.players[1];
+        assert_eq!(loser.status, LeagueRoundPlayerStatus::Lost);
+        assert_eq!(
+            (loser.settlement_score_old, loser.league_score_gain),
+            (-1, -1)
+        );
+
+        let defaulted = decode_league_end_response(
+            b"[Response]\r\nStatus=Success\r\n\r\n\x20\x20[PlayerInfos]\r\n\r\n\x20\x20\x20\x20[Player]\r\n\x20\x20\x20\x20TotalPlayingTime=broken\r\n",
+        )
+        .expect("defaulted malformed field does not reject End");
+        assert_eq!(defaulted.players.len(), 1);
+        assert_eq!(defaulted.players[0].total_playing_time, 0);
+
+        assert!(matches!(
+            decode_league_end_response(
+                b"[Response]\r\nStatus=Failure\r\nMessage=Rejected\r\n"
+            ),
+            Err(LeagueResponseDecodeError::EndRejected(response))
+                if response.head.message.as_bytes() == b"Rejected"
+        ));
     }
 
     #[test]

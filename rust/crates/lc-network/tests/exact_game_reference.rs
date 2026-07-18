@@ -6,10 +6,12 @@ use lc_engine::{
     PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
 };
 use lc_network::{
-    encode_host_game_reference_response, parse_reference_response, ClientPlayerInfosSnapshot,
+    encode_host_game_reference_response, encode_league_end_request, encode_league_start_request,
+    encode_league_update_request, parse_reference_response, ClientPlayerInfosSnapshot,
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
     JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope,
-    JoinTeamListSnapshot, JoinTeamSnapshot, NetworkAddress, NetworkGameAdvertiser,
+    JoinTeamListSnapshot, JoinTeamSnapshot, LeagueEndRecord, LeagueHeartbeat, LeagueHostSession,
+    LeagueReferenceRequestEncodeError, NetworkAddress, NetworkGameAdvertiser,
     NetworkGameAdvertiserConfig, NetworkGameReference, NetworkProtocol, PlayerInfoListSnapshot,
 };
 
@@ -132,6 +134,125 @@ fn cpp_reference_serializes_the_complete_game_parameters_snapshot_in_compile_ord
         .as_bytes()
     );
     assert_eq!(parse_reference_response(&encoded).unwrap(), vec![summary]);
+}
+
+#[test]
+fn cpp_league_host_requests_append_the_exact_reference_after_the_request_head() {
+    // C4LeagueClient::{Start,Update,End} insert the complete Reference as a
+    // sibling after Request and solve the checksum over both sections
+    // (pristine 9ffa0a5d src/C4League.cpp:284-383). This fixture composes with
+    // the byte-for-byte Reference assertion above so the boundary, head field
+    // order, SHA representation and final proof-of-work bytes are all pinned.
+    let reference =
+        HostGameReference::new(fixture_summary(), fixture_metadata(), complete_parameters())
+            .expect("fixture reference validates");
+    let reference_bytes =
+        encode_host_game_reference_response(&reference).expect("fixture reference serializes");
+    let csid = legacy(b"session-7");
+    let checksum_start = 0x1234_5678;
+
+    let start = encode_league_start_request(&reference, checksum_start)
+        .expect("start request checksum solves");
+    let mut expected_start = b"[Request]\r\n\
+Action=Start\r\n\
+Checksum=sTSoj\r\n\
+\r\n"
+        .to_vec();
+    expected_start.extend_from_slice(&reference_bytes);
+    assert_eq!(checksum_value(&start), b"sTSoj");
+    assert_eq!(start, expected_start);
+
+    let update = encode_league_update_request(&csid, &reference, checksum_start)
+        .expect("update request checksum solves");
+    let mut expected_update = b"[Request]\r\n\
+Action=Update\r\n\
+CSID=session-7\r\n\
+Checksum=QuXoj\r\n\
+\r\n"
+        .to_vec();
+    expected_update.extend_from_slice(&reference_bytes);
+    assert_eq!(checksum_value(&update), b"QuXoj");
+    assert_eq!(update, expected_update);
+
+    let mut session = LeagueHostSession::new();
+    assert!(matches!(
+        session.encode_update_request(&reference, checksum_start),
+        Err(LeagueReferenceRequestEncodeError::MissingCsid)
+    ));
+    session
+        .accept_start_response(b"[Response]\r\nStatus=Success\r\nCSID=session-7\r\n")
+        .expect("Start response saves the host CSID");
+    assert_eq!(
+        session
+            .encode_update_request(&reference, checksum_start)
+            .expect("registered session builds Update"),
+        update
+    );
+
+    let end_without_record = encode_league_end_request(&csid, &reference, None, checksum_start)
+        .expect("recordless end request checksum solves");
+    let mut expected_end_without_record = b"[Request]\r\n\
+Action=End\r\n\
+CSID=session-7\r\n\
+Checksum=vxToj\r\n\
+\r\n"
+        .to_vec();
+    expected_end_without_record.extend_from_slice(&reference_bytes);
+    assert_eq!(checksum_value(&end_without_record), b"vxToj");
+    assert_eq!(end_without_record, expected_end_without_record);
+    assert_eq!(
+        session
+            .encode_end_request(&reference, None, checksum_start)
+            .expect("registered session builds End"),
+        end_without_record
+    );
+
+    let record = LeagueEndRecord {
+        name: legacy(b"Round 7.c4r"),
+        sha1: std::array::from_fn(|index| index as u8),
+    };
+    let end = encode_league_end_request(&csid, &reference, Some(&record), checksum_start)
+        .expect("end request checksum solves");
+    let mut expected_end = b"[Request]\r\n\
+Action=End\r\n\
+CSID=session-7\r\n\
+Checksum=Cecoj\r\n\
+RecordName=Round 7.c4r\r\n\
+RecordSHA=000102030405060708090a0b0c0d0e0f10111213\r\n\
+\r\n"
+        .to_vec();
+    expected_end.extend_from_slice(&reference_bytes);
+    assert_eq!(checksum_value(&end), b"Cecoj");
+    assert_eq!(end, expected_end);
+}
+
+#[test]
+fn cpp_league_heartbeat_is_initially_due_and_uses_strict_wall_clock_deadlines() {
+    // iLastLeagueUpdate starts at zero, so the first host Execute dispatches an
+    // Update immediately. A successful dispatch records wall-clock time and
+    // restores MasterReferencePeriod. InvalidateReference changes only the
+    // delay to ten seconds; C++ tests `now > last + delay`, not `>=`
+    // (pristine 9ffa0a5d src/C4Network2.cpp:209-214,707-718,2217-2222,
+    // 2439-2464).
+    let mut heartbeat = LeagueHeartbeat::new(60);
+
+    assert!(heartbeat.is_due(1_000));
+
+    heartbeat.update_dispatched(1_000);
+    assert!(!heartbeat.is_due(1_060));
+    assert!(heartbeat.is_due(1_061));
+
+    heartbeat.update_dispatched(1_061);
+    heartbeat.invalidate_reference();
+    assert!(!heartbeat.is_due(1_071));
+    assert!(heartbeat.is_due(1_072));
+
+    heartbeat.update_dispatched(1_072);
+    assert!(!heartbeat.is_due(1_132));
+    assert!(heartbeat.is_due(1_133));
+
+    heartbeat.invalidate_reference();
+    assert!(heartbeat.is_due(2_000));
 }
 
 #[test]
@@ -510,6 +631,16 @@ fn complete_parameters() -> JoinGameParametersEnvelope {
 
 fn legacy(value: &[u8]) -> LegacyCString {
     LegacyCString::from_bytes(value.to_vec()).unwrap()
+}
+
+fn checksum_value(request: &[u8]) -> &[u8] {
+    let prefix = b"Checksum=";
+    let start = request
+        .windows(prefix.len())
+        .position(|window| window == prefix)
+        .expect("league request has a checksum field")
+        + prefix.len();
+    &request[start..start + 5]
 }
 
 fn id(value: [u8; 4], count: i32) -> JoinDataIdListEntry {
