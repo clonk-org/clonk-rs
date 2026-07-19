@@ -24,7 +24,10 @@ const MIN_INTERIOR_HEIGHT: i32 = 8;
 const EMPTY_MENU_WIDTH: i32 = 40;
 const EMPTY_MENU_HEIGHT: i32 = 7;
 const ICON_CELL: u32 = 40;
-const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
+/// `C4GUI_ToolTipShowTime`: the cursor must be still for this long before a
+/// tooltip may be drawn.
+pub const CLASSIC_TOOLTIP_DELAY: Duration = Duration::from_millis(500);
+const TOOLTIP_DELAY: Duration = CLASSIC_TOOLTIP_DELAY;
 const TOOLTIP_MAX_WIDTH: i32 = 500;
 
 const CONTEXT_BACKGROUND: u32 = 0x4f3f_1a00;
@@ -33,6 +36,132 @@ const TOOLTIP_BACKGROUND: u32 = 0x00f1_ea78;
 const TOOLTIP_FRAME: u32 = 0x7f00_0000;
 const CONTEXT_TEXT: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 const TOOLTIP_TEXT: [u8; 4] = [0x48, 0x32, 0x22, 0xff];
+
+/// Process-level mouse-input state used to gate classic delayed tooltips.
+///
+/// This mirrors the relevant `C4GUI::CMouse` fields instead of attaching a
+/// separate timer to every control. Pointer coordinates are compared after
+/// integer-pixel conversion because native GUI input receives integer screen
+/// positions. A key or gamepad event clears the active-input flag without
+/// changing the retained pointer or timer; only a different pointer pixel, a
+/// pointer button, or a wheel event makes pointer input active again.
+#[derive(Clone, Debug)]
+pub struct ClassicTooltipTracker {
+    pointer: Option<GuiPoint>,
+    last_pointer_activity: Instant,
+    pointer_active: bool,
+}
+
+impl Default for ClassicTooltipTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClassicTooltipTracker {
+    /// Creates an inactive tracker using the current monotonic clock value.
+    pub fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    /// Deterministic constructor for hosts and tests that own the clock.
+    pub fn new_at(now: Instant) -> Self {
+        Self {
+            pointer: None,
+            last_pointer_activity: now,
+            pointer_active: false,
+        }
+    }
+
+    pub const fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer
+    }
+
+    pub const fn pointer_active(&self) -> bool {
+        self.pointer_active
+    }
+
+    /// Records pointer movement, returning whether the native integer pixel
+    /// changed. Subpixel-only motion updates the retained draw position but
+    /// neither restarts the delay nor reactivates pointer input after a key.
+    pub fn note_pointer_move(&mut self, point: GuiPoint) -> bool {
+        self.note_pointer_move_at(point, Instant::now())
+    }
+
+    pub fn note_pointer_move_at(&mut self, point: GuiPoint, now: Instant) -> bool {
+        let moved = self.pointer.is_none_or(|previous| {
+            previous.x as i32 != point.x as i32 || previous.y as i32 != point.y as i32
+        });
+        self.pointer = Some(point);
+        if moved {
+            self.note_pointer_activity_at(now);
+        }
+        moved
+    }
+
+    /// A pointer button is active mouse input even if the pointer did not
+    /// move, matching `CMouse::Input(iButton != 0, ...)`.
+    pub fn note_pointer_button(&mut self) {
+        self.note_pointer_button_at(Instant::now());
+    }
+
+    pub fn note_pointer_button_at(&mut self, now: Instant) {
+        self.note_pointer_activity_at(now);
+    }
+
+    /// Wheel input has the same tooltip-reset semantics as a pointer button.
+    pub fn note_pointer_wheel(&mut self) {
+        self.note_pointer_wheel_at(Instant::now());
+    }
+
+    pub fn note_pointer_wheel_at(&mut self, now: Instant) {
+        self.note_pointer_activity_at(now);
+    }
+
+    /// Mirrors `CMouse::ResetActiveInput` for keyboard and gamepad input.
+    pub fn note_non_pointer_input(&mut self) {
+        self.pointer_active = false;
+    }
+
+    /// Suppresses tooltips and forgets the pointer when the cursor leaves the
+    /// application. The next real pointer event starts a fresh delay.
+    pub fn pointer_left(&mut self) {
+        self.pointer = None;
+        self.pointer_active = false;
+    }
+
+    /// Returns the retained cursor whenever pointer input is active, both
+    /// before and after the delay. Hosts use this to keep a frame cache live
+    /// whenever the control under this point owns a tooltip.
+    pub const fn pending_pointer(&self) -> Option<GuiPoint> {
+        if self.pointer_active {
+            self.pointer
+        } else {
+            None
+        }
+    }
+
+    pub fn eligible_pointer(&self) -> Option<GuiPoint> {
+        self.eligible_pointer_at(Instant::now())
+    }
+
+    /// Returns the cursor only when pointer input is active and the exact
+    /// classic delay has elapsed. A clock value before the last activity is
+    /// treated as not ready.
+    pub fn eligible_pointer_at(&self, now: Instant) -> Option<GuiPoint> {
+        let pointer = self.pointer?;
+        (self.pointer_active
+            && now
+                .checked_duration_since(self.last_pointer_activity)
+                .is_some_and(|elapsed| elapsed >= CLASSIC_TOOLTIP_DELAY))
+        .then_some(pointer)
+    }
+
+    fn note_pointer_activity_at(&mut self, now: Instant) {
+        self.last_pointer_activity = now;
+        self.pointer_active = true;
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextMenuIcon {
@@ -1243,6 +1372,141 @@ mod tests {
         let icons = ImageData::new(240, 40, vec![255; 240 * 40 * 4]);
         let arrow = ImageData::new(8, 16, vec![255; 8 * 16 * 4]);
         ContextMenuResources::new(&fonts.text, &tooltip, &icons, &arrow).expect("resources")
+    }
+
+    #[test]
+    fn classic_tooltip_tracker_starts_inactive_and_uses_the_exact_delay() {
+        let start = Instant::now();
+        let mut tracker = ClassicTooltipTracker::new_at(start);
+        assert_eq!(tracker.pointer_position(), None);
+        assert!(!tracker.pointer_active());
+        assert_eq!(tracker.pending_pointer(), None);
+        assert_eq!(
+            tracker.eligible_pointer_at(start + CLASSIC_TOOLTIP_DELAY),
+            None
+        );
+
+        let first = GuiPoint::new(10.1, 20.9);
+        assert!(tracker.note_pointer_move_at(first, start));
+        assert!(tracker.pointer_active());
+        assert_eq!(tracker.pending_pointer(), Some(first));
+        assert_eq!(
+            tracker.eligible_pointer_at(start + CLASSIC_TOOLTIP_DELAY - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            tracker.eligible_pointer_at(start + CLASSIC_TOOLTIP_DELAY),
+            Some(first),
+            "the native 500ms boundary is inclusive"
+        );
+
+        let next_pixel = GuiPoint::new(11.0, 20.0);
+        let moved_at = start + Duration::from_millis(750);
+        assert!(tracker.note_pointer_move_at(next_pixel, moved_at));
+        assert_eq!(
+            tracker
+                .eligible_pointer_at(moved_at + CLASSIC_TOOLTIP_DELAY - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            tracker.eligible_pointer_at(moved_at + CLASSIC_TOOLTIP_DELAY),
+            Some(next_pixel)
+        );
+    }
+
+    #[test]
+    fn classic_tooltip_tracker_ignores_subpixel_motion_and_keys_require_real_mouse_input() {
+        let start = Instant::now();
+        let mut tracker = ClassicTooltipTracker::new_at(start);
+        let first = GuiPoint::new(10.1, 20.1);
+        tracker.note_pointer_move_at(first, start);
+
+        let subpixel = GuiPoint::new(10.9, 20.8);
+        assert!(!tracker.note_pointer_move_at(subpixel, start + Duration::from_millis(400)));
+        assert_eq!(
+            tracker.eligible_pointer_at(start + CLASSIC_TOOLTIP_DELAY),
+            Some(subpixel),
+            "motion within one native integer pixel must not restart the timer"
+        );
+
+        tracker.note_non_pointer_input();
+        assert!(!tracker.pointer_active());
+        assert_eq!(tracker.pending_pointer(), None);
+        assert_eq!(
+            tracker.eligible_pointer_at(start + Duration::from_secs(2)),
+            None
+        );
+        assert!(!tracker
+            .note_pointer_move_at(GuiPoint::new(10.2, 20.2), start + Duration::from_secs(2)));
+        assert!(
+            !tracker.pointer_active(),
+            "same-pixel motion is not new input"
+        );
+
+        let reactivated_at = start + Duration::from_secs(3);
+        let changed = GuiPoint::new(9.9, 20.2);
+        assert!(tracker.note_pointer_move_at(changed, reactivated_at));
+        assert!(tracker.pointer_active());
+        assert_eq!(
+            tracker.eligible_pointer_at(
+                reactivated_at + CLASSIC_TOOLTIP_DELAY - Duration::from_millis(1)
+            ),
+            None
+        );
+        assert_eq!(
+            tracker.eligible_pointer_at(reactivated_at + CLASSIC_TOOLTIP_DELAY),
+            Some(changed)
+        );
+    }
+
+    #[test]
+    fn classic_tooltip_tracker_buttons_wheel_and_leave_match_cmouse_activity() {
+        let start = Instant::now();
+        let mut tracker = ClassicTooltipTracker::new_at(start);
+        let point = GuiPoint::new(5.0, 7.0);
+        tracker.note_pointer_move_at(point, start);
+        tracker.note_non_pointer_input();
+
+        let button_at = start + Duration::from_secs(1);
+        tracker.note_pointer_button_at(button_at);
+        assert!(tracker.pointer_active());
+        assert_eq!(
+            tracker.eligible_pointer_at(button_at + CLASSIC_TOOLTIP_DELAY),
+            Some(point)
+        );
+
+        tracker.note_non_pointer_input();
+        let wheel_at = start + Duration::from_secs(2);
+        tracker.note_pointer_wheel_at(wheel_at);
+        assert_eq!(
+            tracker
+                .eligible_pointer_at(wheel_at + CLASSIC_TOOLTIP_DELAY - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            tracker.eligible_pointer_at(wheel_at + CLASSIC_TOOLTIP_DELAY),
+            Some(point)
+        );
+
+        tracker.pointer_left();
+        assert_eq!(tracker.pointer_position(), None);
+        assert!(!tracker.pointer_active());
+        assert_eq!(tracker.pending_pointer(), None);
+        assert_eq!(
+            tracker.eligible_pointer_at(start + Duration::from_secs(10)),
+            None
+        );
+
+        let returned_at = start + Duration::from_secs(11);
+        assert!(tracker.note_pointer_move_at(point, returned_at));
+        assert_eq!(
+            tracker.eligible_pointer_at(returned_at - Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            tracker.eligible_pointer_at(returned_at + CLASSIC_TOOLTIP_DELAY),
+            Some(point)
+        );
     }
 
     fn screen() -> IntRect {

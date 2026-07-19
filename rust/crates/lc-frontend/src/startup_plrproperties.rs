@@ -6,9 +6,10 @@
 //! one.
 
 use crate::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
+use crate::startup_main_menu::StartupTooltip;
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use lc_engine::player_file::PlayerFile;
-use lc_graphics::clonk_font::TextAlign;
+use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{Color, GammaRamp, Rect as SurfaceRect, Surface};
 use lc_gui::Rect as GuiRect;
 
@@ -181,6 +182,26 @@ impl PlayerPropertiesLayout {
             PlayerPropertiesControl::Ok => self.ok,
             PlayerPropertiesControl::Cancel => self.cancel,
         }
+    }
+
+    /// Autosized movement-label bounds in `[Classic, Jump'n'Run]` order.
+    /// Native labels start six pixels above the matching icon's bottom and
+    /// continue for the full BookSmallFont line height.
+    pub fn movement_label_rects(self, book_small: &ClonkFont) -> [IntRect; 2] {
+        [
+            movement_label_rect(self.classic_movement, "Classic", book_small),
+            movement_label_rect(self.jump_and_run_movement, "Jump'n'Run", book_small),
+        ]
+    }
+}
+
+fn movement_label_rect(button: IntRect, text: &str, font: &ClonkFont) -> IntRect {
+    let (w, h) = font.measure(text, true);
+    IntRect {
+        x: button.x + button.w / 2 - w / 2,
+        y: button.y + button.h - 6,
+        w,
+        h,
     }
 }
 
@@ -508,6 +529,50 @@ impl PlayerPropertiesController {
 
     pub fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
+    }
+
+    /// Returns exactly the tooltips assigned by the native player-properties
+    /// dialog. Untipped edits, previews, swatches and OK/Cancel controls do
+    /// not inherit descriptions from unrelated siblings.
+    pub fn tooltip_at(
+        &self,
+        point: GuiPoint,
+        book_small: &ClonkFont,
+    ) -> Option<StartupTooltip> {
+        let layout = self.layout();
+        if contains(layout.control_preview, point) {
+            return Some(StartupTooltip::resource("IDS_DLGTIP_PLAYERCONTROL"));
+        }
+        if let Some(control) = self.hit_control(point) {
+            let key = match control {
+                PlayerPropertiesControl::ColorPrevious | PlayerPropertiesControl::ColorNext => {
+                    "IDS_DLGTIP_PLAYERCOLORS"
+                }
+                PlayerPropertiesControl::Red
+                | PlayerPropertiesControl::Green
+                | PlayerPropertiesControl::Blue => "IDS_DLGTIP_PLAYERCOLORSTGB",
+                PlayerPropertiesControl::ControlPrevious
+                | PlayerPropertiesControl::ControlNext => "IDS_DLGTIP_PLAYERCONTROL",
+                PlayerPropertiesControl::Mouse => "IDS_DLGTIP_PLAYERCONTROLMOUSE",
+                PlayerPropertiesControl::Picture => "IDS_DESC_SELECTAPICTUREANDORLOBBYI",
+                PlayerPropertiesControl::JumpAndRunMovement => "IDS_DLGTIP_JUMPANDRUN",
+                PlayerPropertiesControl::ClassicMovement => "IDS_DLGTIP_CLASSIC",
+                PlayerPropertiesControl::Name
+                | PlayerPropertiesControl::Ok
+                | PlayerPropertiesControl::Cancel => return None,
+            };
+            return Some(StartupTooltip::resource(key));
+        }
+        let [classic, jump_and_run] = layout.movement_label_rects(book_small);
+        if contains(classic, point) {
+            return Some(StartupTooltip::resource("IDS_DLGTIP_CLASSIC"));
+        }
+        contains(jump_and_run, point)
+            .then(|| StartupTooltip::resource("IDS_DLGTIP_JUMPANDRUN"))
+    }
+
+    pub fn tooltip(&self, book_small: &ClonkFont) -> Option<StartupTooltip> {
+        self.tooltip_at(self.pointer_position?, book_small)
     }
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
@@ -1199,5 +1264,91 @@ mod tests {
             state.handle_key_down(KeyCode::Space),
             vec![PlayerPropertiesAction::ChoosePicture]
         );
+    }
+
+    #[test]
+    fn tooltip_targets_match_native_player_properties_assignments() {
+        let mut state = controller();
+        state.resize(800, 600);
+        let layout = PlayerPropertiesLayout::for_size(800, 600);
+        let ttf = std::fs::read(
+            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
+        )
+        .expect("read Endeavour.ttf");
+        let book_small = crate::startup_options_dlg::build_book_fonts(&ttf)
+            .expect("build book fonts")
+            .book_small;
+        let center = |rect: IntRect| {
+            GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+        };
+        for (rect, key) in [
+            (layout.color_previous, "IDS_DLGTIP_PLAYERCOLORS"),
+            (layout.color_next, "IDS_DLGTIP_PLAYERCOLORS"),
+            (layout.rgb_sliders[0], "IDS_DLGTIP_PLAYERCOLORSTGB"),
+            (layout.rgb_sliders[1], "IDS_DLGTIP_PLAYERCOLORSTGB"),
+            (layout.rgb_sliders[2], "IDS_DLGTIP_PLAYERCOLORSTGB"),
+            (layout.control_previous, "IDS_DLGTIP_PLAYERCONTROL"),
+            (layout.control_preview, "IDS_DLGTIP_PLAYERCONTROL"),
+            (layout.control_next, "IDS_DLGTIP_PLAYERCONTROL"),
+            (layout.mouse, "IDS_DLGTIP_PLAYERCONTROLMOUSE"),
+            (layout.picture, "IDS_DESC_SELECTAPICTUREANDORLOBBYI"),
+            (layout.jump_and_run_movement, "IDS_DLGTIP_JUMPANDRUN"),
+            (layout.classic_movement, "IDS_DLGTIP_CLASSIC"),
+        ] {
+            assert_eq!(
+                state.tooltip_at(center(rect), &book_small),
+                Some(StartupTooltip::resource(key))
+            );
+        }
+        for rect in [
+            layout.name,
+            layout.color_swatch,
+            layout.ok,
+            layout.cancel,
+            layout.close,
+        ] {
+            assert_eq!(state.tooltip_at(center(rect), &book_small), None);
+        }
+
+        let [classic_label, jump_label] = layout.movement_label_rects(&book_small);
+        for (label, button, key) in [
+            (
+                classic_label,
+                layout.classic_movement,
+                "IDS_DLGTIP_CLASSIC",
+            ),
+            (
+                jump_label,
+                layout.jump_and_run_movement,
+                "IDS_DLGTIP_JUMPANDRUN",
+            ),
+        ] {
+            assert!(label.y + label.h > button.y + button.h);
+            let label_only = GuiPoint::new(
+                (label.x + label.w / 2) as f32,
+                (button.y + button.h + 1) as f32,
+            );
+            assert_eq!(
+                state.tooltip_at(label_only, &book_small),
+                Some(StartupTooltip::resource(key))
+            );
+        }
+
+        for (label, blocker) in [(classic_label, layout.ok), (jump_label, layout.cancel)] {
+            let overlap = IntRect {
+                x: label.x.max(blocker.x),
+                y: label.y.max(blocker.y),
+                w: (label.x + label.w).min(blocker.x + blocker.w)
+                    - label.x.max(blocker.x),
+                h: (label.y + label.h).min(blocker.y + blocker.h)
+                    - label.y.max(blocker.y),
+            };
+            assert!(overlap.w > 0 && overlap.h > 0);
+            assert_eq!(
+                state.tooltip_at(center(overlap), &book_small),
+                None,
+                "later OK/Cancel controls occlude the movement label"
+            );
+        }
     }
 }

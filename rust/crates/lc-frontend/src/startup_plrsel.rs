@@ -8,7 +8,7 @@
 //! through the CStdDDraw-faithful helpers in this crate.
 
 use crate::clonk_fonts::ClonkFontSet;
-use crate::startup_main_menu::{draw_bar, IntRect};
+use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
@@ -1337,6 +1337,86 @@ impl PlrSelController {
     /// than to a row under that release position.
     pub const fn scrollbar_pointer_captured(&self) -> bool {
         self.scrollbar_dragging || self.scrollbar_arrow_captured
+    }
+
+    /// Resolves the native tooltip target at `point`. `row_names` must follow
+    /// the currently displayed player/crew order; row tooltips contain the
+    /// live name, and the activation button formats that same name into its
+    /// localized participate/deactivate description.
+    pub fn tooltip_at<'a>(
+        &self,
+        point: GuiPoint,
+        row_names: impl IntoIterator<Item = &'a str>,
+    ) -> Option<StartupTooltip> {
+        if let Some(control) = self.hit_button(point) {
+            return match (self.is_crew_mode(), control) {
+                (false, PlrSelControl::Back) => {
+                    Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN"))
+                }
+                (false, PlrSelControl::NewPlayer) => {
+                    Some(StartupTooltip::resource("IDS_DLGTIP_NEWPLAYER"))
+                }
+                (false, PlrSelControl::Delete) => {
+                    Some(StartupTooltip::resource("IDS_DLGTIP_PLAYERDELETE"))
+                }
+                (false, PlrSelControl::Properties) => {
+                    Some(StartupTooltip::resource("IDS_DLGTIP_PLAYERPROPERTIES"))
+                }
+                (false, PlrSelControl::Crew) => {
+                    Some(StartupTooltip::resource("IDS_DLGTIP_PLAYERCREW"))
+                }
+                (true, PlrSelControl::Back) => {
+                    Some(StartupTooltip::resource("IDS_MSG_BACKTOPLAYERDLG"))
+                }
+                (true, PlrSelControl::Delete) => {
+                    Some(StartupTooltip::resource("IDS_MSG_DELETECLONK_DESC"))
+                }
+                (true, PlrSelControl::Rename) => {
+                    Some(StartupTooltip::resource("IDS_DESC_CREWRENAME"))
+                }
+                (_, PlrSelControl::Activate) => {
+                    let selected = self.selected;
+                    let name = selected
+                        .and_then(|index| row_names.into_iter().nth(index))
+                        .unwrap_or_default();
+                    let active = selected.is_some_and(|index| {
+                        if self.is_crew_mode() {
+                            self.crew_participations
+                                .get(index)
+                                .copied()
+                                .unwrap_or(false)
+                        } else {
+                            self.player_activations.get(index).copied().unwrap_or(false)
+                        }
+                    });
+                    Some(StartupTooltip::formatted_resource(
+                        if active {
+                            "IDS_MSG_NOPARTICIPATE_DESC"
+                        } else {
+                            "IDS_MSG_PARTICIPATE_DESC"
+                        },
+                        [name],
+                    ))
+                }
+                _ => None,
+            };
+        }
+
+        let layout = self.layout();
+        if !contains_plrsel(layout.plr_list, point) {
+            return None;
+        }
+        if let Some(index) = self.list_item_at(point) {
+            return row_names.into_iter().nth(index).map(StartupTooltip::text);
+        }
+        Some(StartupTooltip::resource("IDS_DLGTIP_PLAYERFILES"))
+    }
+
+    pub fn tooltip<'a>(
+        &self,
+        row_names: impl IntoIterator<Item = &'a str>,
+    ) -> Option<StartupTooltip> {
+        self.tooltip_at(self.pointer_position?, row_names)
     }
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
@@ -2923,6 +3003,100 @@ mod tests {
         assert_eq!(controller.mode(), &PlrSelMode::Player);
         assert_eq!(controller.selected_index(), Some(2));
         assert_eq!(controller.row_count(), 3);
+    }
+
+    #[test]
+    fn tooltip_targets_follow_rows_participation_and_mode_specific_buttons() {
+        let layout = plrsel_layout(1280, 720);
+        let names = ["Ada", "Grace"];
+        let mut controller = PlrSelController::new(names.len());
+        controller.resize(1280, 720);
+
+        for (rect, key) in [
+            (layout.buttons[0], "IDS_DLGTIP_BACKMAIN"),
+            (layout.buttons[1], "IDS_DLGTIP_NEWPLAYER"),
+            (layout.buttons[3], "IDS_DLGTIP_PLAYERDELETE"),
+            (layout.buttons[4], "IDS_DLGTIP_PLAYERPROPERTIES"),
+            (layout.buttons[5], "IDS_DLGTIP_PLAYERCREW"),
+        ] {
+            assert_eq!(
+                controller.tooltip_at(center(rect), names),
+                Some(StartupTooltip::resource(key))
+            );
+        }
+        assert_eq!(
+            controller.tooltip_at(center(layout.buttons[2]), names),
+            Some(StartupTooltip::formatted_resource(
+                "IDS_MSG_PARTICIPATE_DESC",
+                ["Ada"]
+            ))
+        );
+
+        controller.set_player_activations(vec![true, false]);
+        assert_eq!(
+            controller.tooltip_at(center(layout.buttons[2]), names),
+            Some(StartupTooltip::formatted_resource(
+                "IDS_MSG_NOPARTICIPATE_DESC",
+                ["Ada"]
+            ))
+        );
+        let first_row = GuiPoint::new(
+            (layout.list_client.x + layout.item_height * 2) as f32,
+            (layout.list_client.y + layout.item_height / 2) as f32,
+        );
+        assert_eq!(
+            controller.tooltip_at(first_row, names),
+            Some(StartupTooltip::text("Ada"))
+        );
+        let row_gap = GuiPoint::new(
+            (layout.list_client.x + 1) as f32,
+            (layout.list_client.y + layout.item_height) as f32,
+        );
+        assert_eq!(
+            controller.tooltip_at(row_gap, names),
+            Some(StartupTooltip::resource("IDS_DLGTIP_PLAYERFILES"))
+        );
+
+        assert!(controller.enter_crew_mode(0, "Ada", vec![true, false]));
+        for (rect, key) in [
+            (layout.crew_buttons[0], "IDS_MSG_BACKTOPLAYERDLG"),
+            (layout.crew_buttons[2], "IDS_MSG_DELETECLONK_DESC"),
+            (layout.crew_buttons[3], "IDS_DESC_CREWRENAME"),
+        ] {
+            assert_eq!(
+                controller.tooltip_at(center(rect), names),
+                Some(StartupTooltip::resource(key))
+            );
+        }
+        assert_eq!(
+            controller.tooltip_at(center(layout.crew_buttons[1]), names),
+            Some(StartupTooltip::formatted_resource(
+                "IDS_MSG_NOPARTICIPATE_DESC",
+                ["Ada"]
+            ))
+        );
+    }
+
+    #[test]
+    fn tooltip_targets_follow_scrolled_player_rows() {
+        let layout = plrsel_layout(1280, 720);
+        let names: Vec<String> = (0..20)
+            .map(|index| format!("Player {index}"))
+            .collect();
+        let mut controller = PlrSelController::new(names.len());
+        controller.resize(1280, 720);
+        let viewport_point = GuiPoint::new(
+            (layout.list_viewport.x + 4) as f32,
+            (layout.list_viewport.y + 4) as f32,
+        );
+
+        controller.handle_wheel(viewport_point, -60);
+
+        assert_eq!(controller.list_scroll_offset(), 60);
+        assert_eq!(
+            controller.tooltip_at(viewport_point, names.iter().map(String::as_str)),
+            Some(StartupTooltip::text("Player 2"))
+        );
     }
 
     #[test]

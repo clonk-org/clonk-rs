@@ -98,8 +98,9 @@ use lc_engine::{
     MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
 };
 use lc_frontend::context_menu::{
-    ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent, ContextMenuIcon,
-    ContextMenuOutcome, ContextMenuPointerButton, ContextMenuSound,
+    ClassicContextMenu, ClassicTooltipTracker, ContextMenuDirection, ContextMenuEntry,
+    ContextMenuEvent, ContextMenuIcon, ContextMenuOutcome, ContextMenuPointerButton,
+    ContextMenuSound,
 };
 use lc_frontend::game_lobby::{
     GameLobby as ClassicGameLobby, LobbyAction as ClassicLobbyAction, LobbyChatClipboardShortcut,
@@ -133,8 +134,9 @@ use lc_frontend::{
     GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
     InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction, MainMenuItem,
     MaterialRenderInfo, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
-    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportEdgeScroll, ViewportInput,
-    ViewportPointer, default_owner_color, viewport_edge_scroll, viewport_edge_scroll_at,
+    StartupMainMenu, StartupMenu, StartupMenuAction, StartupTooltip, ViewportEdgeScroll,
+    ViewportInput, ViewportPointer, default_owner_color, viewport_edge_scroll,
+    viewport_edge_scroll_at,
 };
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
@@ -5932,9 +5934,12 @@ fn handle_window_event(
             MouseButton::Right => app
                 .handle_right_mouse_button(state)
                 .context("failed to process right mouse button")?,
-            _ => app
+            MouseButton::Middle => app
                 .handle_other_mouse_button(state)
-                .context("failed to process auxiliary mouse button")?,
+                .context("failed to process middle mouse button")?,
+            // LegacyClonk's SDL frontend recognizes only left, right and
+            // middle buttons; extra platform buttons never reach CMouse.
+            _ => {}
         },
         WindowEvent::MouseWheel { delta, .. } => {
             app.handle_mouse_wheel(delta, presenter.scale())
@@ -5957,6 +5962,11 @@ fn handle_window_event(
                 && keycode == VirtualKeyCode::F11
                 && !app.options_keyboard_control_capture_active()
             {
+                app.startup_tooltip.note_non_pointer_input();
+                app.note_classic_host_lobby_non_pointer_input();
+                if app.mode == AppMode::Menu {
+                    app.menu_frame_cache = None;
+                }
                 app.reject_classic_global_gui_bootstrap()?;
                 toggle_fullscreen(window, display_options);
                 return Ok(());
@@ -9641,6 +9651,11 @@ struct GameApp {
     /// IDS_GAME_DEFRANKS from the currently loaded process language table.
     /// The next return-to-startup PreInit promotes this to Game.Rank.
     loaded_default_rank_names: Option<Vec<String>>,
+    /// Process startup tooltip strings. Unlike one-off status messages,
+    /// tooltips are resolved every presented frame after their hover delay;
+    /// retain the active C4ResStrTable projection and refresh it with an
+    /// Options language change instead of reopening System.c4g every frame.
+    startup_tooltip_resources: HashMap<String, String>,
     /// Process-local Config.General.MissionAccess shared across fresh games.
     mission_access: MissionAccessStore,
     /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
@@ -9675,6 +9690,10 @@ struct GameApp {
     fallback_ground: i32,
     menu_state: MenuState,
     main_menu_state: MainMenuState,
+    /// One process-level C4GUI::CMouse tooltip clock shared by every startup
+    /// dialog. Target lookup remains view-specific, but input ownership and
+    /// the 500ms stillness delay are global.
+    startup_tooltip: ClassicTooltipTracker,
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
     startup_game_search: Option<lc_network::StartupGameSearch>,
     /// Complete references retained in the same order as the visible game
@@ -11741,6 +11760,11 @@ struct MenuState {
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
     include_back: bool,
+    /// FullscreenDialog creates the scenario title before the Tabular. A
+    /// HideTitle map deletes it; returning to a book re-adds it at the end of
+    /// the dialog, changing both presence and mouse-over z-order.
+    scensel_title_present: bool,
+    scensel_title_topmost: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -12887,6 +12911,8 @@ impl MenuState {
             definition_checkbox_focused: false,
             dialog_focus: ScenselDialogFocus::List,
             include_back: true,
+            scensel_title_present: true,
+            scensel_title_topmost: false,
         }
     }
 
@@ -13393,9 +13419,17 @@ impl MenuState {
         };
         layer.style = MenuLayerStyle::Book;
         if !show_folder_maps {
+            if !self.scensel_title_present {
+                self.scensel_title_present = true;
+                self.scensel_title_topmost = true;
+            }
             return false;
         }
         let Some(folder) = layer.folder.clone() else {
+            if !self.scensel_title_present {
+                self.scensel_title_present = true;
+                self.scensel_title_topmost = true;
+            }
             return false;
         };
         let Some(map) = load_map_folder_data(
@@ -13405,8 +13439,15 @@ impl MenuState {
             mission_access,
             languages,
         ) else {
+            if !self.scensel_title_present {
+                self.scensel_title_present = true;
+                self.scensel_title_topmost = true;
+            }
             return false;
         };
+        if map.hide_title {
+            self.scensel_title_present = false;
+        }
         layer.style = MenuLayerStyle::Map(map);
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
@@ -14133,31 +14174,13 @@ impl MainMenuState {
         self.menu.set_pointer_position(position);
     }
 
-    fn note_pointer_position(&mut self, position: Option<GuiPoint>) {
-        self.menu.note_pointer_position(position);
-    }
-
     fn participants_contains(&self, point: GuiPoint) -> bool {
         self.menu
             .participants_contains(&self.participants_label, point)
     }
 
-    fn participants_tooltip_pending(&self) -> bool {
-        self.menu
-            .participants_tooltip_pending(&self.participants_label)
-    }
-
-    fn participants_tooltip_pointer(&self) -> Option<GuiPoint> {
-        self.menu
-            .participants_tooltip_pointer(&self.participants_label)
-    }
-
-    fn note_pointer_button(&mut self) {
-        self.menu.note_pointer_button();
-    }
-
-    fn note_non_pointer_input(&mut self) {
-        self.menu.note_non_pointer_input();
+    fn tooltip_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        self.menu.tooltip_at(&self.participants_label, point)
     }
 
     fn handle_pointer_move(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
@@ -18833,6 +18856,14 @@ impl GameApp {
             .ok()
             .map(default_rank_resource_names);
         let loaded_default_rank_names = default_rank_names.clone();
+        let startup_tooltip_resources = runtime_language_table
+            .as_ref()
+            .map(|table| table.entries.clone())
+            .unwrap_or_else(|_| {
+                load_runtime_language_table(None)
+                    .expect("the embedded LanguageUS.txt startup resource is valid")
+                    .entries
+            });
         engine.set_needed_material_resource_strings(
             needed_material_need.clone(),
             needed_material_none.clone(),
@@ -18865,6 +18896,7 @@ impl GameApp {
             needed_material_none,
             default_rank_names,
             loaded_default_rank_names,
+            startup_tooltip_resources,
             mission_access,
             show_folder_maps,
             show_commands_requests,
@@ -18889,6 +18921,7 @@ impl GameApp {
             fallback_ground: DEFAULT_GROUND_HEIGHT,
             menu_state,
             main_menu_state,
+            startup_tooltip: ClassicTooltipTracker::new(),
             startup_network_dialog: None,
             startup_game_search: None,
             startup_game_references: Vec::new(),
@@ -19135,7 +19168,7 @@ impl GameApp {
             && self.startup_view == StartupView::MainMenu
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none()
-            && !self.main_menu_state.participants_tooltip_pending()
+            && !self.startup_element_tooltip_pending()
             && self
                 .native_startup_fonts
                 .as_ref()
@@ -19388,6 +19421,15 @@ impl GameApp {
         self.mode == AppMode::Menu
             && self.startup_view == StartupView::NetworkLobby
             && self.classic_host_lobby.is_some()
+    }
+
+    fn note_classic_host_lobby_non_pointer_input(&mut self) {
+        if self.classic_host_lobby_active() {
+            if let Some(lobby) = self.classic_host_lobby.as_mut() {
+                lobby.controller.note_non_pointer_input();
+            }
+            self.scenario_game_options.note_non_pointer_input();
+        }
     }
 
     fn has_or_will_have_network_lobby(&self) -> bool {
@@ -19664,6 +19706,11 @@ impl GameApp {
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         self.close_context_menu_silently();
+        // Native resize tears down/repositions dialog elements and therefore
+        // clears CMouse's owned hover element. A retained screen coordinate
+        // must not acquire whichever control moves underneath it.
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
         self.context_menu_pointer_capture = None;
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
             dialog.controller.cancel_interaction();
@@ -20172,12 +20219,13 @@ impl GameApp {
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.startup_tooltip.note_non_pointer_input();
+        self.note_classic_host_lobby_non_pointer_input();
+        if self.mode == AppMode::Menu {
+            self.menu_frame_cache = None;
+        }
         if self.startup_network_transition_active() {
             return Ok(());
-        }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-            self.main_menu_state.note_non_pointer_input();
-            self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
             return Ok(());
@@ -20310,6 +20358,9 @@ impl GameApp {
     }
 
     fn submit_scenario_search(&mut self) -> Result<(), EngineError> {
+        // UpdateList destroys and recreates the visible row elements.
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
         self.handle_menu_input(|menu| menu.submit_search())?;
         // An empty result emits no SelectionChanged action. Explicitly clear
         // selection-derived checkbox/ForcedNoCrew state in that case rather
@@ -20814,12 +20865,9 @@ impl GameApp {
         output_scale: f32,
     ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.startup_tooltip.note_pointer_wheel();
         if self.startup_network_transition_active() {
             return Ok(());
-        }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-            self.main_menu_state.note_pointer_button();
-            self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
             return Ok(());
@@ -21096,6 +21144,7 @@ impl GameApp {
             if !point_in_map_rect(point, &info_rect) {
                 return Ok(());
             }
+            self.startup_tooltip.pointer_left();
             let mut info_layout = layout;
             info_layout.selection_info = lc_frontend::classic_gui::IntRect {
                 x: info_rect.origin.x.round() as i32,
@@ -21117,6 +21166,7 @@ impl GameApp {
             return Ok(());
         }
         if contains(layout.list) {
+            self.startup_tooltip.pointer_left();
             let item_height = lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
             let viewport_height = layout.list.h - 6;
             if self
@@ -21130,6 +21180,7 @@ impl GameApp {
         if !contains(layout.selection_info) {
             return Ok(());
         }
+        self.startup_tooltip.pointer_left();
         let metrics = {
             let info = scensel_selection_info(&self.menu_state);
             lc_frontend::startup_scensel::selection_info_scroll_metrics(&layout, book_fonts, &info)
@@ -21562,6 +21613,7 @@ impl GameApp {
             "Mission Access",
             InputDialogIcon::OPTIONS,
         );
+        self.startup_tooltip.pointer_left();
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::ScenarioMissionAccess,
             controller,
@@ -23131,6 +23183,11 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.startup_tooltip.note_non_pointer_input();
+        self.note_classic_host_lobby_non_pointer_input();
+        if self.mode == AppMode::Menu {
+            self.menu_frame_cache = None;
+        }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         if self.handle_options_control_capture_key(key, state)? {
             return Ok(());
@@ -23164,9 +23221,6 @@ impl GameApp {
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
-        }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-            self.main_menu_state.note_non_pointer_input();
         }
         let definition_release_latched =
             state == ElementState::Released && self.definition_selector_consumed_keys.remove(&key);
@@ -28550,12 +28604,14 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
+            self.startup_tooltip.note_non_pointer_input();
+            self.note_classic_host_lobby_non_pointer_input();
+            if self.mode == AppMode::Menu {
+                self.menu_frame_cache = None;
+            }
             self.mark_menu_dirty();
             if self.startup_network_transition_active() {
                 return Ok(());
-            }
-            if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-                self.main_menu_state.note_non_pointer_input();
             }
         }
         #[derive(Clone, Copy)]
@@ -28995,6 +29051,7 @@ impl GameApp {
 
     fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.note_classic_host_lobby_non_pointer_input();
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         match event {
             GamepadEvent::Direction {
@@ -29601,24 +29658,22 @@ impl GameApp {
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
+        // C4GraphicsSystem::MouseMove ceil-quantizes the scale-adjusted
+        // coordinates once before either C4GUI::CMouse or viewport routing.
+        let raw_point = gui_point_from_position(position);
+        let point = GuiPoint::new(raw_point.x.ceil(), raw_point.y.ceil());
+        self.startup_tooltip.note_pointer_move(point);
         if self.startup_network_transition_active() {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        let mut point = gui_point_from_position(position);
         if self.mode == AppMode::Running {
-            // C4GraphicsSystem::MouseMove quantizes the scale-adjusted point
-            // once before either C4GUI or MouseMoveToViewport sees it.
-            point = GuiPoint::new(point.x.ceil(), point.y.ceil());
             self.running_pointer_position = Some(point);
             self.ingame_gui_pointer = Some(point);
             if self.ingame_region_drag_active() {
                 self.update_ingame_pointer(point)?;
                 return Ok(());
             }
-        }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-            self.main_menu_state.note_pointer_position(Some(point));
         }
         if self.handle_message_dialog_pointer_move(point) {
             self.suspend_ingame_pointer_for_gui();
@@ -30650,6 +30705,7 @@ impl GameApp {
     fn handle_right_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
+        self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_active() {
             return Ok(());
         }
@@ -30661,9 +30717,6 @@ impl GameApp {
             // the next physical press starts a new gesture and invalidates
             // the old release latch before any underlying control sees it.
             self.context_menu_pointer_capture = None;
-        }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-            self.main_menu_state.note_pointer_button();
         }
         if self
             .consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Right)
@@ -30775,6 +30828,7 @@ impl GameApp {
     fn handle_other_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
+        self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_active() {
             return Ok(());
         }
@@ -30793,9 +30847,6 @@ impl GameApp {
             && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Other);
         if input_dialog_release_latched {
             self.game_option_input_pointer_capture = None;
-        }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-            self.main_menu_state.note_pointer_button();
         }
         if self
             .consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Other)
@@ -31744,6 +31795,7 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.mark_menu_dirty();
+        self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_active() {
             return Ok(());
         }
@@ -31767,9 +31819,6 @@ impl GameApp {
             && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
         if input_dialog_release_latched {
             self.game_option_input_pointer_capture = None;
-        }
-        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
-            self.main_menu_state.note_pointer_button();
         }
         if self.consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Left)
         {
@@ -32855,6 +32904,7 @@ impl GameApp {
 
     fn pointer_left_unchecked(&mut self) {
         self.mark_menu_dirty();
+        self.startup_tooltip.pointer_left();
         // CursorLeft may be the only lifecycle event after an activation
         // closed the menu on down. An open popup, however, must retain its
         // capture so a later outside up cannot leak to the underlying screen.
@@ -33188,6 +33238,7 @@ impl GameApp {
             (PathBuf::new(), None, Vec::new())
         };
         let fixed_selection = scenario_fixed_definition_modules(&scenario);
+        self.startup_tooltip.pointer_left();
         self.definition_selector = Some(lc_frontend::definition_sel::DefinitionSelController::new(
             root.to_string_lossy().into_owned(),
             fixed_selection,
@@ -33801,7 +33852,7 @@ impl GameApp {
             // InitNetworkHost. Show that exact full loader while the socket
             // worker starts; the lobby later retains only its background.
             self.cancel_underlying_interaction();
-            self.startup_view = StartupView::NetworkGame;
+            self.replace_startup_view(StartupView::NetworkGame);
             if let Some(loader) = self
                 .staged_network_host_scenario
                 .as_mut()
@@ -34017,6 +34068,7 @@ impl GameApp {
             "Enter password:",
             InputDialogIcon::LOCKED,
         );
+        self.startup_tooltip.pointer_left();
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::NetworkJoinPassword,
             controller,
@@ -34609,7 +34661,7 @@ impl GameApp {
                                         self.loader_screen = None;
                                         self.network_control_running = true;
                                         self.control_clients = initial_control_clients(None, None);
-                                        self.startup_view = StartupView::NetworkGame;
+                                        self.replace_startup_view(StartupView::NetworkGame);
                                         self.mode = AppMode::Menu;
                                         self.restore_startup_fonts();
                                         return;
@@ -34638,7 +34690,7 @@ impl GameApp {
                             self.loader_screen = None;
                             self.network_control_running = true;
                             self.control_clients = initial_control_clients(None, None);
-                            self.startup_view = StartupView::NetworkGame;
+                            self.replace_startup_view(StartupView::NetworkGame);
                             self.mode = AppMode::Menu;
                             self.restore_startup_fonts();
                             return;
@@ -34700,7 +34752,7 @@ impl GameApp {
                             self.network_control_clock = network_control_clock;
                             self.network_lobby = Some(lobby);
                             self.classic_host_lobby = None;
-                            self.startup_view = StartupView::NetworkLobby;
+                            self.replace_startup_view(StartupView::NetworkLobby);
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
                             self.menu_frame_cache = None;
@@ -34750,7 +34802,7 @@ impl GameApp {
                             self.sync_classic_lobby_roster();
                             self.sync_classic_lobby_resource_ready();
                             self.scenario_game_options = options;
-                            self.startup_view = StartupView::NetworkLobby;
+                            self.replace_startup_view(StartupView::NetworkLobby);
                             self.mode = AppMode::Menu;
                             self.status_text.clear();
                             self.menu_frame_cache = None;
@@ -34821,7 +34873,7 @@ impl GameApp {
                 self.network_control_running = true;
                 self.runtime_network_status_barrier = None;
                 self.control_clients = initial_control_clients(None, None);
-                self.startup_view = StartupView::NetworkGame;
+                self.replace_startup_view(StartupView::NetworkGame);
                 self.mode = AppMode::Menu;
             }
             Err(NetworkStartError::WrongPassword { .. })
@@ -34861,7 +34913,7 @@ impl GameApp {
             self.network_control_running = true;
             self.runtime_network_status_barrier = None;
             self.control_clients = initial_control_clients(None, None);
-            self.startup_view = StartupView::NetworkGame;
+            self.replace_startup_view(StartupView::NetworkGame);
         }
     }
 
@@ -35134,6 +35186,8 @@ impl GameApp {
             resources,
             minimum_width,
         );
+        self.startup_tooltip.pointer_left();
+        self.note_classic_host_lobby_non_pointer_input();
         self.context_menu = Some(menu);
         self.context_menu_lobby_kick_client = None;
         self.set_context_menu_lobby_team_player(lobby_team_player);
@@ -35692,6 +35746,7 @@ impl GameApp {
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.cancel_interaction();
         }
+        self.startup_tooltip.pointer_left();
         self.definition_selector = Some(
             lc_frontend::definition_sel::DefinitionSelController::new_player(root, entries),
         );
@@ -36214,6 +36269,8 @@ impl GameApp {
                     ContextMenuSound::Click => "Click",
                 }),
                 ContextMenuEvent::Closed => {
+                    self.startup_tooltip.pointer_left();
+                    self.note_classic_host_lobby_non_pointer_input();
                     self.context_menu = None;
                     self.set_context_menu_lobby_team_player(None);
                     self.context_menu_lobby_kick_client = None;
@@ -36625,6 +36682,8 @@ impl GameApp {
             return;
         };
         let _ = menu.dismiss(false);
+        self.startup_tooltip.pointer_left();
+        self.note_classic_host_lobby_non_pointer_input();
         self.set_context_menu_lobby_team_player(None);
         self.context_menu_lobby_kick_client = None;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
@@ -36677,6 +36736,7 @@ impl GameApp {
 
     fn open_new_startup_player_properties(&mut self) {
         self.close_context_menu_silently();
+        self.startup_tooltip.pointer_left();
         let controller = self.new_startup_player_properties_controller(
             classic_safe_random(8),
             classic_safe_random(5),
@@ -36708,6 +36768,7 @@ impl GameApp {
             return;
         };
         self.close_context_menu_silently();
+        self.startup_tooltip.pointer_left();
         let mut controller =
             lc_frontend::startup_plrproperties::PlayerPropertiesController::edit_player(
                 index, player, comment, portrait, big_icon,
@@ -36736,6 +36797,7 @@ impl GameApp {
         for action in actions {
             match action {
                 PlayerPropertiesAction::Cancel => {
+                    self.startup_tooltip.pointer_left();
                     self.startup_player_properties_dialog = None;
                     self.status_text.clear();
                     self.mark_menu_dirty();
@@ -36853,6 +36915,7 @@ impl GameApp {
             .map(|player| (player.file_name.clone(), player.render_model.activated))
             .collect::<Vec<_>>();
         let Some(paths) = self.app_paths.as_ref() else {
+            self.startup_tooltip.pointer_left();
             self.startup_player_properties_dialog = None;
             self.status_text = "Player saved, but application paths are unavailable".to_string();
             self.mark_menu_dirty();
@@ -36862,6 +36925,7 @@ impl GameApp {
             Ok(players) => players,
             Err(error) => {
                 tracing::error!(%error, "failed to refresh startup players after save");
+                self.startup_tooltip.pointer_left();
                 self.startup_player_properties_dialog = None;
                 self.status_text = format!("Player saved, but the list could not be refreshed: {error}");
                 self.mark_menu_dirty();
@@ -36914,6 +36978,7 @@ impl GameApp {
             );
             dialog.set_selected_index(saved_index);
         }
+        self.startup_tooltip.pointer_left();
         self.startup_player_properties_dialog = None;
         self.refresh_participants_label();
         if let Some(error) = persistence_error {
@@ -37100,6 +37165,9 @@ impl GameApp {
             tracing::error!(player_index, "startup crew mode transition was rejected");
             return Ok(());
         }
+        // UpdatePlayerList replaces the row controls on this same dialog.
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
         self.startup_crew_models = crew
             .iter()
             .map(|entry| entry.render_model.clone())
@@ -37123,6 +37191,8 @@ impl GameApp {
         {
             return;
         }
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
         self.startup_crew_files.clear();
         self.startup_crew_models.clear();
         self.startup_crew_player_index = None;
@@ -37140,6 +37210,8 @@ impl GameApp {
         })?;
         let mut crew = discover_crew_files(player)?;
         self.hydrate_startup_crew_models(&mut crew);
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
         let selected = select_file.and_then(|file_name| {
             crew.iter()
                 .position(|entry| entry.file_name.eq_ignore_ascii_case(file_name))
@@ -37284,6 +37356,7 @@ impl GameApp {
             InputDialogIcon::None,
         )
         .with_input_text(&initial_text);
+        self.startup_tooltip.pointer_left();
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::StartupCrew(PendingCrewInputAction::Rename {
                 index,
@@ -37323,6 +37396,7 @@ impl GameApp {
         )
         .with_max_text(75)
         .with_input_text(&initial_text);
+        self.startup_tooltip.pointer_left();
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::StartupCrew(
                 PendingCrewInputAction::SetDeathMessage { index },
@@ -37772,6 +37846,7 @@ impl GameApp {
         let controller = InputDialogController::new(message, caption, InputDialogIcon::None)
             .with_max_text(max_text)
             .with_input_text(&initial);
+        self.startup_tooltip.pointer_left();
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::OptionsNetwork(field),
             controller,
@@ -37804,6 +37879,7 @@ impl GameApp {
         )
         .with_max_text(4)
         .with_input_text(&scale.to_string());
+        self.startup_tooltip.pointer_left();
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::OptionsGraphicsScale,
             controller,
@@ -40124,9 +40200,6 @@ impl GameApp {
         &mut self,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if state == ElementState::Released {
-            return Ok(());
-        }
         let Some(point) = self
             .classic_host_lobby
             .as_ref()
@@ -40135,6 +40208,13 @@ impl GameApp {
             return Ok(());
         };
         let (layout, roster) = self.classic_host_lobby_layouts()?;
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.note_pointer_button(point, &layout, &roster);
+        }
+        self.scenario_game_options.note_pointer_button();
+        if state == ElementState::Released {
+            return Ok(());
+        }
         let actions = self
             .classic_host_lobby
             .as_mut()
@@ -40151,9 +40231,6 @@ impl GameApp {
         &mut self,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if state == ElementState::Released {
-            return Ok(());
-        }
         let Some(point) = self
             .classic_host_lobby
             .as_ref()
@@ -40162,6 +40239,13 @@ impl GameApp {
             return Ok(());
         };
         let (layout, roster) = self.classic_host_lobby_layouts()?;
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.note_pointer_button(point, &layout, &roster);
+        }
+        self.scenario_game_options.note_pointer_button();
+        if state == ElementState::Released {
+            return Ok(());
+        }
         let actions = self
             .classic_host_lobby
             .as_mut()
@@ -40175,6 +40259,9 @@ impl GameApp {
     }
 
     fn handle_classic_lobby_wheel(&mut self, delta: i32) -> Result<(), EngineError> {
+        if delta == 0 {
+            return Ok(());
+        }
         let Some(point) = self
             .classic_host_lobby
             .as_ref()
@@ -40183,11 +40270,29 @@ impl GameApp {
             return Ok(());
         };
         let (layout, roster) = self.classic_host_lobby_layouts()?;
-        if self
+        let contains = |rect: lc_frontend::classic_gui::IntRect| {
+            point.x >= rect.x as f32
+                && point.y >= rect.y as f32
+                && point.x < (rect.x + rect.w) as f32
+                && point.y < (rect.y + rect.h) as f32
+        };
+        let scroll_window_captured = contains(layout.chat_log) || contains(layout.roster);
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.note_pointer_wheel();
+        }
+        self.scenario_game_options.note_pointer_wheel();
+        let scrolled = self
             .classic_host_lobby
             .as_mut()
-            .is_some_and(|lobby| lobby.controller.wheel(point, delta, &layout, &roster))
-        {
+            .is_some_and(|lobby| lobby.controller.wheel(point, delta, &layout, &roster));
+        if scroll_window_captured {
+            // C4GUI::ScrollWindow consumes the wheel and clears the screen's
+            // pMouseOver owner. Keep retained positions for integer motion
+            // detection, but require a later pointer event before either
+            // controller may expose another tooltip.
+            self.note_classic_host_lobby_non_pointer_input();
+        }
+        if scrolled || scroll_window_captured {
             self.mark_menu_dirty();
         }
         Ok(())
@@ -40307,6 +40412,11 @@ impl GameApp {
     /// C4StartupScenSelDlg::DoBack(true) (cpp:1705-1725): backtrace the
     /// folder stack first; from the root, return to the main screen.
     fn configure_current_folder_map(&mut self) {
+        // SetFolderData/UpdateList replace Book/Map child elements without
+        // replacing the outer dialog. Mirror native element destruction by
+        // dropping hover ownership before resolving the rebuilt hierarchy.
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
         let width = self.graphics.surface().width() as i32;
         let height = self.graphics.surface().height() as i32;
         let languages = self
@@ -40357,7 +40467,7 @@ impl GameApp {
                 self.game_option_consumed_keys.clear();
                 self.scenario_game_options.cancel_interaction();
                 self.refresh_retained_network_dialog_internet();
-                self.startup_view = StartupView::NetworkGame;
+                self.replace_startup_view(StartupView::NetworkGame);
                 if let Some(dialog) = self.startup_network_dialog.as_mut() {
                     dialog.pointer_left();
                 }
@@ -40555,6 +40665,15 @@ impl GameApp {
         self.open_scenario_browser_with_mode(ScenarioSelectorMode::Local);
     }
 
+    fn replace_startup_view(&mut self, view: StartupView) {
+        // Destroying/replacing a native dialog clears CMouse's owned
+        // pMouseOverElement. Retaining only the screen coordinate would
+        // otherwise invent a target in the new view without mouse input.
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
+        self.startup_view = view;
+    }
+
     fn open_network_host_scenario_browser(&mut self) {
         self.open_scenario_browser_with_mode(ScenarioSelectorMode::NetworkHost);
     }
@@ -40575,8 +40694,10 @@ impl GameApp {
         self.recording_enabled = values.record && self.recordings_dir.is_some();
         self.scenario_game_options =
             GameOptionButtons::new(selector_mode.game_option_context(), values);
-        self.startup_view = StartupView::ScenarioBrowser;
+        self.replace_startup_view(StartupView::ScenarioBrowser);
         self.menu_state.set_pointer_position(None);
+        self.menu_state.scensel_title_present = true;
+        self.menu_state.scensel_title_topmost = false;
         // The C++ dialog reloads from the root folder every time it is
         // shown (OnShown -> pScenLoader->Load(ExePath), cpp:1431-1443).
         self.menu_state.stack.truncate(1);
@@ -40604,7 +40725,7 @@ impl GameApp {
 
     fn open_network_lobby(&mut self) {
         self.close_context_menu_silently();
-        self.startup_view = StartupView::NetworkLobby;
+        self.replace_startup_view(StartupView::NetworkLobby);
         self.menu_state.set_pointer_position(None);
         self.menu_state.set_include_back(true);
         self.menu_state.refresh_menu_entries();
@@ -40672,7 +40793,7 @@ impl GameApp {
             }
         };
         self.startup_network_dialog = Some(dialog);
-        self.startup_view = StartupView::NetworkGame;
+        self.replace_startup_view(StartupView::NetworkGame);
         if self.startup_game_search.is_some() {
             self.status_text = "Querying game infos…".to_string();
         }
@@ -40708,7 +40829,7 @@ impl GameApp {
         );
         self.startup_player_dialog = Some(dialog);
         self.plrsel_last_click = None;
-        self.startup_view = StartupView::PlayerSelection;
+        self.replace_startup_view(StartupView::PlayerSelection);
         self.status_text.clear();
     }
 
@@ -40738,7 +40859,7 @@ impl GameApp {
             );
         }
         self.startup_options_dialog = Some(dialog);
-        self.startup_view = StartupView::Options;
+        self.replace_startup_view(StartupView::Options);
         self.status_text.clear();
     }
 
@@ -40775,6 +40896,7 @@ impl GameApp {
         self.needed_material_need = needed_material_need.clone();
         self.needed_material_none = needed_material_none.clone();
         self.loaded_default_rank_names = Some(default_rank_resource_names(&table));
+        self.startup_tooltip_resources = table.entries.clone();
         self.engine
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
 
@@ -40800,7 +40922,7 @@ impl GameApp {
             );
         }
         self.startup_about_dialog = Some(dialog);
-        self.startup_view = StartupView::About;
+        self.replace_startup_view(StartupView::About);
         self.status_text.clear();
     }
 
@@ -40882,7 +41004,7 @@ impl GameApp {
             );
             self.sync_scenario_game_option_bounds();
         }
-        self.startup_view = StartupView::MainMenu;
+        self.replace_startup_view(StartupView::MainMenu);
         self.scenario_selector_mode = ScenarioSelectorMode::Local;
         self.main_menu_state.pointer_left();
         if let Some(lobby) = self.network_lobby.as_mut() {
@@ -43763,6 +43885,7 @@ impl GameApp {
         let controller = InputDialogController::new(request.message, request.caption, icon)
             .with_max_text(request.max_text)
             .with_input_text(&request.initial_text);
+        self.startup_tooltip.pointer_left();
         self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
             purpose: PendingInputDialogPurpose::GameOption(request.kind),
             controller,
@@ -43840,6 +43963,7 @@ impl GameApp {
                     let Some(pending) = self.game_option_input_dialog.take() else {
                         continue;
                     };
+                    self.startup_tooltip.pointer_left();
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
                     match pending.purpose {
@@ -43897,6 +44021,7 @@ impl GameApp {
                     let Some(pending) = self.game_option_input_dialog.take() else {
                         continue;
                     };
+                    self.startup_tooltip.pointer_left();
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
                     match pending.purpose {
@@ -44074,6 +44199,7 @@ impl GameApp {
                 }
                 DefinitionSelAction::Accepted(modules) => {
                     if let Some(pending) = self.pending_lobby_player_selection.take() {
+                        self.startup_tooltip.pointer_left();
                         self.definition_selector = None;
                         self.definition_selector_last_click = None;
                         if let [selected] = modules.as_slice() {
@@ -44097,9 +44223,11 @@ impl GameApp {
                     }
                     let Some(pending) = self.pending_definition_selection.take() else {
                         tracing::error!("definition selector accepted without pending scenario");
+                        self.startup_tooltip.pointer_left();
                         self.definition_selector = None;
                         break;
                     };
+                    self.startup_tooltip.pointer_left();
                     self.definition_selector = None;
                     self.definition_selector_last_click = None;
                     self.accept_scenario_from_selector(
@@ -44113,6 +44241,7 @@ impl GameApp {
                     break;
                 }
                 DefinitionSelAction::Cancelled => {
+                    self.startup_tooltip.pointer_left();
                     self.definition_selector = None;
                     self.pending_definition_selection = None;
                     self.pending_lobby_player_selection = None;
@@ -44203,6 +44332,7 @@ impl GameApp {
         let Some(pending) = self.message_dialogs.pop() else {
             return Ok(());
         };
+        self.startup_tooltip.pointer_left();
         let checkbox_checked = pending.state.checkbox_checked();
         self.mark_menu_dirty();
         if let Some(dialog) = self.message_dialogs.last_mut() {
@@ -44449,6 +44579,8 @@ impl GameApp {
                 Vec::new()
             }
         };
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
         if let Err(error) = persist_activations(&paths.config_file(), &players) {
             tracing::warn!(%error, "failed to rebuild participants after player deletion");
         }
@@ -44798,38 +44930,285 @@ impl GameApp {
         context_menu.filter(|_| !game_option_input_open)
     }
 
-    fn render_ordered_startup_tooltips(&mut self) -> Result<()> {
+    fn startup_element_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        if self.mode != AppMode::Menu
+            || self.startup_network_transition_active()
+            || self.context_menu.is_some()
+            || !self.message_dialogs.is_empty()
+            || self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
+            || self.definition_selector.is_some()
+            || self.game_option_input_dialog.is_some()
+        {
+            return None;
+        }
+
         match self.startup_view {
-            StartupView::MainMenu if self.context_menu.is_none() => {
-                if let Some(pointer) = self.main_menu_state.participants_tooltip_pointer() {
-                    let tooltip_font = self
-                        .assets
-                        .global_tooltip_font
-                        .as_deref()
-                        .context("classic shadowless tooltip font is unavailable")?;
-                    lc_frontend::context_menu::draw_classic_tooltip(
-                        self.graphics.surface_mut(),
-                        tooltip_font,
-                        pointer,
-                        lc_frontend::PARTICIPANTS_TOOLTIP,
-                        Some(startup_gamma()),
-                    );
+            StartupView::MainMenu => self.main_menu_state.tooltip_at(point),
+            StartupView::ScenarioBrowser => self.scenario_browser_tooltip_target_at(point),
+            StartupView::NetworkGame => self.network_game_tooltip_target_at(point),
+            StartupView::Options => self.options_tooltip_target_at(point),
+            StartupView::PlayerSelection => self.player_selection_tooltip_target_at(point),
+            StartupView::About => self.about_tooltip_target_at(point),
+            // The lobby keeps its existing controller-owned tooltip model.
+            StartupView::NetworkLobby => None,
+        }
+    }
+
+    fn network_game_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        let dialog = self.startup_network_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        let layout = lc_frontend::startup_netdlg::net_dlg_layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            &lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(fonts),
+        );
+        let title = self.startup_tooltip_resource_string("IDS_DLG_NETSTART");
+        let (display_title, _) = lc_frontend::expand_hotkey_markup(&title);
+        lc_frontend::centered_label_tooltip_at(
+            point,
+            layout.title_anchor,
+            fonts.title.measure(&display_title, true),
+            StartupTooltip::text(title),
+        )
+        .or_else(|| dialog.tooltip_at(point))
+    }
+
+    fn about_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        let dialog = self.startup_about_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        let layout = lc_frontend::startup_about_dlg::about_layout(
+            surface.width() as i32,
+            surface.height() as i32,
+        );
+        // About passes LoadResStr directly rather than LoadResStrNoAmp. The
+        // Label expands the hotkey marker for sizing, while SetToolTip keeps
+        // the raw ampersand text.
+        let title = self.startup_tooltip_resource_string("IDS_DLG_ABOUT");
+        let (display_title, _) = lc_frontend::expand_hotkey_markup(&title);
+        lc_frontend::centered_label_tooltip_at(
+            point,
+            layout.title_anchor,
+            fonts.title.measure(&display_title, true),
+            StartupTooltip::text(title),
+        )
+        .or_else(|| dialog.tooltip_at(point))
+    }
+
+    fn options_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        let dialog = self.startup_options_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let book = self.assets.options_book_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        let layout = lc_frontend::startup_options_dlg::options_dlg_layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            book,
+        );
+        let default_target = dialog.tooltip_at(point, book);
+        if matches!(default_target, Some(StartupTooltip::Resource { .. })) {
+            return default_target;
+        }
+        let in_tabular = point.x >= layout.tabular.x as f32
+            && point.x < (layout.tabular.x + layout.tabular.w) as f32
+            && point.y >= layout.tabular.y as f32
+            && point.y < (layout.tabular.y + layout.tabular.h) as f32;
+        if in_tabular {
+            return None;
+        }
+        let title = self.startup_tooltip_resource_no_amp("IDS_DLG_OPTIONS");
+        if let Some(tooltip) = lc_frontend::centered_label_tooltip_at(
+            point,
+            layout.title_center,
+            fonts.title.measure(&title, true),
+            StartupTooltip::text(title),
+        ) {
+            return Some(tooltip);
+        }
+        None
+    }
+
+    fn player_selection_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        // The properties dialog is modal: even an untipped point on it (or
+        // outside it) must not fall through to the player dialog beneath.
+        if let Some(properties) = self.startup_player_properties_dialog.as_ref() {
+            let book = self.assets.options_book_fonts.as_deref()?;
+            return properties.controller.tooltip_at(point, &book.book_small);
+        }
+        let dialog = self.startup_player_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        let layout = lc_frontend::startup_plrsel::plrsel_layout(
+            surface.width() as i32,
+            surface.height() as i32,
+        );
+        let title = match dialog.mode() {
+            lc_frontend::startup_plrsel::PlrSelMode::Player => {
+                self.startup_tooltip_resource_no_amp("IDS_DLG_PLAYERSELECTION")
+            }
+            lc_frontend::startup_plrsel::PlrSelMode::Crew { player_name, .. } => format!(
+                "{} {}",
+                self.startup_tooltip_resource_no_amp("IDS_CTL_CREW"),
+                player_name
+            ),
+        };
+        let (display_title, _) = lc_frontend::expand_hotkey_markup(&title);
+        if let Some(tooltip) = lc_frontend::centered_label_tooltip_at(
+            point,
+            layout.title_anchor,
+            fonts.title.measure(&display_title, true),
+            StartupTooltip::text(title),
+        ) {
+            return Some(tooltip);
+        }
+        if dialog.is_crew_mode() {
+            dialog.tooltip_at(point, self.startup_crew_models.iter().map(|crew| crew.name.as_str()))
+        } else {
+            dialog.tooltip_at(
+                point,
+                self.startup_player_models
+                    .iter()
+                    .map(|player| player.name.as_str()),
+            )
+        }
+    }
+
+    fn scenario_browser_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let book = self.assets.book_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        let (width, height) = (surface.width(), surface.height());
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            width as i32,
+            height as i32,
+            fonts,
+        );
+        let title_key = if self.scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
+            "IDS_DLG_NETSTART"
+        } else {
+            "IDS_DLG_STARTGAME"
+        };
+        let title = self.startup_tooltip_resource_no_amp(title_key);
+        if self.menu_state.scensel_title_present && self.menu_state.scensel_title_topmost {
+            if let Some(tooltip) = lc_frontend::centered_label_tooltip_at(
+                point,
+                layout.title_anchor,
+                fonts.title.measure(&title, true),
+                StartupTooltip::text(title.clone()),
+            ) {
+                return Some(tooltip);
+            }
+        }
+        if let Some(key) = self.scenario_game_options.tooltip_resource_key_at(point) {
+            return Some(StartupTooltip::resource(key));
+        }
+        let map = self.menu_state.current_map();
+        let sheet_tooltip = if let Some(map) = map {
+            let transform = MapFolderTransform::for_map(map, &layout, width, height);
+            let mut picture_bounds = Vec::new();
+            if !map.fullscreen_background {
+                picture_bounds.push(transform.background);
+            }
+            picture_bounds.extend(
+                map.access_overlays
+                    .iter()
+                    .map(|overlay| transform.rect(overlay.area)),
+            );
+            let buttons = map.scenarios.iter().rev().map(|button| {
+                lc_frontend::startup_scensel::ScenSelMapScenarioTooltip {
+                    bounds: transform.rect(button.area),
+                    scenario_name: button.entry.as_ref().map(|entry| entry.title.as_str()),
                 }
-            }
-            StartupView::ScenarioBrowser => {
-                let assets = Arc::clone(&self.assets);
-                let resources = assets.game_option_resources().with_context(
-                    || "classic scenario game-option tooltip resources are unavailable",
-                )?;
-                self.scenario_game_options.render_tooltip(
-                    self.graphics.surface_mut(),
-                    &resources,
-                    self.context_menu.is_none()
-                        && self.definition_selector.is_none()
-                        && self.game_option_input_dialog.is_none(),
-                    Some(startup_gamma()),
-                )?;
-            }
+            });
+            lc_frontend::startup_scensel::scen_sel_map_tooltip_at(
+                &layout,
+                point,
+                [transform.rect(map.scenario_info_area)],
+                picture_bounds,
+                buttons,
+            )
+        } else {
+            let caption = self
+                .menu_state
+                .current_folder()
+                .map(|folder| folder.title.clone())
+                .unwrap_or_else(|| self.startup_tooltip_resource_string("IDS_DLG_SCENARIOS"));
+            let (display_caption, _) = lc_frontend::expand_hotkey_markup(&caption);
+            lc_frontend::startup_scensel::scen_sel_book_tooltip_at(
+                &layout,
+                point,
+                book.title.measure(&display_caption, true),
+                self.menu_state.scenario_list_scroll(),
+                lc_frontend::startup_scensel::scen_list_item_height(&book.text),
+                self.menu_state
+                    .visible_entries()
+                    .iter()
+                    .map(|entry| entry.title.as_str()),
+            )
+        };
+        if sheet_tooltip.is_some() {
+            return sheet_tooltip;
+        }
+
+        // FullscreenDialog creates the title before ScenarioBrowser adds its
+        // Tabular. The active sheet therefore occludes the lower part of the
+        // title label even where the sheet itself has no tooltip.
+        let in_active_sheet = point.x >= layout.map_sheet.x as f32
+            && point.x < (layout.map_sheet.x + layout.map_sheet.w) as f32
+            && point.y >= layout.map_sheet.y as f32
+            && point.y < (layout.map_sheet.y + layout.map_sheet.h) as f32;
+        if in_active_sheet || !self.menu_state.scensel_title_present {
+            return None;
+        }
+        lc_frontend::centered_label_tooltip_at(
+            point,
+            layout.title_anchor,
+            fonts.title.measure(&title, true),
+            StartupTooltip::text(title),
+        )
+    }
+
+    fn startup_element_tooltip_pending(&self) -> bool {
+        self.startup_tooltip
+            .pending_pointer()
+            .and_then(|point| self.startup_element_tooltip_target_at(point))
+            .is_some()
+    }
+
+    fn render_startup_element_tooltip(&mut self) -> Result<bool> {
+        let Some(pointer) = self.startup_tooltip.eligible_pointer() else {
+            return Ok(false);
+        };
+        let Some(target) = self.startup_element_tooltip_target_at(pointer) else {
+            return Ok(false);
+        };
+        let text = self.resolve_startup_tooltip_text(target);
+        if text.is_empty() {
+            return Ok(false);
+        }
+        let tooltip_font = self
+            .assets
+            .global_tooltip_font
+            .as_deref()
+            .context("classic shadowless tooltip font is unavailable")?;
+        lc_frontend::context_menu::draw_classic_tooltip(
+            self.graphics.surface_mut(),
+            tooltip_font,
+            pointer,
+            &text,
+            Some(startup_gamma()),
+        );
+        Ok(true)
+    }
+
+    fn render_ordered_startup_tooltips(&mut self) -> Result<()> {
+        let _ = self.render_startup_element_tooltip()?;
+        match self.startup_view {
             StartupView::NetworkLobby if self.classic_host_lobby.is_none() => {
                 let assets = Arc::clone(&self.assets);
                 if let Some(lobby) = self.network_lobby.as_mut() {
@@ -45099,15 +45478,14 @@ impl GameApp {
                     let surface = self.graphics.surface();
                     (surface.width(), surface.height())
                 };
-                let participants_tooltip_pending = self.startup_view == StartupView::MainMenu
-                    && self.main_menu_state.participants_tooltip_pending();
+                let startup_tooltip_pending = self.startup_element_tooltip_pending();
                 let cache_eligible = !ordered_native
                     && self.context_menu.is_none()
                     && self.startup_player_properties_dialog.is_none()
                     && self.game_option_input_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
-                    && !participants_tooltip_pending;
+                    && !startup_tooltip_pending;
                 if cache_eligible {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
                         if cache.view == self.startup_view
@@ -45170,6 +45548,13 @@ impl GameApp {
                     self.begin_native_text_capture(true);
                     self.render_ordered_startup_tooltips()?;
                     self.next_pending_native_overlay();
+                } else if self.render_startup_element_tooltip()? {
+                    let surface = self.graphics.surface();
+                    if surface.pixels().len() == frame.len() {
+                        frame.copy_from_slice(surface.pixels());
+                    } else {
+                        copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+                    }
                 }
                 if definition_selector_open {
                     self.render_definition_selector(Some(startup_gamma()))?;
@@ -47901,6 +48286,29 @@ impl GameApp {
             .ok()
             .and_then(|table| table.entries.get(key).cloned())
             .unwrap_or_else(|| format!("[Undefined: {key}]"))
+    }
+
+    fn startup_tooltip_resource_string(&self, key: &str) -> String {
+        self.startup_tooltip_resources
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| format!("[Undefined: {key}]"))
+    }
+
+    fn startup_tooltip_resource_no_amp(&self, key: &str) -> String {
+        self.startup_tooltip_resource_string(key).replace('&', "")
+    }
+
+    fn resolve_startup_tooltip_text(&self, tooltip: StartupTooltip) -> String {
+        match tooltip {
+            StartupTooltip::Resource { key } => self.startup_tooltip_resource_string(key),
+            StartupTooltip::FormattedResource { key, arguments } => {
+                let template = self.startup_tooltip_resource_string(key);
+                let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+                format_resource_string(template, &arguments)
+            }
+            StartupTooltip::Text(text) => text,
+        }
     }
 
     fn scenario_loader_head_for_start(
@@ -51269,17 +51677,6 @@ fn render_startup_frame(
             if let Some(context_menu) = context_menu {
                 context_menu.render(surface, Some(startup_gamma()))?;
             }
-            if !ordered_native && view == StartupView::ScenarioBrowser {
-                let resources = assets.game_option_resources().with_context(
-                    || "classic scenario game-option tooltip resources are unavailable",
-                )?;
-                scenario_game_options.render_tooltip(
-                    surface,
-                    &resources,
-                    !context_menu_open && !definition_selector_open && !game_option_input_open,
-                    Some(startup_gamma()),
-                )?;
-            }
             startup_gamma().apply_to_surface(surface);
             let surface = graphics.surface();
             let pixels = surface.pixels();
@@ -51394,22 +51791,6 @@ fn render_startup_frame(
             StartupView::NetworkLobby => scenario_menu.menu().render(surface),
             StartupView::Options | StartupView::About => {}
         }
-        if !ordered_native && view == StartupView::MainMenu && !context_menu_open {
-            if let Some(pointer) = main_menu.participants_tooltip_pointer() {
-                let tooltip_font = assets
-                    .global_tooltip_font
-                    .as_deref()
-                    .context("classic shadowless tooltip font is unavailable")?;
-                lc_frontend::context_menu::draw_classic_tooltip(
-                    surface,
-                    tooltip_font,
-                    pointer,
-                    lc_frontend::PARTICIPANTS_TOOLTIP,
-                    Some(startup_gamma()),
-                );
-            }
-        }
-
         if let Some(context_menu) = context_menu {
             context_menu.render(surface, Some(startup_gamma()))?;
         }
@@ -70172,6 +70553,240 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.sync_scenario_game_option_bounds();
     }
 
+    #[test]
+    fn persistent_classic_lobby_non_pointer_input_suppresses_tooltip_until_motion() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let (layout, _) = app
+            .classic_host_lobby_layouts()
+            .expect("classic lobby layout");
+        let mut point = GuiPoint::new(
+            (layout.chat_edit.x + 2) as f32,
+            (layout.chat_edit.y + 2) as f32,
+        );
+        let tooltip_visible = |app: &GameApp| {
+            app.classic_host_lobby
+                .as_ref()
+                .and_then(|lobby| {
+                    lobby
+                        .controller
+                        .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                })
+                .is_some()
+        };
+
+        app.handle_classic_lobby_pointer_move(point)
+            .expect("prime lobby hover");
+        assert!(tooltip_visible(&app));
+
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("route physical key");
+        assert!(!tooltip_visible(&app));
+        app.handle_classic_lobby_pointer_move(point)
+            .expect("route synthesized same-pixel motion");
+        assert!(
+            !tooltip_visible(&app),
+            "same-pixel motion must not reactivate the tooltip"
+        );
+
+        point.x += 1.0;
+        app.handle_classic_lobby_pointer_move(point)
+            .expect("reactivate after physical key");
+        assert!(tooltip_visible(&app));
+        app.handle_text_input('x').expect("route text input");
+        assert!(!tooltip_visible(&app));
+
+        point.x += 1.0;
+        app.handle_classic_lobby_pointer_move(point)
+            .expect("reactivate after text input");
+        assert!(tooltip_visible(&app));
+        app.handle_gamepad_event(GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Right,
+            state: ElementState::Pressed,
+        })
+        .expect("route gamepad input");
+        assert!(!tooltip_visible(&app));
+
+        point.x += 1.0;
+        app.handle_classic_lobby_pointer_move(point)
+            .expect("reactivate after gamepad input");
+        assert!(tooltip_visible(&app));
+
+        let option_rect = app
+            .scenario_game_options
+            .layout()
+            .rect(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+            .expect("host fair-crew option");
+        let option_point = GuiPoint::new(
+            (option_rect.x + option_rect.w / 2) as f32,
+            (option_rect.y + option_rect.h / 2) as f32,
+        );
+        app.handle_classic_lobby_pointer_move(option_point)
+            .expect("prime embedded option hover");
+        assert!(
+            app.scenario_game_options
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_some()
+        );
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("suppress embedded option tooltip");
+        assert!(
+            app.scenario_game_options
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_none()
+        );
+        app.handle_classic_lobby_pointer_move(option_point)
+            .expect("route same-pixel option motion");
+        assert!(
+            app.scenario_game_options
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_none(),
+            "the embedded option strip shares CMouse same-pixel suppression"
+        );
+        app.handle_classic_lobby_pointer_move(GuiPoint::new(
+            option_point.x + 1.0,
+            option_point.y,
+        ))
+        .expect("reactivate embedded option hover");
+        assert!(
+            app.scenario_game_options
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_some()
+        );
+        app.handle_classic_lobby_secondary_button(ElementState::Released)
+            .expect("route right-button release clock edge");
+        assert!(
+            app.scenario_game_options
+                .tooltip_state_at(Instant::now() + Duration::from_millis(400))
+                .is_none(),
+            "right-button release resets the embedded option tooltip clock"
+        );
+        app.handle_classic_lobby_middle_button(ElementState::Released)
+            .expect("route middle-button release clock edge");
+        assert!(
+            app.scenario_game_options
+                .tooltip_state_at(Instant::now() + Duration::from_millis(400))
+                .is_none(),
+            "middle-button release resets the embedded option tooltip clock"
+        );
+    }
+
+    #[test]
+    fn captured_classic_lobby_wheel_releases_tooltip_hover_ownership() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let seed = app
+            .classic_host_lobby
+            .as_ref()
+            .expect("test lobby")
+            .controller
+            .rows()[0]
+            .clone();
+        let rows = (0..32)
+            .map(|id| match seed.clone() {
+                LobbyRosterRow::Client(mut client) => {
+                    client.id = id;
+                    client.name = format!("Client {id}");
+                    client.nick = client.name.clone();
+                    LobbyRosterRow::Client(client)
+                }
+                _ => unreachable!("test lobby starts with a client row"),
+            })
+            .collect();
+        app.classic_host_lobby
+            .as_mut()
+            .expect("test lobby")
+            .controller
+            .set_rows(rows);
+
+        let (layout, roster) = app
+            .classic_host_lobby_layouts()
+            .expect("scrollable lobby layout");
+        assert!(roster.max_scroll > 0);
+        let first_row = roster.rows.first().expect("visible roster row");
+        let point = GuiPoint::new(
+            (first_row.rect.x + 2) as f32,
+            (first_row.rect.y + 2) as f32,
+        );
+        app.handle_classic_lobby_pointer_move(point)
+            .expect("prime roster hover");
+        assert!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_some()
+        );
+
+        app.handle_classic_lobby_wheel(-60)
+            .expect("scroll roster");
+        assert!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_none(),
+            "a captured ScrollWindow wheel must release pMouseOver tooltip ownership"
+        );
+
+        let exit_point = GuiPoint::new(
+            (layout.exit_button.x + 2) as f32,
+            (layout.exit_button.y + 2) as f32,
+        );
+        app.handle_classic_lobby_pointer_move(exit_point)
+            .expect("move onto non-scroll control");
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("suppress exit tooltip");
+        app.handle_classic_lobby_wheel(60)
+            .expect("route unconsumed wheel");
+        assert!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_some(),
+            "an unconsumed wheel re-establishes hover with a fresh delay"
+        );
+
+        let mut short_lobby = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut short_lobby);
+        let (_, short_roster) = short_lobby
+            .classic_host_lobby_layouts()
+            .expect("unscrollable lobby layout");
+        assert_eq!(short_roster.max_scroll, 0);
+        let row = short_roster.rows.first().expect("single roster row");
+        let row_point = GuiPoint::new((row.rect.x + 2) as f32, (row.rect.y + 2) as f32);
+        short_lobby
+            .handle_classic_lobby_pointer_move(row_point)
+            .expect("prime unscrollable roster hover");
+        assert!(
+            short_lobby
+                .classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_some()
+        );
+        short_lobby
+            .handle_classic_lobby_wheel(60)
+            .expect("route wheel captured by unscrollable roster");
+        assert!(
+            short_lobby
+                .classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .tooltip_state_at(Instant::now() + Duration::from_secs(1))
+                .is_none(),
+            "ScrollWindow clears hover ownership even when its offset cannot change"
+        );
+    }
+
     fn install_test_classic_host_team_lobby(
         app: &mut GameApp,
     ) -> (
@@ -76795,6 +77410,245 @@ public func Grant(password) { return GainMissionAccess(password); }
         let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
         assert_eq!((width, height), (1280, 720));
+    }
+
+    #[test]
+    fn startup_tooltip_app_uses_the_shared_cmouse_clock_and_runtime_resources() {
+        let mut app = new_classic_menu_app(640, 480);
+        let button = lc_frontend::main_menu_layout(640, 480).buttons[0];
+        let point = GuiPoint::new(
+            (button.x + button.w / 2) as f32,
+            (button.y + button.h / 2) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("hover Start");
+
+        let target = app
+            .startup_element_tooltip_target_at(point)
+            .expect("Start owns a native tooltip");
+        assert_eq!(
+            target,
+            StartupTooltip::resource("IDS_DLGTIP_STARTGAME")
+        );
+        assert_eq!(
+            app.resolve_startup_tooltip_text(target),
+            "Start a local game without network support."
+        );
+        assert_eq!(
+            app.resolve_startup_tooltip_text(StartupTooltip::resource(
+                "IDS_L022_MISSING_RESOURCE"
+            )),
+            "[Undefined: IDS_L022_MISSING_RESOURCE]"
+        );
+
+        // Render the exact hovered base first with mouse input suppressed.
+        // That frame is cacheable because no tooltip can become due.
+        app.startup_tooltip.note_non_pointer_input();
+        let mut base = vec![0; 640 * 480 * 4];
+        assert!(app.render(&mut base).expect("render suppressed base"));
+        assert!(app.menu_frame_cache.is_some());
+
+        // Re-arm the one process-level clock far enough in the past to make
+        // the inclusive 500ms boundary eligible. Pending hover bypasses the
+        // cached base and the final overlay changes pixels.
+        let started = Instant::now()
+            .checked_sub(
+                lc_frontend::context_menu::CLASSIC_TOOLTIP_DELAY
+                    + Duration::from_millis(1),
+            )
+            .expect("monotonic clock supports a 501ms lookback");
+        app.startup_tooltip = ClassicTooltipTracker::new_at(started);
+        app.startup_tooltip.note_pointer_move_at(point, started);
+        assert!(app.startup_element_tooltip_pending());
+        assert_eq!(app.startup_tooltip.eligible_pointer(), Some(point));
+        let mut tipped = vec![0; 640 * 480 * 4];
+        assert!(app.render(&mut tipped).expect("render eligible tooltip"));
+        assert_ne!(tipped, base);
+
+        // A physical key clears active mouse input before any downstream key
+        // owner. Same-pixel motion remains suppressed; a genuinely different
+        // ceil-quantized pixel starts a fresh delay.
+        app.handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+            .expect("route unbound key");
+        assert!(!app.startup_element_tooltip_pending());
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x) - 0.25,
+            f64::from(point.y) - 0.25,
+        ))
+        .expect("same native pixel motion");
+        assert!(!app.startup_element_tooltip_pending());
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x) + 0.25,
+            f64::from(point.y),
+        ))
+        .expect("next native pixel motion");
+        assert!(app.startup_element_tooltip_pending());
+        assert_eq!(app.startup_tooltip.eligible_pointer(), None);
+
+        app.open_options_menu();
+        assert_eq!(app.startup_tooltip.pointer_position(), None);
+        assert!(!app.startup_element_tooltip_pending());
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("re-arm hover before resize");
+        assert!(app.startup_tooltip.pointer_position().is_some());
+        app.resize(800, 600).expect("resize startup dialog");
+        assert_eq!(app.startup_tooltip.pointer_position(), None);
+    }
+
+    #[test]
+    fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
+        let mut app = new_classic_menu_app(640, 480);
+        for (key, value) in [
+            ("IDS_DLG_NETSTART", "&Netzwerkstart"),
+            ("IDS_DLG_ABOUT", "&Programminfo"),
+            ("IDS_DLG_OPTIONS", "&Einstellungen"),
+            ("IDS_DLG_PLAYERSELECTION", "&Spielerauswahl"),
+            ("IDS_CTL_CREW", "&Mannschaft:"),
+            ("IDS_DLG_STARTGAME", "&Lokales Spiel"),
+        ] {
+            app.startup_tooltip_resources
+                .insert(key.to_string(), value.to_string());
+        }
+        let at_anchor = |anchor: (i32, i32)| GuiPoint::new(anchor.0 as f32, anchor.1 as f32 + 1.0);
+        let fonts = Arc::clone(app.assets.clonk_fonts.as_ref().expect("classic fonts"));
+
+        let net_metrics =
+            lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(fonts.as_ref());
+        let mut network = lc_frontend::startup_netdlg::NetDlgController::new(
+            lc_frontend::startup_netdlg::NetDlgConfig::default(),
+            net_metrics,
+        );
+        network.resize(640, 480);
+        app.startup_network_dialog = Some(network);
+        let net_layout = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &net_metrics);
+        assert_eq!(
+            app.network_game_tooltip_target_at(at_anchor(net_layout.title_anchor)),
+            Some(StartupTooltip::text("&Netzwerkstart"))
+        );
+
+        app.open_about_dialog();
+        let about = lc_frontend::startup_about_dlg::about_layout(640, 480);
+        assert_eq!(
+            app.about_tooltip_target_at(at_anchor(about.title_anchor)),
+            Some(StartupTooltip::text("&Programminfo"))
+        );
+
+        app.open_options_menu();
+        let options_book = app
+            .assets
+            .options_book_fonts
+            .as_deref()
+            .expect("options fonts");
+        let options = lc_frontend::startup_options_dlg::options_dlg_layout(
+            640,
+            480,
+            fonts.as_ref(),
+            options_book,
+        );
+        assert_eq!(
+            app.options_tooltip_target_at(at_anchor(options.title_center)),
+            Some(StartupTooltip::text("Einstellungen"))
+        );
+
+        app.open_player_selection_dialog();
+        let player_layout = lc_frontend::startup_plrsel::plrsel_layout(640, 480);
+        assert_eq!(
+            app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)),
+            Some(StartupTooltip::text("Spielerauswahl"))
+        );
+        let player_dialog = app.startup_player_dialog.as_mut().expect("player dialog");
+        player_dialog.set_player_count(1);
+        assert!(player_dialog.enter_crew_mode(0, "Ada", vec![true]));
+        assert_eq!(
+            app.player_selection_tooltip_target_at(at_anchor(player_layout.title_anchor)),
+            Some(StartupTooltip::text("Mannschaft: Ada"))
+        );
+        app.startup_tooltip
+            .note_pointer_move(GuiPoint::new(10.0, 10.0));
+        app.leave_startup_crew_mode();
+        assert_eq!(app.startup_tooltip.pointer_position(), None);
+
+        app.open_scenario_browser();
+        let scenario =
+            lc_frontend::startup_scensel::scen_sel_layout(640, 480, fonts.as_ref());
+        assert_eq!(
+            app.scenario_browser_tooltip_target_at(at_anchor(scenario.title_anchor)),
+            Some(StartupTooltip::text("Lokales Spiel"))
+        );
+    }
+
+    #[test]
+    fn scenario_title_tooltip_tracks_native_readd_z_order_and_fresh_open_reset() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_scenario_browser();
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
+        let title = app.startup_tooltip_resource_no_amp("IDS_DLG_STARTGAME");
+        let title_height = fonts.title.measure(&title, true).1;
+        let overlap_y = layout.map_sheet.y.max(layout.title_anchor.1);
+        assert!(overlap_y < layout.title_anchor.1 + title_height);
+        let overlap = GuiPoint::new(layout.title_anchor.0 as f32, overlap_y as f32);
+
+        assert!(!app.menu_state.scensel_title_topmost);
+        assert_eq!(
+            app.scenario_browser_tooltip_target_at(overlap),
+            None,
+            "the initially constructed Tabular occludes the title"
+        );
+
+        // A HideTitle map removes the label. Returning to book style calls
+        // SetTitle and appends a new label after the Tabular.
+        app.menu_state.scensel_title_present = false;
+        app.startup_tooltip.note_pointer_move(overlap);
+        app.configure_current_folder_map();
+        assert_eq!(app.startup_tooltip.pointer_position(), None);
+        assert!(app.menu_state.scensel_title_present);
+        assert!(app.menu_state.scensel_title_topmost);
+        assert_eq!(
+            app.scenario_browser_tooltip_target_at(overlap),
+            Some(StartupTooltip::text(title))
+        );
+
+        app.open_scenario_browser();
+        assert!(app.menu_state.scensel_title_present);
+        assert!(!app.menu_state.scensel_title_topmost);
+        assert_eq!(app.scenario_browser_tooltip_target_at(overlap), None);
+    }
+
+    #[test]
+    fn scenario_scroll_wheel_clears_hover_ownership_until_pointer_moves() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_scenario_browser();
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
+        let point = GuiPoint::new((layout.list.x + 5) as f32, (layout.list.y + 5) as f32);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("hover scenario list");
+        assert!(app.startup_element_tooltip_pending());
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scroll scenario list");
+        assert_eq!(app.startup_tooltip.pointer_position(), None);
+        assert!(!app.startup_element_tooltip_pending());
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("re-arm scenario hover");
+        app.menu_state.set_search_text("unmatched search");
+        app.submit_scenario_search().expect("rebuild search rows");
+        assert_eq!(app.startup_tooltip.pointer_position(), None);
     }
 
     #[test]
@@ -86429,11 +87283,11 @@ ScenInfoArea=70,5,25,90
         open(&mut app);
         hover_root(&mut app, 1);
         assert!(
-            !app.main_menu_state.participants_tooltip_pending(),
-            "captured popup motion must update the global pointer behind the context"
+            !app.startup_element_tooltip_pending(),
+            "captured popup motion must suppress the underlying startup tooltip"
         );
         app.close_context_menu_silently();
-        assert!(!app.main_menu_state.participants_tooltip_pending());
+        assert!(!app.startup_element_tooltip_pending());
 
         open(&mut app);
         fs::create_dir_all(&bob).expect("create Bob after root popup opens");

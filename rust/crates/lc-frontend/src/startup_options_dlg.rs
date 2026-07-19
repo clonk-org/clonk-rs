@@ -31,7 +31,7 @@
 //!    (C4Surface.cpp:1113).
 
 use crate::clonk_fonts::ClonkFontSet;
-use crate::startup_main_menu::{draw_bar, IntRect};
+use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::startup_options_controls::{
     control_sheet_hit_test, ControlCaptureTarget, ControlDevice, ControlSheetHit,
     ControlSheetLayout, ControlSheetState, CONTROL_KEY_COUNT, CONTROL_KEY_LABELS,
@@ -374,6 +374,10 @@ pub struct OptionsDlgLayout {
     /// "Options" title center anchor (FullscreenDialog::SetTitle,
     /// C4GuiDialogs.cpp:834-849).
     pub title_center: (i32, i32),
+    /// Autosized fullscreen title label bounds. The generic C++
+    /// `FullscreenDialog::SetTitle` installs the displayed title itself as
+    /// this label's tooltip (C4GuiDialogs.cpp:834-849).
+    pub title_label: IntRect,
     /// Back button (ctor 655-657).
     pub back_button: IntRect,
     /// Tabular bounds after `SetGfx` aspect correction
@@ -448,6 +452,13 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
         client.x + client.w / 2,
         client.y + 25 - gui.title.line_height / 2 - (50 + margin_y),
     );
+    let (title_width, title_height) = gui.title.measure("Options", true);
+    let title_label = IntRect {
+        x: title_center.0 - title_width / 2,
+        y: title_center.1,
+        w: title_width,
+        h: title_height,
+    };
 
     // Back button (ctor 627-629, 655-657): 3*w("<< BACK") @ CaptionFont.
     let back_w = 3 * gui.caption.measure("<< BACK", true).0;
@@ -736,6 +747,7 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     OptionsDlgLayout {
         client,
         title_center,
+        title_label,
         back_button,
         tabular,
         paper,
@@ -1407,6 +1419,28 @@ impl OptionsDlgState {
 
     pub const fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
+    }
+
+    /// Returns the native tooltip target under `point` without resolving a
+    /// language string. Tooltip hit regions deliberately differ from action
+    /// hit regions: C++ attaches tips to complete elements (including a
+    /// checkbox caption), and a child with no own tip inherits its nearest
+    /// parent window's tip (`C4GUI::Element::GetToolTip`).
+    pub fn tooltip_at(&self, point: GuiPoint, book: &BookFonts) -> Option<StartupTooltip> {
+        let layout = self.layout.as_ref()?;
+        options_tooltip_at(
+            layout,
+            self.active_sheet,
+            &self.program,
+            &self.controls,
+            book,
+            point,
+        )
+    }
+
+    /// Resolves the tooltip target under the controller's current pointer.
+    pub fn tooltip(&self, book: &BookFonts) -> Option<StartupTooltip> {
+        self.tooltip_at(self.pointer_position?, book)
     }
 
     pub const fn language_combo_focused(&self) -> bool {
@@ -2330,6 +2364,266 @@ const fn sound_volume_heading(id: SoundVolumeId) -> &'static str {
         SoundVolumeId::Music => "Music:",
         SoundVolumeId::SoundEffects => "Sound effects:",
     }
+}
+
+const CONTROL_KEY_TOOLTIP_KEYS: [&str; CONTROL_KEY_COUNT] = [
+    "IDS_CTL_SELECTLEFT",
+    "IDS_CTL_SELECTTOGGLE",
+    "IDS_CTL_SELECTRIGHT",
+    "IDS_CTL_THROW",
+    "IDS_CTL_UPJUMP",
+    "IDS_CTL_DIG",
+    "IDS_CTL_LEFT",
+    "IDS_CTL_DOWNSTOP",
+    "IDS_CTL_RIGHT",
+    "IDS_CTL_PLAYERMENU",
+    "IDS_CTL_SPECIAL1",
+    "IDS_CTL_SPECIAL2",
+];
+
+const fn graphics_checkbox_tooltip_key(id: GraphicsCheckboxId) -> &'static str {
+    match id {
+        GraphicsCheckboxId::AddNewCrewPortraits => "IDS_MSG_ADDPORTRAITS_DESC",
+        GraphicsCheckboxId::SaveDefaultPortraits => "IDS_DESC_STOREPORTRAITS",
+        GraphicsCheckboxId::AutoFrameSkip => "IDS_DESC_AUTOFRAMESKIP",
+        GraphicsCheckboxId::ShowFolderMaps => "IDS_DESC_SHOWFOLDERMAPS",
+        GraphicsCheckboxId::DisableGamma => "IDS_MSG_DISABLEGAMMA_DESC",
+        GraphicsCheckboxId::FireParticles => "IDS_MSG_FIREPARTICLES_DESC",
+    }
+}
+
+const fn sound_checkbox_tooltip_key(id: SoundCheckboxId) -> &'static str {
+    match id {
+        SoundCheckboxId::FrontendMusic => "IDS_DESC_MENUMUSIC",
+        SoundCheckboxId::FrontendSoundEffects => "IDS_DESC_MENUSOUND",
+        SoundCheckboxId::GameMusic => "IDS_DESC_GAMEMUSIC",
+        SoundCheckboxId::GameSoundEffects => "IDS_DESC_GAMESOUND",
+    }
+}
+
+const fn sound_volume_tooltip_key(id: SoundVolumeId) -> &'static str {
+    match id {
+        SoundVolumeId::Music => "IDS_DESC_VOLUMEMUSIC",
+        SoundVolumeId::SoundEffects => "IDS_DESC_VOLUMESOUND",
+    }
+}
+
+const fn network_port_tooltip_key(id: NetworkPortId) -> &'static str {
+    match id {
+        NetworkPortId::Tcp => "IDS_NET_PORT_TCP_DESC",
+        NetworkPortId::Udp => "IDS_NET_PORT_UDP_DESC",
+        NetworkPortId::Reference => "IDS_NET_PORT_REFERENCE_DESC",
+        NetworkPortId::Discovery => "IDS_NET_PORT_DISCOVERY_DESC",
+    }
+}
+
+fn left_label_bounds(font: &ClonkFont, position: (i32, i32), text: &str) -> IntRect {
+    let (width, height) = font.measure(text, true);
+    IntRect {
+        x: position.0,
+        y: position.1,
+        w: width,
+        h: height,
+    }
+}
+
+fn enclosing_rect(first: IntRect, second: IntRect) -> IntRect {
+    let left = first.x.min(second.x);
+    let top = first.y.min(second.y);
+    let right = (first.x + first.w).max(second.x + second.w);
+    let bottom = (first.y + first.h).max(second.y + second.h);
+    IntRect {
+        x: left,
+        y: top,
+        w: right - left,
+        h: bottom - top,
+    }
+}
+
+fn labeled_edit_bounds(edit: IntRect, label_line_height: i32) -> IntRect {
+    IntRect {
+        y: edit.y - label_line_height,
+        h: edit.h + label_line_height,
+        ..edit
+    }
+}
+
+fn options_tooltip_at(
+    layout: &OptionsDlgLayout,
+    active_sheet: OptionsSheet,
+    program: &ProgramSheetState,
+    controls: &ControlSheetState,
+    book: &BookFonts,
+    point: GuiPoint,
+) -> Option<StartupTooltip> {
+    let resource = |key| Some(StartupTooltip::resource(key));
+
+    // Back and the fullscreen title were added before the Tabular. Any point
+    // inside that later sibling is owned by its active sheet (or by an
+    // untipped Tabular child) and cannot fall through to either label/button.
+    if !rect_contains(&layout.tabular, point) {
+        if rect_contains(&layout.back_button, point) {
+            return resource("IDS_DLGTIP_BACKMAIN");
+        }
+        if rect_contains(&layout.title_label, point) {
+            return Some(StartupTooltip::text("Options"));
+        }
+        return None;
+    }
+
+    match active_sheet {
+        OptionsSheet::Program => {
+            let language_label = left_label_bounds(&book.book, layout.language_label, "Language:");
+            let language_info =
+                left_label_bounds(&book.book, layout.language_info, &program.language_info);
+            if rect_contains(&language_label, point)
+                || rect_contains(&layout.language_combo, point)
+                || rect_contains(&language_info, point)
+            {
+                return resource("IDS_MSG_SELECTLANG");
+            }
+
+            let font_label = left_label_bounds(&book.book, layout.font_label, "Font:");
+            if rect_contains(&font_label, point) || rect_contains(&layout.font_face_combo, point) {
+                return resource("IDS_DESC_SELECTFONT");
+            }
+            if rect_contains(&layout.font_size_combo, point) {
+                return resource("IDS_DESC_FONTSIZE");
+            }
+
+            let white_chat_label =
+                left_label_bounds(&book.book, layout.white_chat_label, "White Chat:");
+            if rect_contains(&white_chat_label, point) {
+                return resource("IDS_DESC_WHITECHAT");
+            }
+            for (bounds, key) in [
+                (layout.ingame_check, "IDS_DESC_WHITECHAT_INGAME"),
+                (layout.lobby_check, "IDS_DESC_WHITECHAT_LOBBY"),
+                (layout.timestamps_check, "IDS_DESC_TIMESTAMPS"),
+                (layout.preloading_check, "IDS_MSG_PRELOADING_DESC"),
+            ] {
+                if rect_contains(&bounds, point) {
+                    return resource(key);
+                }
+            }
+
+            // The tooltip is on the GroupBox, not its ScrollBar, so every
+            // child and every otherwise-empty part of the frame inherits it.
+            if rect_contains(&layout.group, point) {
+                return resource("IDS_DESC_FAIRCREWSTRENGTH");
+            }
+            if rect_contains(&layout.reset_button, point) {
+                return resource("IDS_DESC_RESETCONFIG");
+            }
+            if rect_contains(&layout.advanced_button, point) {
+                return resource("IDS_DESC_ADVANCED_SETTINGS");
+            }
+        }
+        OptionsSheet::Graphics => {
+            // ScaleEdit is a SpinBox window. Its edit and both arrow children
+            // inherit the parent's tip; the adjacent ScrollBar has the same
+            // explicitly assigned resource.
+            if rect_contains(&layout.graphics.scale_edit, point)
+                || rect_contains(&layout.graphics.scale_slider, point)
+            {
+                return resource("IDS_DESC_GRAPHICSSCALE");
+            }
+            for id in GraphicsCheckboxId::ALL {
+                if rect_contains(&layout.graphics.checkbox(id), point) {
+                    return resource(graphics_checkbox_tooltip_key(id));
+                }
+            }
+            if rect_contains(&layout.graphics.smoke_slider, point) {
+                return resource("IDS_MSG_PARTICLES_DESC");
+            }
+        }
+        OptionsSheet::Sound => {
+            for id in SoundCheckboxId::ALL {
+                if rect_contains(&layout.sound.checkbox(id), point) {
+                    return resource(sound_checkbox_tooltip_key(id));
+                }
+            }
+            for id in SoundVolumeId::ALL {
+                if rect_contains(&layout.sound.slider(id), point) {
+                    return resource(sound_volume_tooltip_key(id));
+                }
+            }
+        }
+        OptionsSheet::Keyboard | OptionsSheet::Gamepad => {
+            let device = if active_sheet == OptionsSheet::Keyboard {
+                ControlDevice::Keyboard
+            } else {
+                ControlDevice::Gamepad
+            };
+            for bounds in layout
+                .controls
+                .set_buttons
+                .iter()
+                .take(controls.visible_sets(device))
+            {
+                if rect_contains(bounds, point) {
+                    return resource("IDS_MSG_SELECTKEYSET");
+                }
+            }
+            for (index, bounds) in layout.controls.key_buttons.iter().enumerate() {
+                if rect_contains(bounds, point) {
+                    return resource(CONTROL_KEY_TOOLTIP_KEYS[index]);
+                }
+            }
+            if active_sheet == OptionsSheet::Gamepad
+                && controls.gamepad_gui_checkbox_visible()
+                && rect_contains(&layout.controls.gamepad_gui_check, point)
+            {
+                return resource("IDS_DESC_GAMEPADFORMENU");
+            }
+            if rect_contains(&layout.controls.reset_button, point) {
+                return resource("IDS_MSG_RESETKEYSETS");
+            }
+        }
+        OptionsSheet::Network => {
+            // EditConfig derives from LabeledEdit. SetToolTip is called on
+            // that parent, so both its label and its Edit child are targets.
+            // These are added last on the native sheet and therefore win any
+            // edge overlap with an earlier checkbox.
+            let local_name =
+                labeled_edit_bounds(layout.network.local_name_edit, book.book.line_height);
+            if rect_contains(&local_name, point) {
+                return resource("IDS_NET_COMPUTERNAME_DESC");
+            }
+            let nick = labeled_edit_bounds(layout.network.nick_edit, book.book.line_height);
+            if rect_contains(&nick, point) {
+                return resource("IDS_NET_USERNAME_DESC");
+            }
+
+            if rect_contains(&layout.network.upnp_check, point) {
+                return resource("IDS_DESC_UPNP");
+            }
+            if rect_contains(&layout.network.automatic_update_check, point) {
+                return resource("IDS_DESC_AUTOMATICUPDATES");
+            }
+
+            // NetworkServerAddressConfig likewise owns one parent tooltip;
+            // the checkbox remains visible when its Edit child is hidden.
+            let alternate = enclosing_rect(
+                layout.network.alternate_check,
+                layout.network.alternate_edit,
+            );
+            if rect_contains(&alternate, point) {
+                return resource("IDS_NET_MASTERSRV_DESC");
+            }
+
+            // NetworkPortConfig assigns the tip to the containing Window.
+            // Its title, checkbox, edit and SpinBox arrows all inherit it,
+            // including when the edit itself is hidden.
+            for id in NetworkPortId::ALL {
+                if rect_contains(&layout.network.port_controls[id.index()], point) {
+                    return resource(network_port_tooltip_key(id));
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// `Tabular::MouseInput` for a graphical left tab strip
@@ -3728,6 +4022,343 @@ mod tests {
         let reset_w = (gui.caption.measure("Reset configuration", true).0 + 100).min(208);
         assert_eq!(l.reset_button.w, reset_w);
         assert_eq!(l.reset_button.x, 356 + 352 + (230 - reset_w) / 2);
+    }
+
+    fn tooltip_fixture() -> (OptionsDlgState, OptionsDlgLayout, BookFonts) {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            ControlSheetState::default(),
+            NetworkSheetState::default(),
+        );
+        state.resize(1280, 720, &gui, &book);
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+        (state, layout, book)
+    }
+
+    fn assert_resource_tooltip(
+        state: &OptionsDlgState,
+        book: &BookFonts,
+        point: GuiPoint,
+        key: &'static str,
+    ) {
+        assert_eq!(
+            state.tooltip_at(point, book),
+            Some(StartupTooltip::resource(key)),
+            "tooltip resource at ({}, {})",
+            point.x,
+            point.y,
+        );
+    }
+
+    fn right_inside(rect: IntRect) -> GuiPoint {
+        GuiPoint::new((rect.x + rect.w - 1) as f32, (rect.y + rect.h / 2) as f32)
+    }
+
+    #[test]
+    fn program_tooltip_targets_cover_exact_labels_controls_and_parent_fallback() {
+        let (mut state, layout, book) = tooltip_fixture();
+
+        assert_eq!(
+            state.tooltip_at(rect_center(layout.title_label), &book),
+            Some(StartupTooltip::text("Options")),
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.back_button),
+            "IDS_DLGTIP_BACKMAIN",
+        );
+
+        let language_label = left_label_bounds(&book.book, layout.language_label, "Language:");
+        let language_info = left_label_bounds(
+            &book.book,
+            layout.language_info,
+            &state.program().language_info,
+        );
+        for point in [
+            right_inside(language_label),
+            rect_center(layout.language_combo),
+            right_inside(language_info),
+        ] {
+            assert_resource_tooltip(&state, &book, point, "IDS_MSG_SELECTLANG");
+        }
+
+        let font_label = left_label_bounds(&book.book, layout.font_label, "Font:");
+        for point in [
+            right_inside(font_label),
+            rect_center(layout.font_face_combo),
+        ] {
+            assert_resource_tooltip(&state, &book, point, "IDS_DESC_SELECTFONT");
+        }
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.font_size_combo),
+            "IDS_DESC_FONTSIZE",
+        );
+
+        let white_chat = left_label_bounds(&book.book, layout.white_chat_label, "White Chat:");
+        assert_resource_tooltip(
+            &state,
+            &book,
+            right_inside(white_chat),
+            "IDS_DESC_WHITECHAT",
+        );
+        for (bounds, key) in [
+            (layout.ingame_check, "IDS_DESC_WHITECHAT_INGAME"),
+            (layout.lobby_check, "IDS_DESC_WHITECHAT_LOBBY"),
+            (layout.timestamps_check, "IDS_DESC_TIMESTAMPS"),
+            (layout.preloading_check, "IDS_MSG_PRELOADING_DESC"),
+        ] {
+            // The far caption edge is outside the action-only checkbox square
+            // but remains inside the native tooltip Element.
+            assert_resource_tooltip(&state, &book, right_inside(bounds), key);
+        }
+
+        for point in [
+            GuiPoint::new((layout.group.x + 1) as f32, (layout.group.y + 1) as f32),
+            rect_center(layout.weak_label),
+            rect_center(layout.slider),
+        ] {
+            assert_resource_tooltip(&state, &book, point, "IDS_DESC_FAIRCREWSTRENGTH");
+        }
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.reset_button),
+            "IDS_DESC_RESETCONFIG",
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.advanced_button),
+            "IDS_DESC_ADVANCED_SETTINGS",
+        );
+
+        let active_tab = GuiPoint::new(layout.tab_icons[0].0 as f32, layout.tab_icons[0].1 as f32);
+        assert_eq!(
+            state.tooltip_at(active_tab, &book),
+            None,
+            "tabs have no C++ tip"
+        );
+        state.set_pointer_position(Some(rect_center(layout.language_combo)));
+        assert_eq!(
+            state.tooltip(&book),
+            Some(StartupTooltip::resource("IDS_MSG_SELECTLANG"))
+        );
+    }
+
+    #[test]
+    fn graphics_and_sound_tooltip_targets_are_exhaustive_without_invented_tips() {
+        let (mut state, layout, book) = tooltip_fixture();
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Graphics)]
+        );
+
+        for point in [
+            rect_center(layout.graphics.scale_edit),
+            rect_center(layout.graphics.scale_spin_increment),
+            rect_center(layout.graphics.scale_spin_decrement),
+            rect_center(layout.graphics.scale_slider),
+        ] {
+            assert_resource_tooltip(&state, &book, point, "IDS_DESC_GRAPHICSSCALE");
+        }
+        for id in GraphicsCheckboxId::ALL {
+            assert_resource_tooltip(
+                &state,
+                &book,
+                right_inside(layout.graphics.checkbox(id)),
+                graphics_checkbox_tooltip_key(id),
+            );
+        }
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.graphics.smoke_slider),
+            "IDS_MSG_PARTICLES_DESC",
+        );
+        assert_eq!(
+            state.tooltip_at(rect_center(layout.graphics.display_mode_combo), &book),
+            None,
+            "C++ does not assign a display-mode tooltip",
+        );
+        assert_eq!(
+            state.tooltip_at(rect_center(layout.graphics.apply_button), &book),
+            None,
+            "C++ does not assign an Apply tooltip",
+        );
+
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Sound)]
+        );
+        for id in SoundCheckboxId::ALL {
+            assert_resource_tooltip(
+                &state,
+                &book,
+                right_inside(layout.sound.checkbox(id)),
+                sound_checkbox_tooltip_key(id),
+            );
+        }
+        for id in SoundVolumeId::ALL {
+            assert_resource_tooltip(
+                &state,
+                &book,
+                rect_center(layout.sound.slider(id)),
+                sound_volume_tooltip_key(id),
+            );
+        }
+        assert_eq!(
+            state.tooltip_at(rect_center(layout.sound.volume_headings[0]), &book),
+            None,
+            "volume headings have no C++ tip",
+        );
+    }
+
+    #[test]
+    fn controls_and_network_tooltips_include_composite_parent_regions() {
+        let (mut state, layout, book) = tooltip_fixture();
+        for expected in [
+            OptionsSheet::Graphics,
+            OptionsSheet::Sound,
+            OptionsSheet::Keyboard,
+        ] {
+            assert_eq!(
+                state.handle_ctrl_tab(false),
+                vec![OptionsDlgAction::SheetChanged(expected)]
+            );
+        }
+
+        for set in 0..state.controls().visible_sets(ControlDevice::Keyboard) {
+            assert_resource_tooltip(
+                &state,
+                &book,
+                rect_center(layout.controls.set_buttons[set]),
+                "IDS_MSG_SELECTKEYSET",
+            );
+        }
+        for (index, bounds) in layout.controls.key_buttons.iter().copied().enumerate() {
+            assert_resource_tooltip(
+                &state,
+                &book,
+                rect_center(bounds),
+                CONTROL_KEY_TOOLTIP_KEYS[index],
+            );
+        }
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.controls.reset_button),
+            "IDS_MSG_RESETKEYSETS",
+        );
+
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)]
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.controls.set_buttons[0]),
+            "IDS_MSG_SELECTKEYSET",
+        );
+        assert_eq!(
+            state.tooltip_at(rect_center(layout.controls.set_buttons[1]), &book),
+            None,
+            "disconnected gamepad selectors are not visible targets",
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            right_inside(layout.controls.gamepad_gui_check),
+            "IDS_DESC_GAMEPADFORMENU",
+        );
+
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Network)]
+        );
+        for id in NetworkPortId::ALL {
+            let parent = layout.network.port_controls[id.index()];
+            // The group-title/frame corner is outside both interactive
+            // children and proves recursive parent fallback.
+            let parent_only = GuiPoint::new((parent.x + 1) as f32, (parent.y + 1) as f32);
+            assert_resource_tooltip(&state, &book, parent_only, network_port_tooltip_key(id));
+        }
+
+        // AlternateServerAddress is hidden by default. The visible parent
+        // checkbox still owns the whole composite tooltip region.
+        assert!(!state.network().use_alternate_server);
+        assert_resource_tooltip(
+            &state,
+            &book,
+            rect_center(layout.network.alternate_edit),
+            "IDS_NET_MASTERSRV_DESC",
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            right_inside(layout.network.automatic_update_check),
+            "IDS_DESC_AUTOMATICUPDATES",
+        );
+        assert_resource_tooltip(
+            &state,
+            &book,
+            GuiPoint::new(
+                (layout.network.upnp_check.x + layout.network.upnp_check.w - 1) as f32,
+                (layout.network.upnp_check.y + 1) as f32,
+            ),
+            "IDS_DESC_UPNP",
+        );
+
+        let local_label = labeled_edit_bounds(layout.network.local_name_edit, book.book.line_height);
+        let nick_label = labeled_edit_bounds(layout.network.nick_edit, book.book.line_height);
+        for point in [
+            GuiPoint::new((local_label.x + 1) as f32, (local_label.y + 1) as f32),
+            rect_center(layout.network.local_name_edit),
+        ] {
+            assert_resource_tooltip(&state, &book, point, "IDS_NET_COMPUTERNAME_DESC");
+        }
+        for point in [
+            GuiPoint::new((nick_label.x + 1) as f32, (nick_label.y + 1) as f32),
+            rect_center(layout.network.nick_edit),
+        ] {
+            assert_resource_tooltip(&state, &book, point, "IDS_NET_USERNAME_DESC");
+        }
+    }
+
+    #[test]
+    fn later_tabular_occludes_small_screen_back_button_overlap() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            ControlSheetState::default(),
+            NetworkSheetState::default(),
+        );
+        state.resize(640, 480, &gui, &book);
+        let layout = options_dlg_layout(640, 480, &gui, &book);
+        let overlap = GuiPoint::new(
+            layout.back_button.x.max(layout.tabular.x) as f32,
+            layout.back_button.y.max(layout.tabular.y) as f32,
+        );
+        assert!(rect_contains(&layout.back_button, overlap));
+        assert!(rect_contains(&layout.tabular, overlap));
+        assert_eq!(state.tooltip_at(overlap, &book), None);
+
+        let back_only = GuiPoint::new(
+            (layout.back_button.x + layout.back_button.w / 2) as f32,
+            (layout.back_button.y + layout.back_button.h - 1) as f32,
+        );
+        assert!(!rect_contains(&layout.tabular, back_only));
+        assert_resource_tooltip(&state, &book, back_only, "IDS_DLGTIP_BACKMAIN");
     }
 
     fn live_sound_state(sound: SoundSheetState) -> (OptionsDlgState, OptionsDlgLayout) {

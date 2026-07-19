@@ -10,7 +10,7 @@ use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text, draw_clipped_text_with_markup, draw_engine_box,
 };
 use crate::message_dialog::break_message;
-use crate::startup_main_menu::{draw_bar, IntRect};
+use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{GammaRamp, Surface};
@@ -450,6 +450,22 @@ impl AboutDlgState {
 
     pub const fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
+    }
+
+    /// Returns the native tooltip under `point`. The Licenses advance button
+    /// intentionally has no `SetToolTip` in C++.
+    pub fn tooltip_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        match self.hit_test_button(point)? {
+            AboutButton::Back => Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN")),
+            AboutButton::Update => Some(StartupTooltip::resource(
+                "IDS_DESC_CHECKONLINEFORNEWVERSIONS",
+            )),
+            AboutButton::Licenses => None,
+        }
+    }
+
+    pub fn tooltip(&self) -> Option<StartupTooltip> {
+        self.tooltip_at(self.pointer_position?)
     }
 
     pub fn credit_scroll_offset(&self, section: usize) -> Option<i32> {
@@ -1454,6 +1470,27 @@ mod tests {
         );
         assert!(state.handle_pointer_down(outside).is_empty());
         assert!(state.handle_pointer_up(outside).is_empty());
+    }
+
+    #[test]
+    fn tooltip_targets_match_the_two_native_about_assignments() {
+        let mut state = AboutDlgState::new();
+        state.resize(1280, 720, &crate::test_support::endeavour_font_set());
+        let layout = about_layout(1280, 720);
+        let center = |rect: IntRect| {
+            GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+        };
+        assert_eq!(
+            state.tooltip_at(center(layout.buttons[0])),
+            Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN"))
+        );
+        assert_eq!(
+            state.tooltip_at(center(layout.buttons[1])),
+            Some(StartupTooltip::resource(
+                "IDS_DESC_CHECKONLINEFORNEWVERSIONS"
+            ))
+        );
+        assert_eq!(state.tooltip_at(center(layout.buttons[2])), None);
     }
 
     // OnAdvanceButton shows page 1 and hides itself; the Back *button* walks

@@ -75,7 +75,8 @@ pub use clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 pub use hud::{CommandIcon, CommandImage, CommandOverlayIcon};
 pub use startup_about::{AboutAction, StartupAboutDialog};
 pub use startup_main_menu::{
-    main_menu_layout, MainMenuAction, MainMenuItem, StartupMainMenu, PARTICIPANTS_TOOLTIP,
+    centered_label_rect, centered_label_tooltip_at, main_menu_layout, MainMenuAction, MainMenuItem,
+    StartupMainMenu, StartupTooltip,
 };
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
 pub use startup_options::{ControlOptionItem, ControlOptionsAction, ControlOptionsView};

@@ -13,7 +13,7 @@ use crate::classic_gui::{
     ClassicButtonState, ClassicGuiSkin,
 };
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
-use crate::startup_main_menu::IntRect;
+use crate::startup_main_menu::{IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{GammaRamp, Surface};
@@ -608,6 +608,59 @@ impl NetDlgController {
 
     pub fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
+    }
+
+    /// Returns the C++ `SetToolTip` target at `point`. Timing and keyboard
+    /// suppression belong to the screen-wide classic mouse tracker.
+    pub fn tooltip_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        let layout = self.layout();
+        let controls = [
+            (
+                layout.btn_game_list,
+                "IDS_DESC_SHOWSAVAILABLENETWORKGAME",
+                true,
+            ),
+            (
+                layout.btn_chat,
+                "IDS_DESC_CONNECTSTOANIRCCHATSERVER",
+                true,
+            ),
+            (
+                layout.btn_internet,
+                "IDS_DLGTIP_SEARCHINTERNETGAME",
+                self.mode == NetDlgMode::GameList,
+            ),
+            (
+                layout.btn_record,
+                "IDS_DLGTIP_RECORD",
+                self.mode == NetDlgMode::GameList,
+            ),
+            (layout.buttons[0], "IDS_DLGTIP_BACKMAIN", true),
+            (
+                layout.buttons[1],
+                "IDS_NET_RELOAD_DESC",
+                self.mode == NetDlgMode::GameList,
+            ),
+            (
+                layout.buttons[2],
+                "IDS_NET_JOINGAME_DESC",
+                self.mode == NetDlgMode::GameList,
+            ),
+            (layout.buttons[3], "IDS_NET_NEWGAME_DESC", true),
+        ];
+        if let Some((_, key, _)) = controls
+            .into_iter()
+            .find(|(rect, _, visible)| *visible && contains(*rect, point))
+        {
+            return Some(StartupTooltip::resource(key));
+        }
+        (self.mode == NetDlgMode::GameList
+            && (contains(layout.ip_label, point) || contains(layout.join_edit, point)))
+        .then(|| StartupTooltip::resource("IDS_NET_IP_DESC"))
+    }
+
+    pub fn tooltip(&self) -> Option<StartupTooltip> {
+        self.tooltip_at(self.pointer_position?)
     }
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
@@ -2470,6 +2523,57 @@ mod tests {
         assert_eq!(
             controller.handle_gamepad_horizontal(false),
             vec![NetDlgAction::FocusChanged(NetDlgControl::GameList)]
+        );
+    }
+
+    #[test]
+    fn tooltip_targets_match_native_net_dialog_visibility_and_ip_parent_pair() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        for (rect, key) in [
+            (layout.btn_game_list, "IDS_DESC_SHOWSAVAILABLENETWORKGAME"),
+            (layout.btn_chat, "IDS_DESC_CONNECTSTOANIRCCHATSERVER"),
+            (layout.btn_internet, "IDS_DLGTIP_SEARCHINTERNETGAME"),
+            (layout.btn_record, "IDS_DLGTIP_RECORD"),
+            (layout.buttons[0], "IDS_DLGTIP_BACKMAIN"),
+            (layout.buttons[1], "IDS_NET_RELOAD_DESC"),
+            (layout.buttons[2], "IDS_NET_JOINGAME_DESC"),
+            (layout.buttons[3], "IDS_NET_NEWGAME_DESC"),
+        ] {
+            assert_eq!(
+                controller.tooltip_at(center(rect)),
+                Some(StartupTooltip::resource(key))
+            );
+        }
+        for rect in [layout.ip_label, layout.join_edit] {
+            assert_eq!(
+                controller.tooltip_at(center(rect)),
+                Some(StartupTooltip::resource("IDS_NET_IP_DESC"))
+            );
+        }
+        assert_eq!(controller.tooltip_at(center(layout.game_list_caption)), None);
+
+        assert_eq!(
+            click(&mut controller, layout.btn_chat),
+            vec![
+                NetDlgAction::ModeChanged(NetDlgMode::Chat),
+                NetDlgAction::FocusChanged(NetDlgControl::ChatInput),
+            ]
+        );
+        for rect in [
+            layout.btn_internet,
+            layout.btn_record,
+            layout.buttons[1],
+            layout.buttons[2],
+            layout.ip_label,
+            layout.join_edit,
+        ] {
+            assert_eq!(controller.tooltip_at(center(rect)), None);
+        }
+        assert_eq!(
+            controller.tooltip_at(center(layout.buttons[0])),
+            Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN"))
         );
     }
 

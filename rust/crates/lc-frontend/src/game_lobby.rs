@@ -1202,6 +1202,7 @@ pub struct GameLobby {
     hovered: HitTarget,
     hover_since: Instant,
     pointer: Option<GuiPoint>,
+    tooltip_pointer_active: bool,
     pointer_pressed: Option<HitTarget>,
     pointer_inside_pressed: bool,
     key_pressed: Option<(LobbyControl, KeyCode)>,
@@ -1262,6 +1263,7 @@ impl GameLobby {
             hovered: HitTarget::None,
             hover_since: Instant::now(),
             pointer: None,
+            tooltip_pointer_active: false,
             pointer_pressed: None,
             pointer_inside_pressed: false,
             key_pressed: None,
@@ -1928,6 +1930,9 @@ impl GameLobby {
             previous.x as i32 != point.x as i32 || previous.y as i32 != point.y as i32
         });
         self.pointer = Some(point);
+        if pointer_moved {
+            self.tooltip_pointer_active = true;
+        }
         let previous_hover = self.hovered;
         let hit = self.hit_test(point, layout, roster);
         self.hovered = hit;
@@ -1997,6 +2002,7 @@ impl GameLobby {
     ) -> Vec<LobbyAction> {
         let previous_focus = self.focus;
         self.pointer = Some(point);
+        self.tooltip_pointer_active = true;
         let hit = self.hit_test(point, layout, roster);
         self.hovered = hit;
         self.hover_since = Instant::now();
@@ -2184,8 +2190,10 @@ impl GameLobby {
         now: Instant,
     ) -> Vec<LobbyAction> {
         self.pointer = Some(point);
+        self.tooltip_pointer_active = true;
         let hit = self.hit_test(point, layout, roster);
         self.hovered = hit;
+        self.hover_since = Instant::now();
         self.scrollbar_drag = None;
         if matches!(self.pointer_pressed, Some(HitTarget::GameOption(_))) {
             self.pointer_pressed = None;
@@ -2260,7 +2268,9 @@ impl GameLobby {
         layout: &LobbyLayout,
         roster: &LobbyRosterLayout,
     ) -> Vec<LobbyAction> {
-        match self.hit_test(point, layout, roster) {
+        self.note_pointer_button(point, layout, roster);
+        let hit = self.hovered;
+        match hit {
             HitTarget::ChatInput => vec![LobbyAction::Chat(LobbyChatRequest::OpenContextMenu {
                 anchor: point,
             })],
@@ -2288,7 +2298,9 @@ impl GameLobby {
         layout: &LobbyLayout,
         roster: &LobbyRosterLayout,
     ) -> Vec<LobbyAction> {
-        if self.hit_test(point, layout, roster) == HitTarget::ChatInput {
+        self.note_pointer_button(point, layout, roster);
+        let hit = self.hovered;
+        if hit == HitTarget::ChatInput {
             let previous = self.focus;
             let changed = self.focus != LobbyControl::ChatInput;
             self.change_focus(LobbyControl::ChatInput, false);
@@ -2311,7 +2323,9 @@ impl GameLobby {
         layout: &LobbyLayout,
         roster: &LobbyRosterLayout,
     ) -> Vec<LobbyAction> {
-        if self.hit_test(point, layout, roster) == HitTarget::ChatInput {
+        self.note_pointer_button(point, layout, roster);
+        let hit = self.hovered;
+        if hit == HitTarget::ChatInput {
             vec![LobbyAction::Chat(LobbyChatRequest::PointerMiddleDown(
                 point,
             ))]
@@ -2373,6 +2387,7 @@ impl GameLobby {
     /// `C4GUI::Button::MouseLeave`.
     pub fn pointer_left(&mut self) {
         self.pointer = None;
+        self.tooltip_pointer_active = false;
         self.hovered = HitTarget::None;
         self.hover_since = Instant::now();
         if let Some(pressed) = self.pointer_pressed {
@@ -2401,6 +2416,31 @@ impl GameLobby {
         let _ = self.touch_cancel();
         self.key_pressed = None;
         self.pointer_left();
+    }
+
+    /// Mirrors `CMouse::ResetActiveInput()`: non-pointer input hides an
+    /// existing tooltip without discarding the last cursor position. A
+    /// same-pixel motion event therefore stays inactive; only actual integer
+    /// pointer motion (or a new pointer press) reactivates tooltip timing.
+    pub fn note_non_pointer_input(&mut self) {
+        self.tooltip_pointer_active = false;
+    }
+
+    pub fn note_pointer_wheel(&mut self) {
+        self.tooltip_pointer_active = self.pointer.is_some();
+        self.hover_since = Instant::now();
+    }
+
+    pub fn note_pointer_button(
+        &mut self,
+        point: GuiPoint,
+        layout: &LobbyLayout,
+        roster: &LobbyRosterLayout,
+    ) {
+        self.pointer = Some(point);
+        self.tooltip_pointer_active = true;
+        self.hover_since = Instant::now();
+        self.hovered = self.hit_test(point, layout, roster);
     }
 
     pub fn wheel(
@@ -3389,6 +3429,9 @@ impl GameLobby {
     }
 
     pub fn tooltip_state_at(&self, now: Instant) -> Option<LobbyTooltip> {
+        if !self.tooltip_pointer_active {
+            return None;
+        }
         if now
             .checked_duration_since(self.hover_since)
             .unwrap_or_default()
@@ -3437,6 +3480,9 @@ impl GameLobby {
         roster: &LobbyRosterLayout,
         font: &lc_graphics::clonk_font::ClonkFont,
     ) -> Option<LobbyTooltip> {
+        if !self.tooltip_pointer_active {
+            return None;
+        }
         if now
             .checked_duration_since(self.hover_since)
             .unwrap_or_default()
@@ -6417,6 +6463,53 @@ mod tests {
                 .tooltip_state_with_roster_at(now, &ping_roster, &fonts.text)
                 .map(|tooltip| tooltip.text),
             Some("Ping".into())
+        );
+    }
+
+    #[test]
+    fn non_pointer_input_suppresses_tooltip_until_actual_integer_pointer_motion() {
+        let mut lobby = lobby(LobbyRole::Host, vec![]);
+        let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
+        let roster = lobby.roster_layout(&layout, 22);
+        let point = GuiPoint::new(
+            (layout.chat_edit.x + 2) as f32,
+            (layout.chat_edit.y + 2) as f32,
+        );
+        let _ = lobby.pointer_move(point, &layout, &roster);
+        let after_delay = Instant::now() + TOOLTIP_DELAY;
+        assert!(lobby.tooltip_state_at(after_delay).is_some());
+
+        lobby.note_non_pointer_input();
+        assert!(lobby.tooltip_state_at(after_delay).is_none());
+
+        let _ = lobby.pointer_move(point, &layout, &roster);
+        assert!(
+            lobby.tooltip_state_at(after_delay).is_none(),
+            "a synthesized same-pixel motion must not reactivate CMouse"
+        );
+
+        let moved = GuiPoint::new(point.x + 1.0, point.y);
+        let _ = lobby.pointer_move(moved, &layout, &roster);
+        assert!(
+            lobby
+                .tooltip_state_at(Instant::now() + TOOLTIP_DELAY)
+                .is_some(),
+            "actual integer motion starts a fresh tooltip delay"
+        );
+
+        lobby.hover_since = Instant::now() - TOOLTIP_DELAY;
+        let _ = lobby.pointer_up(moved, &layout, &roster, Instant::now());
+        let release_time = lobby.hover_since;
+        assert_eq!(
+            lobby.tooltip_state_at(release_time + TOOLTIP_DELAY - Duration::from_millis(1)),
+            None,
+            "mouse-up resets the tooltip clock"
+        );
+        assert!(
+            lobby
+                .tooltip_state_at(release_time + TOOLTIP_DELAY)
+                .is_some(),
+            "the inclusive 500ms boundary is restored after mouse-up"
         );
     }
 

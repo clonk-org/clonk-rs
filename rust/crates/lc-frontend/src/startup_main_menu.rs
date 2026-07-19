@@ -4,13 +4,45 @@ use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Surface, TextFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
-pub const PARTICIPANTS_TOOLTIP: &str = "These players will take part in the next round.";
+const TRADEMARK_TEXT: &str = "LegacyClonk is a fan project based on Clonk Rage.   \
+                              'Clonk' is a registered trademark of Matthes Bender.";
 
-fn pointer_pixel(position: Option<GuiPoint>) -> Option<(i32, i32)> {
-    position.map(|point| (point.x as i32, point.y as i32))
+/// Text attached to one classic startup-dialog tooltip target.
+///
+/// Resource variants retain the language-table key so the application can
+/// resolve the active runtime language and preserve C++'s undefined-resource
+/// behavior. Text is used for live content such as scenario and player names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupTooltip {
+    Resource {
+        key: &'static str,
+    },
+    FormattedResource {
+        key: &'static str,
+        arguments: Vec<String>,
+    },
+    Text(String),
+}
+
+impl StartupTooltip {
+    pub const fn resource(key: &'static str) -> Self {
+        Self::Resource { key }
+    }
+
+    pub fn formatted_resource(
+        key: &'static str,
+        arguments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::FormattedResource {
+            key,
+            arguments: arguments.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
 }
 
 /// Integer rectangle in screen pixels (mirrors C++ `C4Rect`).
@@ -20,6 +52,33 @@ pub struct IntRect {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+/// Autosized `C4GUI::Label` bounds for an `ACenter` anchor. Fullscreen
+/// startup titles and the scenario-book caption use this exact geometry.
+pub fn centered_label_rect(anchor: (i32, i32), extent: (i32, i32)) -> IntRect {
+    IntRect {
+        x: anchor.0 - extent.0 / 2,
+        y: anchor.1,
+        w: extent.0,
+        h: extent.1,
+    }
+}
+
+/// Resolves an autosized centered label's own tooltip. Callers supply the
+/// measured live-font extent and the text target assigned by C++.
+pub fn centered_label_tooltip_at(
+    point: GuiPoint,
+    anchor: (i32, i32),
+    extent: (i32, i32),
+    tooltip: StartupTooltip,
+) -> Option<StartupTooltip> {
+    let rect = centered_label_rect(anchor, extent);
+    (point.x >= rect.x as f32
+        && point.y >= rect.y as f32
+        && point.x < (rect.x + rect.w) as f32
+        && point.y < (rect.y + rect.h) as f32)
+        .then_some(tooltip)
 }
 
 /// Pixel-exact C4StartupMainDlg geometry, all in C++ integer math.
@@ -165,8 +224,6 @@ pub struct StartupMainMenu {
     gamma: Option<Arc<lc_graphics::GammaRamp>>,
     buttons: Vec<MenuButton>,
     pointer_position: Option<GuiPoint>,
-    last_pointer_activity: Instant,
-    pointer_active: bool,
     pressed_index: Option<usize>,
     /// Focused button armed by Enter/Space. C++ sets `Button::fDown` on key
     /// down and invokes the callback only on the matching key up
@@ -208,8 +265,6 @@ impl StartupMainMenu {
             gamma: None,
             buttons,
             pointer_position: None,
-            last_pointer_activity: Instant::now(),
-            pointer_active: false,
             pressed_index: None,
             key_pressed: None,
             selected_index: Some(0),
@@ -276,22 +331,71 @@ impl StartupMainMenu {
             && point.y < (rect.y + rect.h) as f32
     }
 
+    fn trademark_contains(&self, point: GuiPoint) -> bool {
+        let layout = main_menu_layout(
+            self.size.width.max(1.0) as i32,
+            self.size.height.max(1.0) as i32,
+        );
+        let (width, line_height) = self.clonk_fonts.as_ref().map_or_else(
+            || {
+                (
+                    self.font.measure_text(TRADEMARK_TEXT, 12.0).width.round() as i32,
+                    18,
+                )
+            },
+            |fonts| {
+                (
+                    fonts.mini.measure(TRADEMARK_TEXT, false).0,
+                    fonts.mini.line_height,
+                )
+            },
+        );
+        let rect = IntRect {
+            x: layout.trademark_anchor_x - width,
+            y: layout.client.y + layout.client.h - line_height / 2,
+            w: width,
+            h: line_height,
+        };
+        point.x >= rect.x as f32
+            && point.y >= rect.y as f32
+            && point.x < (rect.x + rect.w) as f32
+            && point.y < (rect.y + rect.h) as f32
+    }
+
+    /// Returns the native tooltip target at `point`, without applying the
+    /// screen-wide CMouse delay.
+    pub fn tooltip_at(
+        &self,
+        participants_label: &str,
+        point: GuiPoint,
+    ) -> Option<StartupTooltip> {
+        if self.trademark_contains(point) {
+            return None;
+        }
+        if self.participants_contains(participants_label, point) {
+            return Some(StartupTooltip::resource("IDS_DLGTIP_SELECTEDPLAYERS"));
+        }
+        let item = self.buttons.get(self.hit_test(point)?)?.item;
+        Some(StartupTooltip::resource(match item {
+            MainMenuItem::LocalGame => "IDS_DLGTIP_STARTGAME",
+            MainMenuItem::NetworkGame => "IDS_DLGTIP_NETWORKGAME",
+            MainMenuItem::PlayerSelection => "IDS_DLGTIP_PLAYERSELECTION",
+            MainMenuItem::Options => "IDS_DLGTIP_OPTIONS",
+            MainMenuItem::About => "IDS_DLGTIP_ABOUT",
+            MainMenuItem::Quit => "IDS_DLGTIP_EXIT",
+        }))
+    }
+
+    pub fn tooltip(&self, participants_label: &str) -> Option<StartupTooltip> {
+        self.tooltip_at(participants_label, self.pointer_position?)
+    }
+
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
-        self.note_pointer_position(position);
+        self.pointer_position = position;
         self.hover_index = position.and_then(|point| self.hit_test(point));
     }
 
-    pub fn note_pointer_position(&mut self, position: Option<GuiPoint>) {
-        if pointer_pixel(self.pointer_position) != pointer_pixel(position) {
-            self.last_pointer_activity = Instant::now();
-            self.pointer_active = position.is_some();
-        }
-        self.pointer_position = position;
-    }
-
     pub fn pointer_left(&mut self) {
-        self.last_pointer_activity = Instant::now();
-        self.pointer_active = false;
         self.pointer_position = None;
         self.pressed_index = None;
         self.key_pressed = None;
@@ -322,10 +426,6 @@ impl StartupMainMenu {
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
-        if pointer_pixel(self.pointer_position) != pointer_pixel(Some(position)) {
-            self.last_pointer_activity = Instant::now();
-            self.pointer_active = true;
-        }
         self.pointer_position = Some(position);
         // The mouse only hovers; it does not move the keyboard focus
         // (C++ Button::MouseEnter sets fMouseOver, C4GuiButton.cpp:160-181).
@@ -341,7 +441,8 @@ impl StartupMainMenu {
     }
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
-        self.note_pointer_button();
+        self.pointer_position = Some(position);
+        self.hover_index = self.hit_test(position);
         self.key_pressed = None;
         if let Some(index) = self.hit_test(position) {
             if self.buttons[index].enabled {
@@ -352,7 +453,8 @@ impl StartupMainMenu {
     }
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
-        self.note_pointer_button();
+        self.pointer_position = Some(position);
+        self.hover_index = self.hit_test(position);
         let mut actions = Vec::new();
         let pressed = self.pressed_index.take();
         let Some(pressed_index) = pressed else {
@@ -370,7 +472,6 @@ impl StartupMainMenu {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
-        self.pointer_active = false;
         match key {
             KeyCode::Up | KeyCode::Left => {
                 self.key_pressed = None;
@@ -394,7 +495,6 @@ impl StartupMainMenu {
     }
 
     pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
-        self.pointer_active = false;
         let Some((pressed_index, pressed_key)) = self.key_pressed else {
             return Vec::new();
         };
@@ -407,28 +507,6 @@ impl StartupMainMenu {
         } else {
             Vec::new()
         }
-    }
-
-    pub fn participants_tooltip_pending(&self, participants_label: &str) -> bool {
-        self.pointer_active
-            && self
-                .pointer_position
-                .is_some_and(|point| self.participants_contains(participants_label, point))
-    }
-
-    pub fn participants_tooltip_pointer(&self, participants_label: &str) -> Option<GuiPoint> {
-        (self.participants_tooltip_pending(participants_label)
-            && self.last_pointer_activity.elapsed() >= TOOLTIP_DELAY)
-            .then_some(self.pointer_position?)
-    }
-
-    pub fn note_pointer_button(&mut self) {
-        self.last_pointer_activity = Instant::now();
-        self.pointer_active = true;
-    }
-
-    pub fn note_non_pointer_input(&mut self) {
-        self.pointer_active = false;
     }
 
     pub fn render(&mut self, surface: &mut Surface, participants_label: &str) {
@@ -505,8 +583,7 @@ impl StartupMainMenu {
         // rect's right edge, half a line above its bottom
         // (C4StartupMainDlg.cpp:72-74; FANPROJECTTEXT/TRADEMARKTEXT,
         // C4Version.h:21-22).
-        let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
-                         'Clonk' is a registered trademark of Matthes Bender.";
+        let trademark = TRADEMARK_TEXT;
         let (anchor_x, anchor_y) = layout.participants_anchor;
         if let Some(fonts) = self.clonk_fonts.as_ref() {
             let (expanded_label, _) = expand_hotkey_markup(participants_label);
@@ -640,8 +717,7 @@ impl StartupMainMenu {
             physical_offset,
             gamma,
         );
-        let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
-                         'Clonk' is a registered trademark of Matthes Bender.";
+        let trademark = TRADEMARK_TEXT;
         fonts.mini.draw_to_physical_surface_with_offset(
             surface,
             layout.trademark_anchor_x,
@@ -955,44 +1031,84 @@ mod tests {
     }
 
     #[test]
-    fn participants_tooltip_uses_the_global_half_second_mouse_delay() {
-        let fonts = endeavour_font_set();
-        let mut menu = main_menu();
-        menu.set_clonk_fonts(Some(fonts));
+    fn tooltip_targets_cover_every_native_main_control() {
+        let menu = main_menu();
         let label = "Players: Ada";
-        let rect = menu.participants_rect(label);
-        let point = GuiPoint::new((rect.x + 1) as f32, (rect.y + 1) as f32);
-        menu.set_pointer_position(Some(point));
-        assert!(menu.participants_tooltip_pending(label));
-        assert_eq!(menu.participants_tooltip_pointer(label), None);
+        let expected = [
+            "IDS_DLGTIP_STARTGAME",
+            "IDS_DLGTIP_NETWORKGAME",
+            "IDS_DLGTIP_PLAYERSELECTION",
+            "IDS_DLGTIP_OPTIONS",
+            "IDS_DLGTIP_ABOUT",
+            "IDS_DLGTIP_EXIT",
+        ];
+        for (index, key) in expected.into_iter().enumerate() {
+            assert_eq!(
+                menu.tooltip_at(label, button_center(index)),
+                Some(StartupTooltip::resource(key))
+            );
+        }
 
-        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
-        assert_eq!(menu.participants_tooltip_pointer(label), Some(point));
-
-        menu.handle_pointer_move(GuiPoint::new(point.x + 0.25, point.y));
-        assert!(
-            menu.participants_tooltip_pointer(label).is_some(),
-            "subpixel motion does not move C++'s integer mouse position"
-        );
-        menu.handle_pointer_move(GuiPoint::new(point.x + 1.0, point.y));
-        assert_eq!(menu.participants_tooltip_pointer(label), None);
-
-        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
-        menu.handle_key_down(KeyCode::Down);
-        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
+        let participants = menu.participants_rect(label);
         assert_eq!(
-            menu.participants_tooltip_pointer(label),
-            None,
-            "keyboard input suppresses tooltips until another mouse event"
+            menu.tooltip_at(
+                label,
+                GuiPoint::new(participants.x as f32, participants.y as f32)
+            ),
+            Some(StartupTooltip::resource("IDS_DLGTIP_SELECTEDPLAYERS"))
         );
+        assert_eq!(menu.tooltip_at(label, GuiPoint::new(0.0, 0.0)), None);
+    }
 
-        menu.note_pointer_button();
-        assert_eq!(menu.participants_tooltip_pointer(label), None);
-        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
-        assert!(menu.participants_tooltip_pointer(label).is_some());
+    #[test]
+    fn later_trademark_label_occludes_participants_tooltip_overlap() {
+        let fonts = endeavour_font_set();
+        let mut menu = StartupMainMenu::new(Arc::new(BitmapFont::new()), None);
+        menu.set_clonk_fonts(Some(Arc::clone(&fonts)));
+        menu.resize(640.0, 480.0);
+        let label = "Players: Ada";
+        let participants = menu.participants_rect(label);
+        let layout = main_menu_layout(640, 480);
+        let trademark_y = layout.client.y + layout.client.h - fonts.mini.line_height / 2;
+        let point = GuiPoint::new(
+            (participants.x + participants.w - 1) as f32,
+            trademark_y.max(participants.y) as f32,
+        );
+        assert!(menu.participants_contains(label, point));
+        assert!(menu.trademark_contains(point));
+        assert_eq!(menu.tooltip_at(label, point), None);
+    }
 
-        menu.set_pointer_position(Some(GuiPoint::new(rect.x as f32 - 1.0, point.y)));
-        assert!(!menu.participants_tooltip_pending(label));
+    #[test]
+    fn centered_title_tooltip_uses_autosized_label_bounds() {
+        let target = StartupTooltip::text("&Player Selection");
+        assert_eq!(
+            centered_label_rect((100, 8), (21, 34)),
+            IntRect {
+                x: 90,
+                y: 8,
+                w: 21,
+                h: 34,
+            }
+        );
+        assert_eq!(
+            centered_label_tooltip_at(
+                GuiPoint::new(90.0, 8.0),
+                (100, 8),
+                (21, 34),
+                target.clone(),
+            ),
+            Some(target)
+        );
+        assert_eq!(
+            centered_label_tooltip_at(
+                GuiPoint::new(111.0, 8.0),
+                (100, 8),
+                (21, 34),
+                StartupTooltip::text("outside"),
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1093,7 +1209,11 @@ mod tests {
         let player = button_center(2);
 
         assert!(menu.handle_pointer_down(network).is_empty());
+        assert_eq!(menu.pointer_position(), Some(network));
+        assert_eq!(menu.hover_index, Some(1));
         assert!(menu.handle_pointer_up(player).is_empty());
+        assert_eq!(menu.pointer_position(), Some(player));
+        assert_eq!(menu.hover_index, Some(2));
         assert!(menu.handle_pointer_down(network).is_empty());
         assert_eq!(
             menu.handle_pointer_up(network),

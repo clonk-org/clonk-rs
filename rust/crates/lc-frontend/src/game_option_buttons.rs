@@ -659,6 +659,42 @@ impl GameOptionButtons {
         self.view(button).map(|view| view.tooltip)
     }
 
+    /// Runtime language-table key assigned by C4GameOptionButtons for a
+    /// visible button. Fair Crew switches keys with its current state.
+    pub fn tooltip_resource_key_for_button(
+        &self,
+        button: GameOptionButton,
+    ) -> Option<&'static str> {
+        self.view(button)?;
+        Some(match button {
+            GameOptionButton::Internet => "IDS_DLGTIP_STARTINTERNETGAME",
+            GameOptionButton::League => "IDS_DLGTIP_STARTLEAGUEGAME",
+            GameOptionButton::Password => "IDS_NET_PASSWORD_DESC",
+            GameOptionButton::Comment => "IDS_DESC_COMMENTDESCRIPTIONFORTHIS",
+            GameOptionButton::FairCrew => {
+                if self.fair_crew_state().0 {
+                    "IDS_CTL_FAIRCREW_DESC"
+                } else {
+                    "IDS_CTL_NORMALCREW_DESC"
+                }
+            }
+            GameOptionButton::Record => "IDS_DLGTIP_RECORD",
+        })
+    }
+
+    pub fn tooltip_resource_key_at(&self, point: GuiPoint) -> Option<&'static str> {
+        self.tooltip_resource_key_for_button(self.hit_test(point)?)
+    }
+
+    /// Resolves the native tooltip target at `point` without consulting or
+    /// mutating the legacy delayed-tooltip clock. Disabled buttons retain
+    /// their descriptions, while buttons absent from this context have no
+    /// hit-test bounds and therefore no tooltip target.
+    pub fn tooltip_at(&self, point: GuiPoint) -> Option<&'static str> {
+        self.hit_test(point)
+            .and_then(|button| self.tooltip_for_button(button))
+    }
+
     pub fn hovered_tooltip_at(&self, now: Instant) -> Option<&'static str> {
         if !self.pointer_active
             || now
@@ -684,8 +720,8 @@ impl GameOptionButtons {
             old.x as i32 != position.x as i32 || old.y as i32 != position.y as i32
         });
         self.pointer = Some(position);
-        self.pointer_active = true;
         if moved {
+            self.pointer_active = true;
             self.tooltip_since = Instant::now();
         }
         let previous_hover = self.hovered;
@@ -696,6 +732,7 @@ impl GameOptionButtons {
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<GameOptionAction> {
         self.handle_pointer_move(position);
+        self.pointer_active = true;
         self.tooltip_since = Instant::now();
         let Some(button) = self.hovered else {
             return Vec::new();
@@ -714,6 +751,7 @@ impl GameOptionButtons {
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<GameOptionAction> {
         self.handle_pointer_move(position);
+        self.pointer_active = true;
         self.tooltip_since = Instant::now();
         let pressed = self.pointer_pressed;
         let activate = pressed.is_some()
@@ -773,6 +811,22 @@ impl GameOptionButtons {
         self.pointer_pressed = None;
         self.pointer_down_visual = false;
         self.key_pressed = None;
+    }
+
+    /// Mirrors `CMouse::ResetActiveInput()` without discarding the retained
+    /// position used to reject synthesized same-pixel motion.
+    pub fn note_non_pointer_input(&mut self) {
+        self.pointer_active = false;
+    }
+
+    pub fn note_pointer_wheel(&mut self) {
+        self.pointer_active = self.pointer.is_some();
+        self.tooltip_since = Instant::now();
+    }
+
+    pub fn note_pointer_button(&mut self) {
+        self.pointer_active = self.pointer.is_some();
+        self.tooltip_since = Instant::now();
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> GameOptionKeyOutcome {
@@ -1445,6 +1499,61 @@ mod tests {
             GameOptionIcon::FairCrewGray
         );
         assert!(client.view(GameOptionButton::Record).unwrap().enabled);
+    }
+
+    #[test]
+    fn pure_tooltip_target_covers_visible_disabled_buttons_and_rejects_hidden_space() {
+        let values = GameOptionValues {
+            lobby_is_league: true,
+            ..GameOptionValues::default()
+        };
+        let mut lobby_host = GameOptionButtons::new(GameOptionContext::LobbyHost, values);
+        lobby_host.set_bounds(bounds());
+
+        let views = lobby_host.views();
+        assert!(views.iter().any(|view| !view.enabled));
+        for view in views {
+            assert_eq!(
+                lobby_host.tooltip_at(point(view.rect)),
+                Some(view.tooltip),
+                "visible {:?} button must retain its native tooltip",
+                view.button
+            );
+            let expected_key = match view.button {
+                GameOptionButton::Internet => "IDS_DLGTIP_STARTINTERNETGAME",
+                GameOptionButton::League => "IDS_DLGTIP_STARTLEAGUEGAME",
+                GameOptionButton::Password => "IDS_NET_PASSWORD_DESC",
+                GameOptionButton::Comment => "IDS_DESC_COMMENTDESCRIPTIONFORTHIS",
+                GameOptionButton::FairCrew => "IDS_CTL_NORMALCREW_DESC",
+                GameOptionButton::Record => "IDS_DLGTIP_RECORD",
+            };
+            assert_eq!(
+                lobby_host.tooltip_resource_key_at(point(view.rect)),
+                Some(expected_key),
+                "visible {:?} button must retain its language-table key",
+                view.button
+            );
+        }
+
+        let mut fair = controller(GameOptionContext::LocalSelector);
+        fair.values.fair_crew = true;
+        let fair_rect = fair
+            .layout()
+            .rect(GameOptionButton::FairCrew)
+            .expect("local selector exposes Fair Crew");
+        assert_eq!(
+            fair.tooltip_resource_key_at(point(fair_rect)),
+            Some("IDS_CTL_FAIRCREW_DESC")
+        );
+
+        let local = controller(GameOptionContext::LocalSelector);
+        let hidden_internet =
+            game_option_buttons_layout(bounds(), GameOptionContext::NetworkHostSelector)
+                .rect(GameOptionButton::Internet)
+                .expect("network selector exposes Internet");
+        assert_eq!(local.tooltip_at(point(hidden_internet)), None);
+        assert_eq!(local.tooltip_resource_key_at(point(hidden_internet)), None);
+        assert_eq!(local.tooltip_at(GuiPoint::new(0.0, 0.0)), None);
     }
 
     #[test]
@@ -2145,6 +2254,32 @@ mod tests {
             .render_tooltip_at(&mut with_tooltip, &resources, true, None, after)
             .unwrap();
         assert_ne!(without_tooltip.pixels(), with_tooltip.pixels());
+
+        state.note_non_pointer_input();
+        assert_eq!(state.hovered_tooltip_at(after), None);
+        state.handle_pointer_move(point(internet));
+        assert_eq!(
+            state.hovered_tooltip_at(Instant::now() + Duration::from_secs(1)),
+            None,
+            "same-pixel motion does not restore CMouse ownership"
+        );
+        state.note_pointer_wheel();
+        assert_eq!(
+            state.hovered_tooltip_at(Instant::now() + Duration::from_secs(1)),
+            Some(INTERNET_TOOLTIP),
+            "an unconsumed wheel is a fresh pointer event"
+        );
+        state.note_pointer_button();
+        let button_time = state.tooltip_since;
+        assert_eq!(
+            state.hovered_tooltip_at(button_time + TOOLTIP_DELAY - Duration::from_millis(1)),
+            None,
+            "every mouse-button edge resets the tooltip clock"
+        );
+        assert_eq!(
+            state.hovered_tooltip_at(button_time + TOOLTIP_DELAY),
+            Some(INTERNET_TOOLTIP)
+        );
     }
 
     #[test]

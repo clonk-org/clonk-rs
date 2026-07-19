@@ -7,7 +7,9 @@
 
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::classic_gui::{ClassicButtonState, ClassicGuiSkin};
-use crate::startup_main_menu::{draw_bar, IntRect};
+use crate::startup_main_menu::{
+    centered_label_tooltip_at, draw_bar, IntRect, StartupTooltip,
+};
 use crate::{draw_image_bilinear, draw_image_strip, ImageData};
 use anyhow::{ensure, Context, Result};
 use freetype::face::LoadFlag;
@@ -542,6 +544,131 @@ pub fn scen_sel_layout(w: i32, h: i32, fonts: &ClonkFontSet) -> ScenSelLayout {
         button_width,
         search_text_width,
     }
+}
+
+fn tooltip_rect_contains(rect: IntRect, point: crate::GuiPoint) -> bool {
+    point.x >= rect.x as f32
+        && point.y >= rect.y as f32
+        && point.x < (rect.x + rect.w) as f32
+        && point.y < (rect.y + rect.h) as f32
+}
+
+fn tooltip_gui_rect_contains(rect: &GuiRect, point: crate::GuiPoint) -> bool {
+    // C4Rect(FLOAT_RECT) truncates the origin but sizes to the enclosing
+    // floor(left)/ceil(right) span before regular half-open C4Rect hits.
+    let bounds = IntRect {
+        x: rect.origin.x as i32,
+        y: rect.origin.y as i32,
+        w: ((rect.origin.x + rect.size.width).ceil() - rect.origin.x.floor()) as i32,
+        h: ((rect.origin.y + rect.size.height).ceil() - rect.origin.y.floor()) as i32,
+    };
+    tooltip_rect_contains(bounds, point)
+}
+
+/// Resolves one normal-book scenario selector target. `row_names` follows
+/// the visible C++ list order, while `list_scroll_y` is the logical
+/// ScrollWindow displacement. Rows override the list box's resource tooltip
+/// with their live, unstripped scenario/folder name.
+pub fn scen_sel_book_tooltip_at<'a>(
+    layout: &ScenSelLayout,
+    point: crate::GuiPoint,
+    caption_extent: (i32, i32),
+    list_scroll_y: i32,
+    item_height: i32,
+    row_names: impl IntoIterator<Item = &'a str>,
+) -> Option<StartupTooltip> {
+    if let Some(tooltip) = centered_label_tooltip_at(
+        point,
+        layout.caption_anchor,
+        caption_extent,
+        StartupTooltip::resource("IDS_DLGTIP_SELECTSCENARIO"),
+    ) {
+        return Some(tooltip);
+    }
+    for rect in [layout.search_label, layout.search_edit] {
+        if tooltip_rect_contains(rect, point) {
+            return Some(StartupTooltip::resource("IDS_DLGTIP_SEARCHLIST"));
+        }
+    }
+    if tooltip_rect_contains(layout.back_button, point) {
+        return Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN"));
+    }
+    if tooltip_rect_contains(layout.open_button, point) {
+        return Some(StartupTooltip::resource("IDS_DLGTIP_SCENSELNEXT"));
+    }
+    if !tooltip_rect_contains(layout.list, point) {
+        return None;
+    }
+
+    let viewport = IntRect {
+        x: layout.list.x + 3,
+        y: layout.list.y + 3,
+        w: layout.list.w - 6 - 16,
+        h: layout.list.h - 6,
+    };
+    if tooltip_rect_contains(viewport, point) {
+        let item_height = item_height.max(1);
+        let pitch = item_height + 1;
+        let local_y = point.y.floor() as i32 - viewport.y + list_scroll_y.max(0);
+        if local_y >= 0 && local_y % pitch < item_height {
+            let index = (local_y / pitch) as usize;
+            if let Some(name) = row_names.into_iter().nth(index) {
+                return Some(StartupTooltip::text(name));
+            }
+        }
+    }
+    Some(StartupTooltip::resource("IDS_DLGTIP_SELECTSCENARIO"))
+}
+
+/// One topmost map scenario button. Buttons without a resolved entry carry
+/// no tooltip and still occlude a `MapPic` underneath, matching GUI hit-test
+/// recursion rather than sibling fall-through.
+#[derive(Clone, Debug)]
+pub struct ScenSelMapScenarioTooltip<'a> {
+    pub bounds: GuiRect,
+    pub scenario_name: Option<&'a str>,
+}
+
+/// Resolves scenario-map targets. `untipped_foreground_bounds` contains the
+/// selection TextWindow added after all map controls. `picture_bounds`
+/// contains actual `MapPic` elements (the non-fullscreen background and all
+/// authorized access overlays, including empty facets); a fullscreen dialog
+/// background is deliberately omitted.
+pub fn scen_sel_map_tooltip_at<'a>(
+    layout: &ScenSelLayout,
+    point: crate::GuiPoint,
+    untipped_foreground_bounds: impl IntoIterator<Item = GuiRect>,
+    picture_bounds: impl IntoIterator<Item = GuiRect>,
+    scenario_buttons: impl IntoIterator<Item = ScenSelMapScenarioTooltip<'a>>,
+) -> Option<StartupTooltip> {
+    if tooltip_rect_contains(layout.back_button, point) {
+        return Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN"));
+    }
+    if tooltip_rect_contains(layout.open_button, point) {
+        return Some(StartupTooltip::resource("IDS_DLGTIP_SCENSELNEXT"));
+    }
+    // The active Tabular sheet clips and owns every configured map child;
+    // FLOAT_RECT areas outside rcMap cannot receive Screen::MouseInput.
+    if !tooltip_rect_contains(layout.map_sheet, point) {
+        return None;
+    }
+    if untipped_foreground_bounds
+        .into_iter()
+        .any(|bounds| tooltip_gui_rect_contains(&bounds, point))
+    {
+        return None;
+    }
+    for button in scenario_buttons {
+        if tooltip_gui_rect_contains(&button.bounds, point) {
+            return button.scenario_name.map(|name| {
+                StartupTooltip::formatted_resource("IDS_MSG_MAP_STARTSCEN", [name])
+            });
+        }
+    }
+    picture_bounds
+        .into_iter()
+        .any(|bounds| tooltip_gui_rect_contains(&bounds, point))
+        .then(|| StartupTooltip::resource("IDS_MSG_MAP_DESC"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1900,6 +2027,271 @@ mod tests {
         // caught here: W = 3 * caption("<< BACK") = 3*51, S = text("Search:").
         assert_eq!(w, 153);
         assert_eq!(s, 46);
+    }
+
+    #[test]
+    fn book_tooltip_targets_preserve_dynamic_rows_and_parent_fallback() {
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(1280, 720, &fonts);
+        let caption_extent = (
+            fonts.title.measure("Scenarios", true).0,
+            fonts.title.line_height,
+        );
+        let rows = ["<c ff0000>Mission</c>", "Folder"];
+        let center = |rect: IntRect| {
+            crate::GuiPoint::new(
+                (rect.x + rect.w / 2) as f32,
+                (rect.y + rect.h / 2) as f32,
+            )
+        };
+
+        assert_eq!(
+            scen_sel_book_tooltip_at(
+                &layout,
+                crate::GuiPoint::new(
+                    layout.caption_anchor.0 as f32,
+                    layout.caption_anchor.1 as f32
+                ),
+                caption_extent,
+                0,
+                26,
+                rows,
+            ),
+            Some(StartupTooltip::resource("IDS_DLGTIP_SELECTSCENARIO"))
+        );
+        for rect in [layout.search_label, layout.search_edit] {
+            assert_eq!(
+                scen_sel_book_tooltip_at(
+                    &layout,
+                    center(rect),
+                    caption_extent,
+                    0,
+                    26,
+                    rows,
+                ),
+                Some(StartupTooltip::resource("IDS_DLGTIP_SEARCHLIST"))
+            );
+        }
+        let first_row = crate::GuiPoint::new(
+            (layout.list.x + 10) as f32,
+            (layout.list.y + 3 + 13) as f32,
+        );
+        assert_eq!(
+            scen_sel_book_tooltip_at(
+                &layout,
+                first_row,
+                caption_extent,
+                0,
+                26,
+                rows,
+            ),
+            Some(StartupTooltip::text("<c ff0000>Mission</c>"))
+        );
+        assert_eq!(
+            scen_sel_book_tooltip_at(
+                &layout,
+                first_row,
+                caption_extent,
+                27,
+                26,
+                rows,
+            ),
+            Some(StartupTooltip::text("Folder"))
+        );
+        let gap = crate::GuiPoint::new(
+            (layout.list.x + 10) as f32,
+            (layout.list.y + 3 + 26) as f32,
+        );
+        for point in [gap, center(layout.list_scrollbar)] {
+            assert_eq!(
+                scen_sel_book_tooltip_at(
+                    &layout,
+                    point,
+                    caption_extent,
+                    0,
+                    26,
+                    rows,
+                ),
+                Some(StartupTooltip::resource("IDS_DLGTIP_SELECTSCENARIO"))
+            );
+        }
+        let blank_item_band = crate::GuiPoint::new(
+            (layout.list.x + 10) as f32,
+            (layout.list.y + 3 + 2 * 27 + 13) as f32,
+        );
+        assert_eq!(
+            scen_sel_book_tooltip_at(
+                &layout,
+                blank_item_band,
+                caption_extent,
+                0,
+                26,
+                rows,
+            ),
+            Some(StartupTooltip::resource("IDS_DLGTIP_SELECTSCENARIO"))
+        );
+        assert_eq!(
+            scen_sel_book_tooltip_at(
+                &layout,
+                center(layout.back_button),
+                caption_extent,
+                0,
+                26,
+                rows,
+            ),
+            Some(StartupTooltip::resource("IDS_DLGTIP_BACKMAIN"))
+        );
+        assert_eq!(
+            scen_sel_book_tooltip_at(
+                &layout,
+                center(layout.open_button),
+                caption_extent,
+                0,
+                26,
+                rows,
+            ),
+            Some(StartupTooltip::resource("IDS_DLGTIP_SCENSELNEXT"))
+        );
+        assert_eq!(
+            scen_sel_book_tooltip_at(
+                &layout,
+                center(layout.user_change_checkbox),
+                caption_extent,
+                0,
+                26,
+                rows,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn map_tooltip_targets_respect_button_occlusion_and_dynamic_name() {
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(1280, 720, &fonts);
+        let picture = GuiRect::new(100.0, 100.0, 100.0, 100.0);
+        let button = GuiRect::new(120.0, 120.0, 30.0, 30.0);
+        let picture_point = crate::GuiPoint::new(105.0, 105.0);
+        let button_point = crate::GuiPoint::new(125.0, 125.0);
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                picture_point,
+                std::iter::empty(),
+                [picture],
+                std::iter::empty(),
+            ),
+            Some(StartupTooltip::resource("IDS_MSG_MAP_DESC"))
+        );
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                button_point,
+                std::iter::empty(),
+                [picture],
+                [ScenSelMapScenarioTooltip {
+                    bounds: button,
+                    scenario_name: Some("The Mine"),
+                }],
+            ),
+            Some(StartupTooltip::formatted_resource(
+                "IDS_MSG_MAP_STARTSCEN",
+                ["The Mine"]
+            ))
+        );
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                button_point,
+                std::iter::empty(),
+                [picture],
+                [ScenSelMapScenarioTooltip {
+                    bounds: button,
+                    scenario_name: None,
+                }],
+            ),
+            None,
+            "an untipped button blocks the MapPic sibling beneath it"
+        );
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                button_point,
+                [button],
+                [picture],
+                [ScenSelMapScenarioTooltip {
+                    bounds: button,
+                    scenario_name: Some("The Mine"),
+                }],
+            ),
+            None,
+            "the selection TextWindow is added last and blocks map siblings"
+        );
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                crate::GuiPoint::new(10.0, 10.0),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+            ),
+            None,
+            "a fullscreen map background is not a MapPic tooltip target"
+        );
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                crate::GuiPoint::new(
+                    (layout.map_sheet.x - 1) as f32,
+                    (layout.map_sheet.y + 11) as f32,
+                ),
+                std::iter::empty(),
+                [GuiRect::new(
+                    (layout.map_sheet.x - 5) as f32,
+                    (layout.map_sheet.y + 10) as f32,
+                    10.0,
+                    10.0,
+                )],
+                std::iter::empty(),
+            ),
+            None,
+            "the active Tabular sheet clips every map descendant"
+        );
+
+        let fractional = GuiRect::new(
+            layout.map_sheet.x as f32 + 10.75,
+            layout.map_sheet.y as f32 + 20.25,
+            2.1,
+            3.1,
+        );
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                crate::GuiPoint::new(
+                    (layout.map_sheet.x + 10) as f32,
+                    (layout.map_sheet.y + 20) as f32,
+                ),
+                std::iter::empty(),
+                [fractional],
+                std::iter::empty(),
+            ),
+            Some(StartupTooltip::resource("IDS_MSG_MAP_DESC")),
+            "FLOAT_RECT conversion truncates the origin"
+        );
+        assert_eq!(
+            scen_sel_map_tooltip_at(
+                &layout,
+                crate::GuiPoint::new(
+                    (layout.map_sheet.x + 13) as f32,
+                    (layout.map_sheet.y + 20) as f32,
+                ),
+                std::iter::empty(),
+                [fractional],
+                std::iter::empty(),
+            ),
+            None,
+            "the ceil(right)-floor(left) width remains half-open"
+        );
     }
 
     // ScenListItem (C4StartupScenSelDlg.cpp:1210-1238): 26px row, the 24x24
