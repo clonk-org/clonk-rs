@@ -28579,6 +28579,23 @@ impl Engine {
     }
 
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
+        self.advance_tick()?;
+        let mut snapshot = self.snapshot();
+        self.finish_tick_presentation(Some(&mut snapshot));
+        Ok(snapshot)
+    }
+
+    /// Advance one simulation frame without constructing its presentation
+    /// snapshot. Presentation requests are still consumed and audio registry
+    /// state is still updated exactly as if the caller had discarded the
+    /// value returned by [`Engine::tick`].
+    pub fn tick_without_snapshot(&mut self) -> Result<(), EngineError> {
+        self.advance_tick()?;
+        self.finish_tick_presentation(None);
+        Ok(())
+    }
+
+    fn advance_tick(&mut self) -> Result<(), EngineError> {
         self.surface_pending_runtime_flash_boundary()?;
         // The previous frame's C4Landscape::Draw ran DoRelights before its
         // blit. Start the new simulation frame after that presentation
@@ -30262,9 +30279,12 @@ impl Engine {
         if self.game_over_triggered && !self.game_evaluated {
             self.evaluate_game()?;
         }
-        let mut snapshot = self.snapshot();
-        snapshot.hud.scoreboard_presentations = self.take_scoreboard_presentations();
-        snapshot.menu_requests = self.pending_menu_requests.drain(..).collect();
+        Ok(())
+    }
+
+    fn finish_tick_presentation(&mut self, snapshot: Option<&mut SimulationSnapshot>) {
+        let scoreboard_presentations = self.take_scoreboard_presentations();
+        let menu_requests = self.pending_menu_requests.drain(..).collect();
         for command in &self.pending_audio {
             match command {
                 AudioCommand::PlaySound {
@@ -30281,8 +30301,12 @@ impl Engine {
                 _ => {}
             }
         }
-        snapshot.audio = self.pending_audio.drain(..).collect();
-        Ok(snapshot)
+        let audio = self.pending_audio.drain(..).collect();
+        if let Some(snapshot) = snapshot {
+            snapshot.hud.scoreboard_presentations = scoreboard_presentations;
+            snapshot.menu_requests = menu_requests;
+            snapshot.audio = audio;
+        }
     }
 
     pub fn object_snapshot(&self, id: ObjectId) -> Option<ObjectSnapshot> {

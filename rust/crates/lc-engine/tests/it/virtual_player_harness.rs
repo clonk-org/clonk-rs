@@ -1,7 +1,7 @@
 use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 use lc_engine::{
-    Definition, Engine, ObjectId, PlayerConfig, SpawnConfig, COM_DIG, COM_DOWN, COM_RIGHT,
-    COM_SPECIAL,
+    AudioCommand, Definition, Engine, MenuRequest, MenuRequestKind, ObjectId, PlayerConfig,
+    SpawnConfig, COM_DIG, COM_DOWN, COM_RIGHT, COM_SPECIAL,
 };
 use lc_script::Value;
 use std::error::Error;
@@ -52,6 +52,50 @@ fn local(engine: &Engine, object: ObjectId, name: &str) -> Option<Value> {
     engine
         .object_snapshot(object)
         .and_then(|snapshot| snapshot.local_vars.get(name).cloned())
+}
+
+#[test]
+fn snapshotless_tick_matches_a_discarded_snapshot_and_drains_frame_output(
+) -> Result<(), Box<dyn Error>> {
+    let (mut snapshot_engine, snapshot_crew) = fixture()?;
+    let (mut snapshotless_engine, snapshotless_crew) = fixture()?;
+    let audio = |target| AudioCommand::PlaySound {
+        name: "SnapshotlessTick".to_owned(),
+        target: Some(target),
+        volume: 73,
+        looped: false,
+        multiple: false,
+        custom_falloff: None,
+    };
+    let menu = |crew_id| MenuRequest {
+        crew_id,
+        owner: 1,
+        kind: MenuRequestKind::Construction,
+    };
+    snapshot_engine.pending_audio.push(audio(snapshot_crew));
+    snapshotless_engine
+        .pending_audio
+        .push(audio(snapshotless_crew));
+    snapshot_engine
+        .pending_menu_requests
+        .push(menu(snapshot_crew));
+    snapshotless_engine
+        .pending_menu_requests
+        .push(menu(snapshotless_crew));
+
+    let emitted = snapshot_engine.tick()?;
+    snapshotless_engine.tick_without_snapshot()?;
+
+    assert_eq!(emitted.audio, vec![audio(snapshot_crew)]);
+    assert_eq!(emitted.menu_requests, vec![menu(snapshot_crew)]);
+    assert_eq!(snapshotless_engine.snapshot(), snapshot_engine.snapshot());
+
+    let snapshot_frame = snapshot_engine.tick()?;
+    let snapshotless_frame = snapshotless_engine.tick()?;
+    assert_eq!(snapshotless_frame, snapshot_frame);
+    assert!(snapshotless_frame.audio.is_empty());
+    assert!(snapshotless_frame.menu_requests.is_empty());
+    Ok(())
 }
 
 #[test]

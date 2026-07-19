@@ -62028,6 +62028,7 @@ mod tests {
         EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot,
         ObjectStatus, PlayerState, PlayerStatus, ScriptError, SimulationSnapshot, Vector2,
     };
+    use lc_graphics::clonk_font::{ClonkFont, ClonkFontRole, GlyphCell};
     use lc_script::Value;
     use parking_lot::ReentrantMutex;
     use std::collections::HashMap;
@@ -63286,7 +63287,7 @@ mod tests {
 
     #[test]
     fn mouse_fog_blocks_all_four_landscape_boundaries_even_when_disabled() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let owner = app.local_owner;
         app.engine
             .player_mut(owner)
@@ -69416,7 +69417,7 @@ func Award()
 
     #[test]
     fn hud_game_time_reads_the_engine_snapshot() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.snapshot.game_time = 61;
         assert_eq!(app.game_time_seconds(), 61);
     }
@@ -73140,7 +73141,7 @@ func Award()
         // C4GameMessage::Draw compares C4GM_*Player's raw Player field to
         // each viewport owner. FnPlayerMessage(42, ...) therefore reaches no
         // normal viewport when player 42 is absent (C4GameMessage.cpp:104,180).
-        let app = new_running_sandbox_app();
+        let app = new_state_only_running_sandbox_app();
         let viewports = [ActiveViewportProjection {
             index: 0,
             owner: app.local_owner,
@@ -78445,7 +78446,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn unstaged_host_connection_never_enters_generic_lobby() {
-        let mut app = new_classic_menu_app(800, 600);
+        let mut app = new_real_classic_menu_app(800, 600);
         app.open_network_game_dialog();
         let (manager, _events) = NetworkManager::test_stub();
         let (sender, receiver) = mpsc::channel();
@@ -80017,7 +80018,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn classic_host_zero_countdown_enters_go_without_a_countdown_packet() {
         let _lock = env_lock().lock();
-        let mut app = new_menu_app(640, 480);
+        let mut app = new_discovered_menu_app(640, 480);
         let scenario = app
             .scenario_catalog
             .values()
@@ -81272,7 +81273,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn classic_lobby_team_combo_filters_teams_and_submits_the_full_player_packet() {
-        let mut app = new_menu_app(640, 480);
+        let mut app = new_real_menu_app(640, 480);
         let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
         let team_rect = test_lobby_team_rect(&mut app);
         let (network, _events, mut commands) =
@@ -85207,7 +85208,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         fs::create_dir_all(&scenario).expect("create scenario group");
         fs::write(scenario.join("A.ogg"), silent_pcm_wav(20)).expect("write A");
         fs::write(scenario.join("B.ogg"), silent_pcm_wav(20)).expect("write B");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let synchronized_before = app.engine.snapshot().rng;
 
         app.runtime_music_enabled = true;
@@ -86050,7 +86051,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_tooltip_app_uses_the_shared_cmouse_clock_and_runtime_resources() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let button = lc_frontend::main_menu_layout(640, 480).buttons[0];
         let point = GuiPoint::new(
             (button.x + button.w / 2) as f32,
@@ -86140,7 +86141,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_fullscreen_title_tooltips_follow_active_language_amp_rules() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         for (key, value) in [
             ("IDS_DLG_NETSTART", "&Netzwerkstart"),
             ("IDS_DLG_ABOUT", "&Programminfo"),
@@ -86222,7 +86223,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn scenario_title_tooltip_tracks_native_readd_z_order_and_fresh_open_reset() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         app.open_scenario_browser();
         let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
         let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
@@ -86260,7 +86261,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn scenario_scroll_wheel_clears_hover_ownership_until_pointer_moves() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         app.open_scenario_browser();
         let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
         let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, fonts);
@@ -86289,7 +86290,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn missing_scenario_bootstrap_asset_precedes_generic_fallback() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         Arc::get_mut(&mut app.assets)
             .expect("frontend assets are app-owned")
             .startup_dialog_images
@@ -86478,7 +86479,33 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     fn new_menu_app(width: u32, height: u32) -> GameApp {
-        let mut app = GameApp::new(
+        let mut app = new_state_only_menu_app(width, height);
+        install_synthetic_classic_test_assets(&mut app);
+        app
+    }
+
+    fn new_real_menu_app(width: u32, height: u32) -> GameApp {
+        let mut app = new_state_only_menu_app(width, height);
+        install_classic_test_assets(&mut app);
+        app
+    }
+
+    fn new_state_only_menu_app(width: u32, height: u32) -> GameApp {
+        new_menu_app_with_frontend_scenarios(width, height, Some(Vec::new()))
+    }
+
+    fn new_discovered_menu_app(width: u32, height: u32) -> GameApp {
+        let mut app = new_menu_app_with_frontend_scenarios(width, height, None);
+        install_classic_test_assets(&mut app);
+        app
+    }
+
+    fn new_menu_app_with_frontend_scenarios(
+        width: u32,
+        height: u32,
+        frontend_scenarios: Option<Vec<FrontendScenario>>,
+    ) -> GameApp {
+        let mut app = GameApp::new_with_frontend_scenarios(
             width,
             height,
             AudioOptions::default(),
@@ -86489,9 +86516,9 @@ public func Grant(password) { return GainMissionAccess(password); }
                 network: None,
                 record_enabled: false,
             },
+            frontend_scenarios,
         )
         .expect("initialise app");
-        install_classic_test_assets(&mut app);
         wait_for_menu(&mut app);
         app
     }
@@ -86613,6 +86640,102 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
     }
 
+    fn synthetic_classic_test_font(
+        line_height: i32,
+        role: ClonkFontRole,
+        shadowed: bool,
+    ) -> ClonkFont {
+        let mut font = ClonkFont::new(line_height).with_role(role);
+        if !shadowed {
+            font.cell_height = line_height;
+            font.h_space = 0;
+        }
+        let width = (line_height / 2).max(1);
+        let opaque = GlyphCell {
+            width,
+            pixels: vec![
+                Color::opaque(255, 0, 255);
+                usize::try_from(width * font.cell_height).expect("synthetic glyph dimensions")
+            ],
+        };
+        let transparent = GlyphCell {
+            width,
+            pixels: vec![
+                Color::transparent();
+                usize::try_from(width * font.cell_height).expect("synthetic glyph dimensions")
+            ],
+        };
+        for ch in ' '..='~' {
+            font.add_glyph(ch, if ch == 'A' { opaque.clone() } else { transparent.clone() });
+        }
+        font.add_glyph('\u{a6}', transparent.clone());
+        font.set_missing_glyph(transparent);
+        font
+    }
+
+    fn synthetic_classic_test_assets() -> FrontendAssets {
+        let mut assets = FrontendAssets::load(None);
+        let fonts = Arc::new(lc_frontend::ClonkFontSet {
+            title: synthetic_classic_test_font(34, ClonkFontRole::GuiTitle, true),
+            caption: synthetic_classic_test_font(25, ClonkFontRole::GuiCaption, true),
+            text: synthetic_classic_test_font(22, ClonkFontRole::GuiText, true),
+            main_small: synthetic_classic_test_font(20, ClonkFontRole::GuiMainSmall, true),
+            mini: synthetic_classic_test_font(18, ClonkFontRole::GuiMini, true),
+        });
+        let tooltip = Arc::new(synthetic_classic_test_font(
+            22,
+            ClonkFontRole::GuiTooltip,
+            false,
+        ));
+        assets.clonk_fonts = Some(Arc::clone(&fonts));
+        assets.startup_clonk_fonts = Some(fonts);
+        assets.global_tooltip_font = Some(Arc::clone(&tooltip));
+        assets.startup_global_tooltip_font = Some(tooltip);
+
+        for (name, width, height) in [
+            ("GUICaption.png", 192, 23),
+            ("GUIButton.png", 128, 32),
+            ("GUIButtonDown.png", 128, 32),
+            ("GUIButtonHighlight.png", 16, 16),
+            ("GUIIcons.png", 240, 360),
+            ("GUIIcons2.png", 256, 320),
+            ("GUIScroll.png", 32, 48),
+            ("GUIContext.png", 32, 16),
+            ("GUISubmenu.png", 8, 16),
+            ("GUICheckbox.png", 128, 32),
+            ("GUIBigArrows.png", 76, 40),
+            ("GUIProgress.png", 32, 32),
+            ("GUISpinBoxArrow.png", 13, 8),
+        ] {
+            assets.startup_dialog_images.insert(
+                name.to_string(),
+                ImageData::new(width, height, vec![0; width as usize * height as usize * 4]),
+            );
+        }
+        assets.button_highlight = assets
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .cloned();
+        assets.game_over_button_highlight = assets
+            .button_highlight
+            .as_ref()
+            .map(lc_frontend::classic_gui::blacken_transparent_pixels);
+        assets
+    }
+
+    fn install_synthetic_classic_test_assets(app: &mut GameApp) {
+        static SYNTHETIC_CLASSIC_TEST_ASSETS: OnceLock<FrontendAssets> = OnceLock::new();
+        let assets = Arc::new(
+            SYNTHETIC_CLASSIC_TEST_ASSETS
+                .get_or_init(synthetic_classic_test_assets)
+                .clone(),
+        );
+        assets
+            .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+            .expect("synthetic process-global GUI fixture is complete");
+        apply_test_frontend_assets(app, assets);
+    }
+
     fn install_classic_test_assets(app: &mut GameApp) {
         static CLASSIC_TEST_ASSETS: OnceLock<FrontendAssets> = OnceLock::new();
         let assets = Arc::new(
@@ -86642,6 +86765,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             .require_classic_ingame_menu_resources()
             .expect("repository ships exact in-game menu resources");
 
+        apply_test_frontend_assets(app, assets);
+    }
+
+    fn apply_test_frontend_assets(app: &mut GameApp, assets: Arc<FrontendAssets>) {
         let mut main_menu = StartupMainMenu::new(assets.font_arc(), assets.button_textures());
         main_menu.set_highlight_texture(assets.button_highlight.clone());
         main_menu.set_clonk_fonts(assets.clonk_fonts.clone());
@@ -86659,6 +86786,28 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     fn new_classic_menu_app(width: u32, height: u32) -> GameApp {
         new_menu_app(width, height)
+    }
+
+    fn new_real_classic_menu_app(width: u32, height: u32) -> GameApp {
+        new_real_menu_app(width, height)
+    }
+
+    #[test]
+    fn synthetic_classic_test_assets_satisfy_only_the_global_gui_guard() {
+        let mut app = new_menu_app(320, 200);
+        assert!(
+            app.assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .is_ok()
+        );
+        assert!(app.assets.require_classic_startup_bootstrap_resources().is_err());
+        assert!(app.assets.require_classic_startup_main_resources().is_err());
+        assert!(app.assets.require_classic_ingame_menu_resources().is_err());
+        assert!(app.assets.require_classic_game_over_resources().is_err());
+        assert!(
+            Arc::get_mut(&mut app.assets).is_some(),
+            "each app owns a mutable outer asset bundle"
+        );
     }
 
     fn assert_engine_parity_boundary(error: EngineError, expected: ClassicParityBoundary) {
@@ -86773,7 +86922,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn legacy_plaintext_irc_chat_is_intentionally_dropped_at_retained_entry_points() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let boundary = ClassicParityBoundary::StartupSubscreen(
             ClassicStartupSubscreen::NetworkGameChat,
         );
@@ -86810,7 +86959,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(render_error.to_string(), expected);
         assert!(frame.iter().all(|byte| *byte == 0xa5));
 
-        let mut lobby_app = new_menu_app(640, 480);
+        let mut lobby_app = new_real_menu_app(640, 480);
         install_test_classic_host_lobby(&mut lobby_app);
         lobby_app
             .process_classic_lobby_actions(vec![ClassicLobbyAction::Chat(
@@ -86935,7 +87084,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn unported_startup_subscreens_precede_status_and_matching_cache_pixels() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let cases = [ClassicStartupSubscreen::NetworkGameChat];
 
         for (index, subscreen) in cases.into_iter().enumerate() {
@@ -86980,7 +87129,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn missing_startup_models_precede_status_and_matching_cache_pixels() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let cases = [
             (StartupView::NetworkGame, "C4StartupNetDlg"),
             (StartupView::PlayerSelection, "C4StartupPlrSelDlg"),
@@ -87099,7 +87248,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
 
         app.handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::ALT)
             .expect("hold unsupported Ctrl+Alt mask");
@@ -88171,7 +88320,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn player_new_properties_enter_f2_and_insert_open_the_modal() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let model = lc_frontend::startup_plrsel::PlrSelPlayer {
             name: "Entry Player".to_string(),
             activated: false,
@@ -88353,7 +88502,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn modal_and_definition_overlays_never_replace_the_base_frame_cache() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let mut base = vec![0_u8; 640 * 480 * 4];
         app.render(&mut base).expect("cache main-menu base");
         let base_cache = app.menu_frame_cache.as_ref().unwrap().frame.clone();
@@ -88401,7 +88550,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn production_gamepad_batch_invalidates_cache_once_when_switching_options_sheet() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let mut frame = vec![0_u8; 640 * 480 * 4];
         app.render(&mut frame).expect("cache supported main menu");
         let main_version = app.menu_render_version;
@@ -88495,7 +88644,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn options_program_font_combos_accept_native_alt_open_bindings() {
         use lc_frontend::startup_options_dlg::OptionsProgramFocusTarget;
 
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         app.open_options_menu();
         for expected in [
             OptionsProgramFocusTarget::LanguageCombo,
@@ -88689,7 +88838,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_main_missing_classic_resources_fails_before_rendering() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
         assets.menu_background = None;
         assets.logo = None;
@@ -88864,7 +89013,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn global_gui_bootstrap_precedes_all_startup_roots_cache_and_native_pixels() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut initial = vec![0_u8; 320 * 200 * 4];
         app.render(&mut initial).expect("populate startup cache");
         remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
@@ -89602,7 +89751,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_bootstrap_issues_are_typed_and_aggregated_in_cpp_init_order() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
 
         // Remove in deliberately non-oracle order. The boundary must still
@@ -89663,7 +89812,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pixels() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut initial = vec![0_u8; 320 * 200 * 4];
         app.render(&mut initial)
             .expect("populate supported startup cache");
@@ -89739,7 +89888,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_bootstrap_precedes_recursive_startup_children() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         for child in [
             RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
@@ -89776,7 +89925,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn integer_scale_main_requires_matching_native_fonts_before_cache_selection() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         Arc::make_mut(&mut app.assets).startup_native_font_source = None;
         let cached = vec![0x42; 320 * 200 * 4];
         app.menu_frame_cache = Some(MenuFrameCache {
@@ -89813,7 +89962,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_status_boundary_precedes_supported_view_cached_pixels() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut initial = vec![0_u8; 320 * 200 * 4];
         app.render(&mut initial).expect("populate main-menu cache");
         let cached = app
@@ -89883,7 +90032,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn startup_status_boundary_precedes_native_main_text_pixels() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         app.status_text = "native-pass diagnostic".to_string();
         let mut frame = vec![0x6b; 960 * 600 * 4];
 
@@ -89906,7 +90055,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn network_lobby_empty_status_replays_matching_exact_cache() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
         assert!(app.status_text.is_empty());
@@ -90192,7 +90341,7 @@ ScenInfoArea=70,5,25,90
         let alpha = map_test_scenario(&map_path, "Alpha.c4s", "Alpha Mission");
         let beta = map_test_scenario(&map_path, "Beta.c4s", "Beta Mission");
         let folder = map_test_folder(&map_path, vec![alpha.clone(), beta.clone()]);
-        let mut app = new_menu_app(640, 480);
+        let mut app = new_real_menu_app(640, 480);
         app.mission_access = MissionAccessStore::new("Other; mappass ");
 
         open_map_test_folder(&mut app, folder);
@@ -90676,7 +90825,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
         let crew_id = app
@@ -92851,7 +93000,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         install_native_test_fonts(&mut app, 3.0);
         for label in ["LOWER", "H"] {
             app.push_message_dialog(
@@ -94718,7 +94867,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         app.audio = None;
         app.open_options_menu();
 
@@ -95465,7 +95614,7 @@ ScenInfoArea=70,5,25,90
         // empty Initial PlayerInfo; AllowJoin follows that direct local
         // execution (src/C4Game.cpp:421-438,3847-3876;
         // src/C4Network2Players.cpp:38-49,78-123,160-239).
-        let mut app = new_menu_app(1280, 720);
+        let mut app = new_discovered_menu_app(1280, 720);
         let scenario = app
             .scenario_catalog
             .values()
@@ -95863,7 +96012,7 @@ ScenInfoArea=70,5,25,90
             discovery_port: 0,
             reference_port: occupied.local_addr().expect("occupied address").port(),
         };
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
 
         app.start_network_game_advertiser_with_reference(config, reference);
 
@@ -96257,7 +96406,7 @@ ScenInfoArea=70,5,25,90
         let scenarios = sample_scenarios();
         let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
             .expect("build L038 scenario menu");
-        let mut app = new_menu_app(640, 480);
+        let mut app = new_real_menu_app(640, 480);
         app.menu_state = MenuState::new(menu, scenarios.clone());
         app.scenario_catalog = build_scenario_catalog(&scenarios);
         app.open_scenario_browser_with_mode(selector_mode);
@@ -97469,7 +97618,7 @@ ScenInfoArea=70,5,25,90
             net_dlg_layout, NetDlgConfig, NetDlgController, NetDlgFontMetrics, NetDlgGameEntry,
         };
 
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         let metrics = NetDlgFontMetrics::from_fonts(
             app.assets
                 .clonk_fonts
@@ -97601,7 +97750,7 @@ ScenInfoArea=70,5,25,90
     fn l021_player_selection_wheel_and_held_arrow_route_through_app() {
         use lc_frontend::startup_plrsel::{plrsel_layout, PlrSelController, PlrSelPlayer};
 
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
         app.startup_player_models = (0..20)
             .map(|index| PlrSelPlayer {
                 name: format!("Player {index:02}"),
@@ -99665,7 +99814,7 @@ ScenInfoArea=70,5,25,90
     fn menu_render_replays_cached_frame_for_unchanged_state() {
         lc_core::logging::init();
 
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let len = 320 * 200 * 4;
         let mut fresh = vec![0u8; len];
         let composed = app.render(&mut fresh).expect("first render");
@@ -99721,7 +99870,7 @@ ScenInfoArea=70,5,25,90
         blend_startup_dialog_frames(&underlay, None, &mut incoming_only, 10);
         assert_eq!(incoming_only, [30, 40, 50, 60]);
 
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut main = vec![0_u8; 320 * 200 * 4];
         assert!(app.render(&mut main).expect("present stable Main dialog"));
 
@@ -99779,7 +99928,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.render(&mut frame).expect("present Main");
         app.handle_main_menu_activation(MainMenuItem::About)
@@ -99853,7 +100002,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         app.begin_startup_dialog_fade_in();
         let fade = app.startup_dialog_fade.as_ref().expect("fade-in started");
         assert_eq!(fade.outgoing, None);
@@ -99870,7 +100019,7 @@ ScenInfoArea=70,5,25,90
         app.render(&mut frame).expect("complete initial fade-in");
         assert!(app.startup_dialog_fade.is_none());
 
-        let mut modal_app = new_classic_menu_app(320, 200);
+        let mut modal_app = new_real_classic_menu_app(320, 200);
         modal_app.open_new_startup_player_properties_from(
             StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
         );
@@ -99891,7 +100040,7 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn startup_dialog_fade_preserves_ordered_native_text_at_scaled_output() {
         let scale = 1.5;
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         install_native_test_fonts(&mut app, scale);
         app.graphics.set_presentation_scale(scale);
         let _ = render_ordered_test_frame(&mut app, scale, 480, 300);
@@ -99930,8 +100079,8 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
-        let mut actual_app = new_classic_menu_app(320, 200);
-        let mut expected_app = new_classic_menu_app(320, 200);
+        let mut actual_app = new_real_classic_menu_app(320, 200);
+        let mut expected_app = new_real_classic_menu_app(320, 200);
         let mut scratch = vec![0_u8; 320 * 200 * 4];
         actual_app.render(&mut scratch).expect("present actual Main");
         expected_app
@@ -99984,7 +100133,7 @@ ScenInfoArea=70,5,25,90
         assert_eq!(actual_app.startup_view, StartupView::About);
         assert_eq!(actual_app.startup_dialog_fade.as_ref().unwrap().step, 1);
 
-        let mut options = new_classic_menu_app(320, 200);
+        let mut options = new_real_classic_menu_app(320, 200);
         options.open_options_menu();
         options.render(&mut scratch).expect("present Options immediately");
         options
@@ -100033,7 +100182,7 @@ ScenInfoArea=70,5,25,90
     fn menu_input_invalidates_cached_frame() {
         lc_core::logging::init();
 
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut frame = vec![0u8; 320 * 200 * 4];
         app.render(&mut frame).expect("render");
         let cached_version = app
@@ -100053,7 +100202,7 @@ ScenInfoArea=70,5,25,90
     fn menu_backdrop_restore_matches_full_recomposition() {
         lc_core::logging::init();
 
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let len = 320 * 200 * 4;
         let mut first = vec![0u8; len];
         app.render(&mut first).expect("cold render");
@@ -100083,7 +100232,7 @@ ScenInfoArea=70,5,25,90
     fn menu_resize_renders_at_new_dimensions() {
         lc_core::logging::init();
 
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut frame = vec![0u8; 320 * 200 * 4];
         app.render(&mut frame).expect("render");
         app.resize(400, 300).expect("resize");
@@ -100104,12 +100253,27 @@ ScenInfoArea=70,5,25,90
         ))
     }
 
+    fn new_state_only_running_sandbox_app() -> GameApp {
+        let paths = cached_app_paths().expect("discover sandbox crew definition");
+        new_running_sandbox_app_with_definitions_and_assets(
+            SandboxDefinitionLoad::InstallCrew(paths.as_ref()),
+            false,
+        )
+    }
+
     fn new_lightweight_running_sandbox_app() -> GameApp {
         new_running_sandbox_app_with_definitions(SandboxDefinitionLoad::None)
     }
 
     fn new_running_sandbox_app_with_definitions(
         definition_load: SandboxDefinitionLoad<'_>,
+    ) -> GameApp {
+        new_running_sandbox_app_with_definitions_and_assets(definition_load, true)
+    }
+
+    fn new_running_sandbox_app_with_definitions_and_assets(
+        definition_load: SandboxDefinitionLoad<'_>,
+        install_classic_assets: bool,
     ) -> GameApp {
         // Silent audio: keeps these apps from initialising the global
         // sandbox-music OnceLock while env-guarded tests run in parallel.
@@ -100134,7 +100298,9 @@ ScenInfoArea=70,5,25,90
             Some(Vec::new()),
         )
         .expect("initialise app");
-        install_classic_test_assets(&mut app);
+        if install_classic_assets {
+            install_classic_test_assets(&mut app);
+        }
         // Keep the app itself pathless while choosing exactly how much
         // definition data this fixture needs. The default uses the shipped
         // CLNK for native shape/action/portrait coverage; the explicit
@@ -100236,7 +100402,7 @@ ScenInfoArea=70,5,25,90
     fn forced_recording_writes_replay_group_and_league_sha() {
         let directory = tempdir().expect("record directory");
         let output_path = directory.path().join("001-Scenario.c4s");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_test_recording_template(&mut app, output_path.clone());
 
         app.start_recording(true).unwrap();
@@ -100283,7 +100449,7 @@ ScenInfoArea=70,5,25,90
         let directory = tempdir().expect("record directory");
         let output_path = directory.path().join("001-Streamed.c4s");
         let (endpoint, request) = serve_one_record_stream_upload();
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_test_recording_template(&mut app, output_path.clone());
         let initial_name = LegacyCString::from_bytes(b"Records/001-Streamed.c4s".to_vec()).unwrap();
         let initial_chunk = lc_network::encode_league_stream_file_chunk(
@@ -100437,7 +100603,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn league_stream_player_strip_requires_direct_crew_and_flattens_nested_valid_crew() {
-        let app = new_running_sandbox_app();
+        let app = new_state_only_running_sandbox_app();
         assert!(app.engine.definition_name("CLNK").is_some());
 
         let mut no_crew = MutableGroup::new("Empty.c4p");
@@ -100526,7 +100692,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn forced_recording_rejects_missing_prepared_storage() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         assert_eq!(
             app.start_recording(true),
             Err("recording storage was not prepared".to_string())
@@ -100548,7 +100714,7 @@ ScenInfoArea=70,5,25,90
         fs::write(&player_path, player_group.pack().expect("pack player"))
             .expect("write player group");
         let output_path = directory.path().join("001-Resource.c4s");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_test_recording_template(&mut app, output_path.clone());
         app.admission_resources.mark_complete(17, player_path);
         app.start_recording(true).unwrap();
@@ -100596,7 +100762,7 @@ ScenInfoArea=70,5,25,90
     fn synchronize_record_request_starts_with_the_executing_control_list() {
         let directory = tempdir().expect("record directory");
         let output_path = directory.path().join("001-Runtime.c4s");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.recording_enabled = false;
         install_test_recording_template(&mut app, output_path.clone());
         let synchronize = lc_engine::SynchronizeControlData {
@@ -100625,7 +100791,7 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn synchronized_runtime_join_clearance_does_not_request_a_record() {
         let directory = tempdir().expect("record directory");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_test_recording_template(
             &mut app,
             directory.path().join("001-RuntimeJoin.c4s"),
@@ -101050,7 +101216,7 @@ ScenInfoArea=70,5,25,90
         // CheckCompleteCtrl advances CtrlReady only after Control.PreExecute.
         // A raw JoinPlayer blocked on its resource therefore does not prevent
         // CheckStatusReached from stopping at the barrier.
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (events, mut commands) = install_running_network_stub(&mut app, 0, 0, 1);
         app.control_clients.register(0, true, false);
         let resource_id = 91;
@@ -101134,7 +101300,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn runtime_status_report_failure_remains_stopped_and_unreached() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (events, commands) = install_running_network_stub(&mut app, 7, 0, 1);
         drop(commands);
         let pause = lc_network::NetworkStatus {
@@ -101307,7 +101473,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn message_control_authenticates_players_and_applies_running_visibility() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_message_fixture(&mut app);
 
         let spoofed =
@@ -103188,7 +103354,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn message_control_sound_uses_global_cooldown_before_per_client_mute() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_message_fixture(&mut app);
         app.control_messages = ControlMessageState::new(Duration::from_secs(5), false);
         let start = Instant::now();
@@ -103240,7 +103406,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn message_control_host_system_and_inactive_attention_match_cpp() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_message_fixture(&mut app);
         app.window_active = false;
 
@@ -103353,7 +103519,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn portrait_crew_label_decodes_native_info_name_for_presentation() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let crew = app
             .engine
             .crew_cursor(app.local_owner)
@@ -105311,7 +105477,7 @@ ScenInfoArea=70,5,25,90
             "non-keyboard controls pass through and Keyboard1/3/4/2 map to row-major order",
         );
 
-        let app = new_running_sandbox_app();
+        let app = new_state_only_running_sandbox_app();
         let mut snapshot = app.snapshot.clone();
         let template = snapshot
             .players
@@ -105387,7 +105553,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn replay_film_view_retargets_only_the_existing_primary_viewport() {
-        let app = new_running_sandbox_app();
+        let app = new_state_only_running_sandbox_app();
         let mut snapshot = app.snapshot.clone();
         let local_owner = app.local_owner;
         let local = snapshot
@@ -106139,7 +106305,7 @@ ScenInfoArea=70,5,25,90
         // registry is reused when the game starts; the later synchronized
         // JoinPlayer resolves its InfoID there (src/C4Network2Players.cpp:245-269;
         // src/C4Game.cpp:2392-2423).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         let info_id = 41;
@@ -106174,7 +106340,7 @@ ScenInfoArea=70,5,25,90
         // HandleJoinData retains the synchronized parameters and dynamic core;
         // InitNetworkFromReference retrieves and overlays those resources later
         // (src/C4Network2.cpp:281-344,1574-1623).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         let host_config = lc_network::HostConfig::default();
@@ -106238,7 +106404,7 @@ ScenInfoArea=70,5,25,90
         // entries are replaced and the raw LastPlayerID counter is retained
         // (src/C4Network2.cpp:1574-1620; src/C4Game.cpp:64-70;
         // src/C4PlayerInfo.cpp:649-665).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.control_clients.register(99, true, false);
         app.network_client_activity.mark_activated(99, 123);
         app.control_player_infos
@@ -106336,7 +106502,7 @@ ScenInfoArea=70,5,25,90
         // every authoritative C4ClientCore field before DoLobby renders the
         // participant list (src/C4Network2.cpp:1595-1602;
         // src/C4Client.cpp:284-290,321-350).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
         let mut lobby = NetworkLobbyState::new(7, "stale local".to_string(), false);
@@ -106466,7 +106632,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn direct_and_synchronized_player_info_register_loadable_resources() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -106546,7 +106712,7 @@ ScenInfoArea=70,5,25,90
         // registered non-player resource is complete, so OnReadyCheck cannot
         // broadcast or mutate local readiness (src/C4GameLobby.cpp:779-824,
         // 329-343).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -106572,7 +106738,7 @@ ScenInfoArea=70,5,25,90
         // UpdateResourceProgress then observes those same resources until all
         // non-player loads finish (src/C4Network2.cpp:1612-1620;
         // src/C4GameLobby.cpp:779-802).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -106672,7 +106838,7 @@ ScenInfoArea=70,5,25,90
         // RequestReadyCheck aborts an active countdown, leaves the host's
         // readiness untouched, clears every non-host, and broadcasts Request
         // from the local host (src/C4GameLobby.cpp:1072-1088).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
         lobby.register_peer(7, "Player".to_string(), ParticipantKind::Player);
         lobby.register_peer(9, "Observer".to_string(), ParticipantKind::Observer);
@@ -106723,7 +106889,7 @@ ScenInfoArea=70,5,25,90
         // mutates lobby state; the stock configured default is ten seconds
         // (src/C4GameLobby.cpp:614-627; src/C4Config.cpp:394-400;
         // src/C4Cooldown.h:54-64).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
         lobby.register_peer(7, "Player".to_string(), ParticipantKind::Player);
         lobby.participants.get_mut(&7).unwrap().ready = true;
@@ -107103,7 +107269,7 @@ ScenInfoArea=70,5,25,90
         // MainDlg::OnReadyCheck broadcasts the local Client ID and new
         // Ready/NotReady state, then updates the local lobby row
         // (src/C4GameLobby.cpp:329-343).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -107171,7 +107337,7 @@ ScenInfoArea=70,5,25,90
         // value before installing its one-second callback
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:442-472,1111-1131;
         // src/C4Config.cpp:276).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107211,7 +107377,7 @@ ScenInfoArea=70,5,25,90
         // host-owned countdown
         // (pristine 9ffa0a5d src/C4StartupNetDlg.cpp:1111-1114;
         // src/C4StartupScenSelDlg.cpp:1635-1666; src/C4Game.cpp:421-438).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             player_name: "Host".to_string(),
@@ -107373,7 +107539,7 @@ ScenInfoArea=70,5,25,90
         // C4ClientCore initializes LobbyReady=false independently of Observer;
         // only C4PacketReadyCheck changes that field
         // (src/C4Client.cpp:32-36; src/C4Network2.cpp:1625-1635,1703-1731).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
         app.network_lobby = Some(NetworkLobbyState::new(7, "Local".to_string(), false));
@@ -107413,7 +107579,7 @@ ScenInfoArea=70,5,25,90
         // HandleReadyCheck looks up packet.Client and applies IsReady to that
         // exact C4Client; it does not substitute the transport sender
         // (src/C4Network2.cpp:1625-1635,1703-1731).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
         let mut lobby = NetworkLobbyState::new(7, "Local".to_string(), false);
@@ -107441,7 +107607,7 @@ ScenInfoArea=70,5,25,90
         // after the changed client leaves every relevant client ready
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:868-893;
         // src/C4Network2.cpp:1721-1729).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107494,7 +107660,7 @@ ScenInfoArea=70,5,25,90
         // MainDlg::OnClientReadyStateChange skips a non-host client when
         // GetInfoByClientID has no players for it
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-888).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107542,7 +107708,7 @@ ScenInfoArea=70,5,25,90
         // MainDlg::OnClientReadyStateChange always includes the host in its
         // readiness scan, even when the host has no C4ClientPlayerInfos entry
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107586,7 +107752,7 @@ ScenInfoArea=70,5,25,90
         // MainDlg::OnClientReadyStateChange includes a non-host client when
         // its C4ClientPlayerInfos contains at least one player
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107636,7 +107802,7 @@ ScenInfoArea=70,5,25,90
         // actual state transition
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:329-344,868-893;
         // src/C4Network2.cpp:1721-1729).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107679,7 +107845,7 @@ ScenInfoArea=70,5,25,90
         // only when it is the client whose ready state actually changed
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-885;
         // src/C4Network2.cpp:1721-1729).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107878,7 +108044,7 @@ ScenInfoArea=70,5,25,90
         // unready client and aborts only when that exact client changed
         // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-885;
         // src/C4Network2.cpp:1721-1729).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -107943,7 +108109,7 @@ ScenInfoArea=70,5,25,90
         // changes which clients a later ready transition will consider
         // (pristine 9ffa0a5d src/C4Network2.cpp:1721-1729;
         // src/C4GameLobby.cpp:868-893).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let scenario = FrontendScenario::fallback();
         app.scenario_catalog
             .insert(scenario.identifier.clone(), scenario.clone());
@@ -108100,7 +108266,7 @@ ScenInfoArea=70,5,25,90
         // synchronized Game.Parameters.MaxPlayers before adding New Player;
         // it never substitutes the scenario default after JoinData
         // (pristine 9ffa0a5d src/C4MainMenu.cpp:643-686).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.network_max_players = 1;
         app.snapshot.players = vec![lc_engine::PlayerState {
             id: app.local_owner,
@@ -108710,7 +108876,7 @@ ScenInfoArea=70,5,25,90
         // part of the running round (pristine 9ffa0a5d
         // src/C4MainMenu.cpp:643-686; src/C4GameParameters.h:126-173;
         // src/C4GameControl.cpp:93-127; src/C4Network2.cpp:1595-1602).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, _commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -108802,7 +108968,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn league_update_applies_projected_gains_and_directly_rebroadcasts_owners() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(0);
         app.network = Some(manager);
@@ -108883,7 +109049,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn client_league_round_result_packet_applies_persistent_evaluation_fields() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -108972,7 +109138,7 @@ ScenInfoArea=70,5,25,90
             ..Default::default()
         };
 
-        let mut host = new_running_sandbox_app();
+        let mut host = new_state_only_running_sandbox_app();
         let (manager, event_tx, commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(0);
         host.network = Some(manager);
@@ -108999,7 +109165,7 @@ ScenInfoArea=70,5,25,90
         assert_eq!(players.client_id, 8);
         assert_eq!(players.players[0].id, 41);
 
-        let mut client = new_running_sandbox_app();
+        let mut client = new_state_only_running_sandbox_app();
         let (manager, event_tx, commands) =
             NetworkManager::test_stub_with_league_commands_for_client_id(7);
         client.network = Some(manager);
@@ -109251,7 +109417,7 @@ ScenInfoArea=70,5,25,90
             icon_spec: lc_engine::LegacyCString::default(),
             max_players: 0,
         };
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.player_name = "Exact host maker".to_string();
         app.control_clients.register(0, true, false);
         app.control_player_infos.replace_snapshot(
@@ -109354,7 +109520,7 @@ ScenInfoArea=70,5,25,90
         // it happens before DoLobby reaches and acknowledges GS_Lobby
         // (src/C4Network2Players.cpp:38-49,78-137;
         // src/C4Game.cpp:3840-3844).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -110257,7 +110423,7 @@ ScenInfoArea=70,5,25,90
         // C4ControlPlayerInfo with CDT_Direct and executes that host-authored
         // control synchronously (src/C4Network2Players.cpp:160-239;
         // src/C4Control.cpp:1264-1282).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         event_tx
@@ -110304,7 +110470,7 @@ ScenInfoArea=70,5,25,90
             id,
             ..Default::default()
         };
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.network_max_players = 8;
         app.control_player_infos.replace_snapshot(
             2,
@@ -110397,7 +110563,7 @@ ScenInfoArea=70,5,25,90
         let legacy = |bytes: &[u8]| {
             lc_engine::LegacyCString::from_bytes(bytes.to_vec()).expect("NUL-free fixture")
         };
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.network_is_league = true;
         app.network_league_name = b"Cup".to_vec();
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -110516,7 +110682,7 @@ ScenInfoArea=70,5,25,90
         // ID allocation/normalization and the internal gain reset precede that
         // return, but neither auth checks nor direct broadcasts occur
         // (src/C4Network2Players.cpp:160-239).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.network_is_league = true;
         app.network_league_name = b"Cup".to_vec();
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -110575,7 +110741,7 @@ ScenInfoArea=70,5,25,90
         // src/C4PlayerInfoConflicts.cpp:193-344).
         let same_name =
             lc_engine::LegacyCString::from_bytes(b"Same".to_vec()).expect("valid player name");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_player_infos.replace_snapshot(
             1,
             [lc_engine::PlayerInfoControlData {
@@ -110689,7 +110855,7 @@ ScenInfoArea=70,5,25,90
             filename: lc_engine::LegacyCString::from_bytes(b"New.c4p".to_vec()).unwrap(),
             ..Default::default()
         };
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_clients.register(3, true, false);
         app.control_player_infos.replace_snapshot(
             1,
@@ -110768,7 +110934,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn same_client_add_echo_normalizes_and_issues_only_its_direct_snapshot() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_clients.register(3, true, false);
         app.control_player_infos.replace_snapshot(0, []);
         let resources = [
@@ -110897,7 +111063,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn stale_add_echo_joins_its_snapshot_without_normalizing_later_replacement() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_clients.register(3, true, false);
         app.control_player_infos.replace_snapshot(0, []);
         let resource = |id, filename: &[u8]| lc_engine::NetworkResourceCore {
@@ -111030,7 +111196,7 @@ ScenInfoArea=70,5,25,90
         joined_thirty.color = 0x0000_00f4;
         joined_thirty.original_color = 0x0000_00f4;
 
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_clients.register(3, true, false);
         app.control_clients.register(4, true, false);
         app.control_player_infos.replace_snapshot(
@@ -111147,7 +111313,7 @@ ScenInfoArea=70,5,25,90
             ..Default::default()
         };
 
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_clients.register(3, true, false);
         app.control_player_infos.replace_snapshot(
             7,
@@ -111195,7 +111361,7 @@ ScenInfoArea=70,5,25,90
     fn host_updated_admission_emits_clean_full_follow_up_after_direct_apply() {
         let same_name =
             lc_engine::LegacyCString::from_bytes(b"Same".to_vec()).expect("valid player name");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_player_infos.replace_snapshot(
             1,
             [lc_engine::PlayerInfoControlData {
@@ -111261,7 +111427,7 @@ ScenInfoArea=70,5,25,90
         // present in the next client's JoinData after its direct control runs
         // (src/C4Game.cpp:65-71; src/C4Network2.cpp:1820-1844;
         // src/C4Network2Players.cpp:233-239).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -111305,7 +111471,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn host_synchronized_player_info_refreshes_join_data() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -111341,7 +111507,7 @@ ScenInfoArea=70,5,25,90
         // both mark the same owner, but SendUpdatedPlayers emits that
         // client's complete, clean packet only once
         // (src/C4Network2Players.cpp:245-275; src/C4Teams.cpp:688-730).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -111422,7 +111588,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn client_direct_player_info_does_not_rebalance_random_teams_or_echo_updates() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -111498,7 +111664,7 @@ ScenInfoArea=70,5,25,90
             icon_spec: lc_engine::LegacyCString::default(),
             max_players: 0,
         };
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.control_player_infos.replace_snapshot(
             1,
             [lc_engine::PlayerInfoControlData {
@@ -111593,7 +111759,7 @@ ScenInfoArea=70,5,25,90
             icon_spec: lc_engine::LegacyCString::default(),
             max_players: 0,
         };
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.control_player_infos.replace_snapshot(
             1,
             [lc_engine::PlayerInfoControlData {
@@ -111691,7 +111857,7 @@ ScenInfoArea=70,5,25,90
             icon_spec: lc_engine::LegacyCString::default(),
             max_players: 0,
         };
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_player_infos.replace_snapshot(
             1,
             [lc_engine::PlayerInfoControlData {
@@ -111768,7 +111934,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn loading_host_with_retained_lobby_does_not_assign_a_free_team() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let mut metadata = set_control_test_metadata(
             false,
             vec![
@@ -111815,7 +111981,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn lobby_admission_does_not_gain_join_eligibility_before_delayed_echo() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.control_clients.register(3, true, false);
         let resource = lc_engine::NetworkResourceCore {
             resource_type: lc_network::HostResourceType::Player as u8,
@@ -111872,7 +112038,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn queued_lobby_admissions_observe_synchronously_filled_explicit_team() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let mut metadata = set_control_test_metadata(
             false,
             vec![
@@ -111945,7 +112111,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn admission_that_requires_generated_team_generates_and_broadcasts() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.control_player_infos.replace_snapshot(
             1,
             [lc_engine::PlayerInfoControlData {
@@ -112005,7 +112171,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn joined_player_automatic_admission_updates_live_engine_before_loopback() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.control_player_infos.replace_snapshot(41, []);
         let mut metadata = set_control_test_metadata(
             false,
@@ -112067,7 +112233,7 @@ ScenInfoArea=70,5,25,90
         // Game.Parameters.MaxPlayers, not the scenario format default
         // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-807;
         // src/C4Network2Players.cpp:160-194).
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_max_players = 1;
@@ -112105,7 +112271,7 @@ ScenInfoArea=70,5,25,90
         // On a running host, direct PlayerInfo executes first and then
         // JoinUnjoinedPlayersInControlQueue appends one script JoinPlayer to
         // the next control input (src/C4Network2Players.cpp:245-269,353-388).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -112154,7 +112320,7 @@ ScenInfoArea=70,5,25,90
         // the synchronized control's PreExecute
         // (src/C4Network2Players.cpp:245-269,353-388;
         // src/C4Control.cpp:811-825).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -112213,7 +112379,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn offline_create_script_player_joins_through_player_info_control_path() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let existing_player_info_id = app
             .engine
             .player(app.local_owner)
@@ -112296,7 +112462,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn script_league_progress_writes_mirror_null_and_empty_into_player_infos() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -112434,7 +112600,7 @@ ScenInfoArea=70,5,25,90
         // the VM result: a rejected negative change must leave the one-slot
         // Game.Parameters cap in force when the deferred PlayerInfo arrives
         // (src/C4Script.cpp:3693-3705; src/C4PlayerInfo.cpp:781-807).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.network_max_players = 1;
         app.engine.set_max_players(1);
         app.control_player_infos.replace_snapshot(
@@ -112504,7 +112670,7 @@ ScenInfoArea=70,5,25,90
         // queues its PlayerInfo later in the same callback. The app must copy
         // the new limit out of Engine before applying that deferred request
         // (src/C4Script.cpp:2882-2902,3693-3705).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.network_max_players = 1;
         app.engine.set_max_players(1);
         app.engine
@@ -112576,7 +112742,7 @@ ScenInfoArea=70,5,25,90
         // src/C4GameControl.cpp:93-127). Live frame-100 fixture:
         // ff 1a 00 00 00 42 02 85 64 00 32 00 6d 03 00 00 74 80 01 00
         // 00 00 00 00 98 01 99 01 56 02 00.
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let sound_dir = tempdir().expect("desync sound fixture directory");
         let sound_scenario = sound_dir.path().join("DesyncAudio.c4s");
         fs::create_dir_all(&sound_scenario).expect("create desync sound fixture");
@@ -112695,7 +112861,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn league_client_desync_reports_joined_local_players_before_change_to_local() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let local_client = 7;
         let local_info = 55;
         app.engine
@@ -112763,7 +112929,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn host_ignores_remote_sync_check_without_desync_side_effects() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, events) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -112792,7 +112958,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_raw_player_control_counts_before_byte_narrowing() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let owner = app.local_owner;
 
         app.apply_ready_controls(
@@ -112817,7 +112983,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_player_command_executes_stack_data_and_count() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let owner = app.local_owner;
         let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
 
@@ -112856,7 +113022,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_host_script_control_executes_at_the_ready_tick() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         assert_ne!(app.engine.physics().gravity, 77);
 
         app.apply_ready_controls(
@@ -112877,7 +113043,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_em_draw_tool_executes_at_the_ready_tick() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         assert_ne!(
             app.engine
                 .landscape()
@@ -112918,7 +113084,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_em_drop_def_executes_at_the_ready_tick() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let mut definition =
             Definition::from_script("DROP", "Drop", "#strict\n").expect("definition compiles");
         definition.set_category(lc_engine::CATEGORY_OBJECT);
@@ -112955,7 +113121,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_custom_command_executes_only_while_game_is_running() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let command = NetworkControl::CustomCommand(lc_engine::CustomCommandControlData {
             command: lc_engine::LegacyCString::from_bytes(b"speed".to_vec())
                 .expect("command is NUL-free"),
@@ -113053,7 +113219,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_message_board_answer_executes_only_for_the_owning_client() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let player = app.local_owner;
         app.engine
             .player_mut(player)
@@ -113174,7 +113340,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn host_control_rate_set_changes_both_clocks_and_keeps_batch_order() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.network_control_clock = Some(NetworkControlClock::new(37, 4));
@@ -113291,7 +113457,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn host_parameter_sets_update_live_game_state_without_boundaries() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         for (value_type, data) in [(2, 37), (3, 4), (4, -1), (5, 777)] {
             app.apply_ready_controls(
                 9,
@@ -113378,7 +113544,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn host_lobby_sets_update_published_join_data_and_obey_fair_crew_lock() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         let mut snapshot = lc_network::HostConfig::default()
@@ -113484,7 +113650,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn network_host_distribution_reassigns_and_publishes_full_team_state() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -113538,7 +113704,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn generated_distribution_rebuilds_default_teams_and_publishes() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -113608,7 +113774,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn invalid_host_team_distribution_is_a_silent_no_op() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -113656,7 +113822,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn network_host_team_colors_broadcasts_attributes_and_full_join_data() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -113718,7 +113884,7 @@ protected func InputCallback(string answer, int player)
     #[test]
     fn wire_known_zero_color_and_name_conflicts_resolve_and_publish_team_colors() {
         for conflict_kind in ["color", "name"] {
-            let mut app = new_running_sandbox_app();
+            let mut app = new_state_only_running_sandbox_app();
             let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
             app.network = Some(manager);
             app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -113814,7 +113980,7 @@ protected func InputCallback(string answer, int player)
             ..Default::default()
         };
 
-        let mut offline = new_running_sandbox_app();
+        let mut offline = new_state_only_running_sandbox_app();
         offline.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
             metadata.clone(),
         ));
@@ -113828,7 +113994,7 @@ protected func InputCallback(string answer, int player)
         });
         assert_eq!(offline.control_player_infos.get(20).unwrap().team, 2);
 
-        let mut replay = new_running_sandbox_app();
+        let mut replay = new_state_only_running_sandbox_app();
         replay.engine.set_control_host(false);
         replay.network_team_assignment = None;
         replay.control_player_infos.replace_snapshot(20, [packet]);
@@ -113906,7 +114072,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn offline_player_info_control_rechecks_teams_before_joining_unjoined_script_player() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let existing_info_id = app
             .engine
             .player(app.local_owner)
@@ -114093,7 +114259,7 @@ protected func InputCallback(string answer, int player)
     #[test]
     fn non_host_host_gated_control_sets_are_synchronized_no_ops() {
         for value_type in [0, 2, 3, 4, 5] {
-            let mut app = new_running_sandbox_app();
+            let mut app = new_state_only_running_sandbox_app();
             let (manager, _event_tx) = NetworkManager::test_stub();
             app.network = Some(manager);
             app.network_control_clock = Some(NetworkControlClock::new(0, 3));
@@ -114153,7 +114319,7 @@ protected func InputCallback(string answer, int player)
     #[test]
     fn disable_debug_set_executes_for_every_author_and_does_not_preflight_batch() {
         for by_client in [0, 7] {
-            let mut app = new_running_sandbox_app();
+            let mut app = new_state_only_running_sandbox_app();
             let (manager, _event_tx) = NetworkManager::test_stub();
             app.network = Some(manager);
             app.engine.set_debug_mode(true);
@@ -114195,7 +114361,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn immediate_control_sets_execute_for_host_and_non_host_disable_debug() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.engine.set_debug_mode(true);
@@ -114275,7 +114441,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn non_control_host_direct_elimination_returns_success_without_queuing() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let player = app.local_owner;
         app.engine.set_control_host(false);
         let script = format!("EliminatePlayer({player}, true)");
@@ -114328,7 +114494,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn remove_player_control_is_host_only_and_propagates_disconnected() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -114468,7 +114634,7 @@ protected func InputCallback(string answer, int player)
         // that synchronized client exists and is active
         // (src/C4Control.cpp:578-620;
         // src/C4Network2Players.cpp:245-269).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -114541,7 +114707,7 @@ protected func InputCallback(string answer, int player)
         // its lag window uses Game.FrameCounter, measured Game.FPS and the
         // connection ping before queuing host-authored CUT_Activate via
         // CDT_Sync (pristine 9ffa0a5d src/C4Network2.cpp:1553-1571).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -114741,7 +114907,7 @@ protected func InputCallback(string answer, int player)
         // simulation tick (pristine 9ffa0a5d
         // src/C4GameControlNetwork.cpp:558-588).
         let directory = tempdir().expect("record directory");
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         install_test_recording_template(
             &mut app,
             directory.path().join("001-FrozenLobbySync.c4s"),
@@ -114895,7 +115061,7 @@ protected func InputCallback(string answer, int player)
         // PlayerInfo broadcasts remain host-only
         // (src/C4Control.cpp:637-680;
         // src/C4Network2Players.cpp:425-459).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(2);
         app.network = Some(manager);
@@ -114989,7 +115155,7 @@ protected func InputCallback(string answer, int player)
         // OnClientPart returns before team/attribute/league work when no
         // C4ClientPlayerInfos packet exists for the departing client
         // (src/C4Network2Players.cpp:425-430).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -115049,7 +115215,7 @@ protected func InputCallback(string answer, int player)
         // OnClientPart's attribute/gain/send guard is network-host ownership;
         // only the nested random-team recheck requires control-host status
         // (src/C4Network2Players.cpp:449-459; src/C4Teams.cpp:688-692).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -115111,7 +115277,7 @@ protected func InputCallback(string answer, int player)
         // relocatable member from the resulting 3/0 split and sends its
         // owner's updated packet (src/C4Network2Players.cpp:425-459;
         // src/C4Teams.cpp:688-730).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -115352,7 +115518,7 @@ protected func InputCallback(string answer, int player)
         // C4Network2Client is the host. Another peer's eventual synchronized
         // removal remains host-owned (pristine 9ffa0a5d
         // src/C4Network2.cpp:1786-1817).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let local_client = 7;
         let peer_client = 9;
         let peer_player = 17;
@@ -115394,7 +115560,7 @@ protected func InputCallback(string answer, int player)
         // the soft-kick path: deactivate, keep the client, remove its runtime
         // players, and mark history joined, removed, and disconnected
         // (src/C4Control.cpp:588-620; src/C4PlayerList.cpp:219-239).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.control_clients.register(3, true, false);
@@ -115468,7 +115634,7 @@ protected func InputCallback(string answer, int player)
         // while unrelated assignments remain intact (pristine 9ffa0a5d
         // src/C4Control.cpp:607-619; src/C4PlayerList.cpp:122-128,156-162,
         // 219-268,466-477,556-562).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
         app.network = Some(manager);
         app.control_clients.register(3, true, false);
@@ -115548,7 +115714,7 @@ protected func InputCallback(string answer, int player)
         // C4GameControl::ChangeToLocal, which clears networking, removes
         // remote client records, and activates the local client
         // (src/C4Control.cpp:651-660; src/C4GameControl.cpp:94-128).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -115588,7 +115754,7 @@ protected func InputCallback(string answer, int player)
         // already advanced FrameCounter to 6 (src/C4Network2.cpp:2062-2110;
         // src/C4Network2Players.cpp:465-482).
         let directory = tempdir().expect("record directory");
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         install_test_recording_template(
             &mut app,
             directory.path().join("001-FinalGoSync.c4s"),
@@ -115684,7 +115850,7 @@ protected func InputCallback(string answer, int player)
         // controls resolve the resource strictly by ID and use getFile()
         // (src/C4Network2Res.cpp:1113-1122,1701-1707;
         // src/C4Control.cpp:758-764).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         let resource_id = 61;
@@ -116363,7 +116529,7 @@ protected func InputCallback(string answer, int player)
         // C4ControlJoinPlayer resolves AtClient before joining and returns
         // immediately when that client has already disappeared
         // (C4Control.cpp:714-716).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.engine.set_network_game(true);
@@ -117065,7 +117231,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn player_command_submission_queues_the_open_tick_without_local_execution() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -117115,7 +117281,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn player_select_submission_queues_the_open_tick_without_local_execution() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let owner = app.local_owner;
         let first = app.engine.crew_cursor(owner).expect("sandbox cursor");
         let definition = app
@@ -127145,7 +127311,7 @@ protected func InputCallback(string answer, int player)
         // ConvertCom before Input.Add, so both the network packet and CtrlRec
         // contain menu coms rather than their raw gameplay inputs
         // (C4Game.cpp:3616-3623; C4Menu.cpp:1040-1069).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
         install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
@@ -127242,7 +127408,7 @@ protected func InputCallback(string answer, int player)
             ),
             ("QDIG", ControlCommand::Dig, "dig_count"),
         ] {
-            let mut app = new_running_sandbox_app();
+            let mut app = new_state_only_running_sandbox_app();
             let owner = app.local_owner;
             let script = r#"#strict
 local throw_count, dig_count;
@@ -127358,7 +127524,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn network_progressing_cursor_menu_submits_show_text_before_execution() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
         let mut menu = two_item_script_menu(cursor);
@@ -127498,7 +127664,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // pass before offline dispatch/network submission. Only this local
         // raw press may become COM_MenuShowText; synchronized controls must
         // not recalculate the choice from client-specific text progress.
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let cursor = app
             .engine
             .crew_cursor(app.local_owner)
@@ -128067,7 +128233,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn stale_menu_game_over_fails_typed_on_all_startup_roots_before_lower_boundaries() {
-        let mut app = new_classic_menu_app(640, 480);
+        let mut app = new_real_classic_menu_app(640, 480);
 
         // Retain three recursive child states so their own typed boundaries
         // are also known to be lower priority than the invalid lifecycle.
@@ -128163,7 +128329,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn stale_menu_game_over_lifecycle_boundary_precedes_missing_resources() {
-        let mut app = new_classic_menu_app(320, 200);
+        let mut app = new_real_classic_menu_app(320, 200);
         let mut cached = vec![0_u8; 320 * 200 * 4];
         app.render(&mut cached)
             .expect("populate startup frame cache");
@@ -130169,7 +130335,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn runtime_network_role_requires_consistent_manager_identity_and_mode() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.network = None;
         app.network_mode = None;
         assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Offline);
@@ -130197,7 +130363,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
 
         let cp1252 = app
             .prepare_runtime_flash_message("\u{fc}", RuntimeHelpCharset::Windows1252)
@@ -131479,7 +131645,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 .expect("load Initialize probe without invoking it");
         };
 
-        let mut savegame = new_running_sandbox_app();
+        let mut savegame = new_state_only_running_sandbox_app();
         let restored_gravity = savegame.engine.physics().gravity;
         assert_ne!(restored_gravity, 77);
         install_probe(&mut savegame);
@@ -131492,7 +131658,7 @@ func ControlDig() { dig_count = 1; return(1); }
             "C4Game::InitGameFinal skips Script.Initialize for savegames"
         );
 
-        let mut fresh = new_running_sandbox_app();
+        let mut fresh = new_state_only_running_sandbox_app();
         install_probe(&mut fresh);
         fresh
             .finalize_network_loaded_scenario(false)
@@ -133420,6 +133586,17 @@ func ControlDig() { dig_count = 1; return(1); }
             ingame_menu::MenuPage::ClientDisconnect => 9,
             ingame_menu::MenuPage::AbortConfirm => 10,
         };
+        let mut default_app = new_running_sandbox_app();
+        let mut rebound_app = new_running_sandbox_app();
+        rebound_app
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        rebound_app
+            .engine
+            .player_mut(rebound_app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
         let mut covered_pages = [false; 11];
 
         for (default_menu, rebound_menu) in default_pages.into_iter().zip(rebound_pages) {
@@ -133427,7 +133604,6 @@ func ControlDig() { dig_count = 1; return(1); }
             covered_pages[page_index(page)] = true;
             assert_eq!(rebound_menu.page(), page);
 
-            let mut default_app = new_running_sandbox_app();
             default_app
                 .ingame_menu
                 .replace(default_app.local_owner, Some(default_menu));
@@ -133439,25 +133615,41 @@ func ControlDig() { dig_count = 1; return(1); }
                 default_app.ingame_menu.as_ref().map(IngameMenuState::page),
                 Some(page)
             );
+            default_app
+                .handle_key(VirtualKeyCode::F1, ElementState::Released)
+                .expect("release default help key");
+            default_app
+                .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("hide default help before the next page");
+            default_app
+                .handle_key(VirtualKeyCode::F1, ElementState::Released)
+                .expect("release default help reset");
+            assert!(!default_app.runtime_help_visible, "page {page:?}");
 
-            let mut rebound_app = new_running_sandbox_app();
             rebound_app
                 .ingame_menu
                 .replace(rebound_app.local_owner, Some(rebound_menu));
-            rebound_app
-                .bindings
-                .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
-            rebound_app
-                .engine
-                .player_mut(rebound_app.local_owner)
-                .expect("local player")
-                .control
-                .control_style = true;
             rebound_app
                 .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
                 .expect("PRIO_PlrControl owns F1 across every player-menu page");
             assert!(!rebound_app.runtime_help_visible, "page {page:?}");
             assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
+            rebound_app
+                .handle_key(VirtualKeyCode::F1, ElementState::Released)
+                .expect("release rebound player control");
+            assert!(!rebound_app
+                .pressed_engine_keys
+                .contains(&VirtualKeyCode::F1));
+            assert_eq!(
+                rebound_app
+                    .engine
+                    .player(rebound_app.local_owner)
+                    .expect("local player")
+                    .control
+                    .pressed_coms
+                    & (1 << lc_engine::COM_LEFT),
+                0
+            );
         }
         assert!(covered_pages.into_iter().all(|covered| covered));
 
@@ -133660,9 +133852,21 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
+        let mut app = new_running_sandbox_app();
+        let mut rebound = new_running_sandbox_app();
+        rebound
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        rebound
+            .engine
+            .player_mut(rebound.local_owner)
+            .expect("local rebound player")
+            .control
+            .control_style = true;
+        let mut menu_only = vec![0_u8; 320 * 200 * 4];
+        let mut menu_and_help = vec![0_u8; 320 * 200 * 4];
         for style in 0..=3 {
             for text_progressing in [false, true] {
-                let mut app = new_running_sandbox_app();
                 let cursor = app
                     .engine
                     .crew_cursor(app.local_owner)
@@ -133680,12 +133884,12 @@ func ControlDig() { dig_count = 1; return(1); }
                     )
                     .expect("install engine menu style");
                 app.snapshot = app.engine.snapshot();
-                let mut menu_only = vec![0_u8; 320 * 200 * 4];
+                menu_only.fill(0);
                 app.render(&mut menu_only)
                     .expect("render engine menu before F1");
                 app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
                     .expect("default F1 toggles over engine menu");
-                let mut menu_and_help = vec![0_u8; 320 * 200 * 4];
+                menu_and_help.fill(0);
                 app.render(&mut menu_and_help)
                     .expect("render F1 above engine menu");
                 assert!(
@@ -133694,8 +133898,14 @@ func ControlDig() { dig_count = 1; return(1); }
                 );
                 assert_ne!(menu_and_help, menu_only);
                 assert!(app.engine.cursor_object_menu(app.local_owner).is_some());
+                app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+                    .expect("release default help key");
+                app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                    .expect("hide default help before the next engine menu");
+                app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+                    .expect("release default help reset");
+                assert!(!app.runtime_help_visible);
 
-                let mut rebound = new_running_sandbox_app();
                 let rebound_cursor = rebound
                     .engine
                     .crew_cursor(rebound.local_owner)
@@ -133715,15 +133925,6 @@ func ControlDig() { dig_count = 1; return(1); }
                     .expect("install rebound engine menu style");
                 rebound.snapshot = rebound.engine.snapshot();
                 rebound
-                    .bindings
-                    .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
-                rebound
-                    .engine
-                    .player_mut(rebound.local_owner)
-                    .expect("local rebound player")
-                    .control
-                    .control_style = true;
-                rebound
                     .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
                     .expect("player F1 owns every engine menu style");
                 assert!(!rebound.runtime_help_visible);
@@ -133731,6 +133932,20 @@ func ControlDig() { dig_count = 1; return(1); }
                     .engine
                     .cursor_object_menu(rebound.local_owner)
                     .is_some());
+                rebound
+                    .handle_key(VirtualKeyCode::F1, ElementState::Released)
+                    .expect("release rebound player control");
+                assert!(!rebound.pressed_engine_keys.contains(&VirtualKeyCode::F1));
+                assert_eq!(
+                    rebound
+                        .engine
+                        .player(rebound.local_owner)
+                        .expect("local rebound player")
+                        .control
+                        .pressed_coms
+                        & (1 << lc_engine::COM_LEFT),
+                    0
+                );
             }
         }
     }
@@ -135024,7 +135239,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // C4Network2::OnSec1Timer executes the host-only timeout and queues a
         // synchronized negative VoteEnd for the oldest subject
         // (src/C4Network2.cpp:675-731).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -135059,7 +135274,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // A sole connected joined player voting Yes is a strict majority, so
         // the control host queues one synchronized affirmative VoteEnd
         // (src/C4Control.cpp:1366-1442).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         app.engine
             .player_mut(app.local_owner)
             .expect("host player")
@@ -135100,7 +135315,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // every ballot with the exact (Type,Data) key while leaving other
         // simultaneous subjects active (src/C4Control.cpp:1456-1461;
         // src/C4Network2.cpp:2888-2911).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
@@ -135154,7 +135369,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // Approved VT_Kick flags the target and the control host queues
         // C4ClientList::CtrlRemove with the exact "voted out" reason
         // (src/C4Control.cpp:1482-1496; LanguageUS.txt:1399).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
@@ -135423,7 +135638,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // Approved VT_Cancel marks the round's players voted out and calls
         // Game.Abort(true), leaving the active network round
         // (src/C4Control.cpp:1472-1481).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let local_client = 7;
         app.engine
             .player_mut(app.local_owner)
@@ -135459,7 +135674,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // already paused restores GS_Go once no ballots remain
         // (src/C4Network2.cpp:2861-2883,2929-2938;
         // src/C4Game.cpp:1024-1054).
-        let mut pause_app = new_running_sandbox_app();
+        let mut pause_app = new_state_only_running_sandbox_app();
         pause_app
             .engine
             .player_mut(pause_app.local_owner)
@@ -135514,7 +135729,7 @@ func ControlDig() { dig_count = 1; return(1); }
             "Paused"
         );
 
-        let mut unpause_app = new_running_sandbox_app();
+        let mut unpause_app = new_state_only_running_sandbox_app();
         unpause_app
             .engine
             .player_mut(unpause_app.local_owner)
@@ -135599,7 +135814,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // C4ControlInternalPlayerScriptBase::Allowed, which requires the
         // runtime C4Player::AtClient to equal iByClient
         // (src/C4Control.cpp:93-109,1546-1578).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_running_sandbox_app();
         let player = app.local_owner;
         app.engine
             .player_mut(player)
@@ -137597,7 +137812,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn set_plr_show_command_request_force_enables_display_once() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_state_only_menu_app(320, 200);
         app.display_flags.show_commands = false;
         app.show_commands_requests.request_enable();
         app.apply_show_commands_enable_request();

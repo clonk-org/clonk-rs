@@ -444,7 +444,7 @@ impl<'engine> VirtualPlayer<'engine> {
         if let Some(feedback) = &mut self.feedback {
             feedback.before_tick(self.engine);
         }
-        self.engine.tick()?;
+        self.engine.tick_without_snapshot()?;
         Ok(())
     }
 

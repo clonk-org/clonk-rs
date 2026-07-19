@@ -38,3 +38,11 @@ debug = "line-tables-only"
 # the crate is tiny and rarely changes, so opt 3 costs no iteration time.
 [profile.dev.package.lc-scaling]
 opt-level = 3
+
+# Simulation-heavy integration tests spend most of their time in workspace
+# crates. A small optimization bump cuts their warm runtime substantially
+# while retaining the checks that make the test profile useful.
+[profile.test]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
