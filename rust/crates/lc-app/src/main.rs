@@ -110,7 +110,7 @@ use lc_frontend::game_lobby::{
     LobbyRosterId, LobbyRosterLayout, LobbyRosterRow, LobbySheet, LobbySound, LobbyTeamValue,
 };
 use lc_frontend::game_option_buttons::{
-    FairCrewConstraint, GameOptionAction, GameOptionButtons, GameOptionContext,
+    FairCrewConstraint, GameOptionAction, GameOptionButton, GameOptionButtons, GameOptionContext,
     GameOptionGamepadDirection, GameOptionInputDialogRequest, GameOptionInputDialogResult,
     GameOptionInputKind, GameOptionSound, GameOptionValues,
 };
@@ -122,6 +122,10 @@ use lc_frontend::input_dialog::{
 use lc_frontend::loader_screen::{
     LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection, LoaderState, LoaderUpdate,
     STARTUP_LOADER_SPECIFICATION,
+};
+use lc_frontend::rename_edit::{
+    RenameEdit, RenameEditAction, RenameEditCursorOperation, RenameEditResolution,
+    RenameEditResult,
 };
 use lc_frontend::startup_plrsel::{PlrSelCrewContextCommand, PlrSelPlayerContextCommand};
 use lc_frontend::{
@@ -9980,6 +9984,10 @@ struct GameApp {
     /// Last scenario-list row click (index, time) for double-click detection
     /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
     scensel_last_click: Option<(usize, Instant)>,
+    /// Focus selected by RenameEdit completion during an outside pointer
+    /// press. The same gesture may still activate its target, but C++
+    /// Dialog::SetFocus cancels that target's focus transfer.
+    scensel_rename_pointer_focus: Option<ScenselFocusSnapshot>,
     /// Last search-edit click for C4GUI::Edit's double-click word selection.
     scensel_search_last_click: Option<Instant>,
     /// Last definition-list label click for multi-selection double-click
@@ -10664,8 +10672,33 @@ fn clipboard_text_available() -> bool {
         .is_ok()
 }
 
-fn transfer_search_edit_selection<E>(
-    edit: &mut SearchEditState,
+trait SelectionEdit {
+    fn selected_text(&self) -> Option<&str>;
+    fn delete_selection(&mut self) -> bool;
+}
+
+impl SelectionEdit for SearchEditState {
+    fn selected_text(&self) -> Option<&str> {
+        SearchEditState::selected_text(self)
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        SearchEditState::delete_selection(self)
+    }
+}
+
+impl<Focus> SelectionEdit for RenameEdit<Focus> {
+    fn selected_text(&self) -> Option<&str> {
+        RenameEdit::selected_text(self)
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        RenameEdit::delete_selection(self)
+    }
+}
+
+fn transfer_edit_selection<E, Edit: SelectionEdit>(
+    edit: &mut Edit,
     cut: bool,
     transfer: impl FnOnce(&str) -> Result<(), E>,
 ) -> Result<bool, E> {
@@ -11713,8 +11746,7 @@ struct MenuState {
 #[derive(Clone, Debug)]
 struct ScenarioRenameState {
     identifier: String,
-    original_title: String,
-    edit: SearchEditState,
+    edit: RenameEdit<ScenselFocusSnapshot>,
     last_click: Option<Instant>,
 }
 
@@ -11728,6 +11760,12 @@ enum ScenselDialogFocus {
     Definitions,
     Options,
     Open,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScenselFocusSnapshot {
+    dialog: ScenselDialogFocus,
+    option: Option<GameOptionButton>,
 }
 
 const SCENSEL_SCROLLBAR_PART: i32 = 16;
@@ -12884,7 +12922,7 @@ impl MenuState {
         }
     }
 
-    fn start_renaming_selected(&mut self) -> bool {
+    fn start_renaming_selected(&mut self, previous_focus: ScenselFocusSnapshot) -> bool {
         if self.rename_edit.is_some() || self.current_map().is_some() {
             return false;
         }
@@ -12895,27 +12933,33 @@ impl MenuState {
             return false;
         };
         Markup::strip_markup(&mut title);
-        let mut edit = SearchEditState::default();
-        edit.set_text(title.clone());
-        edit.focus();
         self.search_edit.blur();
         self.definition_checkbox_focused = false;
         self.dialog_focus = ScenselDialogFocus::List;
         self.rename_edit = Some(ScenarioRenameState {
             identifier,
-            original_title: title,
-            edit,
+            edit: RenameEdit::new(title, Some(previous_focus)),
             last_click: None,
         });
         true
     }
 
-    fn abort_renaming(&mut self) -> bool {
-        let had_edit = self.rename_edit.take().is_some();
-        if had_edit {
-            self.dialog_focus = ScenselDialogFocus::List;
+    fn abort_renaming(&mut self) -> Option<ScenselFocusSnapshot> {
+        let mut rename = self.rename_edit.take()?;
+        rename.edit.abort();
+        rename.edit.take_previous_focus()
+    }
+
+    fn resolve_renaming(&mut self, result: RenameEditResult) -> Option<ScenselFocusSnapshot> {
+        let resolution = self.rename_edit.as_mut()?.edit.resolve(result);
+        if resolution == RenameEditResolution::KeepEditing {
+            return None;
         }
-        had_edit
+        let mut rename = self
+            .rename_edit
+            .take()
+            .expect("finished rename state remains installed");
+        rename.edit.take_previous_focus()
     }
 
     fn replace_discovered_entries(
@@ -19008,6 +19052,7 @@ impl GameApp {
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
             scensel_last_click: None,
+            scensel_rename_pointer_focus: None,
             scensel_search_last_click: None,
             definition_selector_last_click: None,
             plrsel_last_click: None,
@@ -19438,6 +19483,49 @@ impl GameApp {
         self.menu_state.set_dialog_focus(focus);
         if focus != ScenselDialogFocus::Options {
             self.scenario_game_options.set_focused_button(None);
+        }
+    }
+
+    fn scensel_focus_snapshot(&self) -> ScenselFocusSnapshot {
+        ScenselFocusSnapshot {
+            dialog: self.menu_state.dialog_focus(),
+            option: self.scenario_game_options.focused_button(),
+        }
+    }
+
+    fn restore_scensel_focus(&mut self, snapshot: ScenselFocusSnapshot) {
+        self.set_scensel_dialog_focus(snapshot.dialog);
+        if snapshot.dialog == ScenselDialogFocus::Options {
+            self.scenario_game_options.set_focused_button(snapshot.option);
+        }
+    }
+
+    fn abort_scenario_rename(&mut self) -> bool {
+        let had_rename = self.menu_state.rename_edit.is_some();
+        if let Some(previous_focus) = self.menu_state.abort_renaming() {
+            self.restore_scensel_focus(previous_focus);
+        }
+        had_rename
+    }
+
+    fn restore_scensel_rename_pointer_focus(&mut self) {
+        let focus = self.scensel_rename_pointer_focus;
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+            if let Some(focus) = focus {
+                self.restore_scensel_focus(focus);
+            }
+        }
+    }
+
+    fn activate_scensel_after_gamepad_low_rename_abort(&mut self) -> Result<(), EngineError> {
+        if !self.abort_scenario_rename() {
+            return Ok(());
+        }
+        if self.menu_state.current_map().is_some() {
+            self.start_selected_map_scenario_from_ui()
+        } else {
+            self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
+            self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
         }
     }
 
@@ -20198,7 +20286,7 @@ impl GameApp {
 
     fn copy_search_edit_selection(&mut self, cut: bool) {
         let result =
-            transfer_search_edit_selection(&mut self.menu_state.search_edit, cut, |selected| {
+            transfer_edit_selection(&mut self.menu_state.search_edit, cut, |selected| {
                 arboard::Clipboard::new()
                     .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
             });
@@ -20373,7 +20461,7 @@ impl GameApp {
             return None;
         }
         let control_x =
-            point.x as i32 - (edit_x + 2) + rename.edit.horizontal_scroll;
+            point.x as i32 - (edit_x + 2) + rename.edit.horizontal_scroll();
         let text = rename.edit.text();
         let mut last_width = 0;
         for (start, character) in text.char_indices() {
@@ -20402,7 +20490,7 @@ impl GameApp {
             .menu_state
             .rename_edit
             .as_ref()
-            .is_some_and(|rename| rename.edit.dragging)
+            .is_some_and(|rename| rename.edit.is_dragging())
         {
             return false;
         }
@@ -20419,7 +20507,7 @@ impl GameApp {
             .menu_state
             .rename_edit
             .as_ref()
-            .is_some_and(|rename| rename.edit.dragging)
+            .is_some_and(|rename| rename.edit.is_dragging())
         {
             return false;
         }
@@ -21430,6 +21518,7 @@ impl GameApp {
         self.menu_state.sync_definition_checkbox_to_selection();
         self.sync_scenario_game_option_constraint();
         self.scensel_last_click = None;
+        self.scensel_rename_pointer_focus = None;
         self.mark_menu_dirty();
         Ok(())
     }
@@ -21503,6 +21592,9 @@ impl GameApp {
                 self.status_text = format!("Unable to save mission access: {error}");
             }
         }
+        // C4StartupScenSelDlg::UpdateList begins with AbortRenaming. Empty or
+        // cancelled input never reaches this accepted/rebuild path.
+        self.abort_scenario_rename();
         self.reload_scenario_selector(selected.as_deref(), true, true)
     }
 
@@ -21599,26 +21691,45 @@ impl GameApp {
         self.reload_scenario_selector(next_identifier, false, false)
     }
 
-    fn commit_scenario_rename(&mut self) -> Result<(), EngineError> {
-        let Some(rename) = self.menu_state.rename_edit.as_ref().cloned() else {
+    fn commit_scenario_rename(&mut self, focus_lost: bool) -> Result<(), EngineError> {
+        let Some((identifier, original_title, action)) = self
+            .menu_state
+            .rename_edit
+            .as_mut()
+            .map(|rename| {
+                (
+                    rename.identifier.clone(),
+                    rename.edit.label_text().to_string(),
+                    if focus_lost {
+                        rename.edit.focus_lost()
+                    } else {
+                        rename.edit.finish_input()
+                    },
+                )
+            })
+        else {
             return Ok(());
         };
-        let title = rename.edit.text().to_string();
-        if title.is_empty() || title == rename.original_title {
-            self.menu_state.abort_renaming();
+        let RenameEditAction::Submit(title) = action else {
+            self.abort_scenario_rename();
+            self.mark_menu_dirty();
+            return Ok(());
+        };
+        if title == original_title {
+            self.menu_state.resolve_renaming(RenameEditResult::Deleted);
             self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             self.mark_menu_dirty();
             return Ok(());
         }
         let scenario = self
             .scenario_catalog
-            .get(&rename.identifier)
+            .get(&identifier)
             .cloned()
             .or_else(|| {
                 self.menu_state
                     .visible_entries()
                     .iter()
-                    .find(|entry| entry.identifier == rename.identifier)
+                    .find(|entry| entry.identifier == identifier)
                     .cloned()
             });
         let result = (|| -> Result<String> {
@@ -21643,24 +21754,21 @@ impl GameApp {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| anyhow!("renamed scenario has no UTF-8 filename"))?;
-            let parent = rename
-                .identifier
-                .rsplit_once('/')
-                .map(|(parent, _)| parent);
+            let parent = identifier.rsplit_once('/').map(|(parent, _)| parent);
             Ok(parent.map_or_else(|| filename.to_string(), |parent| format!("{parent}/{filename}")))
         })();
         match result {
             Ok(identifier) => {
-                self.menu_state.abort_renaming();
-                self.reload_scenario_selector(Some(&identifier), true, true)?;
-                self.retain_renamed_scenario_title(&identifier, &title)?;
+                self.menu_state.resolve_renaming(RenameEditResult::Deleted);
+                let refresh_result = self
+                    .reload_scenario_selector(Some(&identifier), true, true)
+                    .and_then(|()| self.retain_renamed_scenario_title(&identifier, &title));
                 self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+                refresh_result?;
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to rename scenario entry");
-                if let Some(rename) = self.menu_state.rename_edit.as_mut() {
-                    rename.edit.select_all();
-                }
+                self.menu_state.resolve_renaming(RenameEditResult::Invalid);
                 self.push_message_dialog(
                     lc_frontend::message_dialog::MessageDialogState::regular_ok(
                         error.to_string(),
@@ -21687,76 +21795,105 @@ impl GameApp {
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if c4_modifiers.is_empty() && key == VirtualKeyCode::F5 {
             if state == ElementState::Pressed {
-                self.menu_state.abort_renaming();
+                self.abort_scenario_rename();
             }
             return Ok(false);
         }
+        let alt_hotkey_modifiers = c4_modifiers == ModifiersState::ALT
+            || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+        let matched_option_hotkey = alt_hotkey_modifiers
+            && context_menu_hotkey(key).is_some_and(|hotkey| {
+                hotkey == 'D'
+                    || self
+                        .scenario_game_options
+                        .context()
+                        .buttons()
+                        .iter()
+                        .any(|button| button.hotkey() == hotkey)
+            });
+        let mission_access_hotkey = key == VirtualKeyCode::M
+            && c4_modifiers == ModifiersState::ALT
+            && self.menu_state.current_map().is_none();
+        if state == ElementState::Pressed && (matched_option_hotkey || mission_access_hotkey) {
+            // Dialog hotkeys invoke controls directly; they do not move focus
+            // out of RenameEdit. Let the matching selector control handle the
+            // key while the inline edit remains active.
+            return Ok(false);
+        }
         let commits_on_focus_loss = state == ElementState::Pressed
-            && ((c4_modifiers.alt()
-                && !c4_modifiers.ctrl()
-                && context_menu_hotkey(key).is_some())
-                || (key == VirtualKeyCode::F && c4_modifiers == ModifiersState::CTRL)
-                || key == VirtualKeyCode::Tab);
+            && ((key == VirtualKeyCode::F && c4_modifiers == ModifiersState::CTRL)
+                || (key == VirtualKeyCode::Tab
+                    && (c4_modifiers.is_empty() || c4_modifiers == ModifiersState::SHIFT)));
         if commits_on_focus_loss {
-            self.commit_scenario_rename()?;
-            return Ok(self.menu_state.rename_edit.is_some());
+            self.commit_scenario_rename(true)?;
+            // FinishRename restores/sets focus during OnLooseFocus, which
+            // makes Dialog::SetFocus cancel the original transfer.
+            return Ok(true);
         }
         if state == ElementState::Released {
             return Ok(true);
         }
-        let ctrl = self.keyboard_modifiers.ctrl();
-        let shift = self.keyboard_modifiers.shift();
+        let ctrl = c4_modifiers.ctrl();
+        let shift = c4_modifiers.shift();
+        let cursor_modifiers = !c4_modifiers.alt();
         match key {
             VirtualKeyCode::F2 if c4_modifiers.is_empty() => {}
-            VirtualKeyCode::Escape => {
-                self.menu_state.abort_renaming();
-                self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+            VirtualKeyCode::Escape if c4_modifiers.is_empty() => {
+                self.abort_scenario_rename();
             }
-            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => {
-                self.commit_scenario_rename()?;
+            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter if c4_modifiers.is_empty() => {
+                self.commit_scenario_rename(false)?;
             }
-            VirtualKeyCode::Back => {
+            VirtualKeyCode::Back if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                     rename.edit.backspace(ctrl, shift);
                 }
             }
-            VirtualKeyCode::Delete => {
+            VirtualKeyCode::Delete if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                     rename.edit.delete(ctrl, shift);
                 }
             }
-            VirtualKeyCode::Left => {
+            VirtualKeyCode::Left if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
-                    rename.edit.move_cursor(SearchCursorOperation::Left, ctrl, shift);
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::Left, ctrl, shift);
                 }
             }
-            VirtualKeyCode::Right => {
+            VirtualKeyCode::Right if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
-                    rename.edit.move_cursor(SearchCursorOperation::Right, ctrl, shift);
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::Right, ctrl, shift);
                 }
             }
-            VirtualKeyCode::Home => {
+            VirtualKeyCode::Home if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
-                    rename.edit.move_cursor(SearchCursorOperation::Home, ctrl, shift);
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::Home, ctrl, shift);
                 }
             }
-            VirtualKeyCode::End => {
+            VirtualKeyCode::End if cursor_modifiers => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
-                    rename.edit.move_cursor(SearchCursorOperation::End, ctrl, shift);
+                    rename
+                        .edit
+                        .move_cursor(RenameEditCursorOperation::End, ctrl, shift);
                 }
             }
-            VirtualKeyCode::A if ctrl => {
+            VirtualKeyCode::A if c4_modifiers == ModifiersState::CTRL => {
                 if let Some(rename) = self.menu_state.rename_edit.as_mut() {
                     rename.edit.select_all();
                 }
             }
-            VirtualKeyCode::C if ctrl => {
+            VirtualKeyCode::C if c4_modifiers == ModifiersState::CTRL => {
                 let result = self
                     .menu_state
                     .rename_edit
                     .as_mut()
                     .map(|rename| {
-                        transfer_search_edit_selection(&mut rename.edit, false, |selected| {
+                        transfer_edit_selection(&mut rename.edit, false, |selected| {
                             arboard::Clipboard::new().and_then(|mut clipboard| {
                                 clipboard.set_text(selected.to_string())
                             })
@@ -21766,13 +21903,13 @@ impl GameApp {
                     tracing::warn!(%error, "failed to copy scenario rename text");
                 }
             }
-            VirtualKeyCode::X if ctrl => {
+            VirtualKeyCode::X if c4_modifiers == ModifiersState::CTRL => {
                 let result = self
                     .menu_state
                     .rename_edit
                     .as_mut()
                     .map(|rename| {
-                        transfer_search_edit_selection(&mut rename.edit, true, |selected| {
+                        transfer_edit_selection(&mut rename.edit, true, |selected| {
                             arboard::Clipboard::new().and_then(|mut clipboard| {
                                 clipboard.set_text(selected.to_string())
                             })
@@ -21782,16 +21919,16 @@ impl GameApp {
                     tracing::warn!(%error, "failed to cut scenario rename text");
                 }
             }
-            VirtualKeyCode::V if ctrl => match arboard::Clipboard::new()
-                .and_then(|mut clipboard| clipboard.get_text())
-            {
-                Ok(text) => {
-                    if let Some(rename) = self.menu_state.rename_edit.as_mut() {
-                        rename.edit.insert_text(&text);
+            VirtualKeyCode::V if c4_modifiers == ModifiersState::CTRL => {
+                match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+                    Ok(text) => {
+                        if let Some(rename) = self.menu_state.rename_edit.as_mut() {
+                            rename.edit.insert_text(&text);
+                        }
                     }
+                    Err(error) => tracing::warn!(%error, "failed to paste scenario rename text"),
                 }
-                Err(error) => tracing::warn!(%error, "failed to paste scenario rename text"),
-            },
+            }
             _ => {}
         }
         self.mark_menu_dirty();
@@ -21827,8 +21964,10 @@ impl GameApp {
                 Ok(true)
             }
             VirtualKeyCode::F2 if no_modifiers && book_selection => {
-                self.menu_state.start_renaming_selected();
-                self.scenario_game_options.set_focused_button(None);
+                let previous_focus = self.scensel_focus_snapshot();
+                if self.menu_state.start_renaming_selected(previous_focus) {
+                    self.scenario_game_options.set_focused_button(None);
+                }
                 self.mark_menu_dirty();
                 Ok(true)
             }
@@ -28557,10 +28696,49 @@ impl GameApp {
                             {
                                 continue;
                             }
+                            let rename_active = self.mode == AppMode::Menu
+                                && self.startup_view == StartupView::ScenarioBrowser
+                                && self.menu_state.rename_edit.is_some();
+                            let rename_owns_raw_gui_button = eligible_gamepad_gui && rename_active;
                             let options_owns_raw_gui_button = eligible_gamepad_gui
                                 && self.mode == AppMode::Menu
                                 && self.startup_view == StartupView::Options;
                             match event {
+                                GamepadEvent::Direction { .. }
+                                    if rename_active && !eligible_gamepad_gui =>
+                                {
+                                    // Dialog registered no gamepad focus keys
+                                    // for a disabled or non-primary source.
+                                }
+                                GamepadEvent::GuiButton {
+                                    class: GuiButtonClass::High,
+                                    state,
+                                    ..
+                                } if rename_owns_raw_gui_button => {
+                                    if state == ElementState::Pressed {
+                                        self.abort_scenario_rename();
+                                        self.mark_menu_dirty();
+                                    }
+                                    // RenameEdit's AnyHighButton binding owns
+                                    // the complete physical cluster, including
+                                    // a possible Cancel/MenuToggle alias.
+                                    owner = ClusterOwner::Suppressed;
+                                }
+                                GamepadEvent::GuiButton {
+                                    class: GuiButtonClass::Low,
+                                    state,
+                                    ..
+                                } if rename_owns_raw_gui_button => {
+                                    if state == ElementState::Pressed {
+                                        self.activate_scensel_after_gamepad_low_rename_abort()?;
+                                        self.mark_menu_dirty();
+                                    }
+                                    // Dialog's AnyLowButton binding owns the
+                                    // cluster and calls DoOK, whose first step
+                                    // is AbortRenaming. Do not also route an
+                                    // abstract Select/Cancel alias.
+                                    owner = ClusterOwner::Suppressed;
+                                }
                                 GamepadEvent::GuiButton {
                                     class: GuiButtonClass::Low,
                                     state,
@@ -29058,11 +29236,16 @@ impl GameApp {
             return self.handle_classic_lobby_gamepad_direction(button, state);
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
-            if state == ElementState::Pressed && self.menu_state.rename_edit.is_some() {
-                self.commit_scenario_rename()?;
-                if self.menu_state.rename_edit.is_some() {
-                    return Ok(());
+            if self.menu_state.rename_edit.is_some() {
+                if state == ElementState::Pressed
+                    && matches!(button, ControlButton::Left | ControlButton::Right)
+                {
+                    self.commit_scenario_rename(true)?;
                 }
+                // RenameEdit has no Up/Down binding. Left/Right attempt a
+                // focus transfer, but FinishRename restores the saved focus
+                // and cancels that original transfer in Dialog::SetFocus.
+                return Ok(());
             }
             let direction = match button {
                 ControlButton::Left => GameOptionGamepadDirection::Left,
@@ -29225,8 +29408,7 @@ impl GameApp {
             && self.menu_state.rename_edit.is_some()
         {
             if state == ElementState::Pressed {
-                self.menu_state.abort_renaming();
-                self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+                self.abort_scenario_rename();
                 self.mark_menu_dirty();
             }
             return Ok(());
@@ -29298,9 +29480,9 @@ impl GameApp {
             && self.startup_view == StartupView::ScenarioBrowser
             && self.menu_state.rename_edit.is_some()
         {
-            if state == ElementState::Pressed {
-                self.commit_scenario_rename()?;
-            }
+            // RenameEdit and Dialog bind the physical AnyHigh/AnyLow inputs,
+            // respectively. Those eligibility-gated raw events are handled
+            // above and own their complete alias cluster.
             return Ok(());
         }
         match action {
@@ -31914,12 +32096,16 @@ impl GameApp {
                         self.process_player_dialog_actions(actions)
                     }
                     StartupView::ScenarioBrowser => {
+                        if button_state == ElementState::Pressed {
+                            self.scensel_rename_pointer_focus = None;
+                        }
                         if button_state == ElementState::Released
                             && self.game_option_pointer_capture
                             && self.menu_state.pointer_position().is_none()
                         {
                             self.game_option_pointer_capture = false;
                             self.scenario_game_options.cancel_interaction();
+                            self.scensel_rename_pointer_focus = None;
                             return Ok(());
                         }
                         if let Some(point) = self.menu_state.pointer_position() {
@@ -31929,10 +32115,12 @@ impl GameApp {
                                         if self.handle_scensel_rename_pointer_down(point) {
                                             return Ok(());
                                         }
-                                        self.commit_scenario_rename()?;
+                                        self.commit_scenario_rename(true)?;
                                         if self.menu_state.rename_edit.is_some() {
                                             return Ok(());
                                         }
+                                        self.scensel_rename_pointer_focus =
+                                            Some(self.scensel_focus_snapshot());
                                     }
                                     ElementState::Released
                                         if self.handle_scensel_rename_pointer_up(point) =>
@@ -31959,6 +32147,7 @@ impl GameApp {
                                         self.menu_state
                                             .set_dialog_focus(ScenselDialogFocus::Options);
                                         self.finish_game_option_input(actions)?;
+                                        self.restore_scensel_rename_pointer_focus();
                                         return Ok(());
                                     }
                                 }
@@ -31967,6 +32156,7 @@ impl GameApp {
                                     let actions =
                                         self.scenario_game_options.handle_pointer_up(point);
                                     self.finish_game_option_input(actions)?;
+                                    self.scensel_rename_pointer_focus = None;
                                     return Ok(());
                                 }
                                 ElementState::Released => {}
@@ -31983,10 +32173,20 @@ impl GameApp {
                                     if !self.handle_scensel_search_pointer_up(point)
                                         && !self.handle_scensel_scrollbar_up(point)
                                     {
-                                        self.handle_scensel_parity_click(point)?;
+                                        self.handle_scensel_parity_click(
+                                            point,
+                                            self.scensel_rename_pointer_focus.is_some(),
+                                        )?;
                                     }
                                 }
                             }
+                            if button_state == ElementState::Pressed {
+                                self.restore_scensel_rename_pointer_focus();
+                            } else {
+                                self.scensel_rename_pointer_focus = None;
+                            }
+                        } else if button_state == ElementState::Released {
+                            self.scensel_rename_pointer_focus = None;
                         }
                         Ok(())
                     }
@@ -32429,6 +32629,9 @@ impl GameApp {
                 Ok(())
             }
             StartupView::ScenarioBrowser => {
+                if phase == TouchPhase::Started {
+                    self.scensel_rename_pointer_focus = None;
+                }
                 self.menu_state.set_pointer_position(Some(position));
                 if self.menu_state.rename_edit.is_some() {
                     match phase {
@@ -32436,10 +32639,12 @@ impl GameApp {
                             if self.handle_scensel_rename_pointer_down(position) {
                                 return Ok(());
                             }
-                            self.commit_scenario_rename()?;
+                            self.commit_scenario_rename(true)?;
                             if self.menu_state.rename_edit.is_some() {
                                 return Ok(());
                             }
+                            self.scensel_rename_pointer_focus =
+                                Some(self.scensel_focus_snapshot());
                         }
                         TouchPhase::Moved if self.handle_scensel_rename_pointer_move(position) => {
                             return Ok(());
@@ -32450,7 +32655,7 @@ impl GameApp {
                         }
                         TouchPhase::Cancelled => {
                             if let Some(rename) = self.menu_state.rename_edit.as_mut() {
-                                rename.edit.dragging = false;
+                                rename.edit.cancel_pointer_selection();
                             }
                             self.pointer_left_unchecked();
                             return Ok(());
@@ -32484,6 +32689,11 @@ impl GameApp {
                     };
                     self.finish_game_option_input(actions)?;
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        self.scensel_rename_pointer_focus = None;
+                    } else {
+                        self.restore_scensel_rename_pointer_focus();
+                    }
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                         self.game_option_pointer_capture = false;
                         self.pointer_left_unchecked();
                     }
@@ -32496,6 +32706,7 @@ impl GameApp {
                                 self.handle_scensel_map_pointer_down(position);
                             }
                         }
+                        self.restore_scensel_rename_pointer_focus();
                         Ok(())
                     }
                     TouchPhase::Moved => {
@@ -32508,14 +32719,19 @@ impl GameApp {
                         if !self.handle_scensel_search_pointer_up(position)
                             && !self.handle_scensel_scrollbar_up(position)
                         {
-                            self.handle_scensel_parity_click(position)?;
+                            self.handle_scensel_parity_click(
+                                position,
+                                self.scensel_rename_pointer_focus.is_some(),
+                            )?;
                         }
+                        self.scensel_rename_pointer_focus = None;
                         self.pointer_left_unchecked();
                         Ok(())
                     }
                     TouchPhase::Cancelled => {
                         self.menu_state.search_edit.dragging = false;
                         self.menu_state.scrollbar_interaction = None;
+                        self.scensel_rename_pointer_focus = None;
                         self.pointer_left_unchecked();
                         Ok(())
                     }
@@ -40130,6 +40346,7 @@ impl GameApp {
 
     fn close_scenario_browser(&mut self) {
         self.menu_state.abort_renaming();
+        self.scensel_rename_pointer_focus = None;
         match self.scenario_selector_mode {
             ScenarioSelectorMode::Local => self.show_main_menu(),
             ScenarioSelectorMode::NetworkHost => {
@@ -40152,7 +40369,11 @@ impl GameApp {
 
     /// Routes a click through the C++-faithful scenario book layout
     /// (Back / Open buttons + list rows, C4StartupScenSelDlg.cpp:1349-1382).
-    fn handle_scensel_parity_click(&mut self, point: GuiPoint) -> Result<(), EngineError> {
+    fn handle_scensel_parity_click(
+        &mut self,
+        point: GuiPoint,
+        suppress_click_focus: bool,
+    ) -> Result<(), EngineError> {
         let Some(fonts) = self.assets.clonk_fonts.clone() else {
             return Ok(());
         };
@@ -40175,23 +40396,31 @@ impl GameApp {
             layout.user_change_checkbox,
         );
         if inside(search.x, search.y, search.w, search.h) {
-            self.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+            if !suppress_click_focus {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+            }
         } else if inside(definitions.x, definitions.y, definitions.h, definitions.h) {
-            if self.menu_state.definition_checkbox_enabled {
+            if !suppress_click_focus && self.menu_state.definition_checkbox_enabled {
                 self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions);
             }
             if self.menu_state.toggle_definition_checkbox() {
                 self.play_ui_sound("ArrowHit");
             }
         } else if inside(back.x, back.y, back.w, back.h) {
-            self.set_scensel_dialog_focus(ScenselDialogFocus::Back);
+            if !suppress_click_focus {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Back);
+            }
             self.scensel_do_back()?;
         } else if inside(open.x, open.y, open.w, open.h) {
-            self.set_scensel_dialog_focus(ScenselDialogFocus::Open);
+            if !suppress_click_focus {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Open);
+            }
             self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
             self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
         } else if inside(list.x + 3, list.y + 3, list.w - 6 - 16, list.h - 6) {
-            self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+            if !suppress_click_focus {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List);
+            }
             if let Some(book) = self.assets.book_fonts.clone() {
                 let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
                 let index = ((py - (list.y + 3) + self.menu_state.scenario_list_scroll()) / pitch)
@@ -50483,86 +50712,6 @@ fn draw_scensel_map_dynamic(
     Ok(())
 }
 
-fn draw_scensel_rename_edit(
-    surface: &mut Surface,
-    font: &lc_graphics::clonk_font::ClonkFont,
-    edit: &mut SearchEditState,
-    rect: Rect,
-    gamma: &'static lc_graphics::GammaRamp,
-) {
-    let cursor_x = font.measure(&edit.text[..edit.caret], false).0;
-    let cursor_half = font.measure("¦", false).0 / 2;
-    edit.scroll_cursor_in_view(cursor_x, rect.width as i32 - 4, cursor_half);
-    fill_engine_box(
-        surface,
-        rect.x,
-        rect.y,
-        rect.x + rect.width as i32 - 1,
-        rect.y + rect.height as i32 - 1,
-        0x7f000000,
-        gamma,
-    );
-    lc_frontend::classic_gui::draw_3d_frame(
-        surface,
-        lc_frontend::classic_gui::IntRect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.width as i32,
-            h: rect.height as i32,
-        },
-        Some(gamma),
-    );
-    let client_left = rect.x + 2;
-    let client_right = rect.x + rect.width as i32 - 3;
-    if let Some(selection) = edit.selection_range() {
-        let x1 = client_left + font.measure(&edit.text[..selection.start], false).0
-            - edit.horizontal_scroll;
-        let x2 = client_left + font.measure(&edit.text[..selection.end], false).0
-            - edit.horizontal_scroll;
-        if x2 > x1 {
-            fill_engine_box(
-                surface,
-                x1.clamp(client_left, client_right),
-                rect.y + 1,
-                (x2 - 1).clamp(client_left, client_right),
-                rect.y + rect.height as i32 - 2,
-                0x7f7f7f00,
-                gamma,
-            );
-        }
-    }
-    let previous_clip = surface.clip();
-    surface.set_clip(rect);
-    font.draw_with_gamma(
-        surface,
-        client_left - edit.horizontal_scroll,
-        rect.y,
-        &edit.text,
-        [255, 255, 255, 255],
-        lc_graphics::clonk_font::TextAlign::Left,
-        false,
-        Some(gamma),
-    );
-    if edit.cursor_visible() {
-        let x = client_left + cursor_x - edit.horizontal_scroll;
-        if (client_left..=client_right).contains(&x) {
-            fill_engine_box(
-                surface,
-                x,
-                rect.y + 1,
-                x,
-                rect.y + rect.height as i32 - 2,
-                0x00ffffff,
-                gamma,
-            );
-        }
-    }
-    match previous_clip {
-        Some(clip) => surface.set_clip(clip),
-        None => surface.clear_clip(),
-    }
-}
-
 /// Draws the selection-dependent layer of the scenario book over the cached
 /// chrome: caption, list rows + selection bar, the right info page, the
 /// Open/Start button and the "Choose definitions" checkbox.
@@ -50678,7 +50827,9 @@ fn draw_scensel_dynamic(
             let is_renaming = scenario_menu
                 .rename_edit
                 .as_ref()
-                .is_some_and(|rename| rename.identifier == *identifier);
+                .is_some_and(|rename| {
+                    rename.identifier == *identifier && !rename.edit.label_visible()
+                });
             scensel::draw_scen_list_item(
                 &mut list_layer,
                 &assets.scen_icons,
@@ -50695,12 +50846,16 @@ fn draw_scensel_dynamic(
                 let edit_w = (item_w - item_h - 4).max(1) as u32;
                 let edit_h = fonts.text.line_height.max(1) as u32;
                 if let Some(rename) = scenario_menu.rename_edit.as_mut() {
-                    draw_scensel_rename_edit(
+                    rename.edit.render(
                         &mut list_layer,
                         &fonts.text,
-                        &mut rename.edit,
-                        Rect::new(edit_x, y + 2, edit_w, edit_h),
-                        gamma,
+                        lc_frontend::classic_gui::IntRect {
+                            x: edit_x,
+                            y: y + 2,
+                            w: edit_w as i32,
+                            h: edit_h as i32,
+                        },
+                        Some(gamma),
                     );
                 }
             }
@@ -73452,7 +73607,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         edit.caret = 5;
         let mut copied = String::new();
         assert_eq!(
-            transfer_search_edit_selection(&mut edit, false, |selection| {
+            transfer_edit_selection(&mut edit, false, |selection| {
                 copied = selection.to_string();
                 Ok::<(), ()>(())
             }),
@@ -73461,13 +73616,13 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(copied, "alpha");
         assert_eq!(edit.text(), "alpha beta", "Copy does not mutate text");
 
-        assert!(transfer_search_edit_selection(&mut edit, true, |_| Err("clipboard")).is_err());
+        assert!(transfer_edit_selection(&mut edit, true, |_| Err("clipboard")).is_err());
         assert_eq!(
             edit.text(),
             "alpha beta",
             "failed Cut must retain the selection"
         );
-        transfer_search_edit_selection(&mut edit, true, |_| Ok::<(), ()>(()))
+        transfer_edit_selection(&mut edit, true, |_| Ok::<(), ()>(()))
             .expect("successful Cut");
         assert_eq!(edit.text(), " beta");
 
@@ -73744,6 +73899,12 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("Escape aborts inline rename");
         assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Search,
+            "RenameEdit restores the control focused before F2"
+        );
+        assert!(app.menu_state.search_focused());
 
         app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect("F5 refreshes the selector in place");
@@ -73777,6 +73938,468 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("Alt+Delete matches neither selector nor search Edit");
         assert_eq!(app.menu_state.search_text(), "beta");
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_rename_restores_search_and_specific_option_focus() {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "Focus.c4s".to_string();
+        scenario.title = "Focus Target".to_string();
+        let scenarios = vec![scenario];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("rename focus menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios);
+        app.open_scenario_browser();
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start rename from search");
+        assert!(!app.menu_state.search_focused(), "inline edit steals focus");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("abort rename back to search");
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+        assert!(app.menu_state.search_focused());
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Options);
+        app.scenario_game_options
+            .set_focused_button(Some(GameOptionButton::Record));
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start rename from Record option");
+        assert_eq!(app.scenario_game_options.focused_button(), None);
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("abort rename back to Record option");
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Options);
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(GameOptionButton::Record)
+        );
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start rename before refresh");
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("refresh aborts rename and restores its prior focus");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+        assert!(app.menu_state.search_focused());
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start rename for exact-modifier checks");
+        let original_title = app
+            .menu_state
+            .rename_edit
+            .as_ref()
+            .expect("active rename")
+            .edit
+            .text()
+            .to_string();
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set Alt modifier");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("Alt+Delete has no rename binding");
+        assert_eq!(
+            app.menu_state
+                .rename_edit
+                .as_ref()
+                .expect("Alt+Delete keeps rename active")
+                .edit
+                .text(),
+            original_title
+        );
+        app.handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+            .expect("unmatched Alt hotkey has no rename binding");
+        assert!(app.menu_state.rename_edit.is_some());
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("Alt+M opens Mission Access without moving rename focus");
+        assert!(app.menu_state.rename_edit.is_some());
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("Mission Access input")
+                .purpose,
+            PendingInputDialogPurpose::ScenarioMissionAccess
+        );
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+            .expect("cancel Mission Access while rename remains active");
+        assert!(app.menu_state.rename_edit.is_some());
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Control modifier");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Control+Escape has no rename binding");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Control+Tab has no focus-advance binding");
+        assert!(app.menu_state.rename_edit.is_some());
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("set Shift modifier");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Shift+Enter has no rename binding");
+        assert!(app.menu_state.rename_edit.is_some());
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear keyboard modifiers");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("unmodified Escape still aborts rename");
+        assert!(app.menu_state.rename_edit.is_none());
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start same-title rename before Control+F");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Control modifier");
+        app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
+            .expect("Control+F causes rename focus loss");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::List,
+            "RR_Deleted focus cancels the original Control+F transfer"
+        );
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear keyboard modifiers");
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start empty focus-loss rename");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("clear rename text");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("empty focus-loss submission aborts");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Search,
+            "empty abort restores focus and cancels the original Tab transfer"
+        );
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start rename before accepted Mission Access");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set Alt modifier");
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("open Mission Access over active rename");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "MissionPass".to_string(),
+        )])
+        .expect("accepted Mission Access rebuilds the selector");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Search,
+            "UpdateList aborts rename and restores its saved focus before rebuilding"
+        );
+    }
+
+    #[test]
+    fn scensel_rename_gamepad_low_and_directions_match_dialog_bindings() {
+        let mut child = FrontendScenario::fallback();
+        child.identifier = "Folder.c4f/Child.c4s".to_string();
+        child.title = "Child".to_string();
+        child.path = None;
+
+        let mut folder = FrontendScenario::fallback();
+        folder.identifier = "Folder.c4f".to_string();
+        folder.title = "Folder".to_string();
+        folder.kind = ScenarioKind::Folder;
+        folder.is_playable = false;
+        folder.path = None;
+        folder.children = vec![child];
+
+        let scenarios = vec![folder];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("gamepad rename menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start rename for direction routing");
+
+        let slot = GamepadSlot::new(0);
+        let source = |gamepad, event| SourcedGamepadEvent {
+            gamepad,
+            cluster: gamepad as u64,
+            event,
+        };
+        app.process_sourced_gamepad_event_batch(
+            [source(
+                0,
+                GamepadEvent::Direction {
+                    slot,
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+            )],
+            false,
+        )
+        .expect("disabled gamepad GUI has no dialog focus binding");
+        assert!(app.menu_state.rename_edit.is_some());
+        let wrong_slot = GamepadSlot::new(1);
+        app.process_sourced_gamepad_event_batch(
+            [source(
+                1,
+                GamepadEvent::Direction {
+                    slot: wrong_slot,
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                },
+            )],
+            true,
+        )
+        .expect("non-primary gamepad has no dialog focus binding");
+        assert!(app.menu_state.rename_edit.is_some());
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot,
+            button: ControlButton::Up,
+            state: ElementState::Pressed,
+        }])
+        .expect("Up is inert in RenameEdit");
+        assert!(app.menu_state.rename_edit.is_some());
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot,
+            button: ControlButton::Right,
+            state: ElementState::Pressed,
+        }])
+        .expect("Right attempts focus loss");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::List,
+            "successful RR_Deleted rename owns focus; the original advance is cancelled"
+        );
+        assert!(app.menu_state.current_folder().is_none());
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("restart rename for AnyLow");
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot,
+                action: GamepadActionType::Cancel,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("AnyLow aborts rename then executes dialog OK once");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(
+            app.menu_state
+                .current_folder()
+                .map(|folder| folder.identifier.as_str()),
+            Some("Folder.c4f")
+        );
+    }
+
+    #[test]
+    fn scensel_rename_pointer_completion_cancels_target_focus_transfer() {
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "Pointer.c4s".to_string();
+        scenario.title = "Pointer".to_string();
+        let scenarios = vec![scenario];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("pointer rename menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        app.sync_scenario_game_option_bounds();
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start empty mouse focus-loss rename");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("clear inline title");
+        let record = app
+            .scenario_game_options
+            .layout()
+            .rect(GameOptionButton::Record)
+            .expect("Record option bounds");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(record.x + record.w / 2),
+            f64::from(record.y + record.h / 2),
+        ))
+        .expect("point at Record option");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("outside mouse down finishes empty rename");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("Record still receives the completing click");
+        assert!(app.scenario_game_options.values().record);
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Search,
+            "empty FinishRename focus survives the complete mouse gesture"
+        );
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start same-title touch focus-loss rename");
+        let fonts = app.assets.clonk_fonts.as_ref().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, fonts);
+        let search = GuiPoint::new(
+            (layout.search_edit.x + layout.search_edit.w / 2) as f32,
+            (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+        );
+        app.handle_touch(TouchPhase::Started, search)
+            .expect("outside touch start finishes same-title rename");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+        app.handle_touch(TouchPhase::Ended, search)
+            .expect("search edit still receives the completing touch");
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::List,
+            "RR_Deleted list focus survives the complete touch gesture"
+        );
+    }
+
+    #[test]
+    fn scensel_rename_abort_paths_do_not_mutate_and_focus_loss_commits() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated rename lifecycle user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let old_path = paths.scenario_dir().join("Old.c4s");
+        let new_path = paths.scenario_dir().join("New.c4s");
+        fs::create_dir_all(&old_path).expect("create original scenario");
+        fs::write(old_path.join("Scenario.txt"), "[Head]\nTitle=Old\n")
+            .expect("write original scenario");
+
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        let index = app
+            .menu_state
+            .visible_entries()
+            .iter()
+            .position(|entry| entry.identifier == "Old.c4s")
+            .expect("original scenario row");
+        app.handle_menu_input(|menu| menu.select_list_index(index))
+            .expect("select original scenario");
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start gamepad-aborted rename");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("clear selected title");
+        for character in "New".chars() {
+            app.handle_text_input(character).expect("type replacement title");
+        }
+        let slot = GamepadSlot::new(0);
+        app.process_gamepad_event_batch([GamepadEvent::Action {
+            slot,
+            action: GamepadActionType::Cancel,
+            state: ElementState::Pressed,
+        }])
+        .expect("an abstract alias cannot bypass the raw GUI-button bindings");
+        assert!(app.menu_state.rename_edit.is_some());
+
+        let source = |gamepad, cluster, event| SourcedGamepadEvent {
+            gamepad,
+            cluster,
+            event,
+        };
+        app.process_sourced_gamepad_event_batch(
+            [
+                source(
+                    0,
+                    10,
+                    GamepadEvent::GuiButton {
+                        slot,
+                        class: GuiButtonClass::High,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    0,
+                    10,
+                    GamepadEvent::Action {
+                        slot,
+                        action: GamepadActionType::MenuToggle,
+                        state: ElementState::Pressed,
+                    },
+                ),
+            ],
+            false,
+        )
+        .expect("disabled gamepad GUI does not bind AnyHighButton");
+        assert!(app.menu_state.rename_edit.is_some());
+
+        let wrong_slot = GamepadSlot::new(1);
+        app.process_sourced_gamepad_event_batch(
+            [
+                source(
+                    1,
+                    11,
+                    GamepadEvent::GuiButton {
+                        slot: wrong_slot,
+                        class: GuiButtonClass::High,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    1,
+                    11,
+                    GamepadEvent::Action {
+                        slot: wrong_slot,
+                        action: GamepadActionType::MenuToggle,
+                        state: ElementState::Pressed,
+                    },
+                ),
+            ],
+            true,
+        )
+        .expect("AnyHighButton is registered only for gamepad zero");
+        assert!(app.menu_state.rename_edit.is_some());
+
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot,
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot,
+                action: GamepadActionType::MenuToggle,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("AnyHighButton aborts and owns its alias cluster");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(old_path.exists());
+        assert!(!new_path.exists());
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start empty rename");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("clear title for empty submission");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("empty Enter is an abort");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert!(old_path.exists());
+        assert!(!new_path.exists());
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("start focus-loss rename");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("clear title for focus-loss submission");
+        for character in "New".chars() {
+            app.handle_text_input(character).expect("type focus-loss title");
+        }
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus loss submits rename as OK");
+        assert!(app.menu_state.rename_edit.is_none());
+        assert!(!old_path.exists());
+        assert!(new_path.exists());
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| (entry.identifier.as_str(), entry.title.as_str())),
+            Some(("New.c4s", "New"))
+        );
+        assert!(app.scenario_catalog.contains_key("New.c4s"));
         reset_cached_app_paths();
     }
 
@@ -73894,8 +74517,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("abort inline rename");
         assert!(old_path.exists());
         assert!(app.menu_state.rename_edit.is_none());
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
         app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
-            .expect("restart inline rename");
+            .expect("restart inline rename from search focus");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("focused rename edit owns bare Delete");
         assert_eq!(
@@ -73921,6 +74545,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         assert!(app.menu_state.rename_edit.is_none());
         assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+        assert!(!app.menu_state.search_focused());
         assert_eq!(
             app.menu_state
                 .selected_scenario()
@@ -74039,6 +74664,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             .rename_edit
             .as_ref()
             .expect("invalid rename editor remains");
+        assert!(rename.edit.is_focused());
         assert_eq!(rename.edit.selected_text(), Some("Taken"));
         assert_eq!(app.message_dialogs.len(), 1);
         assert_eq!(
@@ -74047,6 +74673,13 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("dismiss rename failure");
+        let rename = app
+            .menu_state
+            .rename_edit
+            .as_ref()
+            .expect("invalid rename resumes after its error modal");
+        assert!(rename.edit.is_focused());
+        assert_eq!(rename.edit.selected_text(), Some("Taken"));
         reset_cached_app_paths();
     }
 
