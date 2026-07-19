@@ -104835,8 +104835,48 @@ ScenInfoArea=70,5,25,90
         let paths = cached_app_paths().expect("discover sandbox crew definition");
         new_running_sandbox_app_with_definitions_and_assets(
             SandboxDefinitionLoad::InstallCrew(paths.as_ref()),
-            false,
+            SandboxFixtureAssets::StateOnly,
         )
+    }
+
+    fn new_state_only_lightweight_running_sandbox_app() -> GameApp {
+        new_running_sandbox_app_with_definitions_and_assets(
+            SandboxDefinitionLoad::None,
+            SandboxFixtureAssets::StateOnly,
+        )
+    }
+
+    fn install_synthetic_sandbox_crew_definition(app: &mut GameApp) {
+        // Default PlayerStart uses one native CLNK. Tests which exercise a
+        // later player activation therefore need that exact definition ID,
+        // but not the shipped definition's scripts, graphics, or actions.
+        let mut crew = Definition::from_script("CLNK", "Synthetic Clonk", "#strict\n")
+            .expect("synthetic sandbox crew compiles");
+        crew.set_crew_member(true);
+        crew.set_category(lc_engine::CATEGORY_OBJECT | lc_engine::CATEGORY_LIVING);
+        crew.set_physical(lc_engine::PhysicalInfo {
+            energy: 50_000,
+            breath: 50_000,
+            ..lc_engine::PhysicalInfo::default()
+        });
+        app.engine
+            .register_definition(crew)
+            .expect("synthetic sandbox crew registers");
+    }
+
+    fn new_state_only_synthetic_crew_running_sandbox_app() -> GameApp {
+        let mut app = new_state_only_lightweight_running_sandbox_app();
+        install_synthetic_sandbox_crew_definition(&mut app);
+        app
+    }
+
+    fn new_synthetic_running_sandbox_app() -> GameApp {
+        let mut app = new_running_sandbox_app_with_definitions_and_assets(
+            SandboxDefinitionLoad::None,
+            SandboxFixtureAssets::Synthetic,
+        );
+        install_synthetic_sandbox_crew_definition(&mut app);
+        app
     }
 
     fn new_lightweight_running_sandbox_app() -> GameApp {
@@ -104846,12 +104886,21 @@ ScenInfoArea=70,5,25,90
     fn new_running_sandbox_app_with_definitions(
         definition_load: SandboxDefinitionLoad<'_>,
     ) -> GameApp {
-        new_running_sandbox_app_with_definitions_and_assets(definition_load, true)
+        new_running_sandbox_app_with_definitions_and_assets(
+            definition_load,
+            SandboxFixtureAssets::Classic,
+        )
+    }
+
+    enum SandboxFixtureAssets {
+        StateOnly,
+        Synthetic,
+        Classic,
     }
 
     fn new_running_sandbox_app_with_definitions_and_assets(
         definition_load: SandboxDefinitionLoad<'_>,
-        install_classic_assets: bool,
+        fixture_assets: SandboxFixtureAssets,
     ) -> GameApp {
         // Silent audio: keeps these apps from initialising the global
         // sandbox-music OnceLock while env-guarded tests run in parallel.
@@ -104876,8 +104925,10 @@ ScenInfoArea=70,5,25,90
             Some(Vec::new()),
         )
         .expect("initialise app");
-        if install_classic_assets {
-            install_classic_test_assets(&mut app);
+        match fixture_assets {
+            SandboxFixtureAssets::StateOnly => {}
+            SandboxFixtureAssets::Synthetic => install_synthetic_classic_test_assets(&mut app),
+            SandboxFixtureAssets::Classic => install_classic_test_assets(&mut app),
         }
         // Keep the app itself pathless while choosing exactly how much
         // definition data this fixture needs. The default uses the shipped
@@ -113145,7 +113196,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn synchronized_team_selection_and_runtime_switch_refresh_live_parameters() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_synthetic_crew_running_sandbox_app();
         app.engine.set_team_colors(true);
         app.engine.set_teams(vec![
             lc_engine::TeamInfo::new(1, "Red", 0x00f4_0000),
@@ -113448,7 +113499,7 @@ ScenInfoArea=70,5,25,90
         // TeamSel dispatches DoTeamSelection on the menu's Player
         // (pristine 9ffa0a5d src/C4Player.h:85;
         // src/C4Game.cpp:3572-3624; src/C4MainMenu.cpp:899-908).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_synthetic_running_sandbox_app();
         let primary = app.local_owner;
         let primary_before = app
             .engine
@@ -113514,6 +113565,10 @@ ScenInfoArea=70,5,25,90
         let secondary_player = app.engine.player(secondary).expect("secondary remains");
         assert_eq!(secondary_player.status(), PlayerStatus::Active);
         assert_eq!(secondary_player.team(), Some(1));
+        assert!(
+            app.engine.crew_cursor(secondary).is_some(),
+            "team activation spawns the default native crew"
+        );
         assert_eq!(
             app.engine
                 .player(primary)
@@ -113544,7 +113599,7 @@ ScenInfoArea=70,5,25,90
         // draws only its associated player's menu (pristine 9ffa0a5d
         // src/C4Player.h:85; src/C4Game.cpp:3572-3624;
         // src/C4Viewport.cpp:965-1017).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_synthetic_crew_running_sandbox_app();
         app.engine.set_teams(vec![
             lc_engine::TeamInfo::new(1, "West", 0xff0000),
             lc_engine::TeamInfo::new(2, "East", 0x0000ff),
@@ -113621,6 +113676,10 @@ ScenInfoArea=70,5,25,90
                 .map(|player| (player.status(), player.team())),
             Some((PlayerStatus::Active, Some(2)))
         );
+        assert!(
+            app.engine.crew_cursor(first).is_some(),
+            "first team activation spawns its native crew"
+        );
         assert_eq!(
             app.engine
                 .player(second)
@@ -113641,6 +113700,10 @@ ScenInfoArea=70,5,25,90
                 .player(second)
                 .map(|player| (player.status(), player.team())),
             Some((PlayerStatus::Active, Some(1)))
+        );
+        assert!(
+            app.engine.crew_cursor(second).is_some(),
+            "second team activation spawns its native crew"
         );
         assert!(!app.ingame_menu_belongs_to(first));
         assert!(!app.ingame_menu_belongs_to(second));
@@ -118959,7 +119022,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn fair_crew_set_changes_the_next_live_physical_lookup() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_state_only_lightweight_running_sandbox_app();
         let mut definition =
             Definition::from_script("FCRW", "Fair crew", "#strict\n").expect("definition compiles");
         definition.set_crew_member(true);
@@ -121320,7 +121383,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn unknown_loadable_resource_join_stalls_until_resource_completion() {
-        let mut app = new_running_sandbox_app();
+        let mut app = new_synthetic_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.engine.set_network_game(true);
@@ -121536,7 +121599,7 @@ protected func InputCallback(string answer, int player)
         // the authoring host when issuance preceded resource completion. Use
         // the registry path, not packet Filename or the core filename
         // (src/C4Control.cpp:758-764; src/C4Network2Res.cpp:1388-1412).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_synthetic_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.engine.set_network_game(true);
@@ -122052,7 +122115,7 @@ protected func InputCallback(string answer, int player)
         // LocalControl is selected solely by ByClient and loads Filename
         // before the embedded/resource branches (src/C4Control.cpp:43-46,
         // 726-744).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_synthetic_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.engine.set_network_game(true);

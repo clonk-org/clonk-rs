@@ -8,7 +8,7 @@ scenario or replay checks:
 git submodule update --init --recursive
 ```
 
-CI uses Rust 1.87.0 and cargo-nextest 0.9.87. Using the same versions makes
+CI uses Rust 1.87.0 and cargo-nextest 0.9.91. Using the same versions makes
 local and CI diagnostics comparable.
 
 ## Quick, change-aware feedback
