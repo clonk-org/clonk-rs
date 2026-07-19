@@ -51231,8 +51231,20 @@ impl GameApp {
                         }
                         PendingInputDialogPurpose::OptionsGraphicsScale => {
                             if let Ok(value) = text.trim().parse::<i32>() {
-                                if let Some(dialog) = self.startup_options_dialog.as_mut() {
-                                    dialog.graphics_mut().set_scale_spinbox_value(value);
+                                let test_action = self
+                                    .startup_options_dialog
+                                    .as_mut()
+                                    .and_then(|dialog| {
+                                        let graphics = dialog.graphics_mut();
+                                        let _ = graphics.set_scale_spinbox_value(value);
+                                        graphics.request_scale_test()
+                                    });
+                                if let Some(action) = test_action {
+                                    self.process_options_dialog_actions(vec![
+                                        lc_frontend::startup_options_dlg::OptionsDlgAction::Graphics(
+                                            action,
+                                        ),
+                                    ])?;
                                 }
                             }
                         }
@@ -98741,7 +98753,7 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn options_scale_test_times_out_reverts_and_yes_commits() {
+    fn l072_options_scale_enter_submit_times_out_reverts_and_yes_commits() {
         use lc_frontend::message_dialog::MessageDialogResult;
         use lc_frontend::startup_options_dlg::OptionsDlgAction;
         use lc_frontend::startup_options_graphics::GraphicsSheetAction;
@@ -98750,10 +98762,14 @@ ScenInfoArea=70,5,25,90
         app.open_options_menu();
         app.process_options_dialog_actions(vec![OptionsDlgAction::OpenGraphicsScaleText])
             .expect("open scale spinbox editor");
-        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
-            "225".to_string(),
-        )])
-        .expect("submit scale spinbox editor");
+        app.game_option_input_dialog
+            .as_mut()
+            .expect("scale spinbox editor")
+            .controller
+            .set_input_text("225");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit scale spinbox editor with Enter");
+        assert!(app.game_option_input_dialog.is_none());
         assert_eq!(
             app.startup_options_dialog
                 .as_ref()
@@ -98762,22 +98778,10 @@ ScenInfoArea=70,5,25,90
                 .proposed_scale_percent,
             225
         );
-        app.startup_options_dialog
-            .as_mut()
-            .unwrap()
-            .graphics_mut()
-            .set_proposed_scale_percent(150);
-        app.process_options_dialog_actions(vec![OptionsDlgAction::Graphics(
-            GraphicsSheetAction::TestScale {
-                old_percent: 100,
-                new_percent: 150,
-            },
-        )])
-        .expect("begin scale test");
         assert_eq!(
             app.pending_options_display_requests.pop_front(),
             Some(OptionsDisplayRequest::SetScale {
-                percent: 150,
+                percent: 225,
                 persist: false,
             })
         );
@@ -98785,6 +98789,19 @@ ScenInfoArea=70,5,25,90
             .message_dialogs
             .last()
             .is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
+        assert!(matches!(
+            app.message_dialogs
+                .last()
+                .map(|dialog| &dialog.continuation),
+            Some(MessageDialogContinuation::OptionsScaleTest {
+                old_percent: 100,
+                new_percent: 225,
+                remaining_seconds: 12,
+            })
+        ));
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release scale editor Enter");
+        assert_eq!(app.message_dialogs.len(), 1);
         for _ in 0..12 {
             app.sec1_timer().expect("advance scale countdown");
         }
