@@ -15273,7 +15273,10 @@ impl FrontendScenario {
     }
 }
 
-fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScenario> {
+fn merge_frontend_scenarios(
+    entries: Vec<FrontendScenario>,
+    alphabetical_sorting: bool,
+) -> Vec<FrontendScenario> {
     let mut result: Vec<FrontendScenario> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
 
@@ -15282,7 +15285,7 @@ fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScena
             let existing = &mut result[existing_idx];
             if existing.kind == entry.kind {
                 if is_container_kind(&existing.kind) && is_container_kind(&entry.kind) {
-                    merge_container(existing, entry);
+                    merge_container(existing, entry, alphabetical_sorting);
                 } else {
                     merge_leaf(existing, entry);
                 }
@@ -15300,7 +15303,7 @@ fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScena
         result.push(entry);
     }
 
-    sort_frontend_entries(&mut result);
+    sort_frontend_entries(&mut result, alphabetical_sorting);
     result
 }
 
@@ -15308,10 +15311,18 @@ fn merge_leaf(existing: &mut FrontendScenario, mut incoming: FrontendScenario) {
     merge_metadata(existing, &mut incoming);
 }
 
-fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenario) {
+fn merge_container(
+    existing: &mut FrontendScenario,
+    mut incoming: FrontendScenario,
+    alphabetical_sorting: bool,
+) {
     merge_metadata(existing, &mut incoming);
-    merge_children(&mut existing.children, incoming.children);
-    sort_frontend_entries(&mut existing.children);
+    merge_children(
+        &mut existing.children,
+        incoming.children,
+        alphabetical_sorting,
+    );
+    sort_frontend_entries(&mut existing.children, alphabetical_sorting);
 }
 
 fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenario) {
@@ -15376,6 +15387,7 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
 fn merge_children(
     existing_children: &mut Vec<FrontendScenario>,
     incoming_children: Vec<FrontendScenario>,
+    alphabetical_sorting: bool,
 ) {
     if incoming_children.is_empty() {
         return;
@@ -15393,7 +15405,7 @@ fn merge_children(
                 && is_container_kind(&child.kind)
             {
                 let existing_child = &mut existing_children[existing_idx];
-                merge_container(existing_child, child);
+                merge_container(existing_child, child, alphabetical_sorting);
             }
             continue;
         }
@@ -15406,10 +15418,10 @@ fn is_container_kind(kind: &ScenarioKind) -> bool {
     matches!(kind, ScenarioKind::Folder | ScenarioKind::Editor)
 }
 
-fn sort_frontend_entries(entries: &mut [FrontendScenario]) {
-    entries.sort_by(compare_frontend_entries);
+fn sort_frontend_entries(entries: &mut [FrontendScenario], alphabetical_sorting: bool) {
+    entries.sort_by(|a, b| compare_frontend_entries(a, b, alphabetical_sorting));
     for entry in entries.iter_mut() {
-        sort_frontend_entries(&mut entry.children);
+        sort_frontend_entries(&mut entry.children, alphabetical_sorting);
     }
 }
 
@@ -15417,6 +15429,7 @@ fn override_frontend_scenario_title(
     entries: &mut [FrontendScenario],
     identifier: &str,
     title: &str,
+    alphabetical_sorting: bool,
 ) -> bool {
     let mut changed = false;
     for entry in entries.iter_mut() {
@@ -15424,15 +15437,24 @@ fn override_frontend_scenario_title(
             entry.title = title.to_string();
             changed = true;
         }
-        changed |= override_frontend_scenario_title(&mut entry.children, identifier, title);
+        changed |= override_frontend_scenario_title(
+            &mut entry.children,
+            identifier,
+            title,
+            alphabetical_sorting,
+        );
     }
     if changed {
-        sort_frontend_entries(entries);
+        sort_frontend_entries(entries, alphabetical_sorting);
     }
     changed
 }
 
-fn compare_frontend_entries(a: &FrontendScenario, b: &FrontendScenario) -> Ordering {
+fn compare_frontend_entries(
+    a: &FrontendScenario,
+    b: &FrontendScenario,
+    alphabetical_sorting: bool,
+) -> Ordering {
     let a_is_folder = matches!(a.kind, ScenarioKind::Folder);
     let b_is_folder = matches!(b.kind, ScenarioKind::Folder);
     if a_is_folder != b_is_folder {
@@ -15443,18 +15465,20 @@ fn compare_frontend_entries(a: &FrontendScenario, b: &FrontendScenario) -> Order
         };
     }
 
-    let a_folder_index = a.folder_index.unwrap_or(0);
-    let b_folder_index = b.folder_index.unwrap_or(0);
-    if a_folder_index != 0 || b_folder_index != 0 {
-        if a_folder_index == 0 {
-            return Ordering::Greater;
-        }
-        if b_folder_index == 0 {
-            return Ordering::Less;
-        }
-        match a_folder_index.cmp(&b_folder_index) {
-            Ordering::Equal => {}
-            other => return other,
+    if !alphabetical_sorting {
+        let a_folder_index = a.folder_index.unwrap_or(0);
+        let b_folder_index = b.folder_index.unwrap_or(0);
+        if a_folder_index != 0 || b_folder_index != 0 {
+            if a_folder_index == 0 {
+                return Ordering::Greater;
+            }
+            if b_folder_index == 0 {
+                return Ordering::Less;
+            }
+            match a_folder_index.cmp(&b_folder_index) {
+                Ordering::Equal => {}
+                other => return other,
+            }
         }
     }
 
@@ -15468,18 +15492,20 @@ fn compare_frontend_entries(a: &FrontendScenario, b: &FrontendScenario) -> Order
         }
     }
 
-    let a_difficulty = a.difficulty.unwrap_or(0);
-    let b_difficulty = b.difficulty.unwrap_or(0);
-    if a_difficulty != 0 || b_difficulty != 0 {
-        if a_difficulty == 0 {
-            return Ordering::Greater;
-        }
-        if b_difficulty == 0 {
-            return Ordering::Less;
-        }
-        match a_difficulty.cmp(&b_difficulty) {
-            Ordering::Equal => {}
-            other => return other,
+    if !alphabetical_sorting {
+        let a_difficulty = a.difficulty.unwrap_or(0);
+        let b_difficulty = b.difficulty.unwrap_or(0);
+        if a_difficulty != 0 || b_difficulty != 0 {
+            if a_difficulty == 0 {
+                return Ordering::Greater;
+            }
+            if b_difficulty == 0 {
+                return Ordering::Less;
+            }
+            match a_difficulty.cmp(&b_difficulty) {
+                Ordering::Equal => {}
+                other => return other,
+            }
         }
     }
 
@@ -17185,6 +17211,17 @@ fn parse_config_bool(raw: &str) -> bool {
         raw.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn load_startup_alphabetical_sorting(paths: Option<&AppPaths>) -> bool {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("Startup"), "AlphabeticalSorting")
+                .map(parse_config_bool)
+        })
+        .unwrap_or(false)
 }
 
 fn repair_rust_truncated_masterserver_urls(config_path: &Path) -> io::Result<bool> {
@@ -23027,7 +23064,14 @@ impl GameApp {
             .first()
             .map(|layer| layer.entries.clone())
             .unwrap_or_default();
-        if !override_frontend_scenario_title(&mut entries, identifier, title) {
+        let alphabetical_sorting =
+            load_startup_alphabetical_sorting(self.app_paths.as_ref());
+        if !override_frontend_scenario_title(
+            &mut entries,
+            identifier,
+            title,
+            alphabetical_sorting,
+        ) {
             return Ok(());
         }
         self.scenario_catalog = build_scenario_catalog(&entries);
@@ -62283,6 +62327,7 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
 }
 
 fn load_frontend_scenarios_from_paths(paths: &AppPaths) -> Vec<FrontendScenario> {
+    let alphabetical_sorting = load_startup_alphabetical_sorting(Some(paths));
     let languages = startup_language_sequence(Some(paths));
     let language_packs = classic_language_packs(paths);
     let roots = scenario_roots(paths);
@@ -62307,6 +62352,7 @@ fn load_frontend_scenarios_from_paths(paths: &AppPaths) -> Vec<FrontendScenario>
             .into_iter()
             .map(|(entry, label)| FrontendScenario::from_resource(entry, &label))
             .collect(),
+        alphabetical_sorting,
     )
 }
 
@@ -93250,10 +93296,11 @@ ScenInfoArea=70,5,25,90
         let mut locked = unlocked.clone();
         locked.mission_access = Some("Secret".to_string());
 
-        let user_first = merge_frontend_scenarios(vec![unlocked.clone(), locked.clone()]);
+        let user_first =
+            merge_frontend_scenarios(vec![unlocked.clone(), locked.clone()], false);
         assert_eq!(user_first[0].mission_access, None);
 
-        let install_first = merge_frontend_scenarios(vec![locked, unlocked]);
+        let install_first = merge_frontend_scenarios(vec![locked, unlocked], false);
         assert_eq!(install_first[0].mission_access.as_deref(), Some("Secret"));
     }
 
@@ -139914,6 +139961,126 @@ func ControlDig() { dig_count = 1; return(1); }
             vec!["Missions.c4f", "Arcade.c4f"],
             "folders should follow legacy indices"
         );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn l064_alphabetical_sorting_gates_only_folder_index_and_difficulty() {
+        let titled_entry = |title: &str| {
+            let mut entry = FrontendScenario::fallback();
+            entry.identifier = format!("{title}.c4s");
+            entry.title = title.to_string();
+            entry
+        };
+        let titles = |entries: &[FrontendScenario]| {
+            entries
+                .iter()
+                .map(|entry| entry.title.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut alpha = titled_entry("Alpha");
+        alpha.difficulty = Some(3);
+        let mut beta = titled_entry("Beta");
+        beta.difficulty = Some(1);
+        let gamma = titled_entry("Gamma");
+        let mut difficulty_entries = vec![alpha, beta, gamma];
+        sort_frontend_entries(&mut difficulty_entries, false);
+        assert_eq!(titles(&difficulty_entries), vec!["Beta", "Alpha", "Gamma"]);
+        sort_frontend_entries(&mut difficulty_entries, true);
+        assert_eq!(titles(&difficulty_entries), vec!["Alpha", "Beta", "Gamma"]);
+
+        let mut alpha = titled_entry("Alpha");
+        alpha.kind = ScenarioKind::Folder;
+        alpha.folder_index = Some(2);
+        let mut beta = titled_entry("Beta");
+        beta.kind = ScenarioKind::Folder;
+        beta.folder_index = Some(1);
+        let mut gamma = titled_entry("Gamma");
+        gamma.kind = ScenarioKind::Folder;
+        let mut folder_entries = vec![alpha, beta, gamma];
+        sort_frontend_entries(&mut folder_entries, false);
+        assert_eq!(titles(&folder_entries), vec!["Beta", "Alpha", "Gamma"]);
+        sort_frontend_entries(&mut folder_entries, true);
+        assert_eq!(titles(&folder_entries), vec!["Alpha", "Beta", "Gamma"]);
+
+        let mut alpha = titled_entry("Alpha");
+        alpha.icon_index = Some(11);
+        let mut beta = titled_entry("Beta");
+        beta.icon_index = Some(2);
+        let mut icon_entries = vec![alpha, beta];
+        sort_frontend_entries(&mut icon_entries, true);
+        assert_eq!(titles(&icon_entries), vec!["Beta", "Alpha"]);
+
+        let alpha = titled_entry("Alpha");
+        let mut zulu = titled_entry("Zulu");
+        zulu.kind = ScenarioKind::Folder;
+        let mut kind_entries = vec![alpha, zulu];
+        sort_frontend_entries(&mut kind_entries, true);
+        assert_eq!(titles(&kind_entries), vec!["Zulu", "Alpha"]);
+    }
+
+    #[test]
+    fn l064_loader_reads_startup_alphabetical_sorting_recursively() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let worlds_folder = install_dir.path().join("Scenarios").join("Worlds.c4f");
+        fs::create_dir_all(&worlds_folder).unwrap();
+        fs::write(worlds_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+        let alpha_dir = worlds_folder.join("Alpha.c4s");
+        fs::create_dir_all(&alpha_dir).unwrap();
+        fs::write(
+            alpha_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha\nDifficulty=3\n",
+        )
+        .unwrap();
+        let beta_dir = worlds_folder.join("Beta.c4s");
+        fs::create_dir_all(&beta_dir).unwrap();
+        fs::write(
+            beta_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Beta\nDifficulty=1\n",
+        )
+        .unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+
+        let child_titles = |entries: &[FrontendScenario]| {
+            entries[0]
+                .children
+                .iter()
+                .map(|entry| entry.title.clone())
+                .collect::<Vec<_>>()
+        };
+
+        fs::write(
+            paths.config_file(),
+            "[Startup]\nAlphabeticalSorting=1\n",
+        )
+        .unwrap();
+        let alphabetical = load_frontend_scenarios_from_paths(&paths);
+        assert_eq!(child_titles(&alphabetical), vec!["Alpha", "Beta"]);
+
+        fs::write(
+            paths.config_file(),
+            "[Startup]\nAlphabeticalSorting=0\n",
+        )
+        .unwrap();
+        let legacy = load_frontend_scenarios_from_paths(&paths);
+        assert_eq!(child_titles(&legacy), vec!["Beta", "Alpha"]);
 
         reset_cached_app_paths();
     }
