@@ -12074,30 +12074,12 @@ impl Definition {
         {
             ocf |= crate::ocf::INFLAMMABLE;
         }
-        // OCF_Collection (SetOCF, C4Object.cpp:593-599): FullCon or
-        // IncompleteActivity, a positive Collection area, a free
-        // CollectionLimit slot, no ObjectDisabled action, and
-        // NoCollectDelay == 0.
-        if ocf & crate::ocf::FULL_CON != 0 || self.incomplete_activity {
-            if let Some(rect) = self.collection_rect {
-                if rect.is_positive() {
-                    let below_limit = self
-                        .collection_limit
-                        .map(|limit| state.contents.len() < limit as usize)
-                        .unwrap_or(true);
-                    if below_limit
-                        && !self
-                            .action_library
-                            .disables_object_for_entry(
-                                &state.action.name,
-                                state.action.act_map_index,
-                            )
-                        && state.no_collect_delay == 0
-                    {
-                        ocf |= crate::ocf::COLLECTION;
-                    }
-                }
-            }
+        if self.collection_ocf_enabled(
+            state,
+            state.contents.len(),
+            state.no_collect_delay,
+        ) {
+            ocf |= crate::ocf::COLLECTION;
         }
         // OCF_LineConstruct: FullCon + any LineConnect bit besides
         // C4D_EnergyHolder (SetOCF, C4Object.cpp:611-614)
@@ -12127,6 +12109,35 @@ impl Definition {
             ocf |= crate::ocf::CONTAINER;
         }
         ocf
+    }
+
+    /// The OCF_Collection bit decision (SetOCF, C4Object.cpp:593-599), including
+    /// the raw fixture seed and explicit Contents and NoCollectDelay values.
+    /// Host-context previews can therefore substitute those scalars without
+    /// cloning the full state.
+    fn collection_ocf_enabled(
+        &self,
+        state: &ObjectState,
+        contents_len: usize,
+        no_collect_delay: i32,
+    ) -> bool {
+        if self.ocf_base & crate::ocf::COLLECTION != 0 {
+            return true;
+        }
+        (self.ocf_base & crate::ocf::FULL_CON != 0
+            || state.construction >= FULL_CON
+            || self.incomplete_activity)
+            && self
+                .collection_rect
+                .is_some_and(|rect| rect.is_positive())
+            && self
+                .collection_limit
+                .map(|limit| contents_len < limit as usize)
+                .unwrap_or(true)
+            && !self
+                .action_library
+                .disables_object_for_entry(&state.action.name, state.action.act_map_index)
+            && no_collect_delay == 0
     }
 
     pub fn value(&self) -> i32 {
@@ -15427,6 +15438,60 @@ impl Definition {
         });
         Ok((commands, audio_state, rng, callback_result))
     }
+}
+
+#[cfg(test)]
+#[test]
+fn collection_ocf_scalar_overrides_match_materialized_state() -> Result<(), EngineError> {
+    let mut definition = Definition::from_script("COLP", "Collection preview", "")?;
+    definition.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+    definition.set_collection_limit(Some(2));
+    let mut state = preview_spawn_state(
+        Vector2::ZERO,
+        OWNER_NONE,
+        OWNER_NONE,
+        DEFAULT_CATEGORY,
+        FULL_CON,
+        CONTACT_DENSITY_SOLID,
+        Vec::new(),
+    );
+    state.contents = vec![ObjectId::new(1), ObjectId::new(2)];
+    state.no_collect_delay = 2;
+
+    assert!(!definition.collection_ocf_enabled(&state, state.contents.len(), 0));
+    assert!(definition.collection_ocf_enabled(&state, 0, 0));
+    assert!(!definition.collection_ocf_enabled(&state, 0, state.no_collect_delay));
+    for (contents_len, no_collect_delay) in [(state.contents.len(), 0), (0, 0)] {
+        let preview = definition.collection_ocf_enabled(&state, contents_len, no_collect_delay);
+        let mut materialized = state.clone();
+        materialized.contents.truncate(contents_len);
+        materialized.no_collect_delay = no_collect_delay;
+        assert_eq!(
+            preview,
+            definition.compute_ocf(&materialized) & crate::ocf::COLLECTION != 0,
+        );
+    }
+    assert_eq!(state.contents.len(), 2, "preview leaves Contents untouched");
+    assert_eq!(state.no_collect_delay, 2, "preview leaves delay untouched");
+
+    state.construction = FULL_CON - 1;
+    assert!(!definition.collection_ocf_enabled(&state, 0, 0));
+    definition.set_ocf_base(crate::ocf::FULL_CON);
+    assert!(definition.collection_ocf_enabled(&state, 0, 0));
+
+    definition.set_ocf_base(crate::ocf::COLLECTION);
+    definition.set_collection_rect(None);
+    let seeded = definition.collection_ocf_enabled(
+        &state,
+        state.contents.len(),
+        state.no_collect_delay,
+    );
+    assert!(seeded, "raw OCF fixture seed bypasses dynamic gates");
+    assert_eq!(
+        seeded,
+        definition.compute_ocf(&state) & crate::ocf::COLLECTION != 0,
+    );
+    Ok(())
 }
 
 struct ScenarioScript {
@@ -24131,15 +24196,14 @@ impl Engine {
                 .with_need_energy(object.state.need_energy)
                 .with_collectible(definition.is_some_and(Definition::is_collectible))
                 .with_collection_available_ignoring_delay(definition.is_some_and(|definition| {
-                    let mut state = object.state.clone();
-                    state.no_collect_delay = 0;
-                    definition.compute_ocf(&state) & crate::ocf::COLLECTION != 0
+                    definition.collection_ocf_enabled(
+                        &object.state,
+                        object.state.contents.len(),
+                        0,
+                    )
                 }))
                 .with_collection_enabled(definition.is_some_and(|definition| {
-                    let mut state = object.state.clone();
-                    state.no_collect_delay = 0;
-                    state.contents.clear();
-                    definition.compute_ocf(&state) & crate::ocf::COLLECTION != 0
+                    definition.collection_ocf_enabled(&object.state, 0, 0)
                 }))
                 .with_no_collect_delay(object.state.no_collect_delay)
                 .with_collection_limit(definition.and_then(Definition::collection_limit))
