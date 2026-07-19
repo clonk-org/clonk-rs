@@ -42,7 +42,7 @@ pub struct PlrSelLayout {
     /// Width of the list scroll window client = item width
     /// (list client minus the 16px scrollbar, C4Gui.h:111).
     pub item_width: i32,
-    /// Height of one player list item: BookFont line height 22 + 2*2
+    /// Height of one player list item: current BookFont line height + 2*2
     /// (C4StartupPlrSelDlg.cpp:81-82).
     pub item_height: i32,
     /// Vertical pitch between items: item height + 1px spacing
@@ -75,11 +75,35 @@ const BOOK_FONT_LINE_HEIGHT: i32 = 22;
 
 /// Computes the C4StartupPlrSelDlg layout for a `w`x`h` screen.
 ///
+/// This compatibility entry point uses the default Endeavour metrics. Runtime
+/// callers with configured fonts should use [`plrsel_layout_with_fonts`].
+///
 /// Mirrors C4StartupPlrSelDlg.cpp:550-562 (ctor geometry),
 /// C4StartupPlrSelDlg.cpp:636-657 (bottom buttons via GetGridCell,
 /// C4Gui.cpp:1059-1080), C4GuiDialogs.cpp:819-822 (fullscreen margins) and
 /// C4GuiContainers.cpp:301-307 / C4GuiListBox.h:120-123 (client rects).
 pub fn plrsel_layout(w: i32, h: i32) -> PlrSelLayout {
+    plrsel_layout_with_line_heights(w, h, TITLE_FONT_LINE_HEIGHT, BOOK_FONT_LINE_HEIGHT)
+}
+
+/// Computes player-selection geometry from the active GUI TitleFont and
+/// startup BookFont. C++ creates the title and each list item from these live
+/// font metrics (C4GuiDialogs.cpp:842-845; C4StartupPlrSelDlg.cpp:79-82).
+pub fn plrsel_layout_with_fonts(
+    w: i32,
+    h: i32,
+    fonts: &ClonkFontSet,
+    book: &BookFontSet,
+) -> PlrSelLayout {
+    plrsel_layout_with_line_heights(w, h, fonts.title.line_height, book.text.line_height)
+}
+
+fn plrsel_layout_with_line_heights(
+    w: i32,
+    h: i32,
+    title_font_line_height: i32,
+    book_font_line_height: i32,
+) -> PlrSelLayout {
     // Fullscreen dialog margins (C4GuiDialogs.cpp:819-820); the top margin is
     // overridden to rcBounds.Hgt/7 (C4StartupPlrSelDlg.h:221).
     let margin_x = if w < 500 { 2 } else { w / 50 };
@@ -195,8 +219,8 @@ pub fn plrsel_layout(w: i32, h: i32) -> PlrSelLayout {
         list_viewport,
         list_scrollbar,
         item_width: list_viewport.w,
-        item_height: BOOK_FONT_LINE_HEIGHT + 4,
-        item_pitch: BOOK_FONT_LINE_HEIGHT + 4 + 1,
+        item_height: book_font_line_height + 4,
+        item_pitch: book_font_line_height + 4 + 1,
         info_window,
         info_client,
         picture_area: at_screen(picture_rel),
@@ -206,7 +230,7 @@ pub fn plrsel_layout(w: i32, h: i32) -> PlrSelLayout {
         // TitleFont.lh/2 - GetMarginTop() (C4GuiDialogs.cpp:843-847).
         title_anchor: (
             client.x + client.w / 2,
-            client.y + 25 - TITLE_FONT_LINE_HEIGHT / 2 - margin_top,
+            client.y + 25 - title_font_line_height / 2 - margin_top,
         ),
     }
 }
@@ -1060,6 +1084,8 @@ impl PlrSelCrewContextMenu {
 pub struct PlrSelController {
     width: i32,
     height: i32,
+    title_font_line_height: i32,
+    book_font_line_height: i32,
     mode: PlrSelMode,
     player_activations: Vec<bool>,
     crew_participations: Vec<bool>,
@@ -1082,6 +1108,8 @@ impl PlrSelController {
         Self {
             width: 1,
             height: 1,
+            title_font_line_height: TITLE_FONT_LINE_HEIGHT,
+            book_font_line_height: BOOK_FONT_LINE_HEIGHT,
             mode: PlrSelMode::Player,
             player_activations: vec![false; player_count],
             crew_participations: Vec::new(),
@@ -1174,6 +1202,35 @@ impl PlrSelController {
     pub fn resize(&mut self, width: i32, height: i32) {
         self.width = width.max(1);
         self.height = height.max(1);
+        self.reflow_layout();
+    }
+
+    /// Resizes and configures geometry from the active player-selection
+    /// fonts in one pass. Subsequent [`Self::resize`] calls retain the font
+    /// metrics.
+    pub fn resize_with_fonts(
+        &mut self,
+        width: i32,
+        height: i32,
+        fonts: &ClonkFontSet,
+        book: &BookFontSet,
+    ) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+        self.title_font_line_height = fonts.title.line_height;
+        self.book_font_line_height = book.text.line_height;
+        self.reflow_layout();
+    }
+
+    /// Reflows controller hit-testing and scrolling after a runtime font
+    /// change without altering the current surface dimensions.
+    pub fn set_layout_fonts(&mut self, fonts: &ClonkFontSet, book: &BookFontSet) {
+        self.title_font_line_height = fonts.title.line_height;
+        self.book_font_line_height = book.text.line_height;
+        self.reflow_layout();
+    }
+
+    fn reflow_layout(&mut self) {
         self.hovered = self
             .pointer_position
             .and_then(|point| self.hit_button(point));
@@ -1609,8 +1666,14 @@ impl PlrSelController {
         self.selected_edit_action()
     }
 
-    fn layout(&self) -> PlrSelLayout {
-        plrsel_layout(self.width, self.height)
+    /// Current controller geometry, including configured font metrics.
+    pub fn layout(&self) -> PlrSelLayout {
+        plrsel_layout_with_line_heights(
+            self.width,
+            self.height,
+            self.title_font_line_height,
+            self.book_font_line_height,
+        )
     }
 
     pub fn row_count(&self) -> usize {
@@ -2136,7 +2199,7 @@ impl PlrSelScreen {
         gamma: Option<&GammaRamp>,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
-        let layout = plrsel_layout(w, h);
+        let layout = plrsel_layout_with_fonts(w, h, fonts, book);
         // Engine texture upload: fully transparent PNG texels turn black
         // (C4Surface::ReadPNG, C4Surface.cpp:972).
         let assets = &PlrSelAssets {
@@ -2805,6 +2868,23 @@ impl PlrSelScreen {
 mod tests {
     use super::*;
 
+    fn size_sixteen_layout_fonts() -> (ClonkFontSet, BookFontSet) {
+        let defaults = crate::test_support::endeavour_font_set();
+        let mut fonts = ClonkFontSet {
+            title: defaults.title.clone(),
+            caption: defaults.caption.clone(),
+            text: defaults.text.clone(),
+            main_small: defaults.main_small.clone(),
+            mini: defaults.mini.clone(),
+        };
+        let mut book = book_fonts();
+        // Configured base size 16 produces these line heights in the current
+        // classic font bundles. Only layout metrics matter to these tests.
+        fonts.title.line_height = 39;
+        book.text.line_height = 25;
+        (fonts, book)
+    }
+
     // Pixel-exact C4StartupPlrSelDlg geometry at 1280x720, derived from
     // C4StartupPlrSelDlg.cpp:550-562/636-657, C4GuiDialogs.cpp:819-820 and
     // C4StartupPlrSelDlg.h:221, verified against an F9 screenshot of the C++
@@ -2907,6 +2987,65 @@ mod tests {
 
         // Title label anchor: centered at x=640, y=8.
         assert_eq!(l.title_anchor, (640, 8));
+    }
+
+    #[test]
+    fn size_sixteen_font_metrics_drive_player_selection_layout() {
+        let (fonts, book) = size_sixteen_layout_fonts();
+
+        let layout = plrsel_layout_with_fonts(1280, 720, &fonts, &book);
+        assert_eq!((layout.item_height, layout.item_pitch), (29, 30));
+        assert_eq!(layout.title_anchor, (640, 6));
+
+        // The compatibility wrapper remains pinned to the reference-capture
+        // defaults used by existing callers and tests.
+        let default_layout = plrsel_layout(1280, 720);
+        assert_eq!(
+            (default_layout.item_height, default_layout.item_pitch),
+            (26, 27)
+        );
+        assert_eq!(default_layout.title_anchor, (640, 8));
+    }
+
+    #[test]
+    fn size_sixteen_font_metrics_reflow_controller_hits_and_scroll() {
+        let (fonts, book) = size_sixteen_layout_fonts();
+        let layout = plrsel_layout_with_fonts(1280, 720, &fonts, &book);
+
+        let mut controller = PlrSelController::new(20);
+        controller.resize(1280, 720);
+        controller.set_selected_index(Some(19));
+        assert_eq!(controller.list_scroll_offset(), 172);
+
+        controller.set_layout_fonts(&fonts, &book);
+        assert_eq!(controller.layout(), layout);
+        assert_eq!(controller.list_max_scroll(), 232);
+        assert_eq!(controller.list_scroll_offset(), 232);
+
+        controller.set_selected_index(Some(0));
+        let name_x = (layout.list_client.x + layout.item_height * 2) as f32;
+        assert_eq!(
+            controller.context_index_at(GuiPoint::new(
+                name_x,
+                (layout.list_viewport.y + layout.item_height - 1) as f32,
+            )),
+            Some(0),
+        );
+        assert_eq!(
+            controller.context_index_at(GuiPoint::new(
+                name_x,
+                (layout.list_viewport.y + layout.item_height) as f32,
+            )),
+            None,
+            "the one-pixel C4GUI list spacing is not a row target",
+        );
+        assert_eq!(
+            controller.context_index_at(GuiPoint::new(
+                name_x,
+                (layout.list_viewport.y + layout.item_pitch) as f32,
+            )),
+            Some(1),
+        );
     }
 
     fn center(rect: IntRect) -> crate::GuiPoint {

@@ -84,6 +84,15 @@ pub const SHEET_TITLES: [&str; 6] = [
     "Program", "Graphics", "Sound", "Keyboard", "Gamepad", "Network",
 ];
 
+/// Entries filled by `C4StartupOptionsDlg::OnFontFaceComboFill`, in native
+/// menu order.
+pub const PROGRAM_FONT_FACES: [&str; 4] =
+    ["Arial Unicode MS", "Comic Sans MS", "Endeavour", "Verdana"];
+
+/// Entries filled by `C4StartupOptionsDlg::OnFontSizeComboFill`, in native
+/// menu order. The context-menu id is the displayed size itself.
+pub const PROGRAM_FONT_SIZES: [i32; 9] = [8, 10, 12, 14, 16, 18, 20, 24, 28];
+
 // ---------------------------------------------------------------------------
 // Shadowless startup "book" fonts (C4StartupGraphics::InitFonts,
 // C4Startup.cpp:93-116: BookFont = C4FT_Main 14px, BookSmallFont =
@@ -842,6 +851,10 @@ pub struct ProgramSheetState {
     /// Slider value 0..=100; `FairCrewStrength2Slider(1000) = 9`
     /// (C4StartupOptionsDlg.cpp:1061-1065).
     pub fair_crew_slider: i32,
+    /// Raw `Config.General.FairCrewStrength` (`DefCrewStrength` on disk).
+    /// This is separate because the native conversions truncate and are
+    /// intentionally not mathematical inverses.
+    pub fair_crew_strength: i32,
 }
 
 /// One checkbox on the classic Sound sheet, in C++ construction/focus order
@@ -899,6 +912,10 @@ pub enum SoundSheetSound {
     ArrowHit,
     Command,
 }
+
+/// GUI feedback shared by non-Sound sheets. This alias keeps the existing
+/// Sound-sheet API while giving top-level dialog actions a sheet-neutral type.
+pub type GuiSound = SoundSheetSound;
 
 /// Ordered effects produced by one Sound-sheet input operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1008,6 +1025,7 @@ impl Default for ProgramSheetState {
             show_log_timestamps: false,
             preloading: false,
             fair_crew_slider: 9,
+            fair_crew_strength: 1_000,
         };
         state.refresh_language();
         state
@@ -1044,6 +1062,20 @@ impl ProgramSheetState {
         true
     }
 
+    /// Refreshes both font combo captions after the app successfully applies
+    /// the new game font and recreates the dialog.
+    pub fn set_font(&mut self, face: impl Into<String>, size: i32) {
+        self.font_face = face.into();
+        self.font_size = size.to_string();
+    }
+
+    /// Loads the raw config strength and derives the constructor-time slider
+    /// value through the native lossy inverse mapping.
+    pub fn set_fair_crew_strength(&mut self, strength: i32) {
+        self.fair_crew_strength = strength;
+        self.fair_crew_slider = fair_crew_strength_to_slider(strength).clamp(0, 100);
+    }
+
     fn refresh_language(&mut self) {
         let selected = self
             .language_infos
@@ -1058,6 +1090,16 @@ impl ProgramSheetState {
             self.language_info = self.no_language_info.clone();
         }
     }
+}
+
+/// `C4StartupOptionsDlg::FairCrewSlider2Strength`.
+pub fn fair_crew_slider_to_strength(slider: i32) -> i32 {
+    ((f64::from(slider) / 9.5).powf(1.5) * 1_000.0) as i32
+}
+
+/// `C4StartupOptionsDlg::FairCrewStrength2Slider`.
+pub fn fair_crew_strength_to_slider(strength: i32) -> i32 {
+    ((f64::from(strength) / 1_000.0).powf(1.0 / 1.5) * 9.5) as i32
 }
 
 /// `C4StartupOptionsDlg::UpdateLanguage` fallback composition. Substring
@@ -1147,6 +1189,21 @@ pub enum OptionsDlgAction {
     ShowLogTimestampsChanged(bool),
     /// Open the language combo's classic context-menu list.
     OpenLanguageCombo,
+    /// Open one of the two native fixed-entry font context menus.
+    OpenFontFaceCombo,
+    OpenFontSizeCombo,
+    WhiteChatIngameChanged(bool),
+    WhiteChatLobbyChanged(bool),
+    PreloadingChanged(bool),
+    /// Raw `Config.General.FairCrewStrength`, after the exponential mapping.
+    FairCrewStrengthChanged(i32),
+    /// GUI feedback from the Program sheet, ordered separately from value
+    /// callbacks so the app can mirror native scrollbar dispatch.
+    ProgramGuiSound(GuiSound),
+    /// Open the native Yes/No reset confirmation.
+    ResetConfiguration,
+    /// Open the generic advanced configuration editor.
+    OpenAdvancedSettings,
     /// One ordered callback/feedback effect from the fully implemented Sound
     /// sheet. Ordering inside the outer action vector is observable.
     Sound(SoundSheetAction),
@@ -1164,22 +1221,73 @@ pub enum OptionsDlgAction {
         id: NetworkCheckboxId,
         checked: bool,
     },
-    /// Gamepad focus traversal reached a Program-sheet control whose exact
-    /// controller/presentation has not been ported yet.
-    UnsupportedProgramFocus(OptionsProgramFocusTarget),
 }
 
-/// First/last Program-sheet focus targets reached from the dialog chrome.
-///
-/// `Dialog::AdvanceFocus` descends forward from the tabular into the language
-/// combo and wraps backward from Back to the Advanced button. Keeping these
-/// targets typed lets the app fail closed instead of guessing another chrome
-/// focus or activating a nearby implemented control.
+/// Focusable Program-sheet controls in exact nested construction order.
+/// The fair-crew scrollbar inherits `Element`, not `Control`, and therefore is
+/// deliberately absent from keyboard/gamepad traversal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptionsProgramFocusTarget {
     LanguageCombo,
     FontFaceCombo,
+    FontSizeCombo,
+    WhiteChatIngame,
+    WhiteChatLobby,
+    ShowLogTimestamps,
+    Preloading,
+    ResetButton,
     AdvancedButton,
+}
+
+impl OptionsProgramFocusTarget {
+    fn next(self) -> Option<Self> {
+        Some(match self {
+            Self::LanguageCombo => Self::FontFaceCombo,
+            Self::FontFaceCombo => Self::FontSizeCombo,
+            Self::FontSizeCombo => Self::WhiteChatIngame,
+            Self::WhiteChatIngame => Self::WhiteChatLobby,
+            Self::WhiteChatLobby => Self::ShowLogTimestamps,
+            Self::ShowLogTimestamps => Self::Preloading,
+            Self::Preloading => Self::ResetButton,
+            Self::ResetButton => Self::AdvancedButton,
+            Self::AdvancedButton => return None,
+        })
+    }
+
+    fn previous(self) -> Option<Self> {
+        Some(match self {
+            Self::LanguageCombo => return None,
+            Self::FontFaceCombo => Self::LanguageCombo,
+            Self::FontSizeCombo => Self::FontFaceCombo,
+            Self::WhiteChatIngame => Self::FontSizeCombo,
+            Self::WhiteChatLobby => Self::WhiteChatIngame,
+            Self::ShowLogTimestamps => Self::WhiteChatLobby,
+            Self::Preloading => Self::ShowLogTimestamps,
+            Self::ResetButton => Self::Preloading,
+            Self::AdvancedButton => Self::ResetButton,
+        })
+    }
+
+    const fn is_combo(self) -> bool {
+        matches!(
+            self,
+            Self::LanguageCombo | Self::FontFaceCombo | Self::FontSizeCombo
+        )
+    }
+
+    const fn is_checkbox(self) -> bool {
+        matches!(
+            self,
+            Self::WhiteChatIngame
+                | Self::WhiteChatLobby
+                | Self::ShowLogTimestamps
+                | Self::Preloading
+        )
+    }
+
+    const fn is_button(self) -> bool {
+        matches!(self, Self::ResetButton | Self::AdvancedButton)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1187,7 +1295,7 @@ enum OptionsFocus {
     None,
     Back,
     Tabular,
-    LanguageCombo,
+    Program(OptionsProgramFocusTarget),
     SoundCheckbox(SoundCheckboxId),
 }
 
@@ -1195,8 +1303,8 @@ enum OptionsFocus {
 enum OptionsHit {
     Back,
     Tab(OptionsSheet),
-    LanguageCombo,
-    ShowLogTimestamps,
+    Program(OptionsProgramFocusTarget),
+    FairCrewSlider(ProgramSliderPart),
     SoundCheckbox(SoundCheckboxId),
     SoundSlider(SoundVolumeId, SoundSliderPart),
     Graphics(GraphicsHitTarget),
@@ -1213,6 +1321,19 @@ enum SoundSliderPart {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SoundSliderDirection {
+    Decrement,
+    Increment,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgramSliderPart {
+    DecrementArrow,
+    Track,
+    IncrementArrow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgramSliderDirection {
     Decrement,
     Increment,
 }
@@ -1242,6 +1363,10 @@ pub struct OptionsDlgState {
     pressed_back: bool,
     back_pointer_owned: bool,
     pointer_down: bool,
+    captured_fair_crew_slider: bool,
+    pressed_fair_crew_arrow: Option<ProgramSliderDirection>,
+    fair_crew_slider_position: Option<i32>,
+    pressed_program_button: Option<OptionsProgramFocusTarget>,
     captured_sound_slider: Option<SoundVolumeId>,
     pressed_sound_arrow: Option<(SoundVolumeId, SoundSliderDirection)>,
     sound_slider_positions: [Option<i32>; 2],
@@ -1295,6 +1420,10 @@ impl OptionsDlgState {
             pressed_back: false,
             back_pointer_owned: false,
             pointer_down: false,
+            captured_fair_crew_slider: false,
+            pressed_fair_crew_arrow: None,
+            fair_crew_slider_position: None,
+            pressed_program_button: None,
             captured_sound_slider: None,
             pressed_sound_arrow: None,
             sound_slider_positions: [None; 2],
@@ -1314,6 +1443,9 @@ impl OptionsDlgState {
         book: &BookFonts,
     ) {
         self.layout = Some(options_dlg_layout(width.max(1), height.max(1), gui, book));
+        self.captured_fair_crew_slider = false;
+        self.pressed_fair_crew_arrow = None;
+        self.pressed_program_button = None;
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
         self.captured_graphics_slider = None;
@@ -1321,8 +1453,10 @@ impl OptionsDlgState {
         self.pressed_release_target = None;
         self.back_pointer_owned = false;
         self.pressed_back = false;
+        self.fair_crew_slider_position = None;
         self.sound_slider_positions = [None; 2];
         self.graphics_slider_positions = [None; 2];
+        self.sync_fair_crew_slider_position();
         self.sync_sound_slider_positions();
         self.sync_graphics_slider_positions();
         self.hovered = self.pointer_position.and_then(|point| {
@@ -1347,6 +1481,7 @@ impl OptionsDlgState {
     }
 
     pub fn program_mut(&mut self) -> &mut ProgramSheetState {
+        self.fair_crew_slider_position = None;
         &mut self.program
     }
 
@@ -1417,6 +1552,13 @@ impl OptionsDlgState {
         }
     }
 
+    pub const fn focused_program_control(&self) -> Option<OptionsProgramFocusTarget> {
+        match self.focus {
+            OptionsFocus::Program(target) => Some(target),
+            _ => None,
+        }
+    }
+
     pub const fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
     }
@@ -1444,7 +1586,10 @@ impl OptionsDlgState {
     }
 
     pub const fn language_combo_focused(&self) -> bool {
-        matches!(self.focus, OptionsFocus::LanguageCombo)
+        matches!(
+            self.focus,
+            OptionsFocus::Program(OptionsProgramFocusTarget::LanguageCombo)
+        )
     }
 
     pub fn language_combo_anchor(&self) -> Option<GuiPoint> {
@@ -1452,6 +1597,24 @@ impl OptionsDlgState {
             GuiPoint::new(
                 layout.language_combo.x as f32,
                 (layout.language_combo.y + layout.language_combo.h) as f32,
+            )
+        })
+    }
+
+    pub fn font_face_combo_anchor(&self) -> Option<GuiPoint> {
+        self.layout.as_ref().map(|layout| {
+            GuiPoint::new(
+                layout.font_face_combo.x as f32,
+                (layout.font_face_combo.y + layout.font_face_combo.h) as f32,
+            )
+        })
+    }
+
+    pub fn font_size_combo_anchor(&self) -> Option<GuiPoint> {
+        self.layout.as_ref().map(|layout| {
+            GuiPoint::new(
+                layout.font_size_combo.x as f32,
+                (layout.font_size_combo.y + layout.font_size_combo.h) as f32,
             )
         })
     }
@@ -1497,6 +1660,9 @@ impl OptionsDlgState {
         self.pressed_back = false;
         self.back_pointer_owned = false;
         self.pointer_down = false;
+        self.captured_fair_crew_slider = false;
+        self.pressed_fair_crew_arrow = None;
+        self.pressed_program_button = None;
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
         self.captured_graphics_slider = None;
@@ -1511,6 +1677,11 @@ impl OptionsDlgState {
             self.pressed_back = self.hovered == Some(OptionsHit::Back);
             return Vec::new();
         }
+        if self.captured_fair_crew_slider {
+            self.pointer_position = Some(position);
+            self.hovered = None;
+            return self.update_fair_crew_slider_from_pointer(position);
+        }
         if let Some(id) = self.captured_sound_slider {
             self.pointer_position = Some(position);
             self.hovered = None;
@@ -1521,9 +1692,16 @@ impl OptionsDlgState {
             self.hovered = None;
             return self.update_graphics_slider_from_pointer(id, position);
         }
+        let previous_fair_crew_arrow = self.pressed_fair_crew_arrow;
         let previous_arrow = self.pressed_sound_arrow;
         let previous_graphics_arrow = self.pressed_graphics_arrow;
         self.set_pointer_position(Some(position));
+        if self.pointer_down
+            && (previous_fair_crew_arrow.is_some()
+                || matches!(self.hovered, Some(OptionsHit::FairCrewSlider(_))))
+        {
+            return self.update_held_fair_crew_arrow(position, previous_fair_crew_arrow);
+        }
         if self.pointer_down
             && (previous_arrow.is_some()
                 || matches!(self.hovered, Some(OptionsHit::SoundSlider(_, _))))
@@ -1545,6 +1723,9 @@ impl OptionsDlgState {
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
         self.pointer_down = true;
         self.back_pointer_owned = false;
+        self.captured_fair_crew_slider = false;
+        self.pressed_fair_crew_arrow = None;
+        self.pressed_program_button = None;
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
         self.captured_graphics_slider = None;
@@ -1561,17 +1742,37 @@ impl OptionsDlgState {
                 self.pressed_back = false;
                 self.select_sheet(sheet)
             }
-            Some(OptionsHit::LanguageCombo) => {
+            Some(OptionsHit::Program(
+                target @ (OptionsProgramFocusTarget::LanguageCombo
+                | OptionsProgramFocusTarget::FontFaceCombo
+                | OptionsProgramFocusTarget::FontSizeCombo),
+            )) => {
                 self.pressed_back = false;
                 // The context menu captures the matching release. Do not
                 // leave the underlying dialog in a held-pointer state when
                 // that menu is cancelled instead of selecting an entry.
                 self.pointer_down = false;
-                vec![OptionsDlgAction::OpenLanguageCombo]
+                self.activate_program_combo(target)
             }
-            Some(OptionsHit::ShowLogTimestamps) => {
+            Some(OptionsHit::Program(
+                OptionsProgramFocusTarget::WhiteChatIngame
+                | OptionsProgramFocusTarget::WhiteChatLobby
+                | OptionsProgramFocusTarget::ShowLogTimestamps
+                | OptionsProgramFocusTarget::Preloading,
+            )) => {
                 self.pressed_back = false;
                 Vec::new()
+            }
+            Some(OptionsHit::Program(
+                OptionsProgramFocusTarget::ResetButton | OptionsProgramFocusTarget::AdvancedButton,
+            )) => {
+                self.pressed_back = false;
+                self.pressed_release_target = self.hovered;
+                Vec::new()
+            }
+            Some(OptionsHit::FairCrewSlider(part)) => {
+                self.pressed_back = false;
+                self.begin_fair_crew_slider_pointer(part, position)
             }
             Some(OptionsHit::SoundCheckbox(_)) => {
                 self.pressed_back = false;
@@ -1627,6 +1828,15 @@ impl OptionsDlgState {
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
         self.pointer_down = false;
+        if self.captured_fair_crew_slider {
+            self.captured_fair_crew_slider = false;
+            let mut actions = self.update_fair_crew_slider_from_pointer(position);
+            self.set_pointer_position(Some(position));
+            self.pressed_fair_crew_arrow = None;
+            self.back_pointer_owned = false;
+            actions.extend(self.dispatch_pointer_up_target());
+            return actions;
+        }
         if let Some(id) = self.captured_sound_slider.take() {
             // Screen::MouseInput first calls StopDragging (and therefore the
             // forced final scrollbar callback), clears pDragElement, and only
@@ -1647,6 +1857,15 @@ impl OptionsDlgState {
             return actions;
         }
         self.set_pointer_position(Some(position));
+        if self.pressed_fair_crew_arrow.take().is_some() {
+            let released_inside_scrollbar = self
+                .layout
+                .as_ref()
+                .is_some_and(|layout| rect_contains(&layout.slider, position));
+            if released_inside_scrollbar {
+                return vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)];
+            }
+        }
         if let Some((id, _)) = self.pressed_sound_arrow.take() {
             let released_inside_scrollbar = self
                 .layout
@@ -1673,11 +1892,14 @@ impl OptionsDlgState {
         if activate_back {
             return vec![OptionsDlgAction::Back];
         }
-        if self.hovered == Some(OptionsHit::ShowLogTimestamps) {
-            self.program.show_log_timestamps = !self.program.show_log_timestamps;
-            return vec![OptionsDlgAction::ShowLogTimestampsChanged(
-                self.program.show_log_timestamps,
-            )];
+        if let Some(OptionsHit::Program(
+            target @ (OptionsProgramFocusTarget::WhiteChatIngame
+            | OptionsProgramFocusTarget::WhiteChatLobby
+            | OptionsProgramFocusTarget::ShowLogTimestamps
+            | OptionsProgramFocusTarget::Preloading),
+        )) = self.hovered
+        {
+            return self.toggle_program_checkbox(target);
         }
         if let Some(OptionsHit::SoundCheckbox(id)) = self.hovered {
             return self.toggle_sound_checkbox(id);
@@ -1686,6 +1908,10 @@ impl OptionsDlgState {
             match pressed_release_target {
                 Some(OptionsHit::Graphics(hit)) => return self.activate_graphics_hit(hit),
                 Some(OptionsHit::Control(hit)) => return self.activate_control_hit(hit),
+                Some(OptionsHit::Program(
+                    target @ (OptionsProgramFocusTarget::ResetButton
+                    | OptionsProgramFocusTarget::AdvancedButton),
+                )) => return self.activate_program_button(target),
                 _ => {}
             }
         }
@@ -1714,15 +1940,34 @@ impl OptionsDlgState {
             KeyCode::Down if self.focus == OptionsFocus::Tabular => {
                 self.select_sheet(self.active_sheet.wrapping_offset(1))
             }
-            KeyCode::Down | KeyCode::Space if self.focus == OptionsFocus::LanguageCombo => {
-                vec![OptionsDlgAction::OpenLanguageCombo]
+            KeyCode::Down | KeyCode::Space if matches!(self.focus, OptionsFocus::Program(target) if target.is_combo()) =>
+            {
+                let OptionsFocus::Program(target) = self.focus else {
+                    unreachable!()
+                };
+                self.activate_program_combo(target)
             }
             KeyCode::Tab => self.handle_tab(false),
+            KeyCode::Space if matches!(self.focus, OptionsFocus::Program(target) if target.is_checkbox()) =>
+            {
+                let OptionsFocus::Program(target) = self.focus else {
+                    unreachable!()
+                };
+                self.toggle_program_checkbox(target)
+            }
             KeyCode::Space if matches!(self.focus, OptionsFocus::SoundCheckbox(_)) => {
                 let OptionsFocus::SoundCheckbox(id) = self.focus else {
                     unreachable!()
                 };
                 self.toggle_sound_checkbox(id)
+            }
+            KeyCode::Enter | KeyCode::Space if matches!(self.focus, OptionsFocus::Program(target) if target.is_button()) =>
+            {
+                let OptionsFocus::Program(target) = self.focus else {
+                    unreachable!()
+                };
+                self.pressed_program_button = Some(target);
+                Vec::new()
             }
             KeyCode::Enter | KeyCode::Space if self.focus == OptionsFocus::Back => {
                 self.pressed_back = true;
@@ -1733,6 +1978,13 @@ impl OptionsDlgState {
     }
 
     pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
+        if matches!(key, KeyCode::Enter | KeyCode::Space) {
+            if let Some(target) = self.pressed_program_button.take() {
+                if self.focus == OptionsFocus::Program(target) {
+                    return self.activate_program_button(target);
+                }
+            }
+        }
         if matches!(key, KeyCode::Enter | KeyCode::Space)
             && self.focus == OptionsFocus::Back
             && self.pressed_back
@@ -1747,6 +1999,7 @@ impl OptionsDlgState {
     /// (or gamepad Left), while false is Tab (or gamepad Right).
     pub fn handle_tab(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
         self.pressed_back = false;
+        self.pressed_program_button = None;
         match self.active_sheet {
             OptionsSheet::Sound => {
                 self.focus = match (self.focus, backwards) {
@@ -1786,44 +2039,37 @@ impl OptionsDlgState {
                     (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects), true) => {
                         OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic)
                     }
-                    (OptionsFocus::LanguageCombo, _) => unreachable!(),
+                    (OptionsFocus::Program(_), _) => unreachable!(),
                 };
                 Vec::new()
             }
-            OptionsSheet::Program => match (self.focus, backwards) {
-                (OptionsFocus::Tabular, false) | (OptionsFocus::None, false) => {
-                    self.focus = OptionsFocus::LanguageCombo;
-                    Vec::new()
-                }
-                (OptionsFocus::Back, true) | (OptionsFocus::None, true) => {
-                    vec![OptionsDlgAction::UnsupportedProgramFocus(
-                        OptionsProgramFocusTarget::AdvancedButton,
-                    )]
-                }
-                (OptionsFocus::Tabular, true) => {
-                    self.focus = OptionsFocus::Back;
-                    Vec::new()
-                }
-                (OptionsFocus::Back, false) => {
-                    self.focus = OptionsFocus::Tabular;
-                    Vec::new()
-                }
-                (OptionsFocus::LanguageCombo, true) => {
-                    self.focus = OptionsFocus::Tabular;
-                    Vec::new()
-                }
-                (OptionsFocus::LanguageCombo, false) => {
-                    vec![OptionsDlgAction::UnsupportedProgramFocus(
-                        OptionsProgramFocusTarget::FontFaceCombo,
-                    )]
-                }
-                (OptionsFocus::SoundCheckbox(_), _) => unreachable!(),
-            },
+            OptionsSheet::Program => {
+                self.focus = match (self.focus, backwards) {
+                    (OptionsFocus::Tabular | OptionsFocus::None, false) => {
+                        OptionsFocus::Program(OptionsProgramFocusTarget::LanguageCombo)
+                    }
+                    (OptionsFocus::Back | OptionsFocus::None, true) => {
+                        OptionsFocus::Program(OptionsProgramFocusTarget::AdvancedButton)
+                    }
+                    (OptionsFocus::Tabular, true) => OptionsFocus::Back,
+                    (OptionsFocus::Back, false) => OptionsFocus::Tabular,
+                    (OptionsFocus::Program(target), false) => target
+                        .next()
+                        .map(OptionsFocus::Program)
+                        .unwrap_or(OptionsFocus::Back),
+                    (OptionsFocus::Program(target), true) => target
+                        .previous()
+                        .map(OptionsFocus::Program)
+                        .unwrap_or(OptionsFocus::Tabular),
+                    (OptionsFocus::SoundCheckbox(_), _) => unreachable!(),
+                };
+                Vec::new()
+            }
             _ => {
                 self.focus = match self.focus {
                     OptionsFocus::None | OptionsFocus::Tabular => OptionsFocus::Back,
                     OptionsFocus::Back => OptionsFocus::Tabular,
-                    OptionsFocus::LanguageCombo => OptionsFocus::None,
+                    OptionsFocus::Program(_) => OptionsFocus::None,
                     OptionsFocus::SoundCheckbox(_) => OptionsFocus::None,
                 };
                 Vec::new()
@@ -1847,7 +2093,17 @@ impl OptionsDlgState {
     pub fn handle_gamepad_low_down(&mut self) -> Vec<OptionsDlgAction> {
         match self.focus {
             OptionsFocus::SoundCheckbox(id) => self.toggle_sound_checkbox(id),
-            OptionsFocus::LanguageCombo => vec![OptionsDlgAction::OpenLanguageCombo],
+            OptionsFocus::Program(target) if target.is_combo() => {
+                self.activate_program_combo(target)
+            }
+            OptionsFocus::Program(target) if target.is_checkbox() => {
+                self.toggle_program_checkbox(target)
+            }
+            OptionsFocus::Program(target) if target.is_button() => {
+                self.pressed_program_button = Some(target);
+                Vec::new()
+            }
+            OptionsFocus::Program(_) => Vec::new(),
             OptionsFocus::Back => {
                 self.pressed_back = true;
                 Vec::new()
@@ -1857,6 +2113,11 @@ impl OptionsDlgState {
     }
 
     pub fn handle_gamepad_low_up(&mut self) -> Vec<OptionsDlgAction> {
+        if let Some(target) = self.pressed_program_button.take() {
+            if self.focus == OptionsFocus::Program(target) {
+                return self.activate_program_button(target);
+            }
+        }
         if self.focus == OptionsFocus::Back && self.pressed_back {
             self.pressed_back = false;
             vec![OptionsDlgAction::Back]
@@ -1873,6 +2134,24 @@ impl OptionsDlgState {
     /// by one *thumb pixel* from `ScrollBar::DrawElement`, then invokes the
     /// value callback even when integer range conversion repeats a value.
     pub fn advance_frame(&mut self) -> Vec<OptionsDlgAction> {
+        if self.active_sheet == OptionsSheet::Program {
+            let Some(direction) = self.pressed_fair_crew_arrow else {
+                return Vec::new();
+            };
+            let Some(rect) = self.layout.as_ref().map(|layout| layout.slider) else {
+                return Vec::new();
+            };
+            let max_scroll = program_slider_max_scroll(rect);
+            let old = self.fair_crew_slider_position(rect);
+            let new = match direction {
+                ProgramSliderDirection::Decrement => old.saturating_sub(1),
+                ProgramSliderDirection::Increment => (old + 1).min(max_scroll),
+            };
+            if new == old {
+                return Vec::new();
+            }
+            return self.set_fair_crew_slider_position(rect, new);
+        }
         if self.active_sheet == OptionsSheet::Sound {
             let Some((id, direction)) = self.pressed_sound_arrow else {
                 return Vec::new();
@@ -1921,10 +2200,13 @@ impl OptionsDlgState {
             return Vec::new();
         }
         if (matches!(self.focus, OptionsFocus::SoundCheckbox(_)) && sheet != OptionsSheet::Sound)
-            || (self.focus == OptionsFocus::LanguageCombo && sheet != OptionsSheet::Program)
+            || (matches!(self.focus, OptionsFocus::Program(_)) && sheet != OptionsSheet::Program)
         {
             self.focus = OptionsFocus::None;
         }
+        self.captured_fair_crew_slider = false;
+        self.pressed_fair_crew_arrow = None;
+        self.pressed_program_button = None;
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
         self.captured_graphics_slider = None;
@@ -1944,8 +2226,20 @@ impl OptionsDlgState {
         matches!(self.focus, OptionsFocus::Back) || matches!(self.hovered, Some(OptionsHit::Back))
     }
 
-    const fn timestamps_highlighted(&self) -> bool {
-        matches!(self.hovered, Some(OptionsHit::ShowLogTimestamps))
+    fn program_control_highlighted(&self, target: OptionsProgramFocusTarget) -> bool {
+        matches!(self.focus, OptionsFocus::Program(focused) if focused == target)
+            || matches!(self.hovered, Some(OptionsHit::Program(hovered)) if hovered == target)
+    }
+
+    fn program_button_pressed(&self, target: OptionsProgramFocusTarget) -> bool {
+        self.pressed_program_button == Some(target)
+            || (self.pointer_down
+                && self.pressed_release_target == Some(OptionsHit::Program(target))
+                && self.hovered == Some(OptionsHit::Program(target)))
+    }
+
+    fn fair_crew_arrow_pressed(&self, direction: ProgramSliderDirection) -> bool {
+        self.pressed_fair_crew_arrow == Some(direction)
     }
 
     fn sound_checkbox_highlighted(&self, id: SoundCheckboxId) -> bool {
@@ -1967,6 +2261,158 @@ impl OptionsDlgState {
 
     const fn sound_action(action: SoundSheetAction) -> OptionsDlgAction {
         OptionsDlgAction::Sound(action)
+    }
+
+    fn activate_program_combo(&self, target: OptionsProgramFocusTarget) -> Vec<OptionsDlgAction> {
+        match target {
+            OptionsProgramFocusTarget::LanguageCombo => {
+                vec![OptionsDlgAction::OpenLanguageCombo]
+            }
+            OptionsProgramFocusTarget::FontFaceCombo => {
+                vec![OptionsDlgAction::OpenFontFaceCombo]
+            }
+            OptionsProgramFocusTarget::FontSizeCombo => {
+                vec![OptionsDlgAction::OpenFontSizeCombo]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn toggle_program_checkbox(
+        &mut self,
+        target: OptionsProgramFocusTarget,
+    ) -> Vec<OptionsDlgAction> {
+        let action = match target {
+            OptionsProgramFocusTarget::WhiteChatIngame => {
+                self.program.white_chat_ingame = !self.program.white_chat_ingame;
+                OptionsDlgAction::WhiteChatIngameChanged(self.program.white_chat_ingame)
+            }
+            OptionsProgramFocusTarget::WhiteChatLobby => {
+                self.program.white_chat_lobby = !self.program.white_chat_lobby;
+                OptionsDlgAction::WhiteChatLobbyChanged(self.program.white_chat_lobby)
+            }
+            OptionsProgramFocusTarget::ShowLogTimestamps => {
+                self.program.show_log_timestamps = !self.program.show_log_timestamps;
+                OptionsDlgAction::ShowLogTimestampsChanged(self.program.show_log_timestamps)
+            }
+            OptionsProgramFocusTarget::Preloading => {
+                self.program.preloading = !self.program.preloading;
+                OptionsDlgAction::PreloadingChanged(self.program.preloading)
+            }
+            _ => return Vec::new(),
+        };
+        vec![action]
+    }
+
+    fn activate_program_button(&self, target: OptionsProgramFocusTarget) -> Vec<OptionsDlgAction> {
+        match target {
+            OptionsProgramFocusTarget::ResetButton => {
+                vec![OptionsDlgAction::ResetConfiguration]
+            }
+            OptionsProgramFocusTarget::AdvancedButton => {
+                vec![OptionsDlgAction::OpenAdvancedSettings]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn begin_fair_crew_slider_pointer(
+        &mut self,
+        part: ProgramSliderPart,
+        position: GuiPoint,
+    ) -> Vec<OptionsDlgAction> {
+        match part {
+            ProgramSliderPart::DecrementArrow => {
+                self.pressed_fair_crew_arrow = Some(ProgramSliderDirection::Decrement);
+                vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+            }
+            ProgramSliderPart::IncrementArrow => {
+                self.pressed_fair_crew_arrow = Some(ProgramSliderDirection::Increment);
+                vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+            }
+            ProgramSliderPart::Track => {
+                let mut actions = self.update_fair_crew_slider_from_pointer(position);
+                self.captured_fair_crew_slider = true;
+                actions.push(OptionsDlgAction::ProgramGuiSound(GuiSound::Command));
+                actions
+            }
+        }
+    }
+
+    fn update_held_fair_crew_arrow(
+        &mut self,
+        position: GuiPoint,
+        previous: Option<ProgramSliderDirection>,
+    ) -> Vec<OptionsDlgAction> {
+        let current = match self.hovered {
+            Some(OptionsHit::FairCrewSlider(ProgramSliderPart::DecrementArrow)) => {
+                Some(ProgramSliderDirection::Decrement)
+            }
+            Some(OptionsHit::FairCrewSlider(ProgramSliderPart::IncrementArrow)) => {
+                Some(ProgramSliderDirection::Increment)
+            }
+            Some(OptionsHit::FairCrewSlider(ProgramSliderPart::Track)) => {
+                self.pressed_fair_crew_arrow = None;
+                let mut actions = self.update_fair_crew_slider_from_pointer(position);
+                self.captured_fair_crew_slider = true;
+                actions.push(OptionsDlgAction::ProgramGuiSound(GuiSound::Command));
+                if previous.is_some() {
+                    actions.push(OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit));
+                }
+                return actions;
+            }
+            _ => None,
+        };
+        self.pressed_fair_crew_arrow = current;
+        if current.is_some() && previous.is_none() {
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn update_fair_crew_slider_from_pointer(
+        &mut self,
+        position: GuiPoint,
+    ) -> Vec<OptionsDlgAction> {
+        let Some(rect) = self.layout.as_ref().map(|layout| layout.slider) else {
+            return Vec::new();
+        };
+        let max_scroll = program_slider_max_scroll(rect);
+        let local_x = position.x.floor() as i32 - rect.x;
+        let scroll_pos = (local_x - 16 - 8).clamp(0, max_scroll);
+        self.set_fair_crew_slider_position(rect, scroll_pos)
+    }
+
+    fn set_fair_crew_slider_position(
+        &mut self,
+        rect: IntRect,
+        scroll_pos: i32,
+    ) -> Vec<OptionsDlgAction> {
+        let max_scroll = program_slider_max_scroll(rect).max(1);
+        let scroll_pos = scroll_pos.clamp(0, max_scroll);
+        self.fair_crew_slider_position = Some(scroll_pos);
+        let slider = (scroll_pos * 100 / max_scroll).clamp(0, 100);
+        let strength = fair_crew_slider_to_strength(slider);
+        self.program.fair_crew_slider = slider;
+        self.program.fair_crew_strength = strength;
+        vec![OptionsDlgAction::FairCrewStrengthChanged(strength)]
+    }
+
+    fn sync_fair_crew_slider_position(&mut self) {
+        let Some(rect) = self.layout.as_ref().map(|layout| layout.slider) else {
+            return;
+        };
+        if self.fair_crew_slider_position.is_none() {
+            self.fair_crew_slider_position =
+                Some(self.program.fair_crew_slider * program_slider_max_scroll(rect) / 100);
+        }
+    }
+
+    fn fair_crew_slider_position(&self, rect: IntRect) -> i32 {
+        self.fair_crew_slider_position.unwrap_or_else(|| {
+            self.program.fair_crew_slider * program_slider_max_scroll(rect) / 100
+        })
     }
 
     fn toggle_sound_checkbox(&mut self, id: SoundCheckboxId) -> Vec<OptionsDlgAction> {
@@ -2328,6 +2774,14 @@ fn sound_slider_max_scroll(rect: IntRect) -> i32 {
     }
 }
 
+fn program_slider_max_scroll(rect: IntRect) -> i32 {
+    if rect.w > 48 {
+        rect.w - 48
+    } else {
+        100
+    }
+}
+
 fn graphics_slider_max_scroll(rect: IntRect) -> i32 {
     if rect.w > 48 {
         rect.w - 48
@@ -2639,15 +3093,80 @@ fn options_hit_test(
     if rect_contains(&layout.back_button, point) {
         return Some(OptionsHit::Back);
     }
-    let timestamp_square = IntRect {
-        w: layout.timestamps_check.h + 1,
-        ..layout.timestamps_check
-    };
-    if active_sheet == OptionsSheet::Program && rect_contains(&timestamp_square, point) {
-        return Some(OptionsHit::ShowLogTimestamps);
-    }
-    if active_sheet == OptionsSheet::Program && rect_contains(&layout.language_combo, point) {
-        return Some(OptionsHit::LanguageCombo);
+    if active_sheet == OptionsSheet::Program {
+        for (bounds, target) in [
+            (
+                layout.language_combo,
+                OptionsProgramFocusTarget::LanguageCombo,
+            ),
+            (
+                layout.font_face_combo,
+                OptionsProgramFocusTarget::FontFaceCombo,
+            ),
+            (
+                layout.font_size_combo,
+                OptionsProgramFocusTarget::FontSizeCombo,
+            ),
+        ] {
+            if rect_contains(&bounds, point) {
+                return Some(OptionsHit::Program(target));
+            }
+        }
+
+        // CheckBox::MouseInput accepts only the square, with an inclusive
+        // horizontal Hgt edge; parent dispatch keeps the vertical edge
+        // half-open.
+        for (bounds, target) in [
+            (
+                layout.ingame_check,
+                OptionsProgramFocusTarget::WhiteChatIngame,
+            ),
+            (
+                layout.lobby_check,
+                OptionsProgramFocusTarget::WhiteChatLobby,
+            ),
+            (
+                layout.timestamps_check,
+                OptionsProgramFocusTarget::ShowLogTimestamps,
+            ),
+            (
+                layout.preloading_check,
+                OptionsProgramFocusTarget::Preloading,
+            ),
+        ] {
+            let square = IntRect {
+                w: bounds.h + 1,
+                ..bounds
+            };
+            if rect_contains(&square, point) {
+                return Some(OptionsHit::Program(target));
+            }
+        }
+
+        if rect_contains(&layout.slider, point) {
+            let local_x = point.x.floor() as i32 - layout.slider.x;
+            let part = if local_x < 16 {
+                ProgramSliderPart::DecrementArrow
+            } else if local_x >= layout.slider.w - 16 {
+                ProgramSliderPart::IncrementArrow
+            } else if layout.slider.w > 48 {
+                ProgramSliderPart::Track
+            } else {
+                return None;
+            };
+            return Some(OptionsHit::FairCrewSlider(part));
+        }
+        for (bounds, target) in [
+            (layout.reset_button, OptionsProgramFocusTarget::ResetButton),
+            (
+                layout.advanced_button,
+                OptionsProgramFocusTarget::AdvancedButton,
+            ),
+        ] {
+            if rect_contains(&bounds, point) {
+                return Some(OptionsHit::Program(target));
+            }
+        }
     }
     if active_sheet == OptionsSheet::Sound {
         for id in SoundCheckboxId::ALL {
@@ -3193,11 +3712,38 @@ impl OptionsDlgScreen {
             book.book.draw_with_gamma(surface, pos.0, pos.1, text, black, TextAlign::Left, true, gamma);
         };
         draw_book_left(surface, layout.language_label, "Language:");
-        Self::draw_combo(surface, assets, book, &layout.language_combo, &program.language_text, gamma);
+        Self::draw_combo(
+            surface,
+            assets,
+            book,
+            &layout.language_combo,
+            &program.language_text,
+            draw_focus
+                && state.program_control_highlighted(OptionsProgramFocusTarget::LanguageCombo),
+            gamma,
+        );
         draw_book_left(surface, layout.language_info, &program.language_info);
         draw_book_left(surface, layout.font_label, "Font:");
-        Self::draw_combo(surface, assets, book, &layout.font_face_combo, &program.font_face, gamma);
-        Self::draw_combo(surface, assets, book, &layout.font_size_combo, &program.font_size, gamma);
+        Self::draw_combo(
+            surface,
+            assets,
+            book,
+            &layout.font_face_combo,
+            &program.font_face,
+            draw_focus
+                && state.program_control_highlighted(OptionsProgramFocusTarget::FontFaceCombo),
+            gamma,
+        );
+        Self::draw_combo(
+            surface,
+            assets,
+            book,
+            &layout.font_size_combo,
+            &program.font_size,
+            draw_focus
+                && state.program_control_highlighted(OptionsProgramFocusTarget::FontSizeCombo),
+            gamma,
+        );
         draw_book_left(surface, layout.white_chat_label, "White Chat:");
         Self::draw_checkbox(
             surface,
@@ -3206,7 +3752,8 @@ impl OptionsDlgScreen {
             &layout.ingame_check,
             "Ingame",
             program.white_chat_ingame,
-            false,
+            draw_focus
+                && state.program_control_highlighted(OptionsProgramFocusTarget::WhiteChatIngame),
             gamma,
         );
         Self::draw_checkbox(
@@ -3216,7 +3763,8 @@ impl OptionsDlgScreen {
             &layout.lobby_check,
             "Lobby",
             program.white_chat_lobby,
-            false,
+            draw_focus
+                && state.program_control_highlighted(OptionsProgramFocusTarget::WhiteChatLobby),
             gamma,
         );
         Self::draw_checkbox(
@@ -3226,7 +3774,8 @@ impl OptionsDlgScreen {
             &layout.timestamps_check,
             "Timestamps",
             program.show_log_timestamps,
-            draw_focus && state.timestamps_highlighted(),
+            draw_focus
+                && state.program_control_highlighted(OptionsProgramFocusTarget::ShowLogTimestamps),
             gamma,
         );
         Self::draw_checkbox(
@@ -3236,12 +3785,31 @@ impl OptionsDlgScreen {
             &layout.preloading_check,
             "Preload game data",
             program.preloading,
-            false,
+            draw_focus && state.program_control_highlighted(OptionsProgramFocusTarget::Preloading),
             gamma,
         );
-        Self::draw_fair_crew_group(surface, assets, book, &layout, program, gamma);
-        Self::draw_small_button(surface, book, &layout.reset_button, "Reset configuration", gamma);
-        Self::draw_small_button(surface, book, &layout.advanced_button, "Advanced settings", gamma);
+        Self::draw_fair_crew_group(surface, assets, book, &layout, state, gamma);
+        Self::draw_small_button(
+            surface,
+            assets,
+            book,
+            &layout.reset_button,
+            "Reset configuration",
+            draw_focus && state.program_control_highlighted(OptionsProgramFocusTarget::ResetButton),
+            state.program_button_pressed(OptionsProgramFocusTarget::ResetButton),
+            gamma,
+        );
+        Self::draw_small_button(
+            surface,
+            assets,
+            book,
+            &layout.advanced_button,
+            "Advanced settings",
+            draw_focus
+                && state.program_control_highlighted(OptionsProgramFocusTarget::AdvancedButton),
+            state.program_button_pressed(OptionsProgramFocusTarget::AdvancedButton),
+            gamma,
+        );
     }
 
     /// Sheet::DrawCaption with clip gfx (C4GuiTabular.cpp:59-64): clip 1:1,
@@ -3279,6 +3847,7 @@ impl OptionsDlgScreen {
         book: &BookFonts,
         rect: &IntRect,
         text: &str,
+        highlighted: bool,
         gamma: Option<&GammaRamp>,
     ) {
         // DrawBoxDw with C4StartupEditBGColor = 0xff000000 -> opacity 0, skip.
@@ -3308,6 +3877,14 @@ impl OptionsDlgScreen {
             true,
             gamma,
         );
+        if highlighted {
+            draw_image_bilinear_additive(
+                surface,
+                &GuiRect::new(x0 as f32, y0 as f32, rect.w as f32, rect.h as f32),
+                &blacken_transparent(&assets.button_highlight),
+                gamma,
+            );
+        }
     }
 
     /// CheckBox::DrawElement (C4GuiCheckBox.cpp:110-137): box facet phase
@@ -3473,6 +4050,7 @@ impl OptionsDlgScreen {
             book,
             &layout.display_mode_combo,
             graphics.display_mode.label(),
+            false,
             gamma,
         );
         Self::draw_edit(
@@ -3482,7 +4060,16 @@ impl OptionsDlgScreen {
             &graphics.proposed_scale_percent.to_string(),
             gamma,
         );
-        Self::draw_small_button(surface, book, &layout.apply_button, "Apply", gamma);
+        Self::draw_small_button(
+            surface,
+            assets,
+            book,
+            &layout.apply_button,
+            "Apply",
+            false,
+            false,
+            gamma,
+        );
         Self::draw_book_scrollbar(
             surface,
             assets,
@@ -3541,7 +4128,16 @@ impl OptionsDlgScreen {
                 ControlDevice::Keyboard => format!("Keyboard {}", set + 1),
                 ControlDevice::Gamepad => format!("Gamepad {}", set + 1),
             };
-            Self::draw_small_button(surface, book, &layout.set_buttons[set], &label, gamma);
+            Self::draw_small_button(
+                surface,
+                assets,
+                book,
+                &layout.set_buttons[set],
+                &label,
+                false,
+                false,
+                gamma,
+            );
         }
         for control in 0..CONTROL_KEY_COUNT {
             let rect = layout.key_buttons[control];
@@ -3549,7 +4145,7 @@ impl OptionsDlgScreen {
                 .controls()
                 .visible_label(device, control)
                 .unwrap_or("Undefined");
-            Self::draw_small_button(surface, book, &rect, binding, gamma);
+            Self::draw_small_button(surface, assets, book, &rect, binding, false, false, gamma);
             book.book_small.draw_with_gamma(
                 surface,
                 rect.x + rect.w / 2,
@@ -3561,7 +4157,16 @@ impl OptionsDlgScreen {
                 gamma,
             );
         }
-        Self::draw_small_button(surface, book, &layout.reset_button, "Reset", gamma);
+        Self::draw_small_button(
+            surface,
+            assets,
+            book,
+            &layout.reset_button,
+            "Reset",
+            false,
+            false,
+            gamma,
+        );
         if device == ControlDevice::Gamepad && state.controls().gamepad_gui_checkbox_visible() {
             Self::draw_checkbox(
                 surface,
@@ -3798,7 +4403,7 @@ impl OptionsDlgScreen {
         assets: &OptionsDlgAssets,
         book: &BookFonts,
         layout: &OptionsDlgLayout,
-        state: &ProgramSheetState,
+        state: &OptionsDlgState,
         gamma: Option<&GammaRamp>,
     ) {
         let g = layout.group;
@@ -3839,46 +4444,60 @@ impl OptionsDlgScreen {
         center_label(surface, &layout.weak_label, "weak");
         center_label(surface, &layout.strong_label, "strong");
 
-        // ScrollBar::DrawElement horizontal (C4GuiContainers.cpp:446-473):
-        // DrawHBarByVGfx with StartupBookScroll facets (begin (0,0), middle
-        // (0,16), end (0,32)), then the pin 1:1 at arrow + iScrollPos.
-        let s = layout.slider;
-        draw_rotated_vfacet(surface, &assets.book_scroll, 0, 0, 16, s.x, s.y, gamma);
-        let mut iy = 16;
-        while iy < s.w - 5 {
-            let h2 = 16.min(s.w - 5 - iy);
-            draw_rotated_vfacet(surface, &assets.book_scroll, 0, 16, h2, s.x + iy, s.y, gamma);
-            iy += 16;
-        }
-        draw_rotated_vfacet(surface, &assets.book_scroll, 0, 32, 16, s.x + s.w - 16, s.y, gamma);
-        // SetScrollPos: iScrollPos = val * maxScroll / 100 (C4Gui.h:910);
-        // maxScroll = Wdt - 2*16 - 16 (C4Gui.h:886-889).
-        let max_scroll = s.w - 2 * 16 - 16;
-        let pin = 16 + state.fair_crew_slider * max_scroll / 100;
-        draw_image_strip(surface, s.x + pin, s.y, &assets.book_scroll, 16, 16, 16, 16, gamma);
+        Self::draw_book_scrollbar(
+            surface,
+            assets,
+            &layout.slider,
+            state.fair_crew_slider_position(layout.slider),
+            state.fair_crew_arrow_pressed(ProgramSliderDirection::Decrement),
+            state.fair_crew_arrow_pressed(ProgramSliderDirection::Increment),
+            gamma,
+        );
     }
 
     /// SmallButton::DrawElement (C4StartupOptionsDlg.cpp:69-98): four beveled
     /// border quads + centered BookFont caption.
     fn draw_small_button(
         surface: &mut Surface,
+        assets: &OptionsDlgAssets,
         book: &BookFonts,
         rect: &IntRect,
         text: &str,
+        highlighted: bool,
+        pressed: bool,
         gamma: Option<&GammaRamp>,
     ) {
         let (x0, y0) = (rect.x, rect.y);
         let (x1, y1) = (rect.x + rect.w, rect.y + rect.h);
         let text_h = book.book.line_height;
         let i = ((rect.h - text_h) / 3).clamp(2, 5);
-        fill_quad_dw(surface, &[(x0, y0), (x1, y0), (x1 - i, y0 + i), (x0, y0 + i)], BTN_BORDER_COLOR1, gamma);
-        fill_quad_dw(surface, &[(x0, y0), (x0 + i, y0), (x0 + i, y1 - i), (x0, y1)], BTN_BORDER_COLOR1, gamma);
-        fill_quad_dw(surface, &[(x1, y0), (x1, y1), (x1 - i, y1), (x1 - i, y0 + i)], BTN_BORDER_COLOR2, gamma);
-        fill_quad_dw(surface, &[(x1, y1), (x0, y1), (x0 + i, y1 - i), (x1, y1 - i)], BTN_BORDER_COLOR2, gamma);
+        let (high, low) = if pressed {
+            (BTN_BORDER_COLOR2, BTN_BORDER_COLOR1)
+        } else {
+            (BTN_BORDER_COLOR1, BTN_BORDER_COLOR2)
+        };
+        fill_quad_dw(surface, &[(x0, y0), (x1, y0), (x1 - i, y0 + i), (x0, y0 + i)], high, gamma);
+        fill_quad_dw(surface, &[(x0, y0), (x0 + i, y0), (x0 + i, y1 - i), (x0, y1)], high, gamma);
+        fill_quad_dw(surface, &[(x1, y0), (x1, y1), (x1 - i, y1), (x1 - i, y0 + i)], low, gamma);
+        fill_quad_dw(surface, &[(x1, y1), (x0, y1), (x0 + i, y1 - i), (x1, y1 - i)], low, gamma);
+        let text_offset = if pressed { i } else { 0 };
+        if highlighted {
+            draw_image_bilinear_additive(
+                surface,
+                &GuiRect::new(
+                    (x0 + 5 + text_offset) as f32,
+                    (y0 + 3 + text_offset) as f32,
+                    (rect.w - 10) as f32,
+                    (rect.h - 6) as f32,
+                ),
+                &blacken_transparent(&assets.button_highlight),
+                gamma,
+            );
+        }
         book.book.draw_with_gamma(
             surface,
-            (x0 + x1) / 2,
-            (y0 + y1 - text_h) / 2,
+            (x0 + x1) / 2 + text_offset,
+            (y0 + y1 - text_h) / 2 + text_offset,
             text,
             BTN_FONT_RGBA,
             TextAlign::Center,
@@ -5254,17 +5873,18 @@ mod tests {
         assert_eq!(state.handle_key_up(crate::KeyCode::Enter), vec![OptionsDlgAction::Back]);
     }
 
-    // C4GUI::Dialog maps gamepad Left/Right to backward/forward
-    // AdvanceFocus. From the initially focused Tabular, backward reaches Back
-    // while forward descends into the selected Program sheet's Language
-    // combo. Backward from Back wraps to the Program sheet's last focusable
-    // control, Advanced; forward from Back returns to Tabular.
+    // Dialog::AdvanceFocus walks nested controls in construction order. The
+    // fair-crew scrollbar is an Element rather than a Control, so it is not in
+    // this sequence.
     #[test]
-    fn live_state_gamepad_horizontal_opens_language_then_reports_next_boundary() {
+    fn program_focus_traverses_and_activates_every_native_control() {
         let mut state = OptionsDlgState::default();
 
         assert!(state.handle_gamepad_horizontal(false).is_empty());
-        assert!(state.language_combo_focused());
+        assert_eq!(
+            state.focused_program_control(),
+            Some(OptionsProgramFocusTarget::LanguageCombo)
+        );
         assert_eq!(
             state.handle_gamepad_low_down(),
             vec![OptionsDlgAction::OpenLanguageCombo]
@@ -5277,32 +5897,276 @@ mod tests {
             state.handle_key_down(crate::KeyCode::Space),
             vec![OptionsDlgAction::OpenLanguageCombo]
         );
-        assert_eq!(
-            state.handle_gamepad_horizontal(false),
-            vec![OptionsDlgAction::UnsupportedProgramFocus(
+
+        for (target, action) in [
+            (
                 OptionsProgramFocusTarget::FontFaceCombo,
-            )]
+                OptionsDlgAction::OpenFontFaceCombo,
+            ),
+            (
+                OptionsProgramFocusTarget::FontSizeCombo,
+                OptionsDlgAction::OpenFontSizeCombo,
+            ),
+        ] {
+            assert!(state.handle_gamepad_horizontal(false).is_empty());
+            assert_eq!(state.focused_program_control(), Some(target));
+            assert_eq!(state.handle_gamepad_low_down(), vec![action]);
+        }
+
+        for (target, action) in [
+            (
+                OptionsProgramFocusTarget::WhiteChatIngame,
+                OptionsDlgAction::WhiteChatIngameChanged(true),
+            ),
+            (
+                OptionsProgramFocusTarget::WhiteChatLobby,
+                OptionsDlgAction::WhiteChatLobbyChanged(true),
+            ),
+            (
+                OptionsProgramFocusTarget::ShowLogTimestamps,
+                OptionsDlgAction::ShowLogTimestampsChanged(true),
+            ),
+            (
+                OptionsProgramFocusTarget::Preloading,
+                OptionsDlgAction::PreloadingChanged(true),
+            ),
+        ] {
+            assert!(state.handle_gamepad_horizontal(false).is_empty());
+            assert_eq!(state.focused_program_control(), Some(target));
+            assert_eq!(state.handle_gamepad_low_down(), vec![action]);
+        }
+
+        assert!(state.handle_gamepad_horizontal(false).is_empty());
+        assert_eq!(
+            state.focused_program_control(),
+            Some(OptionsProgramFocusTarget::ResetButton)
+        );
+        assert!(state.handle_gamepad_low_down().is_empty());
+        assert_eq!(
+            state.handle_gamepad_low_up(),
+            vec![OptionsDlgAction::ResetConfiguration]
         );
 
-        assert!(state.handle_gamepad_horizontal(true).is_empty());
-        assert!(!state.language_combo_focused());
-        assert!(state.handle_gamepad_horizontal(true).is_empty());
+        assert!(state.handle_gamepad_horizontal(false).is_empty());
         assert_eq!(
-            state.handle_gamepad_horizontal(true),
-            vec![OptionsDlgAction::UnsupportedProgramFocus(
-                OptionsProgramFocusTarget::AdvancedButton,
-            )]
+            state.focused_program_control(),
+            Some(OptionsProgramFocusTarget::AdvancedButton)
         );
         assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
         assert_eq!(
             state.handle_key_up(crate::KeyCode::Enter),
-            vec![OptionsDlgAction::Back],
-            "the unsupported Advanced boundary must retain Back focus"
+            vec![OptionsDlgAction::OpenAdvancedSettings]
         );
 
         assert!(state.handle_gamepad_horizontal(false).is_empty());
-        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
-        assert!(state.handle_key_up(crate::KeyCode::Enter).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Back);
+        assert!(state.handle_gamepad_horizontal(true).is_empty());
+        assert_eq!(
+            state.focused_program_control(),
+            Some(OptionsProgramFocusTarget::AdvancedButton)
+        );
+        assert!(state.handle_gamepad_horizontal(true).is_empty());
+        assert_eq!(
+            state.focused_program_control(),
+            Some(OptionsProgramFocusTarget::ResetButton)
+        );
+    }
+
+    #[test]
+    fn fair_crew_conversions_preserve_raw_strength_and_native_truncation() {
+        assert_eq!(
+            PROGRAM_FONT_FACES,
+            ["Arial Unicode MS", "Comic Sans MS", "Endeavour", "Verdana",]
+        );
+        assert_eq!(PROGRAM_FONT_SIZES, [8, 10, 12, 14, 16, 18, 20, 24, 28]);
+
+        assert_eq!(fair_crew_slider_to_strength(0), 0);
+        assert_eq!(fair_crew_slider_to_strength(9), 922);
+        assert_eq!(fair_crew_slider_to_strength(10), 1_079);
+        assert_eq!(fair_crew_slider_to_strength(100), 34_151);
+        assert_eq!(fair_crew_strength_to_slider(0), 0);
+        assert_eq!(fair_crew_strength_to_slider(1_000), 9);
+        assert_eq!(fair_crew_strength_to_slider(34_151), 99);
+
+        let mut program = ProgramSheetState::default();
+        program.set_fair_crew_strength(1_079);
+        assert_eq!(program.fair_crew_strength, 1_079);
+        assert_eq!(program.fair_crew_slider, 9);
+        program.set_font("Verdana", 20);
+        assert_eq!(program.font_face, "Verdana");
+        assert_eq!(program.font_size, "20");
+    }
+
+    #[test]
+    fn program_pointer_controls_emit_actions_and_fair_crew_drag_updates_raw_strength() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+
+        for (rect, action, anchor) in [
+            (
+                layout.font_face_combo,
+                OptionsDlgAction::OpenFontFaceCombo,
+                state.font_face_combo_anchor(),
+            ),
+            (
+                layout.font_size_combo,
+                OptionsDlgAction::OpenFontSizeCombo,
+                state.font_size_combo_anchor(),
+            ),
+        ] {
+            let point = GuiPoint::new(rect.x as f32, rect.y as f32);
+            assert_eq!(state.handle_pointer_down(point), vec![action]);
+            assert!(!state.pointer_down);
+            assert_eq!(
+                anchor,
+                Some(GuiPoint::new(rect.x as f32, (rect.y + rect.h) as f32))
+            );
+        }
+
+        for (rect, action) in [
+            (
+                layout.ingame_check,
+                OptionsDlgAction::WhiteChatIngameChanged(true),
+            ),
+            (
+                layout.lobby_check,
+                OptionsDlgAction::WhiteChatLobbyChanged(true),
+            ),
+            (
+                layout.preloading_check,
+                OptionsDlgAction::PreloadingChanged(true),
+            ),
+        ] {
+            let square = GuiPoint::new((rect.x + rect.h / 2) as f32, (rect.y + rect.h / 2) as f32);
+            assert!(state.handle_pointer_down(square).is_empty());
+            assert_eq!(state.handle_pointer_up(square), vec![action]);
+        }
+
+        let slider = layout.slider;
+        let track = GuiPoint::new(
+            (slider.x + slider.w / 2) as f32,
+            (slider.y + slider.h / 2) as f32,
+        );
+        let max_scroll = program_slider_max_scroll(slider);
+        let scroll_pos = (slider.w / 2 - 24).clamp(0, max_scroll);
+        let slider_value = scroll_pos * 100 / max_scroll.max(1);
+        let strength = fair_crew_slider_to_strength(slider_value);
+        assert_eq!(
+            state.handle_pointer_down(track),
+            vec![
+                OptionsDlgAction::FairCrewStrengthChanged(strength),
+                OptionsDlgAction::ProgramGuiSound(GuiSound::Command),
+            ]
+        );
+        assert!(state.captured_fair_crew_slider);
+        assert_eq!(state.program().fair_crew_slider, slider_value);
+        assert_eq!(state.program().fair_crew_strength, strength);
+        assert_eq!(state.fair_crew_slider_position, Some(scroll_pos));
+
+        let outside = GuiPoint::new((slider.x - 100) as f32, slider.y as f32);
+        assert_eq!(
+            state.handle_pointer_up(outside),
+            vec![OptionsDlgAction::FairCrewStrengthChanged(0)]
+        );
+        assert!(!state.captured_fair_crew_slider);
+        assert_eq!(state.program().fair_crew_strength, 0);
+
+        let reset = GuiPoint::new(
+            (layout.reset_button.x + layout.reset_button.w / 2) as f32,
+            (layout.reset_button.y + layout.reset_button.h / 2) as f32,
+        );
+        assert!(state.handle_pointer_down(reset).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(reset),
+            vec![OptionsDlgAction::ResetConfiguration]
+        );
+        let advanced = GuiPoint::new(
+            (layout.advanced_button.x + layout.advanced_button.w / 2) as f32,
+            (layout.advanced_button.y + layout.advanced_button.h / 2) as f32,
+        );
+        assert!(state.handle_pointer_down(advanced).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(advanced),
+            vec![OptionsDlgAction::OpenAdvancedSettings]
+        );
+    }
+
+    #[test]
+    fn fair_crew_slider_gui_sounds_match_scrollbar_ordering() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+        let slider = layout.slider;
+        let decrement = GuiPoint::new((slider.x + 2) as f32, (slider.y + 2) as f32);
+        let track = GuiPoint::new(
+            (slider.x + slider.w / 2) as f32,
+            (slider.y + slider.h / 2) as f32,
+        );
+        let outside = GuiPoint::new((slider.x - 10) as f32, decrement.y);
+
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+        assert!(matches!(
+            state.advance_frame().as_slice(),
+            [OptionsDlgAction::FairCrewStrengthChanged(_)]
+        ));
+        assert_eq!(
+            state.handle_pointer_up(decrement),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+        assert!(state.handle_pointer_move(outside).is_empty());
+        assert_eq!(
+            state.handle_pointer_move(decrement),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)],
+            "an LDown pointer re-entering the arrow re-arms it"
+        );
+        assert_eq!(
+            state.handle_pointer_up(decrement),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit)]
+        );
+        assert!(matches!(
+            state.handle_pointer_move(track).as_slice(),
+            [
+                OptionsDlgAction::FairCrewStrengthChanged(_),
+                OptionsDlgAction::ProgramGuiSound(GuiSound::Command),
+                OptionsDlgAction::ProgramGuiSound(GuiSound::ArrowHit),
+            ]
+        ));
+        assert!(matches!(
+            state.handle_pointer_move(outside).as_slice(),
+            [OptionsDlgAction::FairCrewStrengthChanged(_)]
+        ));
+        assert!(matches!(
+            state.handle_pointer_up(outside).as_slice(),
+            [OptionsDlgAction::FairCrewStrengthChanged(_)]
+        ));
+
+        let mut direct_track = OptionsDlgState::default();
+        direct_track.resize(1280, 720, &gui, &book);
+        assert!(matches!(
+            direct_track.handle_pointer_down(track).as_slice(),
+            [
+                OptionsDlgAction::FairCrewStrengthChanged(_),
+                OptionsDlgAction::ProgramGuiSound(GuiSound::Command),
+            ]
+        ));
     }
 
     #[test]

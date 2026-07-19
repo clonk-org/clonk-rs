@@ -1429,6 +1429,12 @@ struct ClassicFontBundle {
     native_source: Option<ClassicNativeFontSource>,
 }
 
+struct ClassicStartupFontBundle {
+    book: Arc<lc_frontend::startup_scensel::BookFontSet>,
+    options: Arc<lc_frontend::startup_options_dlg::BookFonts>,
+    player_selection: Arc<lc_frontend::startup_plrsel::BookFontSet>,
+}
+
 #[derive(Clone)]
 struct ClassicNativeFontSource {
     bytes: Arc<[u8]>,
@@ -1558,6 +1564,22 @@ fn resolve_classic_font_bundle(
     graphics_registrations: &[LoaderGroupRegistration],
 ) -> Result<ClassicFontBundle> {
     let (request, base_size) = classic_font_request(paths, scenario_font)?;
+    resolve_classic_font_bundle_for_request(
+        paths,
+        &request,
+        base_size,
+        catalog_registrations,
+        graphics_registrations,
+    )
+}
+
+fn resolve_classic_font_bundle_for_request(
+    paths: &AppPaths,
+    request: &str,
+    base_size: i32,
+    catalog_registrations: &[LoaderGroupRegistration],
+    graphics_registrations: &[LoaderGroupRegistration],
+) -> Result<ClassicFontBundle> {
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
     let resolve = |role, apply_definition| {
@@ -1616,6 +1638,45 @@ fn resolve_classic_font_bundle(
         fonts: Arc::new(fonts),
         tooltip: Arc::new(tooltip),
         native_source,
+    })
+}
+
+fn resolve_classic_startup_font_bundle_for_request(
+    paths: &AppPaths,
+    request: &str,
+    base_size: i32,
+    catalog_registrations: &[LoaderGroupRegistration],
+    graphics_registrations: &[LoaderGroupRegistration],
+) -> Result<ClassicStartupFontBundle> {
+    use lc_graphics::clonk_font::ClonkFontRole;
+
+    let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
+    let graphics = main_graphics_group(paths)?;
+    let resolve = |role| {
+        catalog
+            .resolve(request, base_size, role, true)
+            .with_context(|| format!("classic startup font `{request}` has no {role:?} mapping"))
+    };
+    let build = |spec: ResolvedFontSpec| {
+        build_classic_font_spec(spec, graphics_registrations, &graphics, false)
+    };
+
+    let title = build(resolve(FontRole::Title)?)?.with_role(ClonkFontRole::BookTitle);
+    let caption = build(resolve(FontRole::Caption)?)?.with_role(ClonkFontRole::BookCaption);
+    let text = build(resolve(FontRole::Main)?)?.with_role(ClonkFontRole::BookText);
+    let small = build(resolve(FontRole::MainSmall)?)?.with_role(ClonkFontRole::BookSmall);
+
+    Ok(ClassicStartupFontBundle {
+        book: Arc::new(lc_frontend::startup_scensel::BookFontSet {
+            title,
+            caption: caption.clone(),
+            text: text.clone(),
+        }),
+        options: Arc::new(lc_frontend::startup_options_dlg::BookFonts {
+            book: text.clone(),
+            book_small: small,
+        }),
+        player_selection: Arc::new(lc_frontend::startup_plrsel::BookFontSet { caption, text }),
     })
 }
 
@@ -3615,9 +3676,15 @@ impl FrontendAssets {
             .and_then(|bundle| bundle.native_source.clone());
         let global_tooltip_font = classic_fonts.as_ref().map(|bundle| bundle.tooltip.clone());
         let startup_global_tooltip_font = global_tooltip_font.clone();
-        let book_fonts = Self::load_book_fonts(paths);
-        let options_book_fonts = Self::load_options_book_fonts(paths);
-        let plrsel_book_fonts = Self::load_plrsel_book_fonts(paths);
+        let (book_fonts, options_book_fonts, plrsel_book_fonts) =
+            match Self::load_classic_startup_fonts(paths) {
+                Some(bundle) => (
+                    Some(bundle.book),
+                    Some(bundle.options),
+                    Some(bundle.player_selection),
+                ),
+                None => (None, None, None),
+            };
         let mut startup_dialog_images = HashMap::new();
         let mut startup_bootstrap_image_failures = HashMap::new();
         let mut global_gui_font_failures = HashMap::new();
@@ -3914,49 +3981,36 @@ impl FrontendAssets {
         }
     }
 
-    /// Builds the shadowless startup book fonts (C4Startup.cpp:92-116).
-    fn load_book_fonts(
+    /// Resolves the configured startup RX face for every shadowless book
+    /// font set (C4Startup.cpp:92-116).
+    fn load_classic_startup_fonts(
         paths: Option<&AppPaths>,
-    ) -> Option<Arc<lc_frontend::startup_scensel::BookFontSet>> {
+    ) -> Option<ClassicStartupFontBundle> {
         let paths = paths?;
-        let group = Group::open(paths.system_group_path()).ok()?;
-        let resource = load_endeavour_font(&group).ok()?;
-        match lc_frontend::startup_scensel::build_book_font_set(resource.bytes()) {
-            Ok(set) => Some(Arc::new(set)),
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to build startup book fonts");
-                None
+        let registrations = match startup_loader_registrations(paths) {
+            Ok(registrations) => registrations,
+            Err(error) => {
+                tracing::warn!(%error, "failed to inspect startup book-font groups");
+                return None;
             }
-        }
-    }
-
-    /// Builds the options paper-sheet book fonts (C4Startup.cpp:92-116).
-    fn load_options_book_fonts(
-        paths: Option<&AppPaths>,
-    ) -> Option<Arc<lc_frontend::startup_options_dlg::BookFonts>> {
-        let paths = paths?;
-        let group = Group::open(paths.system_group_path()).ok()?;
-        let resource = load_endeavour_font(&group).ok()?;
-        match lc_frontend::startup_options_dlg::build_book_fonts(resource.bytes()) {
-            Ok(set) => Some(Arc::new(set)),
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to build options book fonts");
-                None
+        };
+        let (request, base_size) = match classic_font_request(paths, None) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read configured startup book font");
+                return None;
             }
-        }
-    }
-
-    /// Builds the player-selection book fonts (C4Startup.cpp:92-116).
-    fn load_plrsel_book_fonts(
-        paths: Option<&AppPaths>,
-    ) -> Option<Arc<lc_frontend::startup_plrsel::BookFontSet>> {
-        let paths = paths?;
-        let group = Group::open(paths.system_group_path()).ok()?;
-        let resource = load_endeavour_font(&group).ok()?;
-        match lc_frontend::startup_plrsel::build_book_font_set(resource.bytes()) {
-            Ok(set) => Some(Arc::new(set)),
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to build plrsel book fonts");
+        };
+        match resolve_classic_startup_font_bundle_for_request(
+            paths,
+            &request,
+            base_size,
+            &registrations,
+            &registrations,
+        ) {
+            Ok(bundle) => Some(bundle),
+            Err(error) => {
+                tracing::warn!(%error, "failed to resolve configured startup book fonts");
                 None
             }
         }
@@ -5807,8 +5861,10 @@ fn main() -> Result<()> {
             *control_flow,
             ControlFlow::Exit | ControlFlow::ExitWithCode(_)
         ) {
-            if let Some(paths) = app_paths.as_ref() {
-                display_options.persist_if_dirty(paths.as_ref());
+            if !app.configuration_reset_requested {
+                if let Some(paths) = app_paths.as_ref() {
+                    display_options.persist_if_dirty(paths.as_ref());
+                }
             }
         }
     });
@@ -5858,8 +5914,10 @@ fn apply_options_display_requests(
                 }
             }
         }
-        if let Some(paths) = paths {
-            display_options.persist_if_dirty(paths);
+        if !app.configuration_reset_requested {
+            if let Some(paths) = paths {
+                display_options.persist_if_dirty(paths);
+            }
         }
         window.request_redraw();
     }
@@ -8244,6 +8302,7 @@ enum MessageDialogContinuation {
     },
     OptionsControlCapture(lc_frontend::startup_options_controls::ControlCaptureTarget),
     OptionsAlternateServerNotice,
+    OptionsResetConfiguration,
 }
 
 #[derive(Clone, Debug)]
@@ -8463,6 +8522,8 @@ enum AppContextMenuCommand {
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
     OptionsLanguage(String),
+    OptionsFontFace(String),
+    OptionsFontSize(i32),
     OptionsDisplayMode(lc_frontend::startup_options_graphics::GraphicsDisplayMode),
     LobbyTeam { player_id: i32, team_id: i32 },
     LobbyKick(i32),
@@ -9968,6 +10029,10 @@ struct GameApp {
     ingame_ignore_left_up: bool,
     window_active: bool,
     exit_requested: bool,
+    /// A confirmed `Config.Default()` reset owns shutdown persistence. Keep
+    /// this latched after `take_exit_request` so the event-loop tail cannot
+    /// merge stale display values back into the freshly reset config.
+    configuration_reset_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
     /// `C4GraphicsSystem::ShowHelp`; reset by GraphicsSystem::Default for a
@@ -10995,7 +11060,7 @@ impl fmt::Display for ClassicStartupBootstrapIssue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicStartupAction {
-    OptionsProgramFocus(lc_frontend::startup_options_dlg::OptionsProgramFocusTarget),
+    OptionsAdvancedSettings,
     PlayerCrew { index: usize },
 }
 
@@ -16911,11 +16976,45 @@ fn load_options_program_state(
 ) -> lc_frontend::startup_options_dlg::ProgramSheetState {
     let mut state = lc_frontend::startup_options_dlg::ProgramSheetState::default();
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    state.font_face = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "FontName"))
+        .filter(|face| !face.is_empty())
+        .unwrap_or("Endeavour")
+        .to_string();
+    state.font_size = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "FontSize"))
+        .and_then(|size| size.trim().parse::<i32>().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(14)
+        .to_string();
+    state.white_chat_ingame = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "UseWhiteIngameChat"))
+        .map(parse_config_bool)
+        .unwrap_or(false);
+    state.white_chat_lobby = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "UseWhiteLobbyChat"))
+        .map(parse_config_bool)
+        .unwrap_or(false);
     state.show_log_timestamps = config
         .as_ref()
         .and_then(|config| config.get_in(Some("General"), "ShowLogTimestamps"))
         .map(parse_config_bool)
         .unwrap_or(false);
+    state.preloading = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "Preloading"))
+        .map(parse_config_bool)
+        .unwrap_or(!cfg!(target_os = "macos"));
+    let fair_crew_strength = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "DefCrewStrength"))
+        .and_then(|strength| strength.trim().parse::<i32>().ok())
+        .unwrap_or(1_000);
+    state.set_fair_crew_strength(fair_crew_strength);
 
     let language = config
         .as_ref()
@@ -17583,9 +17682,7 @@ fn persist_config_value(
 
 fn persist_startup_options_config(
     paths: &AppPaths,
-    language: &str,
-    language_ex: &str,
-    show_log_timestamps: bool,
+    program: &lc_frontend::startup_options_dlg::ProgramSheetState,
     audio_options: Option<&AudioOptions>,
     graphics: &lc_frontend::startup_options_graphics::GraphicsSheetState,
     network: &lc_frontend::startup_options_network::NetworkSheetState,
@@ -17599,17 +17696,39 @@ fn persist_startup_options_config(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
         Err(error) => return Err(error),
     };
-    config.set_in(Some("General"), "Language", language);
-    config.set_in(Some("General"), "LanguageEx", language_ex);
+    config.set_in(Some("General"), "Language", &program.language);
+    config.set_in(Some("General"), "LanguageEx", &program.language_ex);
+    config.set_in(Some("General"), "FontName", &program.font_face);
+    config.set_in(Some("General"), "FontSize", &program.font_size);
+    let bool_string = |value: bool| i32::from(value).to_string();
+    config.set_in(
+        Some("General"),
+        "UseWhiteIngameChat",
+        bool_string(program.white_chat_ingame),
+    );
+    config.set_in(
+        Some("General"),
+        "UseWhiteLobbyChat",
+        bool_string(program.white_chat_lobby),
+    );
     config.set_in(
         Some("General"),
         "ShowLogTimestamps",
-        i32::from(show_log_timestamps).to_string(),
+        bool_string(program.show_log_timestamps),
+    );
+    config.set_in(
+        Some("General"),
+        "Preloading",
+        bool_string(program.preloading),
+    );
+    config.set_in(
+        Some("General"),
+        "DefCrewStrength",
+        program.fair_crew_strength.to_string(),
     );
     if let Some(audio_options) = audio_options {
         audio_options.write_startup_sound_config(&mut config);
     }
-    let bool_string = |value: bool| i32::from(value).to_string();
     config.set_in(
         Some("Graphics"),
         "DisplayMode",
@@ -19341,6 +19460,7 @@ impl GameApp {
             ingame_ignore_left_up: false,
             window_active: true,
             exit_requested: false,
+            configuration_reset_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
             runtime_help_visible: false,
@@ -20059,7 +20179,14 @@ impl GameApp {
                 dialog.pointer_left();
             }
             if let Some(dialog) = self.startup_player_dialog.as_mut() {
-                dialog.resize(width as i32, height as i32);
+                if let (Some(fonts), Some(book)) = (
+                    self.assets.clonk_fonts.as_deref(),
+                    self.assets.plrsel_book_fonts.as_deref(),
+                ) {
+                    dialog.resize_with_fonts(width as i32, height as i32, fonts, book);
+                } else {
+                    dialog.resize(width as i32, height as i32);
+                }
                 dialog.pointer_left();
             }
             if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
@@ -21798,7 +21925,16 @@ impl GameApp {
             && self
                 .startup_options_dialog
                 .as_ref()
-                .is_some_and(|dialog| dialog.language_combo_focused())
+                .is_some_and(|dialog| {
+                    matches!(
+                        dialog.focused_program_control(),
+                        Some(
+                            lc_frontend::startup_options_dlg::OptionsProgramFocusTarget::LanguageCombo
+                                | lc_frontend::startup_options_dlg::OptionsProgramFocusTarget::FontFaceCombo
+                                | lc_frontend::startup_options_dlg::OptionsProgramFocusTarget::FontSizeCombo
+                        )
+                    )
+                })
         {
             return false;
         }
@@ -33128,19 +33264,13 @@ impl GameApp {
                             None
                         } else {
                             point.and_then(|point| {
-                                let layout = lc_frontend::startup_plrsel::plrsel_layout(
-                                    self.graphics.surface().width() as i32,
-                                    self.graphics.surface().height() as i32,
-                                );
+                                let dialog = self.startup_player_dialog.as_ref()?;
+                                let layout = dialog.layout();
                                 let in_name_column = point.x
                                     >= (layout.list_client.x + layout.item_height) as f32
                                     && point.x < (layout.list_client.x + layout.item_width) as f32;
                                 in_name_column
-                                    .then(|| {
-                                        self.startup_player_dialog
-                                            .as_ref()
-                                            .and_then(|dialog| dialog.context_index_at(point))
-                                    })
+                                    .then(|| dialog.context_index_at(point))
                                     .flatten()
                             })
                         };
@@ -36447,6 +36577,60 @@ impl GameApp {
         self.open_context_menu_at(entries, anchor)
     }
 
+    fn open_options_font_face_combo(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(anchor) = self
+            .startup_options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.font_face_combo_anchor())
+        else {
+            return Ok(false);
+        };
+        let entries = lc_frontend::startup_options_dlg::PROGRAM_FONT_FACES
+            .into_iter()
+            .map(|face| {
+                ContextMenuEntry::new(face)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsFontFace(face.to_string()))
+            })
+            .collect();
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    fn open_options_font_size_combo(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(anchor) = self
+            .startup_options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.font_size_combo_anchor())
+        else {
+            return Ok(false);
+        };
+        let entries = lc_frontend::startup_options_dlg::PROGRAM_FONT_SIZES
+            .into_iter()
+            .map(|size| {
+                ContextMenuEntry::new(size.to_string())
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsFontSize(size))
+            })
+            .collect();
+        self.open_context_menu_at(entries, anchor)
+    }
+
     fn open_options_display_mode_combo(&mut self) -> Result<bool, EngineError> {
         use lc_frontend::startup_options_graphics::GraphicsDisplayMode;
         if self.mode != AppMode::Menu
@@ -37575,6 +37759,12 @@ impl GameApp {
                                 self.open_options_menu();
                             }
                         }
+                    }
+                    AppContextMenuCommand::OptionsFontFace(face) => {
+                        self.apply_options_font_selection(Some(face), None)?;
+                    }
+                    AppContextMenuCommand::OptionsFontSize(size) => {
+                        self.apply_options_font_selection(None, Some(size))?;
                     }
                     AppContextMenuCommand::OptionsDisplayMode(mode) => {
                         let changed = self
@@ -38851,6 +39041,36 @@ impl GameApp {
                 OptionsDlgAction::OpenLanguageCombo => {
                     self.open_options_language_combo()?;
                 }
+                OptionsDlgAction::OpenFontFaceCombo => {
+                    self.open_options_font_face_combo()?;
+                }
+                OptionsDlgAction::OpenFontSizeCombo => {
+                    self.open_options_font_size_combo()?;
+                }
+                OptionsDlgAction::WhiteChatIngameChanged(enabled) => {
+                    self.display_flags.white_chat = enabled;
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::WhiteChatLobbyChanged(enabled) => {
+                    self.white_lobby_chat = enabled;
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::PreloadingChanged(_) => {
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::ProgramGuiSound(sound) => {
+                    self.play_options_sound(sound);
+                }
+                OptionsDlgAction::FairCrewStrengthChanged(_) => {}
+                OptionsDlgAction::ResetConfiguration => {
+                    self.play_ui_sound("Command");
+                    self.show_options_reset_configuration()?;
+                }
+                OptionsDlgAction::OpenAdvancedSettings => {
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::OptionsAdvancedSettings,
+                    ));
+                }
                 OptionsDlgAction::Sound(action) => match action {
                     SoundSheetAction::GuiSound(sound) | SoundSheetAction::TestSound(sound) => {
                         self.play_options_sound(sound);
@@ -38933,11 +39153,6 @@ impl GameApp {
                         }
                     }
                 }
-                OptionsDlgAction::UnsupportedProgramFocus(target) => {
-                    return Err(classic_startup_action_error(
-                        ClassicStartupAction::OptionsProgramFocus(target),
-                    ));
-                }
             }
         }
         Ok(())
@@ -38948,6 +39163,142 @@ impl GameApp {
             lc_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
             lc_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
         });
+    }
+
+    fn apply_options_font_selection(
+        &mut self,
+        selected_face: Option<String>,
+        selected_size: Option<i32>,
+    ) -> Result<(), EngineError> {
+        let Some((current_face, current_size)) =
+            self.startup_options_dialog.as_ref().map(|dialog| {
+                (
+                    dialog.program().font_face.clone(),
+                    dialog
+                        .program()
+                        .font_size
+                        .trim()
+                        .parse::<i32>()
+                        .unwrap_or(14),
+                )
+            })
+        else {
+            return Ok(());
+        };
+        let face = selected_face.unwrap_or_else(|| current_face.clone());
+        let size = selected_size.unwrap_or(current_size);
+        let Some(paths) = self.app_paths.as_ref() else {
+            return self.show_options_font_error();
+        };
+        let resources = (|| -> Result<_> {
+            let registrations = startup_loader_registrations(paths)?;
+            let gui = resolve_classic_font_bundle_for_request(
+                paths,
+                &face,
+                size,
+                &registrations,
+                &registrations,
+            )?;
+            let startup = resolve_classic_startup_font_bundle_for_request(
+                paths,
+                &face,
+                size,
+                &registrations,
+                &registrations,
+            )?;
+            Ok((gui, startup))
+        })();
+        let (gui, startup) = match resources {
+            Ok(resources) => resources,
+            Err(error) => {
+                tracing::warn!(%error, %face, size, "failed to apply selected options font");
+                return self.show_options_font_error();
+            }
+        };
+
+        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+            dialog.program_mut().set_font(face.clone(), size);
+        }
+        match self.persist_open_options_config() {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                tracing::warn!(%error, "failed to save selected options font");
+                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    dialog.program_mut().set_font(current_face, current_size);
+                }
+                return self.show_options_font_error();
+            }
+            None => {
+                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    dialog.program_mut().set_font(current_face, current_size);
+                }
+                return self.show_options_font_error();
+            }
+        }
+
+        let ClassicFontBundle {
+            fonts,
+            tooltip,
+            native_source,
+        } = gui;
+        let native_fonts = self.native_font_cache_for_source(native_source.as_ref());
+        let player_selection_fonts = startup.player_selection.clone();
+        {
+            let assets = Arc::make_mut(&mut self.assets);
+            assets.clonk_fonts = Some(fonts.clone());
+            assets.startup_clonk_fonts = Some(fonts.clone());
+            assets.global_tooltip_font = Some(tooltip.clone());
+            assets.startup_global_tooltip_font = Some(tooltip);
+            assets.startup_native_font_source = native_source;
+            assets.book_fonts = Some(startup.book);
+            assets.options_book_fonts = Some(startup.options);
+            assets.plrsel_book_fonts = Some(startup.player_selection);
+        }
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_layout_fonts(fonts.as_ref(), player_selection_fonts.as_ref());
+        }
+        self.graphics.set_clonk_fonts(Some(fonts.clone()));
+        self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
+        self.native_startup_fonts = native_fonts;
+        self.open_options_menu();
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn show_options_font_error(&mut self) -> Result<(), EngineError> {
+        let message = self.runtime_resource_text("IDS_ERR_INITFONTS", "Error initializing fonts");
+        let caption = self.runtime_resource_text("IDS_DLG_ERROR", "Error");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn show_options_reset_configuration(&mut self) -> Result<(), EngineError> {
+        let prompt = self.runtime_resource_text(
+            "IDS_MSG_PROMPTRESETCONFIG",
+            "Are you sure you want to reset all configuration values?",
+        );
+        let restart = self.runtime_resource_text(
+            "IDS_MSG_RESTARTCHANGECFG",
+            "For changes to take effect the program has to be restarted.",
+        );
+        let caption = self.runtime_resource_text("IDS_BTN_RESETCONFIG", "Reset configuration");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                format!("{prompt}|{restart}"),
+                caption,
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::OptionsResetConfiguration,
+        )
     }
 
     fn show_options_network_validation_error(&mut self, message: &str) -> Result<(), EngineError> {
@@ -42232,10 +42583,16 @@ impl GameApp {
                 .map(|player| player.activated)
                 .collect(),
         );
-        dialog.resize(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
-        );
+        let width = self.graphics.surface().width() as i32;
+        let height = self.graphics.surface().height() as i32;
+        if let (Some(fonts), Some(book)) = (
+            self.assets.clonk_fonts.as_deref(),
+            self.assets.plrsel_book_fonts.as_deref(),
+        ) {
+            dialog.resize_with_fonts(width, height, fonts, book);
+        } else {
+            dialog.resize(width, height);
+        }
         self.startup_player_dialog = Some(dialog);
         self.plrsel_last_click = None;
         self.replace_startup_dialog(
@@ -42280,9 +42637,7 @@ impl GameApp {
         let dialog = self.startup_options_dialog.as_ref()?;
         Some(persist_startup_options_config(
             paths,
-            &dialog.program().language,
-            &dialog.program().language_ex,
-            dialog.program().show_log_timestamps,
+            dialog.program(),
             self.audio.as_ref().map(|audio| &audio.options),
             dialog.graphics(),
             dialog.network(),
@@ -46084,6 +46439,24 @@ impl GameApp {
                     }
                 }
             }
+            MessageDialogContinuation::OptionsResetConfiguration
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                if let Some(paths) = self.app_paths.as_ref() {
+                    let path = paths.config_file();
+                    let reset = path
+                        .parent()
+                        .map_or(Ok(()), fs::create_dir_all)
+                        .and_then(|()| Config::new().save(&path));
+                    if let Err(error) = reset {
+                        tracing::warn!(%error, path = %path.display(), "failed to save reset configuration");
+                    }
+                }
+                self.pending_options_display_requests.clear();
+                self.configuration_reset_requested = true;
+                self.request_exit();
+            }
+            MessageDialogContinuation::OptionsResetConfiguration => {}
         }
         Ok(())
     }
@@ -46688,11 +47061,7 @@ impl GameApp {
         }
         let dialog = self.startup_player_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
-        let surface = self.graphics.surface();
-        let layout = lc_frontend::startup_plrsel::plrsel_layout(
-            surface.width() as i32,
-            surface.height() as i32,
-        );
+        let layout = dialog.layout();
         let title = match dialog.mode() {
             lc_frontend::startup_plrsel::PlrSelMode::Player => {
                 self.startup_tooltip_resource_no_amp("IDS_DLG_PLAYERSELECTION")
@@ -82685,140 +83054,120 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn options_program_focus_boundaries_preserve_view_model_pixels_and_cache() {
+    fn options_program_focus_traverses_every_control_without_a_boundary() {
         use lc_frontend::startup_options_dlg::OptionsProgramFocusTarget;
 
         let mut app = new_classic_menu_app(640, 480);
         app.open_options_menu();
-        let mut tabular_frame = vec![0_u8; 640 * 480 * 4];
-        assert!(app
-            .render(&mut tabular_frame)
-            .expect("render focused tabular"));
-        let tabular_program = app
-            .startup_options_dialog
-            .as_ref()
-            .expect("options state")
-            .program()
-            .clone();
-        let tabular_version = app.menu_render_version;
-        let tabular_cache = app.menu_frame_cache.as_ref().expect("tabular cache");
-        let tabular_cache_view = tabular_cache.view;
-        let tabular_cache_version = tabular_cache.version;
-        let tabular_cache_width = tabular_cache.width;
-        let tabular_cache_height = tabular_cache.height;
-        let tabular_cache_native_text_deferred = tabular_cache.native_text_deferred;
-        let tabular_cached_frame = tabular_cache.frame.clone();
-        assert_eq!(tabular_cached_frame, tabular_frame);
+        let expected = [
+            OptionsProgramFocusTarget::LanguageCombo,
+            OptionsProgramFocusTarget::FontFaceCombo,
+            OptionsProgramFocusTarget::FontSizeCombo,
+            OptionsProgramFocusTarget::WhiteChatIngame,
+            OptionsProgramFocusTarget::WhiteChatLobby,
+            OptionsProgramFocusTarget::ShowLogTimestamps,
+            OptionsProgramFocusTarget::Preloading,
+            OptionsProgramFocusTarget::ResetButton,
+            OptionsProgramFocusTarget::AdvancedButton,
+        ];
+        for target in expected {
+            app.handle_gamepad_direction(
+                GamepadSlot::new(0),
+                ControlButton::Right,
+                ElementState::Pressed,
+            )
+            .unwrap_or_else(|error| panic!("focus {target:?}: {error}"));
+            assert_eq!(
+                app.startup_options_dialog
+                    .as_ref()
+                    .expect("options state")
+                    .focused_program_control(),
+                Some(target)
+            );
+        }
 
         app.handle_gamepad_direction(
             GamepadSlot::new(0),
             ControlButton::Right,
             ElementState::Pressed,
         )
-        .expect("forward focus enters the implemented Language combo");
-        assert!(
+        .expect("wrap forward to Back");
+        assert_eq!(
             app.startup_options_dialog
                 .as_ref()
-                .expect("options state retained")
-                .language_combo_focused()
+                .unwrap()
+                .focused_program_control(),
+            None
         );
-        let error = app
-            .handle_gamepad_direction(
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Left,
+            ElementState::Pressed,
+        )
+        .expect("wrap backward to Advanced");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .focused_program_control(),
+            Some(OptionsProgramFocusTarget::AdvancedButton)
+        );
+    }
+
+    #[test]
+    fn options_program_font_combos_accept_native_alt_open_bindings() {
+        use lc_frontend::startup_options_dlg::OptionsProgramFocusTarget;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        for expected in [
+            OptionsProgramFocusTarget::LanguageCombo,
+            OptionsProgramFocusTarget::FontFaceCombo,
+        ] {
+            app.handle_gamepad_direction(
                 GamepadSlot::new(0),
                 ControlButton::Right,
                 ElementState::Pressed,
             )
-            .expect_err("forward focus reaches the unported Font Face combo");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::OptionsProgramFocus(
-                OptionsProgramFocusTarget::FontFaceCombo,
-            )),
-        );
-        assert_eq!(app.startup_view, StartupView::Options);
-        assert!(app.status_text.is_empty());
+            .expect("advance Program focus");
+            assert_eq!(
+                app.startup_options_dialog
+                    .as_ref()
+                    .unwrap()
+                    .focused_program_control(),
+                Some(expected)
+            );
+        }
+
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("Alt+Down opens Font Face");
+        assert!(app.context_menu.is_some());
+        app.close_context_menu_silently();
+        app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+            .expect("release Alt+Down");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("focus Font Size");
         assert_eq!(
             app.startup_options_dialog
                 .as_ref()
-                .expect("options state retained")
-                .program(),
-            &tabular_program
+                .unwrap()
+                .focused_program_control(),
+            Some(OptionsProgramFocusTarget::FontSizeCombo)
         );
-        assert_eq!(app.menu_render_version, tabular_version);
-        let retained_cache = app.menu_frame_cache.as_ref().expect("cache retained");
-        assert_eq!(retained_cache.view, tabular_cache_view);
-        assert_eq!(retained_cache.version, tabular_cache_version);
-        assert_eq!(retained_cache.width, tabular_cache_width);
-        assert_eq!(retained_cache.height, tabular_cache_height);
-        assert_eq!(
-            retained_cache.native_text_deferred,
-            tabular_cache_native_text_deferred
-        );
-        assert_eq!(retained_cache.frame, tabular_cached_frame);
-        let mut sentinel = vec![0xa7; 640 * 480 * 4];
-        assert!(!app
-            .render(&mut sentinel)
-            .expect("replay retained tabular cache"));
-        assert_eq!(sentinel, tabular_frame);
-
-        app.process_gamepad_event_batch([
-            GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Left,
-                state: ElementState::Pressed,
-            },
-            GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Left,
-                state: ElementState::Pressed,
-            },
-        ])
-        .expect("backward focus reaches Back");
-        let mut back_frame = vec![0_u8; 640 * 480 * 4];
-        assert!(app.render(&mut back_frame).expect("render focused Back"));
-        let back_version = app.menu_render_version;
-        let back_cached_frame = app
-            .menu_frame_cache
-            .as_ref()
-            .expect("Back cache")
-            .frame
-            .clone();
-
-        let error = app
-            .handle_gamepad_direction(
-                GamepadSlot::new(0),
-                ControlButton::Left,
-                ElementState::Pressed,
-            )
-            .expect_err("backward wrap reaches the unported Advanced button");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::OptionsProgramFocus(
-                OptionsProgramFocusTarget::AdvancedButton,
-            )),
-        );
-        assert_eq!(app.startup_view, StartupView::Options);
-        assert!(app.status_text.is_empty());
-        assert_eq!(app.menu_render_version, back_version);
-        assert_eq!(
-            app.menu_frame_cache
-                .as_ref()
-                .expect("Back cache retained")
-                .frame,
-            back_cached_frame
-        );
-        let mut sentinel = vec![0x5c; 640 * 480 * 4];
-        assert!(!app
-            .render(&mut sentinel)
-            .expect("replay retained Back cache"));
-        assert_eq!(sentinel, back_frame);
-
-        app.handle_startup_dialog_key(KeyCode::Enter, ElementState::Pressed)
-            .expect("press retained Back focus");
-        assert_eq!(app.startup_view, StartupView::Options);
-        app.handle_startup_dialog_key(KeyCode::Enter, ElementState::Released)
-            .expect("release retained Back focus");
-        assert_eq!(app.startup_view, StartupView::MainMenu);
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Alt+Space opens Font Size");
+        assert!(app.context_menu.is_some());
     }
 
     #[test]
@@ -87474,6 +87823,389 @@ ScenInfoArea=70,5,25,90
                 .show_log_timestamps,
             "the live checkbox must reflect General.ShowLogTimestamps"
         );
+    }
+
+    #[test]
+    fn options_program_round_trips_bound_values_and_raw_fair_crew_strength() {
+        use lc_frontend::startup_options_dlg::{fair_crew_slider_to_strength, OptionsDlgAction};
+
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nFontName=Endeavour\nFontSize=14\nUseWhiteIngameChat=1\nUseWhiteLobbyChat=1\nShowLogTimestamps=0\nPreloading=0\nDefCrewStrength=1000\nVendorProgramKey=keep\n",
+        )
+        .expect("seed Program config");
+
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_options_menu();
+
+        let program = app.startup_options_dialog.as_ref().unwrap().program();
+        assert_eq!(program.font_face, "Endeavour");
+        assert_eq!(program.font_size, "14");
+        assert!(program.white_chat_ingame);
+        assert!(program.white_chat_lobby);
+        assert!(!program.preloading);
+        assert_eq!(program.fair_crew_strength, 1_000);
+        assert_eq!(program.fair_crew_slider, 9);
+
+        let strength = fair_crew_slider_to_strength(10);
+        {
+            let program = app.startup_options_dialog.as_mut().unwrap().program_mut();
+            program.white_chat_ingame = false;
+            program.white_chat_lobby = false;
+            program.preloading = true;
+            program.fair_crew_slider = 10;
+            program.fair_crew_strength = strength;
+        }
+        app.process_options_dialog_actions(vec![
+            OptionsDlgAction::WhiteChatIngameChanged(false),
+            OptionsDlgAction::WhiteChatLobbyChanged(false),
+            OptionsDlgAction::PreloadingChanged(true),
+            OptionsDlgAction::FairCrewStrengthChanged(strength),
+        ])
+        .expect("apply Program callbacks");
+        assert!(!app.display_flags.white_chat);
+        assert!(!app.white_lobby_chat);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
+            .expect("save Program options");
+
+        let config = Config::load(paths.config_file()).expect("reload Program config");
+        assert_eq!(
+            config.get_in(Some("General"), "FontName"),
+            Some("Endeavour")
+        );
+        assert_eq!(config.get_in(Some("General"), "FontSize"), Some("14"));
+        assert_eq!(
+            config.get_in(Some("General"), "UseWhiteIngameChat"),
+            Some("0")
+        );
+        assert_eq!(
+            config.get_in(Some("General"), "UseWhiteLobbyChat"),
+            Some("0")
+        );
+        assert_eq!(config.get_in(Some("General"), "Preloading"), Some("1"));
+        let strength_string = strength.to_string();
+        assert_eq!(
+            config.get_in(Some("General"), "DefCrewStrength"),
+            Some(strength_string.as_str())
+        );
+        assert_eq!(
+            config.get_in(Some("General"), "VendorProgramKey"),
+            Some("keep")
+        );
+    }
+
+    #[test]
+    fn options_font_size_rebuilds_all_startup_font_sets_and_recreates() {
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nFontName=Endeavour\nFontSize=14\n",
+        )
+        .expect("seed font config");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_options_menu();
+
+        app.apply_options_font_selection(None, Some(16))
+            .expect("select size 16");
+
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .program()
+                .font_size,
+            "16"
+        );
+        assert_eq!(
+            app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
+            25
+        );
+        assert_eq!(
+            app.assets
+                .options_book_fonts
+                .as_ref()
+                .unwrap()
+                .book
+                .line_height,
+            25
+        );
+        assert_eq!(app.assets.book_fonts.as_ref().unwrap().text.line_height, 25);
+        assert_eq!(
+            app.assets
+                .plrsel_book_fonts
+                .as_ref()
+                .unwrap()
+                .text
+                .line_height,
+            25
+        );
+        let config = Config::load(paths.config_file()).expect("reload selected font");
+        assert_eq!(
+            config.get_in(Some("General"), "FontName"),
+            Some("Endeavour")
+        );
+        assert_eq!(config.get_in(Some("General"), "FontSize"), Some("16"));
+
+        let before_failure = fs::read(paths.config_file()).expect("font config before failure");
+        app.apply_options_font_selection(Some("Definitely Missing Font".to_string()), None)
+            .expect("report invalid font");
+        let error = app.message_dialogs.last().expect("font error dialog");
+        assert_eq!(error.state.message(), "Error initializing fonts");
+        assert_eq!(
+            error.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .program()
+                .font_size,
+            "16"
+        );
+        assert_eq!(
+            app.assets.clonk_fonts.as_ref().unwrap().text.line_height,
+            25
+        );
+        assert_eq!(fs::read(paths.config_file()).unwrap(), before_failure);
+
+        drop(app);
+        let mut restarted = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("restart with persisted font selection");
+        wait_for_menu(&mut restarted);
+        assert_eq!(
+            restarted
+                .assets
+                .clonk_fonts
+                .as_ref()
+                .unwrap()
+                .text
+                .line_height,
+            25
+        );
+        assert_eq!(
+            restarted
+                .assets
+                .options_book_fonts
+                .as_ref()
+                .unwrap()
+                .book
+                .line_height,
+            25
+        );
+        assert_eq!(
+            restarted.assets.book_fonts.as_ref().unwrap().text.line_height,
+            25
+        );
+        assert_eq!(
+            restarted
+                .assets
+                .plrsel_book_fonts
+                .as_ref()
+                .unwrap()
+                .text
+                .line_height,
+            25
+        );
+        restarted.open_player_selection_dialog();
+        let player_layout = restarted
+            .startup_player_dialog
+            .as_ref()
+            .expect("player dialog with persisted font")
+            .layout();
+        assert_eq!(player_layout.item_height, 29);
+        assert_eq!(
+            player_layout,
+            lc_frontend::startup_plrsel::plrsel_layout_with_fonts(
+                1280,
+                720,
+                restarted.assets.clonk_fonts.as_deref().unwrap(),
+                restarted.assets.plrsel_book_fonts.as_deref().unwrap(),
+            )
+        );
+        restarted.open_options_menu();
+        assert_eq!(
+            restarted
+                .startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .program()
+                .font_size,
+            "16"
+        );
+
+        fs::remove_file(paths.config_file()).expect("remove font config");
+        fs::create_dir(paths.config_file()).expect("block font config writes");
+        restarted
+            .apply_options_font_selection(None, Some(18))
+            .expect("report font persistence failure");
+        assert_eq!(
+            restarted
+                .startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .program()
+                .font_size,
+            "16"
+        );
+        assert_eq!(
+            restarted
+                .assets
+                .clonk_fonts
+                .as_ref()
+                .unwrap()
+                .text
+                .line_height,
+            25
+        );
+        assert_eq!(
+            restarted
+                .message_dialogs
+                .last()
+                .expect("font persistence error")
+                .state
+                .message(),
+            "Error initializing fonts"
+        );
+    }
+
+    #[test]
+    fn options_reset_confirmation_replaces_config_and_requests_clean_exit() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogResult,
+        };
+        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nFontName=Endeavour\nFontSize=28\nVendorResetKey=remove\n[Graphics]\nScale=250\n",
+        )
+        .expect("seed reset config");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_options_menu();
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .program_mut()
+            .preloading = true;
+        let before_cancel = fs::read(paths.config_file()).expect("read config before reset prompt");
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
+            .expect("open reset confirmation");
+        let modal = app.message_dialogs.last().expect("reset modal");
+        assert_eq!(modal.state.caption(), "Reset configuration");
+        assert_eq!(
+            modal.state.message(),
+            "Are you sure you want to reset all configuration values?|For changes to take effect the program has to be restarted."
+        );
+        assert_eq!(modal.state.buttons(), MessageDialogButtons::YES_NO);
+        assert_eq!(modal.state.icon(), MessageDialogIcon::NOTIFY);
+        assert_eq!(modal.state.focused_button(), Some(MessageDialogButton::Yes));
+        app.finish_message_dialog(MessageDialogResult::No)
+            .expect("cancel reset");
+        assert_eq!(fs::read(paths.config_file()).unwrap(), before_cancel);
+        assert!(!app.configuration_reset_requested);
+        assert!(!app.take_exit_request());
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::ResetConfiguration])
+            .expect("reopen reset confirmation");
+        app.finish_message_dialog(MessageDialogResult::Yes)
+            .expect("confirm reset");
+        let reset = Config::load(paths.config_file()).expect("load reset config");
+        assert_eq!(reset.get_in(Some("General"), "VendorResetKey"), None);
+        assert_eq!(reset.get_in(Some("General"), "FontSize"), None);
+        assert_eq!(reset.get_in(Some("Graphics"), "Scale"), None);
+        assert!(app.configuration_reset_requested);
+        assert!(app.take_exit_request());
+        assert_eq!(app.startup_view, StartupView::Options);
     }
 
     #[test]
