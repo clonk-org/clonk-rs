@@ -29,6 +29,7 @@ use lc_network::{
 };
 #[cfg(test)]
 use lc_network::start_host;
+pub use lc_network::RuntimeNetworkConnection;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -288,6 +289,13 @@ impl NetworkControlClock {
         self.control_presend
     }
 
+    /// Smoothed control-send time in microseconds, matching
+    /// `C4GameControlNetwork::getAvgControlSendTime()` and the `ACT` field in
+    /// the runtime network client-list dialog.
+    pub(crate) fn avg_control_send_time(self) -> i64 {
+        self.avg_control_send_time_us
+    }
+
     fn update_control_presend(&mut self) {
         let Some(round_trip_ms) = self.host_round_trip_ms.filter(|rtt| *rtt != 0) else {
             return;
@@ -341,6 +349,17 @@ impl NetworkControlClock {
 
     pub(crate) fn current_tick(self) -> i32 {
         self.control_tick
+    }
+
+    /// `C4GameControl::ControlTick` for a presented frame. Rust advances its
+    /// next-tick cursor as soon as the cadence frame completes; native keeps
+    /// displaying the executed tick until the next cadence boundary.
+    pub(crate) fn display_control_tick_for_frame(self, frame: u64) -> i32 {
+        if frame % self.control_rate == 0 {
+            self.control_tick
+        } else {
+            self.control_tick.wrapping_sub(1)
+        }
     }
 
     pub(crate) fn engine_timing(
@@ -1819,6 +1838,13 @@ enum PlayerInfoEchoProvenance {
 
 #[derive(Debug)]
 enum NetworkCommand {
+    InspectRuntimeConnections {
+        completion: Sender<std::result::Result<Vec<RuntimeNetworkConnection>, String>>,
+    },
+    DisconnectRuntimeConnection {
+        connection_id: u32,
+        completion: Sender<std::result::Result<(), String>>,
+    },
     PublishPlayerResource {
         request: ClientPlayerResourceRequest,
         completion: Sender<std::result::Result<lc_engine::NetworkResourceCore, String>>,
@@ -2120,6 +2146,41 @@ impl NetworkManager {
     /// must not reuse the frame from the input that armed the first request.
     pub fn refresh_current_frame(&self, current_frame: i32) {
         self.current_frame.store(current_frame, Ordering::Relaxed);
+    }
+
+    pub fn runtime_connections(&self) -> Result<Vec<RuntimeNetworkConnection>> {
+        if self.worker.is_none() {
+            return Err(anyhow!(
+                "runtime connection inspection is unavailable without a network worker"
+            ));
+        }
+        let (completion, inspected) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::InspectRuntimeConnections { completion })
+            .map_err(|_| anyhow!("network worker is not accepting connection inspection"))?;
+        inspected
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before returning live connections"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    pub fn disconnect_runtime_connection(&self, connection_id: u32) -> Result<()> {
+        if self.worker.is_none() {
+            return Err(anyhow!(
+                "runtime connection disconnect is unavailable without a network worker"
+            ));
+        }
+        let (completion, disconnected) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::DisconnectRuntimeConnection {
+                connection_id,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting connection disconnects"))?;
+        disconnected
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before disconnecting the connection"))?
+            .map_err(|message| anyhow!(message))
     }
 
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
@@ -3916,6 +3977,23 @@ async fn run_host_worker(
                 }
                 Some(command) = command_rx.recv() => {
                     match command {
+                    NetworkCommand::InspectRuntimeConnections { completion } => {
+                        let result = host
+                            .runtime_connections()
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::DisconnectRuntimeConnection {
+                        connection_id,
+                        completion,
+                    } => {
+                        let result = host
+                            .disconnect_runtime_connection(connection_id)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
                     NetworkCommand::PublishPlayerResource {
                         request,
                         completion,
@@ -4570,6 +4648,12 @@ async fn run_client_worker(
                 if !client_events_open {
                     let unavailable = "network client is disconnected".to_string();
                     match command {
+                        NetworkCommand::InspectRuntimeConnections { completion } => {
+                            let _ = completion.send(Err(unavailable.clone()));
+                        }
+                        NetworkCommand::DisconnectRuntimeConnection { completion, .. } => {
+                            let _ = completion.send(Err(unavailable.clone()));
+                        }
                         NetworkCommand::LeagueReportDisconnect {
                             reason,
                             players,
@@ -4620,6 +4704,23 @@ async fn run_client_worker(
                     continue;
                 }
                 match command {
+                    NetworkCommand::InspectRuntimeConnections { completion } => {
+                        let result = client
+                            .runtime_connections()
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::DisconnectRuntimeConnection {
+                        connection_id,
+                        completion,
+                    } => {
+                        let result = client
+                            .disconnect_runtime_connection(connection_id)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
                     NetworkCommand::PublishPlayerResource {
                         request,
                         completion,
@@ -9651,6 +9752,35 @@ mod tests {
     }
 
     #[test]
+    fn control_clock_display_tick_retains_the_executed_tick_between_cadence_frames() {
+        let mut clock = NetworkControlClock::new(40, 4);
+        assert_eq!(clock.display_control_tick_for_frame(0), 40);
+        clock.complete_control_frame();
+        assert_eq!(clock.current_tick(), 41);
+        for frame in 1..4 {
+            assert_eq!(clock.display_control_tick_for_frame(frame), 40);
+        }
+        assert_eq!(clock.display_control_tick_for_frame(4), 41);
+    }
+
+    #[test]
+    fn runtime_connection_api_fails_promptly_without_a_worker() {
+        let (host, _events, _commands) = NetworkManager::test_stub_with_commands();
+        assert!(
+            host.runtime_connections()
+                .expect_err("stub has no live route worker")
+                .to_string()
+                .contains("without a network worker")
+        );
+        assert!(
+            host.disconnect_runtime_connection(7)
+                .expect_err("stub cannot retire a live route")
+                .to_string()
+                .contains("without a network worker")
+        );
+    }
+
+    #[test]
     fn control_clock_rate_change_consumes_the_admitted_tick_without_resetting_phase() {
         let mut clock = NetworkControlClock::new(9, 2);
 
@@ -9673,6 +9803,7 @@ mod tests {
         // with the latest sample (src/C4GameControlNetwork.cpp:382-447).
         let mut clock = NetworkControlClock::new(0, 1);
         assert_eq!(clock.control_presend(), 1);
+        assert_eq!(clock.avg_control_send_time(), 0);
         clock.observe_round_trip_ms(300);
         for _ in 0..13 {
             clock.complete_control_frame();
@@ -9680,6 +9811,7 @@ mod tests {
         assert_eq!(clock.control_presend(), 1);
         clock.complete_control_frame();
         assert_eq!(clock.control_presend(), 2);
+        assert_eq!(clock.avg_control_send_time(), 26_813);
 
         let mut saturated = NetworkControlClock::new(0, 1);
         saturated.observe_round_trip_ms(1_000);

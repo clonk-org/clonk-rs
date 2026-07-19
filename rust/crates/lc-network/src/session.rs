@@ -63,6 +63,30 @@ fn resource_safe_random(range: usize) -> usize {
 /// Broadcast identifier that mirrors the legacy `C4ClientIDAll` constant.
 pub const BROADCAST_CLIENT_ID: ClientId = u32::MAX;
 
+/// One live transport route as shown by the runtime network client list.
+/// `connection_id` is local to this process and remains stable for the life of
+/// the route. A route may carry data, messages, or both according to the same
+/// preference rules used by the session send path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeNetworkConnection {
+    pub connection_id: u32,
+    pub client_id: ClientId,
+    pub usage: String,
+    pub protocol: crate::NetworkProtocol,
+    pub peer_address: Option<SocketAddr>,
+    pub packet_loss: u32,
+    pub ping_ms: i32,
+}
+
+fn runtime_connection_usage(message: bool, data: bool) -> Option<String> {
+    match (message, data) {
+        (true, true) => Some("Data/Msg".to_string()),
+        (true, false) => Some("Msg".to_string()),
+        (false, true) => Some("Data".to_string()),
+        (false, false) => None,
+    }
+}
+
 /// Configuration options for the multiplayer host.
 #[derive(Debug, Clone)]
 pub struct HostConfig {
@@ -526,6 +550,13 @@ pub enum HostCommand {
         allowed: bool,
         completion: oneshot::Sender<()>,
     },
+    InspectRuntimeConnections {
+        completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
+    },
+    DisconnectRuntimeConnection {
+        connection_id: u32,
+        completion: oneshot::Sender<bool>,
+    },
     #[cfg(test)]
     InspectAcceptedRoutes {
         completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
@@ -758,6 +789,31 @@ impl HostHandle {
         applied.await.map_err(|_| HostError::HostLoopGone)
     }
 
+    pub async fn runtime_connections(&self) -> Result<Vec<RuntimeNetworkConnection>, HostError> {
+        let (completion, inspected) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::InspectRuntimeConnections { completion })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        inspected.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn disconnect_runtime_connection(&self, connection_id: u32) -> Result<(), HostError> {
+        let (completion, disconnected) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::DisconnectRuntimeConnection {
+                connection_id,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        if disconnected.await.map_err(|_| HostError::HostLoopGone)? {
+            Ok(())
+        } else {
+            Err(HostError::ConnectionNotFound(connection_id))
+        }
+    }
+
     #[cfg(test)]
     async fn accepted_routes(&self) -> Vec<(u32, ClientId, u32)> {
         let (completion, routes) = oneshot::channel();
@@ -803,6 +859,8 @@ pub enum HostError {
     HostLoopGone,
     #[error("host resource initialization failed: {0}")]
     Resource(String),
+    #[error("runtime connection {0} is not active")]
+    ConnectionNotFound(u32),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -819,6 +877,8 @@ pub enum ClientError {
     GracefulPart(String),
     #[error("client loop terminated unexpectedly")]
     ClientLoopGone,
+    #[error("runtime connection {0} is not active")]
+    ConnectionNotFound(u32),
 }
 
 enum ClientAttemptError {
@@ -2838,6 +2898,13 @@ pub enum ClientCommand {
     GracefulPart {
         completion: oneshot::Sender<Result<(), String>>,
     },
+    InspectRuntimeConnections {
+        completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
+    },
+    DisconnectRuntimeConnection {
+        connection_id: u32,
+        completion: oneshot::Sender<bool>,
+    },
     #[cfg(test)]
     InspectMeshPeers {
         completion: oneshot::Sender<Vec<ClientId>>,
@@ -3005,6 +3072,37 @@ impl ClientHandle {
             .send(ClientCommand::ExecSync { control_tick })
             .await
             .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn runtime_connections(&self) -> Result<Vec<RuntimeNetworkConnection>, ClientError> {
+        let (completion, inspected) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::InspectRuntimeConnections { completion })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        inspected.await.map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn disconnect_runtime_connection(
+        &self,
+        connection_id: u32,
+    ) -> Result<(), ClientError> {
+        let (completion, disconnected) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::DisconnectRuntimeConnection {
+                connection_id,
+                completion,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        if disconnected
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+        {
+            Ok(())
+        } else {
+            Err(ClientError::ConnectionNotFound(connection_id))
+        }
     }
 
     pub async fn graceful_part(mut self) -> Result<(), ClientError> {
@@ -3175,6 +3273,7 @@ struct AcceptedConnectionRoute {
     remote_connection_id: u32,
     peer_addr: SocketAddr,
     protocol: crate::NetworkProtocol,
+    ping_ms: i32,
     outbound: HostOutboundSender,
 }
 
@@ -4103,6 +4202,43 @@ fn preferred_host_outbound(
     preferred_host_route(state, client_id, traffic).map(|route| route.outbound.clone())
 }
 
+fn host_runtime_connections(state: &HostState) -> Vec<RuntimeNetworkConnection> {
+    state
+        .accepted_routes
+        .iter()
+        .filter(|(_, route)| !route.outbound.is_closed())
+        .filter_map(|(connection_id, route)| {
+            let is_message =
+                preferred_host_route(state, route.client_id, ConnectionTrafficClass::Message)
+                    .is_some_and(|preferred| preferred.outbound.same_channel(&route.outbound));
+            let is_data =
+                preferred_host_route(state, route.client_id, ConnectionTrafficClass::Data)
+                    .is_some_and(|preferred| preferred.outbound.same_channel(&route.outbound));
+            Some(RuntimeNetworkConnection {
+                connection_id: *connection_id,
+                client_id: route.client_id,
+                usage: runtime_connection_usage(is_message, is_data)?,
+                protocol: route.protocol,
+                peer_address: Some(route.peer_addr),
+                packet_loss: 0,
+                ping_ms: route.ping_ms,
+            })
+        })
+        .collect()
+}
+
+fn disconnect_host_runtime_connection(connection_id: u32, state: &HostState) -> bool {
+    let Some(route) = state
+        .accepted_routes
+        .get(&connection_id)
+        .filter(|route| !route.outbound.is_closed())
+    else {
+        return false;
+    };
+    route.outbound.retire();
+    true
+}
+
 fn host_target_client_ids(state: &HostState, except_client_id: Option<ClientId>) -> Vec<ClientId> {
     state
         .clients
@@ -4906,6 +5042,17 @@ async fn run_host(
                         state.admission.set_allow_join(allowed);
                         let _ = completion.send(());
                     }
+                    HostCommand::InspectRuntimeConnections { completion } => {
+                        let _ = completion.send(host_runtime_connections(&state));
+                    }
+                    HostCommand::DisconnectRuntimeConnection {
+                        connection_id,
+                        completion,
+                    } => {
+                        let disconnected =
+                            disconnect_host_runtime_connection(connection_id, &state);
+                        let _ = completion.send(disconnected);
+                    }
                     #[cfg(test)]
                     HostCommand::InspectAcceptedRoutes { completion } => {
                         let routes = state
@@ -5282,6 +5429,7 @@ async fn handle_client_accepted(
             remote_connection_id,
             peer_addr,
             protocol,
+            ping_ms: -1,
             outbound: outbound.clone(),
         },
     );
@@ -5624,6 +5772,11 @@ async fn handle_client_message(
     ping_ms: i32,
     state: &mut HostState,
 ) {
+    if ping_ms >= 0 {
+        if let Some(route) = state.accepted_routes.get_mut(&connection_id) {
+            route.ping_ms = ping_ms;
+        }
+    }
     match message {
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
@@ -6195,6 +6348,7 @@ async fn handle_client_disconnected(
         peer_addr: _peer_addr,
         protocol: _protocol,
         outbound: _outbound,
+        ping_ms: _,
     }) = disconnected_route
     {
         debug_assert_eq!(route_client_id, client_id);
@@ -7425,6 +7579,7 @@ struct ClientRouteEntry {
     remote_connection_id: u32,
     protocol: crate::NetworkProtocol,
     peer_addr: Option<SocketAddr>,
+    ping_ms: i32,
     outbound: ClientRouteSender,
 }
 
@@ -7569,6 +7724,7 @@ impl ClientRouteManager {
                 remote_connection_id,
                 protocol,
                 peer_addr,
+                ping_ms: -1,
                 outbound: ClientRouteSender { sender, retire },
             },
         );
@@ -7808,6 +7964,41 @@ impl ClientRouteManager {
             .collect()
     }
 
+    fn runtime_connections(&self) -> Vec<RuntimeNetworkConnection> {
+        self.routes
+            .iter()
+            .filter(|(_, route)| !route.outbound.is_closed())
+            .filter_map(|(connection_id, route)| {
+                let is_message = self
+                    .preferred_route_id(route.peer_id, ConnectionTrafficClass::Message)
+                    == Some(*connection_id);
+                let is_data = self.preferred_route_id(route.peer_id, ConnectionTrafficClass::Data)
+                    == Some(*connection_id);
+                Some(RuntimeNetworkConnection {
+                    connection_id: *connection_id,
+                    client_id: route.peer_id,
+                    usage: runtime_connection_usage(is_message, is_data)?,
+                    protocol: route.protocol,
+                    peer_address: route.peer_addr,
+                    packet_loss: 0,
+                    ping_ms: route.ping_ms,
+                })
+            })
+            .collect()
+    }
+
+    fn disconnect_runtime_connection(&self, connection_id: u32) -> bool {
+        let Some(route) = self
+            .routes
+            .get(&connection_id)
+            .filter(|route| !route.outbound.is_closed())
+        else {
+            return false;
+        };
+        route.outbound.retire();
+        true
+    }
+
     fn peer_ping_ms(&self, peer_id: ClientId) -> i32 {
         self.peer_ping_ms.get(&peer_id).copied().unwrap_or(0)
     }
@@ -7989,6 +8180,10 @@ impl ClientRouteManager {
                     round_trip_ms,
                 } if self.routes.contains_key(&route_id) => {
                     let peer_id = self.routes[&route_id].peer_id;
+                    self.routes
+                        .get_mut(&route_id)
+                        .expect("checked route still exists")
+                        .ping_ms = round_trip_ms;
                     if self.preferred_route_id(peer_id, ConnectionTrafficClass::Message)
                         != Some(route_id)
                     {
@@ -9002,6 +9197,17 @@ async fn run_client_loop_with_routes(
                         .map_err(|error| error.to_string());
                         let _ = completion.send(result);
                         break;
+                    }
+                    ClientCommand::InspectRuntimeConnections { completion } => {
+                        let _ = completion.send(transport.runtime_connections());
+                    }
+                    ClientCommand::DisconnectRuntimeConnection {
+                        connection_id,
+                        completion,
+                    } => {
+                        let disconnected =
+                            transport.disconnect_runtime_connection(connection_id);
+                        let _ = completion.send(disconnected);
                     }
                     #[cfg(test)]
                     ClientCommand::InspectMeshPeers { completion } => {
@@ -10515,6 +10721,7 @@ mod tests {
                     remote_connection_id: route_id.wrapping_add(1_000),
                     protocol,
                     peer_addr: None,
+                    ping_ms: -1,
                     outbound: ClientRouteSender { sender, retire },
                 },
             )
@@ -11787,6 +11994,75 @@ mod tests {
             .await
             .expect("setter task")
             .expect("gate acknowledgement");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_connection_handles_inspect_and_retire_the_live_tcp_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+
+        let host_connections = host.runtime_connections().await.unwrap();
+        assert_eq!(host_connections.len(), 1);
+        assert_eq!(host_connections[0].client_id, client.client_id());
+        assert_eq!(host_connections[0].usage, "Data/Msg");
+        assert_eq!(host_connections[0].protocol, crate::NetworkProtocol::Tcp);
+        assert!(host_connections[0].peer_address.is_some());
+
+        let client_connections = client.runtime_connections().await.unwrap();
+        assert_eq!(client_connections.len(), 1);
+        assert_eq!(client_connections[0].client_id, HOST_CLIENT_ID);
+        assert_eq!(client_connections[0].usage, "Data/Msg");
+        assert_eq!(client_connections[0].protocol, crate::NetworkProtocol::Tcp);
+        assert!(client_connections[0].peer_address.is_some());
+
+        client
+            .disconnect_runtime_connection(client_connections[0].connection_id)
+            .await
+            .unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                if host.runtime_connections().await.unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host did not retire the client-closed route");
+
+        client.shutdown().await.unwrap();
+
+        let second_client = connect_client(
+            address,
+            ClientConfig::new("Bob", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let second_connections = host.runtime_connections().await.unwrap();
+        assert_eq!(second_connections.len(), 1);
+        assert_eq!(second_connections[0].client_id, second_client.client_id());
+        host.disconnect_runtime_connection(second_connections[0].connection_id)
+            .await
+            .unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                if host.runtime_connections().await.unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host did not retire its selected route");
+        second_client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -13166,6 +13442,78 @@ mod tests {
             Some(ControlMessage::Status(status))
         );
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_runtime_connections_follow_route_ownership_ping_and_retirement() {
+        let (tcp_client, _tcp_peer) = duplex(1_024);
+        let (udp_client, _udp_peer) = duplex(1_024);
+        let tcp_peer_address = SocketAddr::from(([127, 0, 0, 1], 11_111));
+        let udp_peer_address = SocketAddr::from(([127, 0, 0, 1], 22_222));
+        let mut routes = ClientRouteManager::new();
+        routes.add_route(
+            1,
+            11,
+            crate::NetworkProtocol::Tcp,
+            Some(tcp_peer_address),
+            crate::ControlTransport::new(tcp_client),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        routes.add_route(
+            2,
+            12,
+            crate::NetworkProtocol::Udp,
+            Some(udp_peer_address),
+            crate::ControlTransport::new(udp_client),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        routes
+            .event_tx
+            .send(ClientRouteEvent::PingMeasured {
+                route_id: 2,
+                round_trip_ms: 37,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            routes.read_event().await.unwrap(),
+            ClientRouteRead::PingMeasured {
+                peer_id: HOST_CLIENT_ID,
+                round_trip_ms: 37,
+            }
+        ));
+
+        assert_eq!(
+            routes.runtime_connections(),
+            vec![
+                RuntimeNetworkConnection {
+                    connection_id: 1,
+                    client_id: HOST_CLIENT_ID,
+                    usage: "Data".to_string(),
+                    protocol: crate::NetworkProtocol::Tcp,
+                    peer_address: Some(tcp_peer_address),
+                    packet_loss: 0,
+                    ping_ms: -1,
+                },
+                RuntimeNetworkConnection {
+                    connection_id: 2,
+                    client_id: HOST_CLIENT_ID,
+                    usage: "Msg".to_string(),
+                    protocol: crate::NetworkProtocol::Udp,
+                    peer_address: Some(udp_peer_address),
+                    packet_loss: 0,
+                    ping_ms: 37,
+                },
+            ]
+        );
+
+        assert!(routes.disconnect_runtime_connection(2));
+        assert!(!routes.disconnect_runtime_connection(2));
+        let remaining = routes.runtime_connections();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].connection_id, 1);
+        assert_eq!(remaining[0].usage, "Data/Msg");
+        routes.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -17912,12 +18260,22 @@ mod tests {
             .control_rate = 2;
         let mut host = start_host(listener, config).await.unwrap();
         let mut host_events = host.take_event_receiver();
+        // Keep one task runnable while live loopback setup completes. Without
+        // this guard Tokio may auto-advance paused time to the dial timeout
+        // before the OS socket becomes ready under a heavily loaded test run.
+        let frozen_time_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
         let mut client =
             connect_client(address, ClientConfig::new("Slow", ParticipantKind::Player))
                 .await
                 .unwrap();
         let mut client_events = client.take_event_receiver();
         activate_joined_client(&host, &mut host_events, client.client_id()).await;
+        frozen_time_guard.abort();
+        let _ = frozen_time_guard.await;
 
         host.control_tick_reached(0, 2, tokio::time::Instant::now())
             .await
@@ -17936,21 +18294,19 @@ mod tests {
         assert!(take_queued_client_ready(&mut client_events).is_none());
 
         tokio::time::advance(Duration::from_millis(1)).await;
-        let mut host_ready = None;
-        let mut client_ready = None;
-        for _ in 0..256 {
-            tokio::task::yield_now().await;
-            host_ready = host_ready.or_else(|| take_queued_host_ready(&mut host_events));
-            client_ready = client_ready.or_else(|| take_queued_client_ready(&mut client_events));
-            if host_ready.is_some() && client_ready.is_some() {
-                break;
-            }
-        }
-        let host_ready = host_ready.expect("async host did not force the expired tick");
-        let client_ready = client_ready.expect("forced complete packet was not broadcast");
+        // This completion is a host-loop barrier. Because the deadline branch
+        // is biased above commands, the expired tick is forced first.
+        host.set_join_allowed(true).await.unwrap();
+        let host_ready = take_queued_host_ready(&mut host_events)
+            .expect("async host did not force the expired tick");
         assert_eq!(host_ready.client_id(), BROADCAST_CLIENT_ID);
         assert_eq!(host_ready.tick(), 0);
         assert_eq!(control_commands(&host_ready), vec![0xA0]);
+
+        // The host event proves the exact paused-time boundary. Let live TCP
+        // use wall-clock scheduling while checking delivery to the client.
+        tokio::time::resume();
+        let client_ready = wait_for_client_ready(&mut client_events, EVENT_WAIT).await;
         assert_eq!(client_ready, host_ready);
 
         client.shutdown().await.unwrap();

@@ -4143,6 +4143,28 @@ impl FrontendAssets {
         )
     }
 
+    fn runtime_client_list_resources(
+        &self,
+    ) -> Option<lc_frontend::runtime_client_list::RuntimeClientListResources<'_>> {
+        let caption = self.startup_dialog_images.get("GUICaption.png")?;
+        let button = self.startup_dialog_images.get("GUIButton.png")?;
+        let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
+        let button_highlight = self.game_over_button_highlight.as_ref()?;
+        Some(
+            lc_frontend::runtime_client_list::RuntimeClientListResources {
+                skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
+                    caption,
+                    button,
+                    button_down,
+                    Some(button_highlight),
+                ),
+                fonts: self.clonk_fonts.as_deref()?,
+                icons: self.startup_dialog_images.get("GUIIcons.png")?,
+                button_highlight,
+            },
+        )
+    }
+
     fn definition_sel_resources(
         &self,
     ) -> Option<lc_frontend::definition_sel::DefinitionSelResources<'_>> {
@@ -9890,6 +9912,12 @@ struct GameApp {
     /// Temporary player assigned to the existing primary viewport by replay
     /// `SetFilmView`. The physical viewport identity remains unchanged.
     film_view_player: Option<i32>,
+    /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
+    runtime_client_list: Option<lc_frontend::runtime_client_list::RuntimeClientListDialog>,
+    /// Both this dialog and game-over use C4GUI's default z=0. Preserve which
+    /// one was shown most recently so equal-z rendering and input stay in the
+    /// native insertion order.
+    runtime_client_list_above_game_over: bool,
     /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
     /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
     /// the explicit game-over/Clear close sites.
@@ -11082,7 +11110,6 @@ enum ClassicParityBoundary {
     },
     RuntimeFlashProducer(RuntimeFlashProducerBoundary),
     RuntimeIrcChatToggle,
-    RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
     Scoreboard {
         trigger: ClassicScoreboardTrigger,
@@ -11244,10 +11271,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::RuntimeIrcChatToggle => write!(
                 f,
                 "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the runtime Alt+C toggle"
-            ),
-            Self::RuntimeClientListToggle(role) => write!(
-                f,
-                "classic runtime C4Network2ClientListDlg toggle is unavailable for {role:?} network role; refusing generic client pane"
             ),
             Self::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable) => write!(
                 f,
@@ -14816,10 +14839,14 @@ impl InstallDefinitionResolver {
         seen: &mut HashSet<PathBuf>,
     ) -> Result<(), ScenarioError> {
         if let Ok(group) = Group::open(base) {
-            if let Some(child) =
-                open_child_flexible(&group, relative).map_err(ScenarioError::Resources)?
-            {
-                Self::push_group(groups, seen, child);
+            match open_child_flexible(&group, relative) {
+                Ok(Some(child)) => Self::push_group(groups, seen, child),
+                Ok(None) => {}
+                // Ancestor search may walk a shared temp directory. An
+                // unrelated entry disappearing during that scan is still a
+                // simple miss for this candidate base.
+                Err(error) if Self::should_ignore_error(&error) => {}
+                Err(error) => return Err(ScenarioError::Resources(error)),
             }
         }
 
@@ -18919,6 +18946,8 @@ impl GameApp {
             runtime_flash_resources_cache,
             runtime_flash_message: None,
             film_view_player: None,
+            runtime_client_list: None,
+            runtime_client_list_above_game_over: false,
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
@@ -19062,6 +19091,7 @@ impl GameApp {
                 .runtime_flash_message
                 .as_ref()
                 .is_none_or(|message| message.remaining_draws == 0)
+            && self.runtime_client_list.is_none()
             && self.scoreboard_dialog.is_none()
             && self.game_over_dialog.is_none()
             && self.message_dialogs.is_empty()
@@ -20774,6 +20804,33 @@ impl GameApp {
             }
             return Ok(());
         }
+        let runtime_client_list_can_receive_wheel = self.runtime_client_list.is_some()
+            && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over);
+        if self.mode == AppMode::Running && runtime_client_list_can_receive_wheel {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let geometry = self.runtime_client_list_input_geometry();
+            let point = self.running_pointer_position;
+            let consumed = geometry
+                .zip(point)
+                .and_then(|((preferred, line_height), point)| {
+                    self.runtime_client_list.as_mut().map(|dialog| {
+                        dialog.handle_wheel(point, native_delta, preferred, line_height)
+                    })
+                })
+                .unwrap_or(false);
+            if consumed {
+                self.mark_menu_dirty();
+                return Ok(());
+            }
+        }
+        if self.mode == AppMode::Running && self.game_over_dialog.is_some() {
+            return Ok(());
+        }
         if self.mode == AppMode::Running {
             if !self.mouse_control {
                 return Ok(());
@@ -22250,6 +22307,401 @@ impl GameApp {
         Ok(true)
     }
 
+    fn runtime_client_list_snapshot(
+        &mut self,
+    ) -> (
+        Vec<String>,
+        Vec<lc_frontend::runtime_client_list::RuntimeClientRow>,
+        lc_frontend::runtime_client_list::RuntimeClientListStatus,
+    ) {
+        let behind = self.network_control_pacing().behind;
+        let frame = self.engine.frame();
+        let status = self.network_control_clock.map_or_else(
+            || lc_frontend::runtime_client_list::RuntimeClientListStatus {
+                tick: i32::try_from(self.expected_network_control_tick()).unwrap_or(i32::MAX),
+                behind,
+                rate: self.engine.control_rate(),
+                presend: 0,
+                average_control_time: 0,
+            },
+            |clock| lc_frontend::runtime_client_list::RuntimeClientListStatus {
+                tick: clock.display_control_tick_for_frame(frame),
+                behind,
+                rate: clock.control_rate(),
+                presend: clock.control_presend(),
+                average_control_time: clock.avg_control_send_time(),
+            },
+        );
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let local_addresses = self
+            .network
+            .as_ref()
+            .map(NetworkManager::local_addresses)
+            .unwrap_or_default();
+        let runtime_connections = self
+            .network
+            .as_ref()
+            .map(NetworkManager::runtime_connections)
+            .transpose()
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "runtime connection details are not available");
+                None
+            })
+            .unwrap_or_default();
+        let can_moderate = matches!(self.network_mode, Some(NetworkMode::Host(_)));
+        let rows = self
+            .control_clients
+            .snapshot()
+            .into_iter()
+            .map(|client| {
+                let player_names = self
+                    .engine
+                    .players()
+                    .filter(|player| player.at_client().get() == client.client_id)
+                    .map(|player| c4_presentation_text(player.name()))
+                    .collect::<Vec<_>>();
+                let local = local_client_id == Some(client.client_id);
+                let protocol_name = |protocol| match protocol {
+                    lc_network::NetworkProtocol::Tcp => "TCP".to_string(),
+                    lc_network::NetworkProtocol::Udp => "UDP".to_string(),
+                    lc_network::NetworkProtocol::Unknown(value) => {
+                        format!("Protocol {value}")
+                    }
+                    _ => "Unknown protocol".to_string(),
+                };
+                let connections = runtime_connections
+                    .iter()
+                    .filter(|connection| {
+                        i32::try_from(connection.client_id).ok() == Some(client.client_id)
+                    })
+                    .map(
+                        |connection| lc_frontend::runtime_client_list::RuntimeConnectionRow {
+                            connection_id: connection.connection_id,
+                            usage: connection.usage.clone(),
+                            protocol: protocol_name(connection.protocol),
+                            peer_address: connection
+                                .peer_address
+                                .map(|address| address.to_string())
+                                .unwrap_or_else(|| "???".to_string()),
+                            packet_loss: connection.packet_loss,
+                            ping_ms: connection.ping_ms,
+                            can_disconnect: !self.network_is_league,
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                let mut addresses = local
+                    .then(|| {
+                        local_addresses
+                            .iter()
+                            .map(|address| {
+                                let protocol = protocol_name(address.protocol);
+                                format!("{protocol}: {}", address.endpoint)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                addresses.extend(connections.iter().filter_map(|connection| {
+                    (connection.peer_address != "???")
+                        .then(|| format!("{}: {}", connection.protocol, connection.peer_address))
+                }));
+                addresses.sort();
+                addresses.dedup();
+                lc_frontend::runtime_client_list::RuntimeClientRow {
+                    client_id: client.client_id,
+                    name: legacy_presentation_text(client.name.as_bytes()),
+                    nick: legacy_presentation_text(client.nick.as_bytes()),
+                    host: client.client_id == 0,
+                    local,
+                    activated: client.activated,
+                    observer: client.observer,
+                    muted: self.control_messages.is_muted(client.client_id),
+                    has_players: !player_names.is_empty(),
+                    player_names,
+                    addresses,
+                    // Every synchronized runtime core has completed joining.
+                    // Per-client control readiness is intentionally not
+                    // inferred from the global buffered-control count.
+                    status: lc_frontend::runtime_client_list::RuntimeClientStatusIcon::Ready,
+                    wait_ms: None,
+                    connections,
+                    can_moderate: can_moderate && client.client_id != 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let options = vec![
+            if self.network_is_league {
+                "League game".to_string()
+            } else {
+                "Network game".to_string()
+            },
+            format!("Clients: {}", rows.len()),
+        ];
+        (options, rows, status)
+    }
+
+    fn refresh_runtime_client_list(&mut self) -> bool {
+        if self.runtime_client_list.is_none() {
+            return false;
+        }
+        let (options, rows, status) = self.runtime_client_list_snapshot();
+        if let Some(dialog) = self.runtime_client_list.as_mut() {
+            dialog.replace_snapshot(options, rows, status);
+        }
+        true
+    }
+
+    fn toggle_runtime_client_list(&mut self) -> Result<(), EngineError> {
+        if self.runtime_client_list.take().is_some() {
+            self.runtime_client_list_above_game_over = false;
+            return Ok(());
+        }
+        if !matches!(
+            self.runtime_network_role(),
+            RuntimeNetworkRole::Host | RuntimeNetworkRole::Client
+        ) {
+            return Ok(());
+        }
+        Self::guard_gui_overlay_result(
+            "C4Network2ClientListDlg",
+            self.assets
+                .runtime_client_list_resources()
+                .context("exact C4Network2ClientListDlg resource set is absent")
+                .and_then(|resources| resources.validate()),
+        )?;
+        let (options, rows, status) = self.runtime_client_list_snapshot();
+        self.runtime_client_list_above_game_over = self.game_over_dialog.is_some();
+        self.runtime_client_list = Some(
+            lc_frontend::runtime_client_list::RuntimeClientListDialog::new(
+                self.runtime_resource_string("IDS_NET_CAPTION"),
+                options,
+                rows,
+                status,
+            )
+            .with_info_caption(self.runtime_resource_string("IDS_NET_CLIENT_INFO")),
+        );
+        Ok(())
+    }
+
+    fn runtime_client_has_players(&self, client_id: i32) -> bool {
+        self.engine
+            .players()
+            .any(|player| player.at_client().get() == client_id)
+    }
+
+    fn handle_runtime_client_list_action(
+        &mut self,
+        action: lc_frontend::runtime_client_list::RuntimeClientListAction,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::runtime_client_list::RuntimeClientListAction;
+        match action {
+            RuntimeClientListAction::Close => {
+                self.runtime_client_list = None;
+                self.runtime_client_list_above_game_over = false;
+                return Ok(());
+            }
+            RuntimeClientListAction::OpenInfo(_) | RuntimeClientListAction::CloseInfo => {
+                return Ok(());
+            }
+            RuntimeClientListAction::ToggleMute(client_id) => {
+                if self.control_clients.contains(client_id) {
+                    let muted = !self.control_messages.is_muted(client_id);
+                    self.control_messages.set_muted(client_id, muted);
+                }
+            }
+            RuntimeClientListAction::ToggleActivate(client_id) => {
+                if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+                    || client_id == 0
+                    || !self.control_clients.contains(client_id)
+                {
+                    return Ok(());
+                }
+                if self.network_is_league && self.runtime_client_has_players(client_id) {
+                    self.append_control_message_log(
+                        self.runtime_resource_string("IDS_LOG_COMMANDNOTALLOWEDINLEAGUE"),
+                        CONTROL_LOG_COLOR,
+                        None,
+                    );
+                    return Ok(());
+                }
+                let update = lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id,
+                    data: i32::from(!self.control_clients.is_activated(client_id)),
+                    by_client: 0,
+                };
+                if let Some(Err(error)) = self
+                    .network
+                    .as_ref()
+                    .map(|network| network.submit_client_update(update))
+                {
+                    tracing::error!(%client_id, %error, "failed to submit client-list activation");
+                }
+            }
+            RuntimeClientListAction::Kick(client_id) => {
+                if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+                    || client_id == 0
+                    || !self.control_clients.contains(client_id)
+                {
+                    return Ok(());
+                }
+                if self.network_is_league && self.runtime_client_has_players(client_id) {
+                    self.submit_own_league_vote(
+                        LeagueVoteSubject {
+                            vote_type: lc_engine::VOTE_TYPE_KICK,
+                            data: client_id,
+                        },
+                        true,
+                    );
+                    return Ok(());
+                }
+                let reason = self.runtime_resource_string("IDS_MSG_KICKFROMCLIENTLIST");
+                let remove = lc_engine::ClientRemoveControlData {
+                    client_id,
+                    reason: lc_engine::LegacyCString::from_bytes(lc_script::c4_string_bytes(
+                        &reason,
+                    ))
+                    .unwrap_or_default(),
+                    by_client: 0,
+                };
+                if let Some(Err(error)) = self
+                    .network
+                    .as_ref()
+                    .map(|network| network.submit_client_remove(remove))
+                {
+                    tracing::error!(%client_id, %error, "failed to submit client-list kick");
+                }
+            }
+            RuntimeClientListAction::Disconnect {
+                client_id,
+                connection_id,
+            } => {
+                if self.network_is_league {
+                    return Ok(());
+                }
+                if let Some(Err(error)) = self
+                    .network
+                    .as_ref()
+                    .map(|network| network.disconnect_runtime_connection(connection_id))
+                {
+                    tracing::warn!(
+                        %client_id,
+                        %connection_id,
+                        %error,
+                        "failed to disconnect runtime client route"
+                    );
+                }
+            }
+        }
+        self.refresh_runtime_client_list();
+        Ok(())
+    }
+
+    fn runtime_client_list_input_geometry(
+        &self,
+    ) -> Option<(lc_frontend::classic_gui::IntRect, i32)> {
+        self.runtime_client_list.as_ref()?;
+        let line_height = self.assets.clonk_fonts.as_deref()?.text.line_height;
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        Some((preferred, line_height))
+    }
+
+    fn handle_runtime_client_list_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.runtime_client_list.is_none() || key != VirtualKeyCode::Escape {
+            return Ok(false);
+        }
+        let action = self
+            .runtime_client_list
+            .as_mut()
+            .and_then(|dialog| dialog.handle_escape(state == ElementState::Pressed));
+        if let Some(action) = action {
+            self.handle_runtime_client_list_action(action)?;
+        }
+        Ok(true)
+    }
+
+    fn handle_runtime_client_list_pointer_move(&mut self, point: GuiPoint) -> bool {
+        let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
+            return false;
+        };
+        self.runtime_client_list
+            .as_mut()
+            .is_some_and(|dialog| dialog.handle_pointer_move(point, preferred, line_height))
+    }
+
+    fn handle_runtime_client_list_pointer_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
+            return Ok(false);
+        };
+        let Some(point) = self.running_pointer_position else {
+            return Ok(false);
+        };
+        let (consumed, action) = self
+            .runtime_client_list
+            .as_mut()
+            .map(|dialog| match state {
+                ElementState::Pressed => (
+                    dialog.handle_pointer_down(point, preferred, line_height),
+                    None,
+                ),
+                ElementState::Released => {
+                    let consumed = dialog.handle_pointer_move(point, preferred, line_height);
+                    let action = dialog.handle_pointer_up(point, preferred, line_height);
+                    (consumed, action)
+                }
+            })
+            .unwrap_or_default();
+        if let Some(action) = action {
+            self.play_ui_sound("Click");
+            self.handle_runtime_client_list_action(action)?;
+        }
+        Ok(consumed)
+    }
+
+    fn handle_runtime_client_list_touch(
+        &mut self,
+        position: GuiPoint,
+        phase: TouchPhase,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Running || self.runtime_client_list.is_none() {
+            return Ok(false);
+        }
+        self.running_pointer_position = Some(position);
+        let move_captured = self.handle_runtime_client_list_pointer_move(position);
+        let button_captured = match phase {
+            TouchPhase::Started => {
+                self.handle_runtime_client_list_pointer_button(ElementState::Pressed)?
+            }
+            TouchPhase::Ended => {
+                self.handle_runtime_client_list_pointer_button(ElementState::Released)?
+            }
+            TouchPhase::Cancelled => {
+                if let Some(dialog) = self.runtime_client_list.as_mut() {
+                    dialog.pointer_left();
+                }
+                false
+            }
+            TouchPhase::Moved => false,
+        };
+        let captured = move_captured || button_captured;
+        if captured && matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.pointer_left_unchecked();
+        }
+        Ok(captured)
+    }
+
     /// Handles the currently modeled unmodified runtime-global keys.
     /// `C4KeyCodeEx` masks Alt/Ctrl/Shift but has no platform Logo bit, so
     /// Logo alone retains the bare-key route. F1/F3 first give an exact
@@ -22420,7 +22872,8 @@ impl GameApp {
                 if state == ElementState::Released {
                     return Ok(RuntimeGlobalKeyOutcome::Handled);
                 }
-                ClassicParityBoundary::RuntimeClientListToggle(self.runtime_network_role())
+                self.toggle_runtime_client_list()?;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
             }
             VirtualKeyCode::Pause => {
                 // C4Game::TogglePause is disabled while C4GameOverDlg is
@@ -22563,6 +23016,13 @@ impl GameApp {
         if self.options_modified_gui_key_is_inert(key) {
             return Ok(());
         }
+        let runtime_client_list_above_game_over =
+            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        if runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_key(key, state)?
+        {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             if state != ElementState::Pressed {
                 return Ok(());
@@ -22615,6 +23075,11 @@ impl GameApp {
                     boundary,
                 )));
             }
+            return Ok(());
+        }
+        if !runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_key(key, state)?
+        {
             return Ok(());
         }
         if self.handle_runtime_irc_drop_key(key, state)? {
@@ -28953,10 +29418,24 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
+        let runtime_client_list_above_game_over =
+            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        if runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_pointer_move(point)
+        {
+            self.ingame_pointer = None;
+            return Ok(());
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             let surface = self.graphics.surface();
             dialog.handle_pointer_move(point.x, point.y, surface.width(), surface.height());
             self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
+        if !runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_pointer_move(point)
+        {
+            self.ingame_pointer = None;
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -29748,8 +30227,27 @@ impl GameApp {
             }
             return Ok(());
         }
+        let runtime_client_list_above_game_over =
+            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        if runtime_client_list_above_game_over {
+            if let Some(point) = self.running_pointer_position {
+                if self.handle_runtime_client_list_pointer_move(point) {
+                    return Ok(());
+                }
+            }
+        }
+        if runtime_client_list_above_game_over && button_state == ElementState::Pressed {
+            self.runtime_client_list_above_game_over = false;
+        }
         if self.game_over_dialog.is_some() {
             return Ok(());
+        }
+        if !runtime_client_list_above_game_over {
+            if let Some(point) = self.running_pointer_position {
+                if self.handle_runtime_client_list_pointer_move(point) {
+                    return Ok(());
+                }
+            }
         }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_secondary_button(button_state);
@@ -30725,6 +31223,16 @@ impl GameApp {
         if input_dialog_release_latched {
             return Ok(());
         }
+        let runtime_client_list_above_game_over =
+            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        if runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_pointer_button(button_state)?
+        {
+            return Ok(());
+        }
+        if runtime_client_list_above_game_over && button_state == ElementState::Pressed {
+            self.runtime_client_list_above_game_over = false;
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -30743,6 +31251,11 @@ impl GameApp {
             if let Some(action) = action {
                 self.handle_game_over_action(action)?;
             }
+            return Ok(());
+        }
+        if !runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_pointer_button(button_state)?
+        {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -31272,6 +31785,16 @@ impl GameApp {
             self.game_option_input_pointer_capture = None;
             return Ok(());
         }
+        let runtime_client_list_above_game_over =
+            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        if runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_touch(position, phase)?
+        {
+            return Ok(());
+        }
+        if runtime_client_list_above_game_over && phase == TouchPhase::Started {
+            self.runtime_client_list_above_game_over = false;
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -31297,6 +31820,11 @@ impl GameApp {
             } else if phase == TouchPhase::Cancelled {
                 self.pointer_left_unchecked();
             }
+            return Ok(());
+        }
+        if !runtime_client_list_above_game_over
+            && self.handle_runtime_client_list_touch(position, phase)?
+        {
             return Ok(());
         }
         if self.mode == AppMode::Running {
@@ -31697,6 +32225,9 @@ impl GameApp {
                 }
             },
             AppMode::Running => {
+                if let Some(dialog) = self.runtime_client_list.as_mut() {
+                    dialog.pointer_left();
+                }
                 if let Some(state) = self.mouse_state.as_mut() {
                     state.moved = true;
                 }
@@ -39819,6 +40350,8 @@ impl GameApp {
         }
         self.network = None;
         self.network_mode = None;
+        self.runtime_client_list = None;
+        self.runtime_client_list_above_game_over = false;
         self.control_messages.clear_clients();
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
@@ -41562,6 +42095,7 @@ impl GameApp {
         self.engine.sec1_timer();
         let after = self.engine.game_time();
         self.frames_per_second = std::mem::take(&mut self.frames_since_second);
+        let client_list_changed = self.refresh_runtime_client_list();
         if after != before {
             self.snapshot.game_time = after;
         }
@@ -41577,6 +42111,7 @@ impl GameApp {
             || ready_check_changed
             || scale_test_changed
             || vote_timeout_changed
+            || client_list_changed
             || after != before)
     }
 
@@ -41971,6 +42506,7 @@ impl GameApp {
             format!("{scenario_title}: {}", dialog.subtitle())
         };
         self.status_text = status_message;
+        self.runtime_client_list_above_game_over = false;
         self.game_over_dialog = Some(dialog);
         Ok(())
     }
@@ -43638,6 +44174,39 @@ impl GameApp {
         )
     }
 
+    fn render_runtime_client_list_layer(
+        &mut self,
+        frame_gamma: &lc_graphics::GammaRamp,
+        ordered_native: bool,
+    ) -> Result<()> {
+        let Some(dialog) = self.runtime_client_list.as_ref() else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .runtime_client_list_resources()
+            .expect("runtime client-list resources were preflighted before rendering");
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
+        let active = (self.game_over_dialog.is_none()
+            || self.runtime_client_list_above_game_over)
+            && self.message_dialogs.is_empty()
+            && self.context_menu.is_none();
+        dialog.render(
+            self.graphics.surface_mut(),
+            preferred,
+            resources,
+            active,
+            Some(frame_gamma),
+        )?;
+        if ordered_native {
+            self.next_pending_native_overlay();
+        }
+        Ok(())
+    }
+
     /// Renders into `frame`; returns whether the frame content is new (a
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
@@ -44028,6 +44597,15 @@ impl GameApp {
                     .context("exact C4GUI::MessageDialog resource set is absent")
                     .and_then(|resources| resources.validate()),
                 "C4GUI::MessageDialog",
+            )?;
+        }
+        if self.runtime_client_list.is_some() {
+            check(
+                self.assets
+                    .runtime_client_list_resources()
+                    .context("exact C4Network2ClientListDlg resource set is absent")
+                    .and_then(|resources| resources.validate()),
+                "C4Network2ClientListDlg",
             )?;
         }
         if self.mode == AppMode::Menu
@@ -45048,6 +45626,12 @@ impl GameApp {
             }
         }
 
+        let runtime_client_list_above_game_over =
+            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        if !runtime_client_list_above_game_over {
+            self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
+        }
+
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
             let hud = self.current_hud_graphics();
@@ -45064,6 +45648,10 @@ impl GameApp {
             if ordered_native {
                 self.next_pending_native_overlay();
             }
+        }
+
+        if runtime_client_list_above_game_over {
+            self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
         }
 
         self.render_message_dialogs(Some(&frame_gamma))?;
@@ -46366,6 +46954,8 @@ impl GameApp {
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
         self.film_view_player = None;
+        self.runtime_client_list = None;
+        self.runtime_client_list_above_game_over = false;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
@@ -48875,6 +49465,8 @@ impl GameApp {
         self.game_over_handled = false;
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
+        self.runtime_client_list = None;
+        self.runtime_client_list_above_game_over = false;
         self.runtime_key_config_cache = OnceLock::new();
         let _ = self.runtime_key_config_cache.set(
             guard_runtime_global_key_config(self.app_paths.as_ref())
@@ -108693,6 +109285,7 @@ func ControlDig() { dig_count = 1; return(1); }
         game_over_handled: bool,
         runtime_help_visible: bool,
         runtime_flash_message: Option<RuntimeFlashMessage>,
+        runtime_client_list_open: bool,
         scoreboard_dialog: Option<ScoreboardPresentationRequest>,
         scoreboard: lc_engine::ScoreboardState,
         scoreboard_initial_reconcile_pending: bool,
@@ -108736,6 +109329,7 @@ func ControlDig() { dig_count = 1; return(1); }
             game_over_handled: app.game_over_handled,
             runtime_help_visible: app.runtime_help_visible,
             runtime_flash_message: app.runtime_flash_message.clone(),
+            runtime_client_list_open: app.runtime_client_list.is_some(),
             scoreboard_dialog: app.scoreboard_dialog,
             scoreboard: app.snapshot.hud.scoreboard.clone(),
             scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
@@ -114169,50 +114763,50 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn runtime_f4_boundary_carries_every_safe_role_and_consumes_edges() {
-        for role in [
-            RuntimeNetworkRole::Offline,
-            RuntimeNetworkRole::Host,
-            RuntimeNetworkRole::Client,
-            RuntimeNetworkRole::Ambiguous,
+    fn runtime_f4_toggles_only_live_network_dialog_and_consumes_edges() {
+        for (role, opens) in [
+            (RuntimeNetworkRole::Offline, false),
+            (RuntimeNetworkRole::Host, true),
+            (RuntimeNetworkRole::Client, true),
+            (RuntimeNetworkRole::Ambiguous, false),
         ] {
             let mut app = new_running_sandbox_app();
             configure_runtime_network_role(&mut app, role);
-            app.handle_modifiers_changed(ModifiersState::LOGO)
-                .expect("set keyboard modifiers");
-
-            expect_runtime_global_boundary_unchanged(
-                &mut app,
-                VirtualKeyCode::F4,
-                ClassicParityBoundary::RuntimeClientListToggle(role),
-            );
-            // Winit may emit repeated Press edges; C4's global callback can
-            // be reached again, so do not silently latch the first failure.
-            expect_runtime_global_boundary_unchanged(
-                &mut app,
-                VirtualKeyCode::F4,
-                ClassicParityBoundary::RuntimeClientListToggle(role),
-            );
+            app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+                .expect("runtime F4 press is handled locally");
+            assert_eq!(app.runtime_client_list.is_some(), opens, "role {role:?}");
+            assert_eq!(app.mode, AppMode::Running);
+            assert!(!app.exit_requested);
 
             let before_release = runtime_global_ui_snapshot(&app);
             app.handle_key(VirtualKeyCode::F4, ElementState::Released)
                 .expect("runtime F4 release is consumed");
             assert_eq!(runtime_global_ui_snapshot(&app), before_release);
+
+            app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+                .expect("second runtime F4 press toggles off");
+            assert!(app.runtime_client_list.is_none());
         }
     }
 
     #[test]
     fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
-        let expected = ClassicParityBoundary::RuntimeClientListToggle(RuntimeNetworkRole::Offline);
-
         let mut game_over = new_game_over_keyboard_app();
-        expect_runtime_global_boundary_unchanged(
-            &mut game_over,
-            VirtualKeyCode::F4,
-            expected.clone(),
-        );
+        configure_runtime_network_role(&mut game_over, RuntimeNetworkRole::Host);
+        game_over
+            .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("F4 opens above the older equal-z game-over dialog");
+        assert!(game_over.runtime_client_list.is_some());
+        assert!(game_over.game_over_dialog.is_some());
+        assert!(game_over.runtime_client_list_above_game_over);
+        game_over
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("active client-list Escape closes only the client list");
+        assert!(game_over.runtime_client_list.is_none());
+        assert!(game_over.game_over_dialog.is_some());
 
         let mut message = new_running_sandbox_app();
+        configure_runtime_network_role(&mut message, RuntimeNetworkRole::Host);
         message
             .push_message_dialog(
                 lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -114223,15 +114817,222 @@ func ControlDig() { dig_count = 1; return(1); }
                 MessageDialogContinuation::None,
             )
             .expect("push running modal");
-        expect_runtime_global_boundary_unchanged(
-            &mut message,
-            VirtualKeyCode::F4,
-            expected.clone(),
-        );
+        message
+            .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("F4 opens below existing message dialog");
+        assert!(message.runtime_client_list.is_some());
+        assert_eq!(message.message_dialogs.len(), 1);
 
         let mut ingame = new_running_sandbox_app();
+        configure_runtime_network_role(&mut ingame, RuntimeNetworkRole::Host);
         ingame.open_ingame_menu().expect("open in-game menu");
-        expect_runtime_global_boundary_unchanged(&mut ingame, VirtualKeyCode::F4, expected);
+        ingame
+            .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("F4 opens over in-game menu");
+        assert!(ingame.runtime_client_list.is_some());
+        assert!(ingame.ingame_menu.is_some());
+    }
+
+    #[test]
+    fn runtime_client_list_host_actions_submit_native_controls() {
+        use lc_frontend::runtime_client_list::RuntimeClientListAction;
+
+        let mut activate = new_running_sandbox_app();
+        let (_events, mut activate_commands) =
+            install_running_network_stub(&mut activate, 0, 40, 4);
+        activate
+            .control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        activate
+            .handle_runtime_client_list_action(RuntimeClientListAction::ToggleActivate(7))
+            .expect("queue client activation toggle");
+        assert_eq!(
+            activate_commands.take_submitted_client_updates(),
+            vec![lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 7,
+                data: 0,
+                by_client: 0,
+            }]
+        );
+
+        let mut kick = new_running_sandbox_app();
+        let (_events, mut kick_commands) = install_running_network_stub(&mut kick, 0, 40, 4);
+        kick.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        kick.handle_runtime_client_list_action(RuntimeClientListAction::Kick(7))
+            .expect("queue client-list kick");
+        assert_eq!(
+            kick_commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: lc_engine::LegacyCString::from_bytes(b"kicked from client list".to_vec())
+                    .expect("fixture reason"),
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_client_list_renders_with_the_classic_gui_resource_set() {
+        let mut app = new_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("render runtime client list with exact resources");
+        assert!(frame.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn runtime_client_list_wheel_precedes_running_player_control() {
+        let mut app = new_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+        assert!(app.mouse_control);
+        assert!(app.local_controls.mouse_owner().is_some());
+
+        let (preferred, line_height) = app
+            .runtime_client_list_input_geometry()
+            .expect("dialog input geometry");
+        let layout = app
+            .runtime_client_list
+            .as_ref()
+            .expect("dialog open")
+            .layout(preferred, line_height);
+        app.running_pointer_position = Some(GuiPoint::new(
+            (layout.list.x + 4) as f32,
+            (layout.list.y + 4) as f32,
+        ));
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("client list consumes wheel");
+        assert!(commands.take_submitted_local().is_empty());
+
+        app.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
+        app.handle_mouse_wheel(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -120.0)),
+            2.0,
+        )
+        .expect("wheel outside dialog reaches player control");
+        let submitted = commands.take_submitted_local();
+        assert_eq!(submitted.len(), 1);
+        assert!(matches!(
+            submitted[0].1,
+            ControlEvent::RawPlayerControl {
+                command: lc_engine::COM_WHEEL_DOWN,
+                data: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn runtime_client_list_league_actions_gate_activate_and_vote_to_kick() {
+        use lc_frontend::runtime_client_list::RuntimeClientListAction;
+
+        let mut app = new_running_sandbox_app();
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.network_is_league = true;
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.engine
+            .register_player(PlayerConfig::new(17, "Remote Player"))
+            .expect("register remote runtime player");
+        app.engine
+            .player_mut(17)
+            .expect("remote player exists")
+            .set_at_client(lc_engine::PlayerAtClient::new(7));
+        app.snapshot = app.engine.snapshot();
+
+        app.handle_runtime_client_list_action(RuntimeClientListAction::ToggleActivate(7))
+            .expect("league refusal is nonfatal");
+        assert!(commands.take_submitted_client_updates().is_empty());
+        assert_eq!(
+            app.board_log_history.back().map(String::as_str),
+            Some("Command not allowed in league games!")
+        );
+
+        app.handle_runtime_client_list_action(RuntimeClientListAction::Kick(7))
+            .expect("league kick submits a vote");
+        assert_eq!(
+            commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            }]
+        );
+        assert!(commands.take_submitted_client_removes().is_empty());
+    }
+
+    #[test]
+    fn runtime_client_list_status_refreshes_only_on_the_one_second_timer() {
+        let mut app = new_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        let mut clock = NetworkControlClock::new(40, 4);
+        clock.observe_round_trip_ms(6_000);
+        clock.complete_control_frame();
+        app.network_control_clock = Some(clock);
+
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+        let initial = app
+            .runtime_client_list
+            .as_ref()
+            .expect("dialog open")
+            .status();
+        assert_eq!(
+            (
+                initial.tick,
+                initial.rate,
+                initial.presend,
+                initial.average_control_time
+            ),
+            (41, 4, 2, 40_000)
+        );
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("dialog open")
+                .status_text(),
+            initial.to_string()
+        );
+
+        app.network_control_clock = Some(NetworkControlClock::new(50, 2));
+        assert_eq!(
+            app.runtime_client_list
+                .as_ref()
+                .expect("dialog remains open")
+                .status(),
+            initial,
+            "the visible status is a one-second snapshot"
+        );
+        assert!(app
+            .sec1_timer()
+            .expect("pulse one-second network dialog timer"));
+        let refreshed = app
+            .runtime_client_list
+            .as_ref()
+            .expect("dialog remains open")
+            .status();
+        assert_eq!(
+            (
+                refreshed.tick,
+                refreshed.rate,
+                refreshed.presend,
+                refreshed.average_control_time
+            ),
+            (50, 2, 1, 0)
+        );
+        assert!(refreshed.to_string().contains("Behind "));
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod input_dialog;
 pub mod loader_screen;
 pub mod message_dialog;
 pub mod network_start_wait;
+pub mod runtime_client_list;
 pub mod runtime_help;
 pub mod scoreboard;
 pub mod startup_about_dlg;

@@ -215,7 +215,8 @@ pub use session::{
     connect_client, connect_client_addresses, connect_dual_client, connect_udp_client, start_host,
     start_host_with_udp_binding, ClientCommand, ClientConfig, ClientError, ClientEvent,
     ClientHandle, ClientMeshPuncherConfig, HostCommand, HostConfig, HostError, HostEvent,
-    HostHandle, HostJoinSnapshot, HostUdpBinding, HostedResourceFile, BROADCAST_CLIENT_ID,
+    HostHandle, HostJoinSnapshot, HostUdpBinding, HostedResourceFile, RuntimeNetworkConnection,
+    BROADCAST_CLIENT_ID,
 };
 pub use statistics::{
     ConnectionRateStatistics, ConnectionStatisticsKey, ConnectionStatisticsRecorder,
