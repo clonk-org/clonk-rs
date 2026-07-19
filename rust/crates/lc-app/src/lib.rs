@@ -2,6 +2,18 @@ mod client_network_scenario;
 mod client_start_barrier;
 mod configured_client_players;
 
+// Keep these suites in the library test harness instead of Cargo integration
+// targets. Integration targets make Cargo also build the normal lc-app binary,
+// even though neither suite executes it.
+#[cfg(test)]
+#[path = "../tests/host_game_resource_sources.rs"]
+pub mod host_game_resource_sources_tests;
+#[cfg(test)]
+pub(crate) use host_game_resource_sources_tests::host_game_resource_sources;
+#[cfg(test)]
+#[path = "../tests/prepared_host_bootstrap.rs"]
+pub mod prepared_host_bootstrap_tests;
+
 pub use client_network_scenario::{
     compose_client_network_scenario, resolve_client_game_resources,
     resolve_client_scenario_resources, ClientNetworkScenarioError, ClientScenarioResources,

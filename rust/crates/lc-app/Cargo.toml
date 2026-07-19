@@ -2,6 +2,7 @@
 name = "lc-app"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 
 [dependencies]
 anyhow = "1.0"
@@ -37,3 +38,10 @@ gethostname = "1.0"
 [dev-dependencies]
 flate2 = "1"
 tempfile = "3.8"
+# Keep lc-engine's property-test dependencies in the app test graph so adding
+# lc-engine or the full workspace does not rebuild shared transitive crates.
+lc-engine = { path = "../lc-engine", features = ["test-graph"] }
+# Every comparison target includes lc-app. Request lc-network's test-only
+# Tokio feature here as well so app-only and workspace test graphs share one
+# Tokio fingerprint without enabling test utilities in production builds.
+tokio = { version = "1.32", features = ["test-util"] }

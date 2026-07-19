@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 use lc_network::{HostInitialResourceSource, NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY};
 use lc_resources::{Group, LanguagePacks};
 
-#[path = "../src/host_game_resource_sources.rs"]
-pub mod host_game_resource_sources;
 #[path = "../src/prepared_host_bootstrap.rs"]
 pub mod prepared_host_bootstrap;
 

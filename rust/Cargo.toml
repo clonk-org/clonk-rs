@@ -44,5 +44,8 @@ opt-level = 3
 # while retaining the checks that make the test profile useful.
 [profile.test]
 opt-level = 2
+# Full DWARF dominates codegen, linking, and disk use for the very large test
+# harnesses. Line tables retain source locations in failures and backtraces.
+debug = "line-tables-only"
 debug-assertions = true
 overflow-checks = true
