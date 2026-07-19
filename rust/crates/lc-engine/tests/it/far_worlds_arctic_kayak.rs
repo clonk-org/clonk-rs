@@ -106,7 +106,7 @@ fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit() {
     );
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the queued Activate command opens the internal cargo menu");
 
     assert!(

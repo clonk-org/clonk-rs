@@ -85,7 +85,7 @@ fn tutorial04_conkit_opens_the_real_elevator_construction_menu() {
         {
             break;
         }
-        engine.tick().expect("ready crew Exit frame");
+        engine.tick_without_snapshot().expect("ready crew Exit frame");
     }
     engine
         .apply_object_update(conkit, ObjectUpdate::new().with_container(clonk))

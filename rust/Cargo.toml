@@ -59,3 +59,10 @@ overflow-checks = true
 [profile.test.package."*"]
 opt-level = 3
 debug = false
+
+# The large async lc-network harness is a cold-build tail, while its complete
+# suite remains only a few seconds without LLVM optimization. Skip optimization
+# and line tables for this crate's test-profile copy to shorten that tail.
+[profile.test.package.lc-network]
+opt-level = 0
+debug = false

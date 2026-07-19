@@ -111,7 +111,7 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
     );
 
     for _ in 0..80 {
-        engine.tick().expect("real SAWM production frame");
+        engine.tick_without_snapshot().expect("real SAWM production frame");
         if engine.object_snapshot(tree).is_none() {
             break;
         }

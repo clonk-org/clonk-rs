@@ -56,7 +56,7 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
         .expect("Tutorial01 joins one selected CLNK");
 
     for _ in 0..100 {
-        engine.tick().expect("settling frame");
+        engine.tick_without_snapshot().expect("settling frame");
     }
     let settled = engine.object_snapshot(clonk).expect("settled CLNK");
     assert_eq!(
@@ -90,7 +90,7 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
         .player_in_com(joined.number, COM_DIG, 0)
         .expect("normal player Dig control");
     for _ in 0..=10 {
-        engine.tick().expect("dig single-click timeout frame");
+        engine.tick_without_snapshot().expect("dig single-click timeout frame");
     }
 
     assert_eq!(
@@ -159,7 +159,7 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // Exit spends its first C++ Execute in InitEvaluation, so Tick10 may
     // assign Base one frame before the ready crew actually leaves.
     for _ in 0..20 {
-        engine.tick().expect("ready-base initialization frame");
+        engine.tick_without_snapshot().expect("ready-base initialization frame");
         let base_ready = engine.snapshot().objects.iter().any(|object| {
             object.definition_id == "HUT3" && object.base == joined.number
         });
@@ -198,7 +198,7 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
         .apply_object_update(clonk, ObjectUpdate::new().with_container(hut.id))
         .expect("model the completed enter-building step");
 
-    engine.tick().expect("auto-context frame");
+    engine.tick_without_snapshot().expect("auto-context frame");
     let context = engine
         .debug_object_menu(clonk.as_u64())
         .expect("clonk exists")
@@ -273,7 +273,7 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     engine
         .player_in_com(joined.number, COM_DIG, 0)
         .expect("close Buy");
-    engine.tick().expect("auto-context reopens");
+    engine.tick_without_snapshot().expect("auto-context reopens");
     assert_eq!(
         engine
             .debug_object_menu(clonk.as_u64())
@@ -368,7 +368,7 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
         vec!["Enter".to_string()]
     );
 
-    engine.tick().expect("first entrance command frame");
+    engine.tick_without_snapshot().expect("first entrance command frame");
     assert_eq!(
         engine
             .object_snapshot(clonk)
@@ -394,7 +394,7 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
         {
             break;
         }
-        engine.tick().expect("door-opening frame");
+        engine.tick_without_snapshot().expect("door-opening frame");
     }
     let clonk_after_open = engine
         .object_snapshot(clonk)
@@ -468,7 +468,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
 
     let flag = (0..700)
         .find_map(|_| {
-            engine.tick().expect("tutorial lead-in frame");
+            engine.tick_without_snapshot().expect("tutorial lead-in frame");
             engine
                 .snapshot()
                 .objects
@@ -493,7 +493,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     let mut mask = engine.snapshot().players[0].show_control;
     let mut mask_changes = 0;
     for _ in 0..400 {
-        engine.tick().expect("tutorial flag instruction frame");
+        engine.tick_without_snapshot().expect("tutorial flag instruction frame");
         let next = engine.snapshot().players[0].show_control;
         if next != mask {
             mask = next;
@@ -517,7 +517,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         "COM_Throw puts FLAG into HUT2 before returning"
     );
     for _ in 0..20 {
-        engine.tick().expect("ExecBase frame");
+        engine.tick_without_snapshot().expect("ExecBase frame");
         if engine
             .object_snapshot(hut)
             .is_some_and(|object| object.base == joined.number)
@@ -534,7 +534,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
 
     let script110_mask = engine.snapshot().players[0].show_control;
     for _ in 0..150 {
-        engine.tick().expect("Script120 frame");
+        engine.tick_without_snapshot().expect("Script120 frame");
         if engine.snapshot().players[0].show_control != script110_mask {
             break;
         }
@@ -565,7 +565,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
                     .with_velocity(Vector2::ZERO),
             )
             .expect("keep CLNK in Script160's lesson area");
-        engine.tick().expect("Script160 frame");
+        engine.tick_without_snapshot().expect("Script160 frame");
         let script160_message = engine.snapshot().hud.messages.iter().any(|message| {
             message
                 .lines
@@ -625,7 +625,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         .player_in_com(joined.number, COM_DIG, 0)
         .expect("normal player Dig control");
     for _ in 0..100 {
-        engine.tick().expect("diagonal tutorial digging frame");
+        engine.tick_without_snapshot().expect("diagonal tutorial digging frame");
     }
     let diagonal_digger = engine.object_snapshot(clonk).expect("CLNK after Dig");
     assert_eq!(diagonal_digger.action.name, "Dig");
@@ -663,7 +663,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // (C4GameObjects.cpp:143-194; C4Object.cpp:5693-5713). Follow the real
     // tutorial tunnel until its Script150 GOLD enters the real CLNK.
     for _ in 0..140 {
-        engine.tick().expect("horizontal tutorial digging frame");
+        engine.tick_without_snapshot().expect("horizontal tutorial digging frame");
         if engine
             .object_snapshot(gold)
             .is_some_and(|object| object.container == Some(clonk))
@@ -693,7 +693,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         }) {
             break;
         }
-        engine.tick().expect("Script200 GOLD observation frame");
+        engine.tick_without_snapshot().expect("Script200 GOLD observation frame");
     }
     assert!(
         engine.snapshot().hud.messages.iter().any(|message| {
@@ -732,7 +732,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // (C4Game.cpp:1908; Tutorial01 Script.c:176-181).
     for _ in 0..7 {
         for _ in 0..35 {
-            engine.tick().expect("pre-completion clock frame");
+            engine.tick_without_snapshot().expect("pre-completion clock frame");
         }
         engine.sec1_timer();
     }
@@ -748,7 +748,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         {
             break;
         }
-        engine.tick().expect("final HUT2 entrance frame");
+        engine.tick_without_snapshot().expect("final HUT2 entrance frame");
     }
     assert_eq!(
         engine
@@ -772,7 +772,7 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // enters (C4ScriptHost.cpp:222-230).
     let mut reached_tutorial02 = false;
     for _ in 0..20 {
-        engine.tick().expect("Script215 approach frame");
+        engine.tick_without_snapshot().expect("Script215 approach frame");
         if engine.next_mission().path == r"Tutorial.c4f\Tutorial02.c4s" {
             reached_tutorial02 = true;
             break;
@@ -955,7 +955,7 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
         "COM_Up must take the normal WALK -> Jump command path"
     );
 
-    engine.tick().expect("first jump frame");
+    engine.tick_without_snapshot().expect("first jump frame");
     assert_eq!(
         engine
             .object_snapshot(clonk)
@@ -973,7 +973,7 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
         {
             break;
         }
-        engine.tick().expect("ceiling approach frame");
+        engine.tick_without_snapshot().expect("ceiling approach frame");
     }
     let hangle = engine.object_snapshot(clonk).expect("CLNK after contact");
     assert_eq!(hangle.action.name, "Hangle");
@@ -1042,7 +1042,7 @@ fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick() {
         .expect("place the real CLNK in open flight");
 
     for _ in 0..9 {
-        engine.tick().expect("open flight frame");
+        engine.tick_without_snapshot().expect("open flight frame");
     }
 
     let falling = engine.object_snapshot(clonk).expect("CLNK after flight");

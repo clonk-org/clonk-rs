@@ -33,18 +33,22 @@ fn dragon_rock_princess_scream_is_one_targeted_non_looping_effect() {
         // Script15 pauses the counter until the dragon's shipped IntDragonFree
         // effect calls this scenario callback. Invoke that real callback here so
         // this audio regression is independent of the dragon-flight route; from
-        // here onward the ordinary Script20.. counter executes through tick().
+        // here onward the ordinary Script20.. counter executes through engine ticks.
         for _ in 0..30 {
-            let frame = engine.tick().expect("Dragon Rock opening tick succeeds");
-            record_audio(frame.audio);
+            let presentation = engine
+                .tick_with_presentation()
+                .expect("Dragon Rock opening tick succeeds");
+            record_audio(presentation.audio);
         }
         engine
             .call_scenario_script_function("OnDragonReachTarget", Vec::new())
             .expect("the shipped dragon-arrival callback succeeds");
 
         for _ in 0..500 {
-            let frame = engine.tick().expect("Dragon Rock intro tick succeeds");
-            record_audio(frame.audio);
+            let presentation = engine
+                .tick_with_presentation()
+                .expect("Dragon Rock intro tick succeeds");
+            record_audio(presentation.audio);
         }
     }
 

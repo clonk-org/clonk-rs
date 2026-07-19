@@ -228,5 +228,5 @@ fn action_callback_with_transitive_include() {
         .spawn_object(lc_engine::SpawnConfig::new("CHILD".to_string()).with_action(action_state))
         .expect("spawn should work - ActionCallback should be found via transitive includes");
 
-    engine.tick().expect("tick should succeed");
+    engine.tick_without_snapshot().expect("tick should succeed");
 }

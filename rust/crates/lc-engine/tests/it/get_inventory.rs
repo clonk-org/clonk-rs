@@ -118,7 +118,7 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
         .expect("COM_MenuEnterAll executes Command2"));
 
     for _ in 0..30 {
-        engine.tick().expect("Get command frame");
+        engine.tick_without_snapshot().expect("Get command frame");
     }
 
     let in_clonk = flints
@@ -192,7 +192,7 @@ protected func RejectCollect(idObject, pObject) { return(1); }
         .call_object_function(clonk_index, "Board", vec![Value::Object(hut.as_u64())])
         .expect("Board arms C4CMD_Enter");
 
-    engine.tick().expect("C4CMD_Enter frame");
+    engine.tick_without_snapshot().expect("C4CMD_Enter frame");
 
     assert_eq!(
         engine
@@ -296,7 +296,7 @@ protected func RejectEntrance(pContainer)
         .expect("item spawns");
     arm_get(&mut engine, clonk, item);
 
-    engine.tick().expect("Get evaluates");
+    engine.tick_without_snapshot().expect("Get evaluates");
 
     assert_eq!(local_int(&engine, hut, "rejectContentsCount"), 1);
     assert_eq!(local_int(&engine, item, "rejectEntranceCount"), 0);
@@ -409,7 +409,7 @@ protected func RejectContents()
     );
     arm_get(&mut engine, clonk, old_target);
 
-    engine.tick().expect("old Get reaches RejectContents");
+    engine.tick_without_snapshot().expect("old Get reaches RejectContents");
 
     assert_eq!(
         engine
@@ -428,7 +428,7 @@ protected func RejectContents()
         Some(hut)
     );
 
-    engine.tick().expect("replacement Get executes");
+    engine.tick_without_snapshot().expect("replacement Get executes");
     assert_eq!(
         engine
             .object_snapshot(replacement)
@@ -518,7 +518,7 @@ protected func RejectContents()
     arm_get(&mut engine, clonk, target);
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("Get survives synchronous target removal");
 
     assert_eq!(local_int(&engine, hut, "rejectContentsCount"), 1);
@@ -590,7 +590,7 @@ protected func RejectEntrance(pContainer)
         .expect("incoming item spawns");
     arm_get(&mut engine, clonk, incoming);
 
-    engine.tick().expect("Get evaluates");
+    engine.tick_without_snapshot().expect("Get evaluates");
 
     assert_eq!(local_int(&engine, clonk, "dropSelectionCount"), 1);
     assert_eq!(local_int(&engine, clonk, "rejectCollectCount"), 0);
@@ -714,7 +714,7 @@ protected func RejectEntrance(pContainer)
         message.lines,
         vec!["Cart not completed.", "Activation denied."]
     );
-    engine.tick().expect("failed Get clears");
+    engine.tick_without_snapshot().expect("failed Get clears");
     assert!(
         engine
             .object_snapshot(clonk)

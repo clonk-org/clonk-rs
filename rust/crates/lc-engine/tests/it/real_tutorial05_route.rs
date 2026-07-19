@@ -556,7 +556,7 @@ fn tutorial05_catapult_restores_its_partial_tension_after_firing() -> Result<(),
     let launched = (0..4)
         .find_map(|_| {
             engine
-                .tick()
+                .tick_without_snapshot()
                 .expect("advance the real CATA firing animation");
             engine
                 .object_snapshot(payload)
@@ -587,7 +587,7 @@ fn tutorial05_catapult_restores_its_partial_tension_after_firing() -> Result<(),
         {
             break;
         }
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
     }
     let recharged = engine
         .object_snapshot(catapult)
@@ -639,7 +639,7 @@ fn tutorial05_cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent() {
     // Script1 naturally commands the first CLNK to build. No controls or
     // state injection supply the missing fourth WOOD or second METL.
     for _ in 0..240 {
-        engine.tick().expect("Tutorial05 opening frame");
+        engine.tick_without_snapshot().expect("Tutorial05 opening frame");
     }
 
     let stalled = engine

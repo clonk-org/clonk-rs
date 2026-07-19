@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
+use std::rc::Rc;
 
 use crate::{math::C4Fixed, ObjectId};
 use lc_resources::ActionDefinition as ResourceActionDefinition;
@@ -483,6 +485,32 @@ pub struct ActionLibrary {
     /// reflection; this array preserves duplicate slot identity at runtime.
     physical: Vec<(String, ActionSpec)>,
     first_physical: HashMap<String, u32>,
+}
+
+/// Cheap, single-threaded sharing for engine-internal script-host scopes.
+/// The public [`ActionLibrary`] remains an independently owned value; this
+/// handle begins only at the engine's immutable definition-metadata boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedActionLibrary(Rc<ActionLibrary>);
+
+impl From<ActionLibrary> for SharedActionLibrary {
+    fn from(library: ActionLibrary) -> Self {
+        Self(Rc::new(library))
+    }
+}
+
+impl Deref for SharedActionLibrary {
+    type Target = ActionLibrary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Default for SharedActionLibrary {
+    fn default() -> Self {
+        ActionLibrary::default().into()
+    }
 }
 
 impl ActionLibrary {
@@ -1563,6 +1591,12 @@ pub enum ActionUpdateResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_library_remains_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ActionLibrary>();
+    }
 
     #[test]
     fn c4_action_reflection_covers_the_complete_compiler_table() {

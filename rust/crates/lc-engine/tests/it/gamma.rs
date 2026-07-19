@@ -209,7 +209,7 @@ fn season_rollover_refreshes_gamma_before_temperature_drift() {
     engine.set_environment(environment);
 
     for _ in 0..34 {
-        engine.tick().expect("pre-rollover frame succeeds");
+        engine.tick_without_snapshot().expect("pre-rollover frame succeeds");
     }
     assert_eq!(
         engine.gamma_controls().ramp(1),
@@ -217,7 +217,7 @@ fn season_rollover_refreshes_gamma_before_temperature_drift() {
         "non-Tick35 frames do not rewrite the season control"
     );
 
-    engine.tick().expect("rollover frame succeeds");
+    engine.tick_without_snapshot().expect("rollover frame succeeds");
 
     assert_eq!(engine.environment().season, 1);
     assert_eq!(engine.environment().temperature, -9);

@@ -8296,7 +8296,7 @@ public func MarkFinishedOnly()
             .expect("throw release is ignored");
 
         engine.player_in_com(1, COM_UP, 0).expect("gameplay up");
-        engine.tick().expect("queued jump executes");
+        engine.tick_without_snapshot().expect("queued jump executes");
         assert_eq!(
             engine
                 .object_snapshot(crew)
@@ -8578,7 +8578,7 @@ public func MarkFinishedOnly()
         engine
             .player_object_command(1, CommandId::Drop, None, 0, 0)
             .expect("drop command");
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let item_index = engine.find_object_index(item).expect("item exists");
         assert_eq!(
             engine.objects[item_index].state.container, None,
@@ -8771,7 +8771,7 @@ public func DoWait() { SetCommand(this(), "Wait"); return(1); }
             .player_object_command(1, CommandId::Drop, None, 0, 0)
             .expect("drop command");
         for _ in 0..6 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let item_index = engine.find_object_index(item).expect("item exists");
         assert_eq!(
@@ -8781,7 +8781,7 @@ public func DoWait() { SetCommand(this(), "Wait"); return(1); }
 
         engine.player_in_com(1, COM_UP, 0).expect("in_com");
         for _ in 0..3 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let item_index = engine.find_object_index(item).expect("item exists");
         assert_eq!(
@@ -8804,7 +8804,7 @@ public func DoWait() { SetCommand(this(), "Wait"); return(1); }
             .player_object_command(1, CommandId::Drop, None, 0, 0)
             .expect("drop command");
         for _ in 0..9 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let item_index = engine.find_object_index(item).expect("item exists");
         assert_eq!(
@@ -9132,7 +9132,7 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
         let crew = spawn_crew(&mut engine, "CLNK", 1);
 
         engine.player_in_com(1, COM_UP, 0).expect("queue jump");
-        engine.tick().expect("execute queued jump");
+        engine.tick_without_snapshot().expect("execute queued jump");
 
         let snapshot = engine.object_snapshot(crew).expect("crew survives");
         assert_eq!(snapshot.action.name, "Walk");
@@ -9184,7 +9184,7 @@ protected func OnActionJump()
         let crew = spawn_crew(&mut engine, "CLNK", 1);
 
         engine.player_in_com(1, COM_UP, 0).expect("queue jump");
-        engine.tick().expect("execute queued jump");
+        engine.tick_without_snapshot().expect("execute queued jump");
 
         let snapshot = engine.object_snapshot(crew).expect("crew survives");
         assert_eq!(snapshot.action.name, "Locked");
@@ -9350,7 +9350,7 @@ protected func OnActionJump()
             CommandRequest::new(CommandId::Jump).with_tx(Some(target_x)),
         )]);
 
-        engine.tick().expect("execute targeted jump");
+        engine.tick_without_snapshot().expect("execute targeted jump");
 
         assert_eq!(
             engine
@@ -9379,7 +9379,7 @@ protected func OnActionJump()
         assert_eq!(snapshot.action.name, "Walk", "no dig before the timeout");
 
         for _ in 0..=C4_DOUBLE_CLICK {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let snapshot = engine.object_snapshot(crew).expect("snapshot");
         assert_eq!(snapshot.action.name, "Dig");
@@ -10918,7 +10918,7 @@ protected func ContainedThrow(object clonk)
                 .command_names(),
             ["Exit"]
         );
-        engine.tick().expect("selected cargo Exit evaluation frame");
+        engine.tick_without_snapshot().expect("selected cargo Exit evaluation frame");
         let selected_after_evaluation = engine
             .object_snapshot(selected_cargo)
             .expect("selected cargo survives");
@@ -10932,7 +10932,7 @@ protected func ContainedThrow(object clonk)
             ["Exit"]
         );
         engine
-            .tick()
+            .tick_without_snapshot()
             .expect("selected cargo exits and menu refills");
         assert_eq!(
             engine
@@ -13999,7 +13999,7 @@ func Enable() {
         );
 
         for _ in 0..34 {
-            engine.tick().expect("advance before tick-35 refill");
+            engine.tick_without_snapshot().expect("advance before tick-35 refill");
         }
         assert_eq!(engine.frame(), 34);
         let menu = engine
@@ -14017,7 +14017,7 @@ func Enable() {
             "the condition is not polled on ordinary frames"
         );
 
-        engine.tick().expect("run tick-35 refill");
+        engine.tick_without_snapshot().expect("run tick-35 refill");
         assert_eq!(engine.frame(), 35);
         let menu = engine
             .debug_object_menu(crew.as_u64())
@@ -15618,7 +15618,7 @@ public func ContextMagic(object caller)
             .spawn_object(SpawnConfig::new("FLAG").with_container(crew))
             .expect("spawn third carried flag");
         engine
-            .tick()
+            .tick_without_snapshot()
             .expect("complete primary Put and reopen context menu");
         let menu = engine
             .debug_object_menu(crew.as_u64())
@@ -15652,9 +15652,9 @@ public func ContextMagic(object caller)
             [second_flag, third_flag].contains(&resolved_item),
             "Put-all resolves one of the carried flags"
         );
-        engine.tick().expect("advance Put count");
-        engine.tick().expect("put the remaining carried object");
-        engine.tick().expect("complete Put-all command");
+        engine.tick_without_snapshot().expect("advance Put count");
+        engine.tick_without_snapshot().expect("put the remaining carried object");
+        engine.tick_without_snapshot().expect("complete Put-all command");
 
         for flag in [second_flag, third_flag] {
             assert_eq!(
@@ -15734,7 +15734,7 @@ public func ContextMagic(object caller)
         );
         assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
 
-        engine.tick().expect("run evaluated Exit");
+        engine.tick_without_snapshot().expect("run evaluated Exit");
         let crew_after_exit = engine.object_snapshot(crew).expect("crew survives");
         assert_eq!(
             crew_after_exit.container, None,
@@ -15985,7 +15985,7 @@ public func ContextMagic(object caller)
             lorry_after_activate.command_stack.command_names(),
             vec!["Exit"]
         );
-        engine.tick().expect("target Exit evaluation frame");
+        engine.tick_without_snapshot().expect("target Exit evaluation frame");
         let lorry_after_evaluation = engine.object_snapshot(lorry).expect("lorry survives");
         assert_eq!(
             lorry_after_evaluation.container,
@@ -15996,7 +15996,7 @@ public func ContextMagic(object caller)
             lorry_after_evaluation.command_stack.command_names(),
             vec!["Exit"]
         );
-        engine.tick().expect("target evaluated Exit frame");
+        engine.tick_without_snapshot().expect("target evaluated Exit frame");
         assert_eq!(
             engine
                 .object_snapshot(lorry)
@@ -16151,7 +16151,7 @@ public func ContextMagic(object caller)
             ["Exit"],
             "the selected row executes C4CMD_Activate on the contained cargo"
         );
-        engine.tick().expect("execute cargo Exit evaluation frame");
+        engine.tick_without_snapshot().expect("execute cargo Exit evaluation frame");
         let cargo_after_evaluation = engine.object_snapshot(cargo).expect("cargo survives");
         assert_eq!(cargo_after_evaluation.container, Some(hut));
         assert_eq!(
@@ -16159,7 +16159,7 @@ public func ContextMagic(object caller)
             ["Exit"],
             "Exit remains queued after its InitEvaluation frame"
         );
-        engine.tick().expect("execute evaluated cargo Exit command");
+        engine.tick_without_snapshot().expect("execute evaluated cargo Exit command");
         assert_eq!(
             engine
                 .object_snapshot(cargo)
@@ -17015,7 +17015,7 @@ protected func CalcValue(object base, int player)
             "the context menu remains closed"
         );
 
-        engine.tick().expect("run evaluated Exit");
+        engine.tick_without_snapshot().expect("run evaluated Exit");
         assert_eq!(
             engine
                 .object_snapshot(crew)
@@ -17079,7 +17079,7 @@ protected func CalcValue(object base, int player)
         );
         // The first ordinary frame observes SetRefillObject's zero-valued
         // cache. Add the second object only after that count is established.
-        engine.tick().expect("prime refill-object count");
+        engine.tick_without_snapshot().expect("prime refill-object count");
         assert_eq!(engine.frame(), 1);
         engine
             .spawn_object(SpawnConfig::new("ITEM").with_container(hut))

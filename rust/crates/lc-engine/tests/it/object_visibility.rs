@@ -29,7 +29,7 @@ fn shipped_invisibility_spell_hides_and_restores_its_mage() {
         )
         .expect("the shipped invisibility spell activates");
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the effect-start callback executes on the next engine pass");
 
     let hidden = engine.snapshot();
@@ -115,7 +115,7 @@ fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer() {
 
     cast(&mut engine);
     for _ in 0..7 {
-        engine.tick().expect("the invisibility timer advances");
+        engine.tick_without_snapshot().expect("the invisibility timer advances");
     }
     let before = engine
         .object_snapshot(mage)
@@ -155,7 +155,7 @@ fn shipped_invisibility_recast_carries_remaining_time_into_reset_timer() {
         .iter()
         .any(|effect| effect.name == "InvisPSpell" && effect.priority == 0));
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the mage's next Execute cleans the dead recast node");
     let after = engine
         .object_snapshot(mage)

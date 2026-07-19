@@ -1,4 +1,4 @@
-use super::real_scenario::load_installed_scenario;
+use super::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
 use lc_engine::player_file::CrewInfo;
 use lc_engine::{Engine, JoinPlayerConfig, SimulationSnapshot};
 use serde::{Deserialize, Serialize};
@@ -590,8 +590,16 @@ pub fn run_replay_twice(
     replay
         .validate()
         .map_err(|error| ReplayRunError::new(error.to_string()))?;
-    let first = run_replay_once(replay).map_err(ReplayRunError::new)?;
-    let second = run_replay_once(replay).map_err(ReplayRunError::new)?;
+    let prepare_started = Instant::now();
+    let scenario = prepare_installed_scenario(&replay.scenario, replay.seed);
+    let prepare_elapsed = prepare_started.elapsed();
+    // Parsing and I/O are immutable preparation shared by the two fresh
+    // engines. Attribute that measured cost to each run's logical load phase
+    // so `load_micros` remains comparable with pre-reuse replay artifacts.
+    let first = run_replay_once(replay, &scenario, prepare_elapsed)
+        .map_err(ReplayRunError::new)?;
+    let second = run_replay_once(replay, &scenario, prepare_elapsed)
+        .map_err(ReplayRunError::new)?;
     let metrics = ReplayMetricsFileV1 {
         schema_version: REPLAY_SCHEMA_VERSION,
         runs: vec![first.metrics.clone(), second.metrics.clone()],
@@ -706,10 +714,14 @@ pub fn run_replay_twice(
     })
 }
 
-fn run_replay_once(replay: &ScenarioReplayV1) -> Result<ReplayCapture, String> {
+fn run_replay_once(
+    replay: &ScenarioReplayV1,
+    scenario: &PreparedInstalledScenario,
+    prepare_elapsed: Duration,
+) -> Result<ReplayCapture, String> {
     let load_started = Instant::now();
-    let mut engine = load_installed_scenario(&replay.scenario, replay.seed);
-    let load_elapsed = load_started.elapsed();
+    let mut engine = scenario.instantiate();
+    let load_elapsed = prepare_elapsed.saturating_add(load_started.elapsed());
     let simulation_started = Instant::now();
     let mut join_elapsed = Duration::ZERO;
     let mut observations = BTreeMap::new();
@@ -770,7 +782,7 @@ fn run_replay_once(replay: &ScenarioReplayV1) -> Result<ReplayCapture, String> {
         }
         if frame != replay.stop_frame {
             engine
-                .tick()
+                .tick_without_snapshot()
                 .map_err(|error| format!("tick from replay frame {frame}: {error}"))?;
         }
     }

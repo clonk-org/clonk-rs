@@ -1423,7 +1423,7 @@ fn parity_differential_matches_cpp_golden() {
                 ice as i64,
             );
             if index + 1 < states.len() {
-                engine.tick().expect("landscape scan oracle frame executes");
+                engine.tick_without_snapshot().expect("landscape scan oracle frame executes");
             }
         }
     }
@@ -2135,7 +2135,7 @@ func Trigger(object pOther) {
         );
 
         let (mut full_frame, id) = action_direction_engine();
-        full_frame.tick().expect("oracle frame executes");
+        full_frame.tick_without_snapshot().expect("oracle frame executes");
         let object = &full_frame.objects[full_frame
             .find_object_index(id)
             .expect("oracle object survives")];
@@ -2237,7 +2237,7 @@ func Trigger(object pOther) {
         );
 
         let (mut full_frame, id) = swim_action_direction_engine();
-        full_frame.tick().expect("oracle frame executes");
+        full_frame.tick_without_snapshot().expect("oracle frame executes");
         let object = &full_frame.objects[full_frame
             .find_object_index(id)
             .expect("oracle swimmer survives")];
@@ -2285,7 +2285,7 @@ func Trigger(object pOther) {
             .as_str()
             .expect("action_callbacks case has a name");
         let (mut engine, id) = action_callbacks_engine(name);
-        engine.tick().expect("callback fixture frame executes");
+        engine.tick_without_snapshot().expect("callback fixture frame executes");
         expect_eq(
             "action_callbacks",
             idx,

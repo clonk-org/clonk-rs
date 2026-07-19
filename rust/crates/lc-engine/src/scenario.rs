@@ -20151,7 +20151,7 @@ global func Step(state, frame, random)
         // Execute does not unlink its current node until the next pass.
         let mut death_frame = None;
         for frame in 1..=40 {
-            engine.tick().expect("tick runs");
+            engine.tick_without_snapshot().expect("tick runs");
             let active = engine
                 .global_effects()
                 .iter()
@@ -20976,7 +20976,7 @@ public func ActualizePhase(pClonk)
         // the scenario-apply Boot (C4Effect::Execute iTime % iIntervall,
         // C4Effect.cpp:340-345).
         for _ in 0..31 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let snapshot = engine.snapshot();
         let bandit = snapshot
@@ -21031,7 +21031,7 @@ public func ActualizePhase(pClonk)
         // Sin(0,40)=0 — the f60 live wall's crosshairs at owner+0).
         let bandit_id = bandit.id;
         for _ in 0..200 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let bandit_idx = engine.find_object_index(bandit_id).expect("bandit exists");
         let rewrites = engine.objects[bandit_idx]
@@ -25695,15 +25695,15 @@ public func ActualizePhase(pClonk)
         // 1-9 keep the stale flags, frame 10 re-mobilizes with zeroed dirs,
         // and frame 11 runs the first DoMovement that refreshes the flag.
         for _ in 0..9 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert!(
             !flag(&engine, 80),
             "immobile objects keep the stale flag (C4Movement.cpp:567)"
         );
         assert!(flag(&engine, 81), "stale flag survives while demobilized");
-        engine.tick().expect("mobilization tick succeeds");
-        engine.tick().expect("first movement tick succeeds");
+        engine.tick_without_snapshot().expect("mobilization tick succeeds");
+        engine.tick_without_snapshot().expect("first movement tick succeeds");
         assert!(
             flag(&engine, 80),
             "movement sets the flag in liquid (C4Movement.cpp:443-460)"
@@ -26821,7 +26821,7 @@ public func ActualizePhase(pClonk)
         // SyncClearance'd position (itofix(15) + 45875 = 1028915 -> 15.70
         // -> pixel 16, fixtoi rounds to nearest); the frozen object holds
         // position AND its stale dirs.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let mover = idx_of(&engine, 80);
         assert_eq!(
             engine.objects[mover].fixed_position.x.val(),
@@ -26836,11 +26836,11 @@ public func ActualizePhase(pClonk)
         // dirs and re-snaps fix to the integer position
         // (C4Movement.cpp:581-586).
         for _ in 2..=9 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         let frozen = idx_of(&engine, 81);
         assert_eq!(engine.objects[frozen].fixed_velocity.x.val(), 45_875);
-        engine.tick().expect("pulse tick succeeds");
+        engine.tick_without_snapshot().expect("pulse tick succeeds");
         let frozen = idx_of(&engine, 81);
         assert!(engine.objects[frozen].state.mobile);
         assert_eq!(engine.objects[frozen].fixed_velocity.x.val(), 0);

@@ -59,6 +59,7 @@ pub mod text_spec;
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
+use action::SharedActionLibrary;
 pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 pub use control::{
     interpret_player_control_command, ActivateGameGoalMenuControlData,
@@ -320,7 +321,7 @@ protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
                 .with_loaded(true),
         )?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let index = engine.find_object_index(object).expect("object remains");
         assert_eq!(engine.objects[index].definition_id, "PNW1");
@@ -392,7 +393,7 @@ protected func OnEnd() { return 1; }
                 .with_loaded(true),
         )?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         assert_eq!(
             calls.lock().unwrap().as_slice(),
@@ -534,7 +535,7 @@ protected func SourceEnded()
                 .with_loaded(true),
         )?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let index = engine.find_object_index(object).expect("object remains");
         let state = &engine.objects[index].state;
@@ -9562,6 +9563,22 @@ impl Default for FogOfWarPlayerFrame {
     }
 }
 
+/// Presentation-only requests emitted while advancing one simulation frame.
+///
+/// This is the lightweight result returned by
+/// [`Engine::tick_with_presentation`]. It contains the same transient requests
+/// that [`Engine::tick`] attaches to its [`SimulationSnapshot`], without the
+/// cost of constructing that full snapshot.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TickPresentation {
+    /// Ordered runtime scoreboard dialog reconciliations.
+    pub scoreboard_presentations: Vec<ScoreboardPresentationRequest>,
+    /// Menu requests emitted by object commands during the frame.
+    pub menu_requests: Vec<MenuRequest>,
+    /// Audio commands emitted during the frame.
+    pub audio: Vec<AudioCommand>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
@@ -11817,6 +11834,13 @@ impl Definition {
         &self.action_library
     }
 
+    fn shared_action_library(&self, world: &HostWorldContext) -> SharedActionLibrary {
+        world
+            .definition_metadata(self.id.as_str())
+            .map(|metadata| metadata.action_library.clone())
+            .unwrap_or_else(|| self.action_library.clone().into())
+    }
+
     pub fn action_graphics(&self) -> &HashMap<String, DefinitionActionGraphics> {
         &self.action_graphics
     }
@@ -13014,7 +13038,7 @@ impl Definition {
                     state.action.time,
                     state.action.data,
                     state.action.phase,
-                    self.action_library.clone(),
+                    self.shared_action_library(&world),
                     state.direction,
                     state.command_direction,
                     0,
@@ -13253,7 +13277,7 @@ impl Definition {
                     state.action.time,
                     state.action.data,
                     state.action.phase,
-                    self.action_library.clone(),
+                    self.shared_action_library(&world),
                     state.direction,
                     state.command_direction,
                     0,
@@ -13452,7 +13476,7 @@ impl Definition {
                     state.action.time,
                     state.action.data,
                     state.action.phase,
-                    self.action_library.clone(),
+                    self.shared_action_library(&world),
                     state.direction,
                     state.command_direction,
                     0,
@@ -13673,7 +13697,7 @@ impl Definition {
                     state.action.time,
                     state.action.data,
                     state.action.phase,
-                    object_definition.action_library.clone(),
+                    object_definition.shared_action_library(&world),
                     state.direction,
                     state.command_direction,
                     0,
@@ -13805,7 +13829,7 @@ impl Definition {
             state.action.time,
             state.action.data,
             state.action.phase,
-            self.action_library.clone(),
+            self.shared_action_library(&world),
             state.direction,
             state.command_direction,
             0,
@@ -13941,7 +13965,7 @@ impl Definition {
             state.action.time,
             state.action.data,
             state.action.phase,
-            self.action_library.clone(),
+            self.shared_action_library(&world),
             state.direction,
             state.command_direction,
             0,
@@ -14408,7 +14432,7 @@ impl Definition {
             state.action.time,
             state.action.data,
             state.action.phase,
-            self.action_library.clone(),
+            self.shared_action_library(&world),
             state.direction,
             state.command_direction,
             0,
@@ -14693,7 +14717,7 @@ impl Definition {
             state.action.time,
             state.action.data,
             state.action.phase,
-            self.action_library.clone(),
+            self.shared_action_library(&world),
             state.direction,
             state.command_direction,
             0,
@@ -15204,7 +15228,7 @@ impl Definition {
                             state,
                             carrier_metadata
                                 .as_ref()
-                                .map(|metadata| &metadata.action_library)
+                                .map(|metadata| &*metadata.action_library)
                                 .unwrap_or(&self.action_library),
                         )
                     }
@@ -15281,7 +15305,7 @@ impl Definition {
                     carrier_metadata
                         .as_ref()
                         .map(|metadata| metadata.action_library.clone())
-                        .unwrap_or_else(|| self.action_library.clone()),
+                        .unwrap_or_else(|| self.shared_action_library(&world)),
                     state.direction,
                     state.command_direction,
                     0,
@@ -23910,7 +23934,7 @@ impl Engine {
                             crew_member_value: definition.crew_member_value(),
                             silent_commands: definition.silent_commands(),
                             vehicle_control: definition.vehicle_control(),
-                            action_library: definition.action_library().clone(),
+                            action_library: definition.action_library().clone().into(),
                             action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),
                             allow_picture_stack: definition.allow_picture_stack(),
@@ -28710,11 +28734,25 @@ impl Engine {
         Ok(())
     }
 
+    /// Advance one simulation frame and return its full presentation snapshot.
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.advance_tick()?;
         let mut snapshot = self.snapshot();
-        self.finish_tick_presentation(Some(&mut snapshot));
+        let presentation = self.drain_tick_presentation();
+        snapshot.hud.scoreboard_presentations = presentation.scoreboard_presentations;
+        snapshot.menu_requests = presentation.menu_requests;
+        snapshot.audio = presentation.audio;
         Ok(snapshot)
+    }
+
+    /// Advance one simulation frame and return only its transient presentation
+    /// requests, without constructing the frame's full [`SimulationSnapshot`].
+    ///
+    /// Simulation and presentation-queue semantics are identical to
+    /// [`Engine::tick`].
+    pub fn tick_with_presentation(&mut self) -> Result<TickPresentation, EngineError> {
+        self.advance_tick()?;
+        Ok(self.drain_tick_presentation())
     }
 
     /// Advance one simulation frame without constructing its presentation
@@ -28722,8 +28760,7 @@ impl Engine {
     /// state is still updated exactly as if the caller had discarded the
     /// value returned by [`Engine::tick`].
     pub fn tick_without_snapshot(&mut self) -> Result<(), EngineError> {
-        self.advance_tick()?;
-        self.finish_tick_presentation(None);
+        self.tick_with_presentation()?;
         Ok(())
     }
 
@@ -29937,9 +29974,7 @@ impl Engine {
                     .as_deref()
                     .and_then(|new_def| {
                         self.apply_change_object_def(idx, new_def);
-                        self.definitions
-                            .get(&self.objects[idx].definition_id)
-                            .map(|definition| definition.action_library().clone())
+                        self.shared_action_library_for(&self.objects[idx].definition_id)
                     })
                     .unwrap_or_else(|| action_library.clone());
 
@@ -30414,7 +30449,7 @@ impl Engine {
         Ok(())
     }
 
-    fn finish_tick_presentation(&mut self, snapshot: Option<&mut SimulationSnapshot>) {
+    fn drain_tick_presentation(&mut self) -> TickPresentation {
         let scoreboard_presentations = self.take_scoreboard_presentations();
         let menu_requests = self.pending_menu_requests.drain(..).collect();
         for command in &self.pending_audio {
@@ -30434,10 +30469,10 @@ impl Engine {
             }
         }
         let audio = self.pending_audio.drain(..).collect();
-        if let Some(snapshot) = snapshot {
-            snapshot.hud.scoreboard_presentations = scoreboard_presentations;
-            snapshot.menu_requests = menu_requests;
-            snapshot.audio = audio;
+        TickPresentation {
+            scoreboard_presentations,
+            menu_requests,
+            audio,
         }
     }
 
@@ -30565,14 +30600,9 @@ impl Engine {
 
         let definition_id = self.objects[index].definition_id.clone();
         let previous_action_name = self.objects[index].state.action.name.clone();
-        let action_library = {
-            let definition = self
-                .definitions
-                .get(&definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-            let definitions_ref = &self.definitions;
-            definition.action_library().clone()
-        };
+        let action_library = self
+            .shared_action_library_for(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
 
         let mut energy_died = false;
         let mut solid_mask_refresh = rotation.is_some()
@@ -30586,9 +30616,7 @@ impl Engine {
             .as_ref()
             .and_then(|new_def| {
                 self.apply_change_object_def(index, new_def);
-                self.definitions
-                    .get(&self.objects[index].definition_id)
-                    .map(|definition| definition.action_library().clone())
+                self.shared_action_library_for(&self.objects[index].definition_id)
             })
             .unwrap_or(action_library);
         let (object_id, previous_owner, previous_crew, new_owner, new_crew, container_change) = {
@@ -31100,7 +31128,9 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = object_definition.action_library().clone();
+        let action_library = self
+            .shared_action_library_for(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let callback_definition = self
             .definitions
             .get(callback_definition_id)
@@ -31558,11 +31588,9 @@ impl Engine {
             .and_then(|update| update.change_def.clone())
             .and_then(|new_def| {
                 self.apply_change_object_def(index, &new_def);
-                self.definitions
-                    .get(&self.objects[index].definition_id)
-                    .map(|definition| definition.action_library().clone())
+                self.shared_action_library_for(&self.objects[index].definition_id)
             });
-        let action_library = changed_library.as_ref().unwrap_or(action_library);
+        let action_library = changed_library.as_deref().unwrap_or(action_library);
 
         {
             let object = &mut self.objects[index];
@@ -31865,9 +31893,7 @@ impl Engine {
             let object_id = outcome.object_id;
             let definition_id = self.objects[index].definition_id.clone();
             let action_library = self
-                .definitions
-                .get(&definition_id)
-                .map(|definition| definition.action_library().clone())
+                .shared_action_library_for(&definition_id)
                 .unwrap_or_default();
 
             let mut effect_events = Vec::new();
@@ -31938,9 +31964,7 @@ impl Engine {
                 .and_then(|update| update.change_def.clone())
                 .and_then(|new_def| {
                     self.apply_change_object_def(index, &new_def);
-                    self.definitions
-                        .get(&self.objects[index].definition_id)
-                        .map(|definition| definition.action_library().clone())
+                    self.shared_action_library_for(&self.objects[index].definition_id)
                 })
                 .unwrap_or(action_library);
             {
@@ -44337,15 +44361,18 @@ impl Engine {
     fn object_definition_context(
         &self,
         index: usize,
-    ) -> Result<(DefinitionId, ActionLibrary), EngineError> {
+    ) -> Result<(DefinitionId, SharedActionLibrary), EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
         let action_library = self
-            .definitions
-            .get(&definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
-            .action_library()
-            .clone();
+            .shared_action_library_for(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         Ok((definition_id, action_library))
+    }
+
+    fn shared_action_library_for(&self, definition_id: &str) -> Option<SharedActionLibrary> {
+        self.definition_metadata_table()
+            .get(definition_id)
+            .map(|metadata| metadata.action_library.clone())
     }
 
     /// Definition-swap half of `C4Object::ChangeDef`. Script-host outcomes
@@ -55232,7 +55259,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     crew_member_value: 0,
                     silent_commands: false,
                     vehicle_control: 0,
-                    action_library: ActionLibrary::default(),
+                    action_library: ActionLibrary::default().into(),
                     action_graphics: HashMap::new(),
                     value: 0,
                     allow_picture_stack: 0,

@@ -208,7 +208,7 @@ fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline() {
         .iter()
         .any(|effect| effect.name == "PoisonCurse" && effect.priority == 0));
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the protected Clonk's next Execute cleans the dead curse");
     assert!(engine
         .object_snapshot(protected)

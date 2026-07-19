@@ -33,7 +33,33 @@ pub fn content_root() -> PathBuf {
 ///
 /// Keeping this in test support makes virtual playthroughs exercise real
 /// content without gaining a state-mutation shortcut.
-pub fn load_installed_scenario(relative_path: impl AsRef<Path>, seed: u64) -> Engine {
+pub struct PreparedInstalledScenario {
+    seed: u64,
+    scenario_path: PathBuf,
+    scenario: Scenario,
+    materials: MaterialLibrary,
+    system_scripts: Vec<(String, String)>,
+    standard_names: Option<String>,
+}
+
+impl PreparedInstalledScenario {
+    /// Apply the immutable parsed inputs to a fresh simulation instance.
+    pub fn instantiate(&self) -> Engine {
+        let mut engine = Engine::with_seed(self.seed);
+        engine.configure_materials_from_library(&self.materials);
+        engine.install_global_scripts(&self.system_scripts);
+        engine.set_standard_names(self.standard_names.clone());
+        self.scenario.apply(&mut engine).unwrap_or_else(|error| {
+            panic!("scenario `{}` applies: {error}", self.scenario_path.display())
+        });
+        engine
+    }
+}
+
+pub fn prepare_installed_scenario(
+    relative_path: impl AsRef<Path>,
+    seed: u64,
+) -> PreparedInstalledScenario {
     let content = content_root();
     let repository = content.parent().unwrap_or_else(|| {
         panic!(
@@ -59,20 +85,23 @@ pub fn load_installed_scenario(relative_path: impl AsRef<Path>, seed: u64) -> En
         .unwrap_or_else(|error| panic!("planet System.c4g opens: {error}"));
     let system_scripts = load_system_scripts(&system_group)
         .unwrap_or_else(|error| panic!("planet System.c4g scripts load: {error}"));
+    let standard_names = system_group
+        .read_file("Names.txt")
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
 
-    let mut engine = Engine::with_seed(seed);
-    engine.configure_materials_from_library(&materials);
-    engine.install_global_scripts(&system_scripts);
-    engine.set_standard_names(
-        system_group
-            .read_file("Names.txt")
-            .ok()
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
-    );
-    scenario
-        .apply(&mut engine)
-        .unwrap_or_else(|error| panic!("scenario `{}` applies: {error}", scenario_path.display()));
-    engine
+    PreparedInstalledScenario {
+        seed,
+        scenario_path,
+        scenario,
+        materials,
+        system_scripts,
+        standard_names,
+    }
+}
+
+pub fn load_installed_scenario(relative_path: impl AsRef<Path>, seed: u64) -> Engine {
+    prepare_installed_scenario(relative_path, seed).instantiate()
 }
 
 pub fn load_tutorial(number: u8, seed: u64) -> Engine {

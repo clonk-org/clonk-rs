@@ -3,6 +3,7 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
+use crate::action::SharedActionLibrary;
 use crate::command::{
     CallResultAction, CommandData, CommandDefinitionSnapshot, CommandEvent, CommandFailureFeedback,
     CommandFailureReason, CommandId, CommandMode, CommandObjectSnapshot, CommandOperation,
@@ -772,7 +773,7 @@ pub(crate) struct DefinitionMetadata {
     /// ControlCommand routing bits (C4Object.cpp:3957-3983).
     pub vehicle_control: i32,
     /// ActMap for building nested object scopes (Find_Func targets).
-    pub action_library: ActionLibrary,
+    pub action_library: SharedActionLibrary,
     /// Presentation facets used by FrameDecoration::SetByDef.
     pub action_graphics: HashMap<String, crate::DefinitionActionGraphics>,
     #[allow(dead_code)]
@@ -16729,7 +16730,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_ticks: i32,
     pub action_data: i32,
     pub action_phase: i32,
-    pub action_library: ActionLibrary,
+    pub action_library: SharedActionLibrary,
     pub direction: Direction,
     pub command_direction: CommandDirection,
     pub command_count: usize,
@@ -16830,7 +16831,7 @@ impl<'a> HostObjectContext<'a> {
         action_ticks: i32,
         action_data: i32,
         action_phase: i32,
-        action_library: ActionLibrary,
+        action_library: impl Into<SharedActionLibrary>,
         direction: Direction,
         command_direction: CommandDirection,
         command_count: usize,
@@ -16875,7 +16876,7 @@ impl<'a> HostObjectContext<'a> {
             action_ticks,
             action_data,
             action_phase,
-            action_library,
+            action_library: action_library.into(),
             direction,
             command_direction,
             command_count,
@@ -34385,7 +34386,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -34794,7 +34795,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     crew_member_value: 0,
                     silent_commands: false,
                     vehicle_control: 0,
-                    action_library: ActionLibrary::default(),
+                    action_library: ActionLibrary::default().into(),
                     action_graphics: HashMap::new(),
                     value: 0,
                     allow_picture_stack: 0,
@@ -35811,7 +35812,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -44994,13 +44995,17 @@ impl EffectHostContext {
     ) -> Option<(ObjectScopeContext, HashMap<String, Value>)> {
         // Legacy host-only fixtures may expose a full object snapshot
         // without a definition table. A pending native-created preview is
-        // still a real C4Object in that context; default metadata supplies
-        // its inert scope so Enter/Exit and removal remain observable.
-        let metadata = self
-            .world
-            .definition_metadata(object.definition_id())
-            .cloned()
+        // still a real C4Object in that context; field defaults supply its
+        // inert scope so Enter/Exit and removal remain observable.
+        let metadata = self.world.definition_metadata(object.definition_id());
+        let action_library = metadata
+            .map(|metadata| metadata.action_library.clone())
             .unwrap_or_default();
+        let ocf_base = metadata.map_or(0, |metadata| metadata.ocf_base);
+        let definition_physical = metadata.map_or_else(
+            PhysicalInfo::default,
+            |metadata| metadata.physical,
+        );
         let state = object.full_state()?;
         let mut scope = ObjectScopeContext::new(
             object.id,
@@ -45019,7 +45024,7 @@ impl EffectHostContext {
             state.velocity,
             state.rotation,
             state.effects.clone(),
-            metadata.action_library.clone(),
+            action_library,
             state.action.name.clone(),
             state.action.act_map_index,
             state.action.time,
@@ -45031,7 +45036,7 @@ impl EffectHostContext {
             state.action.target,
             state.action.target2,
             state.shape_vertices.clone(),
-            metadata.ocf_base,
+            ocf_base,
             state.crew_member,
             state.plr_view_range,
             state.graphics_overlays.clone(),
@@ -45040,7 +45045,7 @@ impl EffectHostContext {
             state.info_physical,
             state.temporary_physical,
             state.physical_changes.clone(),
-            metadata.physical,
+            definition_physical,
         );
         scope.current_info_rank = self
             .world
@@ -46868,7 +46873,7 @@ struct ObjectScopeContext {
     /// Script Kill request carried separately from Alive: AssignDeath owns
     /// effect revival, action, inventory and Death-callback semantics.
     assign_death: Option<bool>,
-    action_library: ActionLibrary,
+    action_library: SharedActionLibrary,
     current_action_name: String,
     current_action_index: Option<u32>,
     current_action_blocks_other_actions: bool,
@@ -46979,7 +46984,7 @@ impl ObjectScopeContext {
         velocity: Vector2,
         rotation: i32,
         effects: Vec<EffectState>,
-        action_library: ActionLibrary,
+        action_library: SharedActionLibrary,
         action_name: String,
         action_index: Option<u32>,
         action_ticks: i32,
@@ -51837,7 +51842,7 @@ global func PreInitializePlayer(int player)
             ),
         ]));
         let metadata = DefinitionMetadata {
-            action_library,
+            action_library: action_library.into(),
             ..DefinitionMetadata::default()
         };
         let world = HostWorldContext::default().with_definition_metadata(Rc::new(HashMap::from([
@@ -61711,7 +61716,7 @@ func ProbeBadIndex(id) {
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -61773,7 +61778,7 @@ func ProbeBadIndex(id) {
                     crew_member_value: 0,
                     silent_commands: false,
                     vehicle_control: 0,
-                    action_library: ActionLibrary::default(),
+                    action_library: ActionLibrary::default().into(),
                     action_graphics: HashMap::new(),
                     value: 0,
                     allow_picture_stack: 0,
@@ -61813,7 +61818,7 @@ func ProbeBadIndex(id) {
                     crew_member_value: 0,
                     silent_commands: false,
                     vehicle_control: 0,
-                    action_library: ActionLibrary::default(),
+                    action_library: ActionLibrary::default().into(),
                     action_graphics: HashMap::new(),
                     value: 0,
                     allow_picture_stack: 0,
@@ -61942,7 +61947,7 @@ func ProbeBadIndex(id) {
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -62018,7 +62023,7 @@ func ProbeBadIndex(id) {
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -62292,7 +62297,7 @@ func ProbeBadIndex(id) {
             crew_member_value: 0,
             silent_commands: false,
             vehicle_control: 0,
-            action_library: ActionLibrary::default(),
+            action_library: ActionLibrary::default().into(),
             action_graphics: HashMap::new(),
             value: 0,
             allow_picture_stack: 0,
@@ -63586,7 +63591,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -63737,7 +63742,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -63814,7 +63819,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -64555,7 +64560,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
 
             let mut random_counts = Vec::new();
             for _ in 0..16 {
-                engine.tick()?;
+                engine.tick_without_snapshot()?;
                 random_counts.push(engine.sync_check(0).random_count);
             }
             SCRIPT_SAFE_RNG.with(|rng| {
@@ -65128,7 +65133,7 @@ func Probe(state) {
             .with_definition_metadata(Rc::new(HashMap::from([(
                 DefinitionId::from("TARG"),
                 DefinitionMetadata {
-                    action_library,
+                    action_library: action_library.into(),
                     ..DefinitionMetadata::default()
                 },
             )])))
@@ -65284,7 +65289,7 @@ func Probe(state) {
             .with_definition_metadata(Rc::new(HashMap::from([(
                 DefinitionId::from("CLNK"),
                 DefinitionMetadata {
-                    action_library: library,
+                    action_library: library.into(),
                     ..DefinitionMetadata::default()
                 },
             )])))
@@ -66328,7 +66333,7 @@ func Probe(state) {
                 name: "Self".to_string(),
                 shape: Some(DefinitionRect::new(0, -4, 27, 41)),
                 mass: 50,
-                action_library: action_library.clone(),
+                action_library: action_library.clone().into(),
                 ..DefinitionMetadata::default()
             },
         )]));
@@ -67442,7 +67447,7 @@ func Probe(state) {
             HashMap::from([(
                 DefinitionId::from("TARG"),
                 DefinitionMetadata {
-                    action_library,
+                    action_library: action_library.into(),
                     ..DefinitionMetadata::default()
                 },
             )]),
@@ -70554,14 +70559,14 @@ public func Probe(object carrier)
             (
                 DefinitionId::from("CLNK"),
                 DefinitionMetadata {
-                    action_library: library.clone(),
+                    action_library: library.clone().into(),
                     ..DefinitionMetadata::default()
                 },
             ),
             (
                 DefinitionId::from("TARG"),
                 DefinitionMetadata {
-                    action_library: library.clone(),
+                    action_library: library.clone().into(),
                     ..DefinitionMetadata::default()
                 },
             ),
@@ -74349,7 +74354,7 @@ public func SeedFull()
                 crew_member_value: 0,
                 silent_commands: false,
                 vehicle_control: 0,
-                action_library: ActionLibrary::default(),
+                action_library: ActionLibrary::default().into(),
                 action_graphics: HashMap::new(),
                 value: 0,
                 allow_picture_stack: 0,
@@ -74614,7 +74619,7 @@ protected func Construction()
             crew_member_value: 0,
             silent_commands: false,
             vehicle_control: 0,
-            action_library: ActionLibrary::default(),
+            action_library: ActionLibrary::default().into(),
             action_graphics: HashMap::new(),
             value: 0,
             allow_picture_stack: 0,

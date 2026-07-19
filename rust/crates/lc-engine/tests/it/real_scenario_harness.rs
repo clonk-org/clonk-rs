@@ -535,7 +535,7 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         Value::Int(100)
     );
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the shipped one-tick RACE timer accepts the finisher");
 
     let after_finish = engine.snapshot();
@@ -583,7 +583,7 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         if engine.snapshot().game_over {
             break;
         }
-        engine.tick().expect("advance the normal GOAL controller");
+        engine.tick_without_snapshot().expect("advance the normal GOAL controller");
     }
     let completed = engine.snapshot();
     assert!(
@@ -674,7 +674,7 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
         .player_context_command(owner, monster)
         .expect("right-click queues the monster context command"));
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the mouse context command opens the monster menu");
     let monster_menu = engine
         .cursor_object_menu(owner)
@@ -753,7 +753,7 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     // Initialize immediately expands into four persistent FBRS segments and
     // removes both temporary bridge/spell objects.
     for _ in 0..8 {
-        engine.tick().expect("the real magic action advances");
+        engine.tick_without_snapshot().expect("the real magic action advances");
     }
     let snapshot = engine.snapshot();
     let magic_objects = snapshot
@@ -923,7 +923,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
         "Magic"
     );
     for _ in 0..8 {
-        engine.tick().expect("the shipped Magic action advances");
+        engine.tick_without_snapshot().expect("the shipped Magic action advances");
     }
     assert_eq!(
         engine.physics().gravity,
@@ -961,7 +961,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts the selected MGDW cast");
     for _ in 0..8 {
-        engine.tick().expect("the shipped Magic action advances");
+        engine.tick_without_snapshot().expect("the shipped Magic action advances");
     }
     assert_eq!(
         engine.physics().gravity,
@@ -1036,7 +1036,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
                 control.last_com_delay = 17;
                 control.last_com_down_double = 4;
             }
-            engine.tick().expect("the ABLA Magic action advances");
+            engine.tick_without_snapshot().expect("the ABLA Magic action advances");
             engine
                 .snapshot()
                 .objects
@@ -1170,7 +1170,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     // same C++ base lifecycle rather than manufacturing a shortcut.
     let home = (0..20)
         .find_map(|_| {
-            engine.tick().expect("Alchemy base lifecycle advances");
+            engine.tick_without_snapshot().expect("Alchemy base lifecycle advances");
             engine
                 .snapshot()
                 .objects
@@ -1186,7 +1186,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         {
             break;
         }
-        engine.tick().expect("Alchemy ready-crew Exit advances");
+        engine.tick_without_snapshot().expect("Alchemy ready-crew Exit advances");
     }
     assert!(
         engine
@@ -1273,7 +1273,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts MWP2's Magic action");
     for _ in 0..8 {
-        engine.tick().expect("MWP2's Magic action advances");
+        engine.tick_without_snapshot().expect("MWP2's Magic action advances");
     }
 
     let bag_after_cast = engine
@@ -1351,7 +1351,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .expect("place the mage inside the source warp aperture");
 
     let warp_data_observed = (0..30).any(|_| {
-        engine.tick().expect("the real WARP pair advances");
+        engine.tick_without_snapshot().expect("the real WARP pair advances");
         let mage = engine
             .object_snapshot(mage)
             .expect("the mage remains live while the source warp pulls it");
@@ -1408,7 +1408,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     );
 
     let transferred = (0..80).any(|_| {
-        engine.tick().expect("the restored real WARP pair advances");
+        engine.tick_without_snapshot().expect("the restored real WARP pair advances");
         engine
             .object_snapshot(mage)
             .is_some_and(|object| object.container == Some(home))
@@ -1455,7 +1455,7 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .iter()
         .any(|effect| effect.name == "WarpUSpellData" && effect.priority == 0));
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the mage's next effect Execute cleans WarpUSpellData");
     assert!(engine
         .object_snapshot(mage)
@@ -1548,7 +1548,7 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death() {
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts XCRS's Magic action");
     for _ in 0..8 {
-        engine.tick().expect("XCRS's Magic action advances");
+        engine.tick_without_snapshot().expect("XCRS's Magic action advances");
     }
     let protected = engine
         .object_snapshot(mage)
@@ -1700,7 +1700,7 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew() {
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts GGHG's Magic action");
     for _ in 0..50 {
-        engine.tick().expect("GGHG's healing effect advances");
+        engine.tick_without_snapshot().expect("GGHG's healing effect advances");
     }
 
     let caster = engine
@@ -1807,7 +1807,7 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu() {
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts the selected MART cast");
     for _ in 0..8 {
-        engine.tick().expect("MART's Magic action advances");
+        engine.tick_without_snapshot().expect("MART's Magic action advances");
     }
 
     let (_, menu) = engine
@@ -1919,7 +1919,7 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts the selected MART cast");
     for _ in 0..8 {
-        engine.tick().expect("MART's Magic action advances");
+        engine.tick_without_snapshot().expect("MART's Magic action advances");
     }
 
     // C4Menu::Enter executes AddMenuItem's command on MART's command object
@@ -2001,13 +2001,13 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
     // normal CLNK Throw control and simulation callback, rather than calling
     // Mode0/CastSpell directly.
     for _ in 0..20 {
-        engine.tick().expect("the mage leaves its Magic action");
+        engine.tick_without_snapshot().expect("the mage leaves its Magic action");
     }
     engine
         .player_in_com(owner, COM_THROW, 0)
         .expect("MCLK throws the configured ROCK");
     for _ in 0..240 {
-        engine.tick().expect("the artefact throw advances");
+        engine.tick_without_snapshot().expect("the artefact throw advances");
         if engine.snapshot().objects.iter().any(|object| {
             object.definition_id == "LGCN"
                 && object
@@ -2080,7 +2080,7 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls() {
         {
             break;
         }
-        engine.tick().expect("execute the normal exit command");
+        engine.tick_without_snapshot().expect("execute the normal exit command");
     }
     assert!(
         engine
@@ -2103,7 +2103,7 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls() {
         )
         .expect("put MCLK's collection rectangle over the loose bag");
     for _ in 0..3 {
-        engine.tick().expect("run through the Tick3 collection pass");
+        engine.tick_without_snapshot().expect("run through the Tick3 collection pass");
     }
     assert_eq!(
         engine
@@ -2355,7 +2355,7 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
     );
 
     for _ in 0..8 {
-        engine.tick().expect("the shipped Magic action advances");
+        engine.tick_without_snapshot().expect("the shipped Magic action advances");
     }
     assert_eq!(
         engine.physics().gravity,
@@ -2440,7 +2440,7 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object() {
 
     let aimer = (0..12)
         .find_map(|_| {
-            engine.tick().expect("MLGT's Magic action advances");
+            engine.tick_without_snapshot().expect("MLGT's Magic action advances");
             engine
                 .snapshot()
                 .objects
@@ -2474,7 +2474,7 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object() {
 
     let vertex_count = lightning.vertices.len();
     for _ in 0..3 {
-        engine.tick().expect("LGTS advances without a script error");
+        engine.tick_without_snapshot().expect("LGTS advances without a script error");
     }
     let advanced = engine
         .object_snapshot(lightning.id)
@@ -2593,7 +2593,7 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls() {
 
     let (aimer, iceball) = (0..12)
         .find_map(|_| {
-            engine.tick().expect("MICS's Magic action advances");
+            engine.tick_without_snapshot().expect("MICS's Magic action advances");
             let snapshot = engine.snapshot();
             let aimer = snapshot
                 .objects
@@ -2643,7 +2643,7 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls() {
     engine
         .player_in_com(owner, COM_RIGHT, 0)
         .expect("Right steers the launched ICEB");
-    engine.tick().expect("ICEB applies its steering speed");
+    engine.tick_without_snapshot().expect("ICEB applies its steering speed");
     assert_eq!(
         engine.crew_cursor(owner),
         Some(iceball),
@@ -2700,7 +2700,7 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls() {
             .any(|effect| effect.name == "FrostwaveNSpell"),
         "ICEB impact installs the shipped global frostwave"
     );
-    engine.tick().expect("the first frostwave radius executes");
+    engine.tick_without_snapshot().expect("the first frostwave radius executes");
     assert!(
         engine
             .object_snapshot(target)
@@ -2790,7 +2790,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake() {
 
     let quake = (0..12)
         .find_map(|_| {
-            engine.tick().expect("MQKE's Magic action advances");
+            engine.tick_without_snapshot().expect("MQKE's Magic action advances");
             engine
                 .snapshot()
                 .objects
@@ -2877,7 +2877,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake() {
     // (C4Script.cpp:5676-5687).
     engine.set_film_viewport_available(true);
     let view_offset = (0..8).find_map(|_| {
-        engine.tick().expect("FXQ1's quake effect advances");
+        engine.tick_without_snapshot().expect("FXQ1's quake effect advances");
         engine
             .take_viewport_presentation_requests()
             .into_iter()
@@ -2899,7 +2899,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake() {
     // iLifeTime, the next successful Random(3) gate removes FXQ1
     // (Earthquake effect Script.c:7-19,31-45; ActMap.txt:3-10).
     let removed = (0..lifetime as usize + 64).any(|_| {
-        engine.tick().expect("FXQ1 lifecycle advances");
+        engine.tick_without_snapshot().expect("FXQ1 lifecycle advances");
         engine
             .object_snapshot(quake)
             .is_none_or(|quake| !quake.status.is_active())
@@ -3136,7 +3136,7 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize() {
     assert!(!landscape.is_solid_at(wall_x + 3, spell_position.y + 29));
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the seven scheduled phase updates execute");
     let expected_phases = [1, 2, 2, 2, 2, 2, 3];
     for (index, id) in segment_ids.iter().copied().enumerate() {
@@ -3189,7 +3189,7 @@ fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize() {
     }
     for _ in 0..4 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .expect("the next interval-five force-field timer approaches");
     }
     assert!(
@@ -3425,7 +3425,7 @@ fn dragon_rock_walk_up_enters_the_shipped_tent() {
         .player_in_com(owner, COM_UP, 0)
         .expect("Up dispatches through the real KNIG control path");
     for _ in 0..3 {
-        engine.tick().expect("queued Enter command advances");
+        engine.tick_without_snapshot().expect("queued Enter command advances");
     }
     assert_eq!(
         engine
@@ -3519,7 +3519,7 @@ fn dragon_rock_real_schedule_enables_and_forces_player_fog_of_war() {
     assert_eq!(schedules[0].var(1), EffectVarValue::Int(1));
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("the real IntSchedule callback evaluates SetFoW");
 
     // FnSetFoW accepts the live player and calls C4Player::SetFoW
@@ -3738,7 +3738,7 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
     // every-tenth-frame Execute post-increments Counter before calling
     // Script%d (C4ScriptHost.cpp:222-230), so Script1 runs on frame 20.
     for _ in 0..20 {
-        engine.tick().expect("Dragon Rock reaches shipped Script1");
+        engine.tick_without_snapshot().expect("Dragon Rock reaches shipped Script1");
     }
 
     // GetEndboss calls Object(EVIL_MAGE_OBJ), where EVIL_MAGE_OBJ is the
@@ -3775,7 +3775,7 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
     // (Drachenfels.c4s/System.c4g/Dragon.c:17,26-32). If Script1 aborted at
     // Object(), this is the original "target is zero" failure instead.
     for _ in 0..20 {
-        engine.tick().expect("Dragon Rock reaches shipped Script3");
+        engine.tick_without_snapshot().expect("Dragon Rock reaches shipped Script3");
     }
     let globals = &engine.snapshot().script_globals.named;
     assert_eq!(globals.get("DRGN_ctrl_tx"), Some(&Value::Int(400)));
@@ -3796,7 +3796,7 @@ fn dragon_rock_endboss_death_kills_the_shipped_dragon() {
     // (Drachenfels.c4s/Script.c:438-454). C++ routes that native through
     // AssignDeath, including the Dead action and Death callback.
     for _ in 0..20 {
-        engine.tick().expect("Dragon Rock reaches shipped Script1");
+        engine.tick_without_snapshot().expect("Dragon Rock reaches shipped Script1");
     }
     let dragon_id = ObjectId::new(202);
     let dragon_before = engine
@@ -3831,13 +3831,13 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
     // Counter 20 is intentionally empty; Script21 runs at frame 180 and
     // Script25 naturally runs at frame 220.
     for _ in 0..160 {
-        engine.tick().expect("Dragon Rock reaches Script15 pause");
+        engine.tick_without_snapshot().expect("Dragon Rock reaches Script15 pause");
     }
     engine
         .call_scenario_script_function("OnDragonReachTarget", Vec::new())
         .expect("real dragon arrival resumes the intro counter");
     for _ in 0..59 {
-        engine.tick().expect("Dragon Rock approaches Script25");
+        engine.tick_without_snapshot().expect("Dragon Rock approaches Script25");
     }
     assert_eq!(engine.snapshot().frame, 219);
 
@@ -3981,8 +3981,8 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row() {
         Some(earth)
     );
 
-    engine.tick().expect("the tunnel effect reaches time zero");
-    engine.tick().expect("the first tunnel row timer executes");
+    engine.tick_without_snapshot().expect("the tunnel effect reaches time zero");
+    engine.tick_without_snapshot().expect("the first tunnel row timer executes");
     let opened_pixels = {
         let landscape = engine.landscape().expect("landscape after tunnel timer");
         let grid = landscape.pixel_grid().expect("Alchemy raster after tunnel");
@@ -4368,7 +4368,7 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound() {
     );
 
     for _ in 0..10 {
-        engine.tick().expect("the scorching timer approaches");
+        engine.tick_without_snapshot().expect("the scorching timer approaches");
     }
     assert!(
         engine

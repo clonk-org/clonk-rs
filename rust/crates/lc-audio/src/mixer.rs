@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -111,6 +111,7 @@ enum Backend {
     #[cfg(feature = "cpal")]
     Cpal(CpalBackend),
     Null(NullBackend),
+    DeferredNull(Arc<DeferredNullBackend>),
 }
 
 impl AudioSystem {
@@ -138,6 +139,25 @@ impl AudioSystem {
         }
     }
 
+    /// Construct a null mixer whose real-time worker starts only when audio
+    /// is first played. Loading and configuration remain available while the
+    /// backend is dormant, and later playback has the same behavior as
+    /// [`Self::new_null`].
+    pub fn new_deferred_null(max_channels: usize) -> Self {
+        let mixer = Arc::new(AudioMixer::new(44_100, max_channels));
+        let backend = Arc::new(DeferredNullBackend::new(mixer.clone()));
+        Self {
+            mixer,
+            _backend: Backend::DeferredNull(backend),
+        }
+    }
+
+    fn ensure_backend_running(&self) {
+        if let Backend::DeferredNull(backend) = &self._backend {
+            backend.ensure_running();
+        }
+    }
+
     pub fn load_sound(&self, data: &[u8]) -> Result<SoundHandle, AudioError> {
         let id = self.mixer.load_sound(data)?;
         Ok(SoundHandle::new(self.mixer.clone(), id))
@@ -154,10 +174,15 @@ impl AudioSystem {
     pub fn worker_handle(&self) -> AudioWorkerHandle {
         AudioWorkerHandle {
             mixer: self.mixer.clone(),
+            deferred_null_backend: match &self._backend {
+                Backend::DeferredNull(backend) => Some(backend.clone()),
+                _ => None,
+            },
         }
     }
 
     pub fn play_sound(&self, sound: &SoundHandle, looped: bool) -> Result<ChannelId, AudioError> {
+        self.ensure_backend_running();
         self.mixer.play_sound(sound.id(), looped)
     }
 
@@ -174,6 +199,7 @@ impl AudioSystem {
     }
 
     pub fn play_music(&self, music: &MusicHandle, looped: bool) -> Result<(), AudioError> {
+        self.ensure_backend_running();
         self.mixer.play_music(music.id(), looped)
     }
 
@@ -295,6 +321,7 @@ impl CpalBackend {
 #[derive(Clone)]
 pub struct AudioWorkerHandle {
     mixer: Arc<AudioMixer>,
+    deferred_null_backend: Option<Arc<DeferredNullBackend>>,
 }
 
 impl AudioWorkerHandle {
@@ -304,6 +331,9 @@ impl AudioWorkerHandle {
     }
 
     pub fn play_music(&self, music: &MusicHandle, looped: bool) -> Result<(), AudioError> {
+        if let Some(backend) = &self.deferred_null_backend {
+            backend.ensure_running();
+        }
         self.mixer.play_music(music.id(), looped)
     }
 
@@ -313,6 +343,25 @@ impl AudioWorkerHandle {
 
     pub fn music_set_volume(&self, volume: f32) {
         self.mixer.music_set_volume(volume);
+    }
+}
+
+struct DeferredNullBackend {
+    mixer: Arc<AudioMixer>,
+    backend: OnceLock<NullBackend>,
+}
+
+impl DeferredNullBackend {
+    fn new(mixer: Arc<AudioMixer>) -> Self {
+        Self {
+            mixer,
+            backend: OnceLock::new(),
+        }
+    }
+
+    fn ensure_running(&self) {
+        self.backend
+            .get_or_init(|| NullBackend::new(self.mixer.clone()));
     }
 }
 
@@ -915,6 +964,37 @@ mod tests {
             .sum::<f64>()
             / samples.len() as f64;
         mean_square.sqrt()
+    }
+
+    #[test]
+    fn deferred_null_backend_starts_on_first_sound_playback() {
+        let system = AudioSystem::new_deferred_null(2);
+        let Backend::DeferredNull(backend) = &system._backend else {
+            panic!("deferred constructor must retain a deferred backend");
+        };
+        assert!(backend.backend.get().is_none());
+
+        let data = generate_sine_wave(50, 440.0, 44_100);
+        let sound = system.load_sound(&data).unwrap();
+        assert!(backend.backend.get().is_none(), "loading stays dormant");
+
+        system.play_sound(&sound, false).unwrap();
+        assert!(backend.backend.get().is_some(), "playback starts backend");
+    }
+
+    #[test]
+    fn deferred_null_backend_starts_through_music_worker_handle() {
+        let system = AudioSystem::new_deferred_null(2);
+        let Backend::DeferredNull(backend) = &system._backend else {
+            panic!("deferred constructor must retain a deferred backend");
+        };
+        let worker = system.worker_handle();
+        let data = generate_sine_wave(50, 440.0, 44_100);
+        let music = worker.load_music(&data).unwrap();
+        assert!(backend.backend.get().is_none(), "loading stays dormant");
+
+        worker.play_music(&music, false).unwrap();
+        assert!(backend.backend.get().is_some(), "playback starts backend");
     }
 
     #[test]

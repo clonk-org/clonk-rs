@@ -700,7 +700,7 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
     engine
         .player_object_command(joined.number(), CommandId::Jump, None, 0, 0)
         .expect("queue C4CMD_Jump");
-    engine.tick().expect("execute ObjectComJump");
+    engine.tick_without_snapshot().expect("execute ObjectComJump");
 
     let snapshot = engine.object_snapshot(clonk).expect("CLNK survives");
     assert_eq!(snapshot.action.name, "Dive");
@@ -1096,7 +1096,7 @@ fn live_contact_density_controls_movement_contact_with_liquid() {
         Value::Bool(true)
     );
 
-    engine.tick().expect("movement contact probe ticks");
+    engine.tick_without_snapshot().expect("movement contact probe ticks");
 
     let walker = engine.object_snapshot(walker).expect("walker survives");
     let falling = engine

@@ -251,7 +251,7 @@ fn hostile_enter_rejects_before_activate_entrance_and_reports_base_owner() {
         ),
         Value::Bool(true)
     );
-    engine.tick().expect("hostile Enter executes");
+    engine.tick_without_snapshot().expect("hostile Enter executes");
 
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert_eq!(
@@ -285,7 +285,7 @@ fn hostile_exit_rejects_before_activate_entrance_and_fails() {
         call(&mut engine, visitor, "StartExit", Vec::new()),
         Value::Bool(true)
     );
-    engine.tick().expect("hostile Exit asks the native gate");
+    engine.tick_without_snapshot().expect("hostile Exit asks the native gate");
 
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert_eq!(
@@ -410,7 +410,7 @@ fn closed_exit_without_current_entrance_ocf_skips_callback_and_fails() {
         Value::Bool(true)
     );
 
-    engine.tick().expect("closed Exit checks current OCF");
+    engine.tick_without_snapshot().expect("closed Exit checks current OCF");
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert_eq!(
         engine
@@ -443,7 +443,7 @@ fn disabling_base_reject_gate_allows_hostile_activate_entrance() {
     );
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("hostile Enter calls the enabled entrance");
     assert_eq!(local_int(&engine, base, "activate_count"), 1);
     assert_eq!(
@@ -454,7 +454,7 @@ fn disabling_base_reject_gate_allows_hostile_activate_entrance() {
     );
     assert!(engine.snapshot().hud.messages.is_empty());
 
-    engine.tick().expect("opened entrance accepts the visitor");
+    engine.tick_without_snapshot().expect("opened entrance accepts the visitor");
     assert_eq!(
         engine
             .object_snapshot(visitor)
@@ -488,7 +488,7 @@ fn base_reject_entrance_flag_survives_state_restore() {
         ),
         Value::Bool(true)
     );
-    engine.tick().expect("restored flag controls activation");
+    engine.tick_without_snapshot().expect("restored flag controls activation");
     assert_eq!(
         local_int(&engine, base, "activate_count"),
         1,
@@ -548,7 +548,7 @@ fn legacy_section_switch_projects_its_base_reject_entrance_mask(
         "StartEnter",
         vec![Value::Object(main_base.as_u64())],
     );
-    engine.tick()?;
+    engine.tick_without_snapshot()?;
     assert_eq!(local_int(&engine, main_base, "activate_count"), 0);
     assert_hostile_entrance_message(&engine, main_base);
 
@@ -568,7 +568,7 @@ fn legacy_section_switch_projects_its_base_reject_entrance_mask(
         "StartEnter",
         vec![Value::Object(target_base.as_u64())],
     );
-    engine.tick()?;
+    engine.tick_without_snapshot()?;
     assert_eq!(
         local_int(&engine, target_base, "activate_count"),
         1,
@@ -606,7 +606,7 @@ fn false_activation_does_not_fail_callback_replacement_exit() {
     );
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("first Exit is replaced by its callback");
     assert_eq!(local_int(&engine, base, "activate_count"), 1);
     assert_eq!(
@@ -628,7 +628,7 @@ fn false_activation_does_not_fail_callback_replacement_exit() {
     );
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("replacement Exit performs InitEvaluation");
     assert_eq!(
         local_int(&engine, base, "activate_count"),
@@ -637,7 +637,7 @@ fn false_activation_does_not_fail_callback_replacement_exit() {
     );
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("replacement Exit activates the entrance");
     assert_eq!(
         local_int(&engine, base, "activate_count"),
@@ -656,7 +656,7 @@ fn false_activation_does_not_fail_callback_replacement_exit() {
     );
 
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("replacement Exit leaves the open base");
     assert_eq!(
         engine

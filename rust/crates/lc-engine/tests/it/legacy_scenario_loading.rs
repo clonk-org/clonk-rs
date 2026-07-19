@@ -38,7 +38,7 @@ fn defcore_rct_all_timer_call_trailing_space_misses_exact_runtime_lookup(
     let mut engine = Engine::new();
     engine.register_definition(definition)?;
     let object = engine.spawn_object(SpawnConfig::new("RCTA"))?;
-    engine.tick()?;
+    engine.tick_without_snapshot()?;
 
     let snapshot = engine
         .object_snapshot(object)
@@ -352,7 +352,7 @@ fn dormant_defcore_vertex_attributes_survive_save_before_add(
     let mut restored = Engine::new();
     restored.register_definition(definition)?;
     restored.restore_state(&state)?;
-    restored.tick()?;
+    restored.tick_without_snapshot()?;
 
     let snapshot = restored
         .object_snapshot(object)

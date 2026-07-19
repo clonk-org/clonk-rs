@@ -583,9 +583,13 @@ impl Engine {
     where
         F: Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
     {
-        let name = name.into();
+        self.register_host_function_erased(name.into(), Arc::new(func));
+    }
+
+    #[inline(never)]
+    fn register_host_function_erased(&mut self, name: String, func: HostFunction) {
         self.host_reference_functions.remove(&name);
-        self.host_functions.insert(name, Arc::new(func));
+        self.host_functions.insert(name, func);
     }
 
     /// Register a native function whose listed zero-based parameters receive

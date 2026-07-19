@@ -875,7 +875,7 @@ impl RuntimeHandle {
             let executing = self.engine.frame();
             self.apply_control_packets_for_frame(executing)?;
             self.engine
-                .tick()
+                .tick_without_snapshot()
                 .map_err(|error| format!("engine tick failed: {error}"))?;
         }
 
@@ -4603,7 +4603,7 @@ global func Step(state, frame, random)
             )
             .expect("spawn succeeds");
 
-        runtime.engine.tick().expect("tick succeeds");
+        runtime.engine.tick_without_snapshot().expect("tick succeeds");
         let expected_snapshot = runtime.engine.snapshot();
 
         let mut export_error: *mut c_char = ptr::null_mut();

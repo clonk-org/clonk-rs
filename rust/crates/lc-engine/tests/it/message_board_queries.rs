@@ -290,7 +290,7 @@ fn test_message_board_reports_validity_availability_and_retained_query_state() {
     );
 
     for frame in 1..=35 {
-        engine.tick().unwrap_or_else(|error| {
+        engine.tick_without_snapshot().unwrap_or_else(|error| {
             panic!("state query activation tick {frame} succeeds: {error}")
         });
     }
@@ -344,7 +344,7 @@ fn replacement_query_opens_once_and_abort_matches_active_and_pending_paths() {
 
     for frame in 1..=35 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
     }
     let active = engine
@@ -477,7 +477,7 @@ fn eliminated_normal_player_still_opens_a_local_query_on_tick35() {
 
     for frame in 1..=35 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("eliminated query tick {frame} succeeds: {error}"));
     }
     assert_eq!(
@@ -510,7 +510,7 @@ fn local_script_player_does_not_open_a_message_board_query() {
 
     for frame in 1..=35 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("script-player query tick {frame} succeeds: {error}"));
     }
     assert!(engine.active_message_board_input().is_none());
@@ -534,7 +534,7 @@ fn deleting_an_active_query_target_closes_the_input_and_unblocks_the_next_prompt
         Value::Bool(true)
     );
     for frame in 1..=35 {
-        engine.tick().unwrap_or_else(|error| {
+        engine.tick_without_snapshot().unwrap_or_else(|error| {
             panic!("first query activation tick {frame} succeeds: {error}")
         });
     }
@@ -553,7 +553,7 @@ fn deleting_an_active_query_target_closes_the_input_and_unblocks_the_next_prompt
         )
         .expect("active query target enters Status==0");
     engine
-        .tick()
+        .tick_without_snapshot()
         .expect("ordinary destroyed-object cleanup succeeds");
     assert!(
         engine.active_message_board_input().is_none(),
@@ -566,7 +566,7 @@ fn deleting_an_active_query_target_closes_the_input_and_unblocks_the_next_prompt
     );
     for frame in 1..=35 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("next query activation tick {frame} succeeds: {error}"));
     }
     let active = engine
@@ -585,7 +585,7 @@ fn message_board_answer_reaches_the_target_input_callback_exactly_once() {
         Value::Bool(true)
     );
     for frame in 1..=35 {
-        engine.tick().unwrap_or_else(|error| {
+        engine.tick_without_snapshot().unwrap_or_else(|error| {
             panic!("answer query activation tick {frame} succeeds: {error}")
         });
     }
@@ -863,7 +863,7 @@ fn message_board_answer_control_preserves_escaped_and_raw_text_in_the_same_frame
         open(&mut engine, target, false, "escaped answer", PLAYER),
         Value::Bool(true)
     );
-    engine.tick().expect("advance to a nonzero control frame");
+    engine.tick_without_snapshot().expect("advance to a nonzero control frame");
     let frame = i32::try_from(engine.frame()).expect("fixture frame fits i32");
 
     let gravity = engine.physics().gravity;
@@ -930,7 +930,7 @@ fn empty_message_board_answer_control_closes_input_and_only_consumes_the_query()
     );
     for frame in 1..=35 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
     }
     assert!(engine.active_message_board_input().is_some());
@@ -993,7 +993,7 @@ fn message_board_answer_submission_applies_cpp_uppercase_bytes_before_queueing()
     );
     for frame in 1..=35 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("query activation tick {frame} succeeds: {error}"));
     }
 

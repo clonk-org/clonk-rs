@@ -60,7 +60,7 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         {
             break;
         }
-        engine.tick().expect("startup Exit frame");
+        engine.tick_without_snapshot().expect("startup Exit frame");
     }
     assert_eq!(
         engine
@@ -89,7 +89,7 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         }) {
             break;
         }
-        engine.tick().expect("Grab command frame");
+        engine.tick_without_snapshot().expect("Grab command frame");
     }
     let pushing = engine.object_snapshot(clonk).expect("CLNK after Grab");
     let balloon_before_lift = engine.object_snapshot(balloon.id).expect("BALN after Grab");
@@ -127,7 +127,7 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         {
             break;
         }
-        engine.tick().expect("controlled BALN lift frame");
+        engine.tick_without_snapshot().expect("controlled BALN lift frame");
         let clonk_now = engine.object_snapshot(clonk).expect("CLNK during lift");
         let balloon_now = engine
             .object_snapshot(balloon.id)
@@ -187,7 +187,7 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         {
             break;
         }
-        engine.tick().expect("controlled BALN lateral coast frame");
+        engine.tick_without_snapshot().expect("controlled BALN lateral coast frame");
         let clonk_now = engine.object_snapshot(clonk).expect("CLNK during coast");
         let balloon_now = engine
             .object_snapshot(balloon.id)
@@ -231,7 +231,7 @@ fn tutorial02_balloon_flight_keeps_the_pushing_clonk_on_its_platform() {
         CommandDirection::Down
     );
     for descent_frame in 1..=30 {
-        engine.tick().expect("controlled BALN descent frame");
+        engine.tick_without_snapshot().expect("controlled BALN descent frame");
         let clonk_now = engine
             .object_snapshot(clonk)
             .expect("CLNK during descent");
@@ -283,7 +283,7 @@ fn tutorial02_open_bottom_removes_the_clonk_in_the_crossing_tick() {
         {
             break;
         }
-        engine.tick().expect("startup Exit frame");
+        engine.tick_without_snapshot().expect("startup Exit frame");
     }
     let landscape = engine.landscape().expect("Tutorial02 has a landscape");
     assert!(landscape.bottom_open());
@@ -297,7 +297,7 @@ fn tutorial02_open_bottom_removes_the_clonk_in_the_crossing_tick() {
         )
         .expect("place CLNK below the open bottom");
 
-    engine.tick().expect("out-of-bounds movement tick");
+    engine.tick_without_snapshot().expect("out-of-bounds movement tick");
     assert!(
         engine.object_snapshot(clonk).is_none(),
         "the raw open bottom must not leave the CLNK alive for another frame"

@@ -193,12 +193,12 @@ fn duplicate_actions_keep_cpp_first_name_and_last_next_action_semantics() {
         )
         .expect("object spawns");
 
-    engine.tick().expect("Source transitions");
+    engine.tick_without_snapshot().expect("Source transitions");
     let snapshot = engine.object_snapshot(object).expect("object remains");
     assert_eq!(snapshot.action.name, "Dup");
     assert_eq!(snapshot.action.act_map_index, Some(2));
     for _ in 0..3 {
-        engine.tick().expect("later duplicate advances");
+        engine.tick_without_snapshot().expect("later duplicate advances");
     }
     assert_eq!(
         engine

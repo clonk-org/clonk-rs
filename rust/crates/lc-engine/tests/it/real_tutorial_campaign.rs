@@ -93,7 +93,7 @@ fn tutorial02_ready_balloon_exits_the_first_base() {
         {
             break;
         }
-        engine.tick().expect("ready vehicle Exit frame");
+        engine.tick_without_snapshot().expect("ready vehicle Exit frame");
     }
     assert_eq!(
         engine
@@ -134,7 +134,7 @@ fn tutorial02_ready_crew_exits_the_first_base() {
         {
             break;
         }
-        engine.tick().expect("ready crew Exit frame");
+        engine.tick_without_snapshot().expect("ready crew Exit frame");
     }
     assert_eq!(
         engine
@@ -177,7 +177,7 @@ fn tutorial02_ready_objects_exit_then_the_clonk_controls_the_real_balloon_up() {
         {
             break;
         }
-        engine.tick().expect("ready object Exit frame");
+        engine.tick_without_snapshot().expect("ready object Exit frame");
     }
     let ready_clonk = engine.object_snapshot(clonk).expect("ready CLNK survives");
     let ready_balloon = engine
@@ -198,7 +198,7 @@ fn tutorial02_ready_objects_exit_then_the_clonk_controls_the_real_balloon_up() {
         }) {
             break;
         }
-        engine.tick().expect("Grab command frame");
+        engine.tick_without_snapshot().expect("Grab command frame");
     }
     let pushing = engine.object_snapshot(clonk).expect("CLNK survives Grab");
     assert_eq!(pushing.action.name, "Push");

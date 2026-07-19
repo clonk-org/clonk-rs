@@ -65,7 +65,7 @@ fn replay_script(source: &str) -> ScriptControlData {
 fn run_replayed_section_switch(prelude: &str) -> (LcgRng, Vec<(i32, i32)>) {
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 23);
     for _ in 0..2 {
-        engine.tick().expect("pre-switch headless replay tick succeeds");
+        engine.tick_without_snapshot().expect("pre-switch headless replay tick succeeds");
     }
     engine
         .execute_script_control(
@@ -95,7 +95,7 @@ fn run_replayed_section_switch(prelude: &str) -> (LcgRng, Vec<(i32, i32)>) {
     for _ in 0..4 {
         let check = engine.sync_check(0);
         sync_ledgers.push((check.random_count, check.random3));
-        engine.tick().expect("headless replay tick succeeds");
+        engine.tick_without_snapshot().expect("headless replay tick succeeds");
     }
     (post_load_rng, sync_ledgers)
 }

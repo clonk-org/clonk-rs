@@ -6431,7 +6431,15 @@ impl AudioContext {
             options.music_volume,
         )));
         #[cfg(test)]
-        let system = AudioSystem::new_null(options.max_channels);
+        let system = if options.sound_enabled
+            || options.music_enabled
+            || options.menu_music_enabled
+            || options.menu_sound_enabled
+        {
+            AudioSystem::new_null(options.max_channels)
+        } else {
+            AudioSystem::new_deferred_null(options.max_channels)
+        };
         #[cfg(not(test))]
         let system = AudioSystem::new(options.max_channels)?;
         Ok(Self {
@@ -36914,6 +36922,14 @@ impl GameApp {
         }
 
         let actions = handler(&mut self.menu_state);
+        self.handle_menu_actions(actions)
+    }
+
+    #[inline(never)]
+    fn handle_menu_actions(
+        &mut self,
+        actions: Vec<StartupMenuAction>,
+    ) -> Result<(), EngineError> {
         let (start_identifier, updated_label) = self
             .process_menu_actions(actions)
             .map_err(classic_parity_engine_error)?;
@@ -68060,6 +68076,16 @@ mod tests {
         max_ticks: u32,
         mut reached: impl FnMut(&GameApp) -> bool,
     ) {
+        advance_app_until_erased(app, milestone, max_ticks, &mut reached);
+    }
+
+    #[inline(never)]
+    fn advance_app_until_erased(
+        app: &mut GameApp,
+        milestone: &str,
+        max_ticks: u32,
+        reached: &mut dyn FnMut(&GameApp) -> bool,
+    ) {
         if reached(app) {
             return;
         }
@@ -68084,12 +68110,23 @@ mod tests {
         key: VirtualKeyCode,
         milestone: &str,
         max_ticks: u32,
-        reached: impl FnMut(&GameApp) -> bool,
+        mut reached: impl FnMut(&GameApp) -> bool,
+    ) {
+        hold_app_key_until_erased(app, key, milestone, max_ticks, &mut reached);
+    }
+
+    #[inline(never)]
+    fn hold_app_key_until_erased(
+        app: &mut GameApp,
+        key: VirtualKeyCode,
+        milestone: &str,
+        max_ticks: u32,
+        reached: &mut dyn FnMut(&GameApp) -> bool,
     ) {
         AppVirtualKeyboard::new(app)
             .press(key)
             .unwrap_or_else(|error| panic!("press physical {key:?} for {milestone}: {error}"));
-        advance_app_until(app, milestone, max_ticks, reached);
+        advance_app_until_erased(app, milestone, max_ticks, reached);
         AppVirtualKeyboard::new(app)
             .release(key)
             .unwrap_or_else(|error| panic!("release physical {key:?} after {milestone}: {error}"));
@@ -70229,6 +70266,60 @@ mod tests {
         real_installed_scenario_app_with_roster(scenario_key, player_name, false)
     }
 
+    fn load_frontend_scenarios_for_test(
+        paths: &AppPaths,
+        scenario_key: &str,
+    ) -> (FrontendScenario, Vec<FrontendScenario>) {
+        fn restore_production_identifiers(entry: &mut FrontendScenario, parent: &Path) {
+            entry.identifier = parent
+                .join(&entry.identifier)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for child in &mut entry.children {
+                restore_production_identifiers(child, parent);
+            }
+        }
+
+        let relative = Path::new(scenario_key);
+        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+        let languages = startup_language_sequence(Some(paths));
+        let language_packs = classic_language_packs(paths);
+        for root in scenario_roots(paths) {
+            let discovery_root = root.path.join(parent);
+            if !discovery_root.exists() {
+                continue;
+            }
+            let entries = resource_scenario::discover_with_languages_and_packs(
+                &discovery_root,
+                &languages,
+                &language_packs,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "discover focused real scenario {}: {error}",
+                    discovery_root.display()
+                )
+            });
+            let mut scenarios = entries
+                .into_iter()
+                .map(|entry| FrontendScenario::from_resource(entry, &root.label))
+                .collect::<Vec<_>>();
+            // Focused discovery starts at the requested scenario's immediate
+            // parent. Restore install-root identifiers for that whole sibling
+            // set so NextMission/restart navigation remains production-faithful
+            // without scanning every scenario pack for every route test.
+            for scenario in &mut scenarios {
+                restore_production_identifiers(scenario, parent);
+            }
+            let catalog = build_scenario_catalog(&scenarios);
+            let Some(scenario) = resolve_next_mission_scenario(&catalog, scenario_key) else {
+                continue;
+            };
+            return (scenario, scenarios);
+        }
+        panic!("{scenario_key} is present in the real scenario catalog");
+    }
+
     fn real_installed_scenario_app_with_roster(
         scenario_key: &str,
         player_name: &str,
@@ -70256,7 +70347,8 @@ mod tests {
             menu_sound_enabled: false,
             ..AudioOptions::default()
         };
-        let mut app = GameApp::new(
+        let (scenario, scenarios) = load_frontend_scenarios_for_test(&paths, scenario_key);
+        let mut app = GameApp::new_with_frontend_scenarios(
             320,
             200,
             audio_options,
@@ -70267,6 +70359,7 @@ mod tests {
                 network: None,
                 record_enabled: false,
             },
+            Some(scenarios),
         )
         .expect("initialise app");
         if preexisting_clonk {
@@ -70324,8 +70417,6 @@ mod tests {
         }
         wait_for_menu(&mut app);
 
-        let scenario = resolve_next_mission_scenario(&app.scenario_catalog, scenario_key)
-            .unwrap_or_else(|| panic!("{scenario_key} is present in the real scenario catalog"));
         let scenario_path = scenario
             .path
             .clone()
@@ -123642,6 +123733,14 @@ protected func InputCallback(string answer, int player)
         assert_eq!(
             app.engine.next_mission().path,
             r"Tutorial.c4f\Tutorial04.c4s"
+        );
+        assert!(
+            resolve_next_mission_scenario(
+                &app.scenario_catalog,
+                &app.engine.next_mission().path,
+            )
+            .is_some(),
+            "the focused real-scenario catalog retains Tutorial04 navigation"
         );
         // The typed C4GameMessage guard has a dedicated regression.
         app.snapshot.hud.messages.clear();

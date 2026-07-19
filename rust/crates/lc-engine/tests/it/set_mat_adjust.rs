@@ -186,7 +186,7 @@ public func StartFade() { GlobalFadeTo(245, 5); return(1); }
 
     for frame in 1..=4 {
         engine
-            .tick()
+            .tick_without_snapshot()
             .unwrap_or_else(|error| panic!("GoldRush fade tick {frame} succeeds: {error}"));
     }
 

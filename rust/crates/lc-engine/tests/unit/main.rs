@@ -141,7 +141,7 @@ mod tests {
             )
             .expect("walker spawns");
         let index = engine.find_object_index(walker).expect("walker exists");
-        engine.tick().expect("walker attachment executes");
+        engine.tick_without_snapshot().expect("walker attachment executes");
 
         assert!(
             engine.objects[index].state.shape_attach.mat_valid,
@@ -2303,7 +2303,7 @@ func Recruit() { return MakeCrewMember(this(), 0); }
         );
 
         for _ in 0..3 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
             assert_eq!(
                 engine.player(0).expect("player exists").crew(),
                 &[survivor],
@@ -2528,7 +2528,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         engine.objects[idx].fixed_position.x =
             math::itofix(10) + math::C4Fixed::from_raw(math::itofix(1).val() / 4); // 10.25
 
-        engine.tick()?; // builds crew lists
+        engine.tick_without_snapshot()?; // builds crew lists
         let packet = engine.sync_check(0);
         assert_eq!(packet.random3, engine.rng.rnd3_ptr());
         assert_eq!(packet.random_count, engine.rng.count);
@@ -2554,7 +2554,7 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let mut gated = Engine::with_seed(81);
         gated.control_rate = 2;
         for _ in 0..4 {
-            gated.tick()?;
+            gated.tick_without_snapshot()?;
         }
         assert_eq!(gated.control_tick, 2, "frames 2 and 4 advance the tick");
 
@@ -2563,20 +2563,20 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let mut machine = Engine::with_seed(82);
         machine.sync_rate = 10;
         for _ in 0..10 {
-            machine.tick()?;
+            machine.tick_without_snapshot()?;
         }
         assert!(machine.get_sync_check(10).is_some(), "queued on frame 10");
         // strict cutoff (C4GameControl.cpp:519: frame < FrameCounter - 50):
         // check 10 survives the frame-60 prune and drops at the frame-70 one.
         for _ in 0..50 {
-            machine.tick()?;
+            machine.tick_without_snapshot()?;
         }
         assert!(
             machine.get_sync_check(10).is_some(),
             "10 >= 60 - 50 keeps it at frame 60"
         );
         for _ in 0..10 {
-            machine.tick()?;
+            machine.tick_without_snapshot()?;
         }
         assert!(
             machine.get_sync_check(10).is_none(),
@@ -2617,15 +2617,15 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         engine.initialize_network_control_timing(timing);
 
         assert_eq!(engine.sync_check(0).control_tick, 9);
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.frame(), 1);
         assert_eq!(engine.sync_check(0).control_tick, 9);
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.frame(), 2);
         assert_eq!(engine.sync_check(0).control_tick, 10);
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.sync_check(0).control_tick, 10);
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.frame(), 4);
         assert_eq!(engine.sync_check(0).control_tick, 11);
         Ok(())
@@ -3889,7 +3889,7 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         assert!(engine.incinerate_object(idx, 1, false, None)?);
         let con_before = engine.objects[idx].state.construction;
         let phase_before = engine.objects[idx].state.fire_phase;
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let idx = engine.find_object_index(hut).expect("hut survives");
         assert_eq!(
             engine.objects[idx].state.construction,
@@ -3909,7 +3909,7 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
             .cloned()
             .expect("fire effect survives its timer");
         assert_eq!(fire.timer, 1, "iTime elapsed once");
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let idx = engine.find_object_index(hut).expect("hut survives");
         assert_eq!(
             engine.objects[idx].state.construction,
@@ -3948,7 +3948,7 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         assert_eq!(engine.objects[idx].state.position.y, 4);
         assert!(engine.incinerate_object(idx, 1, false, None)?);
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let object = engine.object_snapshot(id).expect("object survives");
         assert_eq!(object.construction, FULL_CON - 100);
@@ -4002,9 +4002,9 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         engine.set_landscape(landscape);
         // run to the next Tick5 frame
         while engine.frame % 5 != 4 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let idx = engine.find_object_index(hut).expect("hut survives");
         assert!(!engine.objects[idx].state.on_fire, "extinguished");
         assert!(
@@ -4122,7 +4122,7 @@ func FxFireTimer(object target, int number, int time)
         // arm execute in the same observable frame.
         engine.set_base_extinguish_enabled(false);
         while engine.frame() < 9 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         for (id, path) in &burning {
             let object = engine.object_snapshot(*id).expect("burning object remains");
@@ -4152,7 +4152,7 @@ func FxFireTimer(object target, int number, int time)
             .collect::<HashMap<_, _>>();
 
         engine.set_base_extinguish_enabled(true);
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.frame(), 10);
 
         for (id, path) in burning {
@@ -4257,7 +4257,7 @@ func FxFireTimer(object target, int number, int time)
                 .any(|effect| effect.name == "Fire" && effect.priority == 0),
             "the killed Fire node stays linked dead"
         );
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let hut_idx = engine.find_object_index(hut).expect("hut exists");
         assert!(!engine.objects[hut_idx]
             .state
@@ -4302,7 +4302,7 @@ func FxFireTimer(object target, int number, int time)
             .effects
             .iter()
             .any(|effect| effect.name == "Fire" && effect.priority == 0));
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let hut_idx = engine.find_object_index(hut).expect("hut exists");
         assert!(!engine.objects[hut_idx]
             .state
@@ -4340,7 +4340,7 @@ func FxFireTimer(object target, int number, int time)
         assert!(engine.incinerate_object(shed_idx, 1, false, None)?);
         let barn_con = engine.objects[barn_idx].state.construction;
         let shed_con = engine.objects[shed_idx].state.construction;
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let barn_idx = engine.find_object_index(barn).expect("barn survives");
         let shed_idx = engine.find_object_index(shed).expect("shed survives");
         assert_eq!(
@@ -4447,7 +4447,7 @@ func FxFireTimer(pObj, iNumber, iTime)
         }
 
         while engine.frame < 10 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         for (id, path) in [
@@ -4570,7 +4570,7 @@ func FxFireTimer(pObj, iNumber, iTime)
             "the checked add runs the engine start before AddEffect returns"
         );
         let con_before = engine.objects[barn_idx].state.construction;
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let barn_idx = engine.find_object_index(barn).expect("barn survives");
         assert!(engine.objects[barn_idx].state.on_fire, "ignited");
         assert_eq!(engine.objects[barn_idx].state.fire_caused_by, 9);
@@ -4689,7 +4689,7 @@ func Incineration(iCause) { return 1; }
                 .any(|effect| effect.name == "Fire" && effect.priority == 0));
         }
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         for id in [direct, scripted] {
             let idx = engine.find_object_index(id).expect("target survives");
             assert_eq!(
@@ -5156,7 +5156,7 @@ func Incineration(iCause) { return 1; }
                 .any(|effect| effect.name == "Fire" && effect.priority == 0),
             "the Start-denied node stays linked dead"
         );
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let idx = engine.find_object_index(tree).expect("tree exists");
         assert!(engine.objects[idx].state.effects.is_empty());
         Ok(())
@@ -6045,7 +6045,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             let result = (meteor.state.position.y, meteor.fixed_velocity.y);
             if top_open {
                 for _ in 0..5 {
-                    engine.tick().expect("meteor movement frame succeeds");
+                    engine.tick_without_snapshot().expect("meteor movement frame succeeds");
                 }
                 let meteor = engine
                     .objects
@@ -8232,7 +8232,7 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
         );
 
         for _ in 0..24 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
 
         let snapshot = engine.snapshot();
@@ -8422,7 +8422,7 @@ func ReadWind()
         assert_eq!(engine.environment().base_wind, 5);
 
         for expected_frame in 1..1_000 {
-            engine.tick().expect("weather tick succeeds");
+            engine.tick_without_snapshot().expect("weather tick succeeds");
             let probe_index = engine.find_object_index(probe).expect("probe remains");
             assert_eq!(
                 engine
@@ -8435,7 +8435,7 @@ func ReadWind()
         }
         assert_eq!(engine.frame(), 999);
 
-        engine.tick().expect("Tick1000 succeeds");
+        engine.tick_without_snapshot().expect("Tick1000 succeeds");
         let weather = engine.environment();
         assert_eq!(weather.base_wind, 5);
         assert!(
@@ -8817,7 +8817,7 @@ func ReadWind()
         }
 
         for _ in 0..2099 {
-            engine.tick().expect("simulation frame advances");
+            engine.tick_without_snapshot().expect("simulation frame advances");
         }
         assert_eq!(engine.frame(), 2099);
 
@@ -8827,7 +8827,7 @@ func ReadWind()
         assert!(follower.home_base_material().get("Brick").is_none());
         assert_eq!((leader.production_delay(), follower.production_delay()), (59, 59));
 
-        engine.tick().expect("sixtieth Tick35 boundary advances");
+        engine.tick_without_snapshot().expect("sixtieth Tick35 boundary advances");
         assert_eq!(engine.frame(), 2100);
 
         let leader = engine.player(1).expect("leader present");
@@ -8884,7 +8884,7 @@ func ReadWind()
         engine.player_mut(5).expect("leader").set_production_delay(59);
 
         for _ in 0..34 {
-            engine.tick().expect("pre-boundary frame advances");
+            engine.tick_without_snapshot().expect("pre-boundary frame advances");
         }
         assert_eq!(
             (
@@ -8893,7 +8893,7 @@ func ReadWind()
             ),
             (59, 59),
         );
-        engine.tick().expect("Tick35 player pass");
+        engine.tick_without_snapshot().expect("Tick35 player pass");
 
         let follower = engine.player(1).expect("follower remains");
         let leader = engine.player(5).expect("leader remains");
@@ -8941,7 +8941,7 @@ func ReadWind()
         engine.player_mut(5).expect("leader").set_production_delay(59);
 
         for _ in 0..35 {
-            engine.tick().expect("frame advances");
+            engine.tick_without_snapshot().expect("frame advances");
         }
 
         let follower = engine.player(1).expect("follower remains");
@@ -8965,13 +8965,13 @@ func ReadWind()
             .expect("player registers");
 
         for _ in 0..70 {
-            engine.tick().expect("frame advances");
+            engine.tick_without_snapshot().expect("frame advances");
         }
         engine
             .set_player_status(1, PlayerStatus::TeamSelectionPending)
             .expect("selection becomes pending");
         for _ in 0..70 {
-            engine.tick().expect("pending-selection frame advances");
+            engine.tick_without_snapshot().expect("pending-selection frame advances");
         }
 
         let player = engine.player(1).expect("player remains");
@@ -9023,7 +9023,7 @@ func ReadWind()
         }
 
         for _ in 0..35 {
-            engine.tick().expect("frame advances");
+            engine.tick_without_snapshot().expect("frame advances");
         }
 
         for owner in [1, 2] {
@@ -9484,7 +9484,7 @@ func ProbeSilent()
             Value::Array(vec![Value::Int(3), Value::Int(88)])
         );
 
-        engine.tick().expect("next effect Execute cleans dead nodes");
+        engine.tick_without_snapshot().expect("next effect Execute cleans dead nodes");
         assert_eq!(
             engine
                 .call_object_function(index, "ProbeSilent", vec![])
@@ -9561,7 +9561,7 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
             .number;
         assert!(first_number < second_number);
 
-        engine.tick().expect("indexed removal frame succeeds");
+        engine.tick_without_snapshot().expect("indexed removal frame succeeds");
         let after_remove = engine.object_snapshot(object).expect("caller remains live");
         assert!(after_remove.effects.iter().any(|effect| {
             effect.number == first_number && effect.name == "Twin" && effect.priority == 100
@@ -9588,7 +9588,7 @@ global func FirstTwin() { return GetEffect("Twin", this(), 0, 0); }
         assert_eq!(stop_calls[0].1.get(1), Some(&Value::Int(second_number)));
         assert_eq!(stop_calls[0].1.get(2), Some(&Value::Int(0)));
 
-        engine.tick().expect("next Execute cleans selected Twin");
+        engine.tick_without_snapshot().expect("next Execute cleans selected Twin");
         assert_eq!(
             engine
                 .object_snapshot(object)
@@ -9656,7 +9656,7 @@ func FxVictimEffect(szNew) { if (szNew == "Probe") { SetR(9); return(-1); } retu
             Value::Int(0),
             "command folding keeps the dead list head linked"
         );
-        engine.tick().expect("effect Execute cleans the dead head");
+        engine.tick_without_snapshot().expect("effect Execute cleans the dead head");
         assert_eq!(
             engine
                 .call_object_function(removed_index, "Walk", vec![])
@@ -9760,7 +9760,7 @@ func FxShieldStop() { SetR(GetR() + 1); return(0); }
                 .any(|effect| effect.number == second && effect.priority == 0),
             "Kill leaves the annulled acceptor linked until Execute"
         );
-        engine.tick().expect("effect Execute cleans the dead acceptor");
+        engine.tick_without_snapshot().expect("effect Execute cleans the dead acceptor");
         assert_eq!(
             engine
                 .object_snapshot(object)
@@ -10338,7 +10338,7 @@ func Initialize()
             assert_eq!(walk_start, 0);
         }
 
-        engine.tick().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
 
         {
             let calls = call_log.lock().unwrap().clone();
@@ -10350,7 +10350,7 @@ func Initialize()
             assert_eq!(walk_start, 1);
         }
 
-        engine.tick().expect("second tick succeeds");
+        engine.tick_without_snapshot().expect("second tick succeeds");
 
         {
             let calls = call_log.lock().unwrap().clone();
@@ -10535,7 +10535,7 @@ func ReadSeen() { return seen_action; }
                 .with_loaded(true),
         )?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let index = engine.find_object_index(object).expect("object remains");
         assert_eq!(engine.objects[index].state.action.name, "Loop");
@@ -11028,7 +11028,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             assert_eq!(idle_phase, 0);
         }
 
-        engine.tick().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
 
         {
             let calls = call_log.lock().unwrap().clone();
@@ -11036,7 +11036,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             assert_eq!(idle_phase, 1);
         }
 
-        engine.tick().expect("second tick succeeds");
+        engine.tick_without_snapshot().expect("second tick succeeds");
 
         {
             let calls = call_log.lock().unwrap().clone();
@@ -11044,7 +11044,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             assert_eq!(idle_phase, 2);
         }
 
-        engine.tick().expect("third tick succeeds");
+        engine.tick_without_snapshot().expect("third tick succeeds");
 
         {
             let calls = call_log.lock().unwrap().clone();
@@ -11118,8 +11118,8 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             .spawn_object(SpawnConfig::new("EffectUser"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("first tick runs");
-        engine.tick().expect("second tick runs");
+        engine.tick_without_snapshot().expect("first tick runs");
+        engine.tick_without_snapshot().expect("second tick runs");
 
         let snapshot = engine
             .object_snapshot(id)
@@ -11198,7 +11198,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         assert_eq!(engine.global_effects().len(), 1);
         assert_eq!(engine.global_effects()[0].name, "WorldPulse");
 
-        engine.tick().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
 
         assert!(engine.global_effects().is_empty());
     }
@@ -11221,7 +11221,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             )
             .expect("spawn succeeds");
 
-        engine.tick().expect("initial tick runs");
+        engine.tick_without_snapshot().expect("initial tick runs");
 
         engine
             .apply_object_update(id, ObjectUpdate::new().with_status(ObjectStatus::Inactive))
@@ -11231,7 +11231,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             .object_snapshot(id)
             .expect("snapshot available before tick");
 
-        engine.tick().expect("tick with inactive object runs");
+        engine.tick_without_snapshot().expect("tick with inactive object runs");
 
         let after = engine
             .object_snapshot(id)
@@ -11283,7 +11283,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
         // crewless owner eliminates once the game runs to the boundary.
         assert!(!restored.is_owner_eliminated(1));
         for _ in 0..35 {
-            restored.tick().expect("tick succeeds");
+            restored.tick_without_snapshot().expect("tick succeeds");
         }
         assert!(restored.is_owner_eliminated(1));
     }
@@ -11872,7 +11872,7 @@ protected func WalkAbort(int phase) { abort_phase = phase; return 1; }
             (-120_588, -170_398),
             (-131_072, -288_365),
         ] {
-            engine.tick().expect("full lift frame succeeds");
+            engine.tick_without_snapshot().expect("full lift frame succeeds");
             let target_idx = engine.find_object_index(target_id).expect("target exists");
             assert_eq!(
                 engine.objects[target_idx].fixed_velocity.y.val(),
@@ -12548,7 +12548,7 @@ func LiftTop()
         engine.objects[index].state.action = action;
 
         for _ in 0..5 {
-            engine.tick().expect("pre-advance tick succeeds");
+            engine.tick_without_snapshot().expect("pre-advance tick succeeds");
         }
         let object = engine
             .object_snapshot(id)
@@ -12556,7 +12556,7 @@ func LiftTop()
         assert_eq!(object.position, Vector2::new(100, 80));
         assert_eq!(object.action.time, 5);
 
-        engine.tick().expect("first bridge step succeeds");
+        engine.tick_without_snapshot().expect("first bridge step succeeds");
         let object = engine
             .object_snapshot(id)
             .expect("object remains after first bridge step");
@@ -12571,7 +12571,7 @@ func LiftTop()
         }
 
         for _ in 6..100 {
-            engine.tick().expect("bridge tick succeeds");
+            engine.tick_without_snapshot().expect("bridge tick succeeds");
         }
 
         let object = engine.object_snapshot(id).expect("object present");
@@ -12673,7 +12673,7 @@ func LiftTop()
         engine.objects[index].state.action = action;
 
         for _ in 0..6 {
-            engine.tick().expect("bridge tick succeeds");
+            engine.tick_without_snapshot().expect("bridge tick succeeds");
         }
 
         let object = engine.object_snapshot(id).expect("object present");
@@ -12754,7 +12754,7 @@ func LiftTop()
             .expect("crate spawns");
         let idx = engine.find_object_index(id).expect("crate exists");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(
             engine.objects[idx].fixed_velocity.x,
             C4Fixed::ZERO,
@@ -13459,7 +13459,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             )
             .expect("digger spawns");
 
-        engine.tick().expect("dig frame succeeds");
+        engine.tick_without_snapshot().expect("dig frame succeeds");
         let landscape = engine.landscape().expect("landscape remains");
         assert_eq!(
             landscape.grid_byte_at(13, 9),
@@ -13523,7 +13523,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("spawn succeeds");
 
         for _ in 0..12 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
 
         let snapshot = engine.snapshot();
@@ -15549,7 +15549,7 @@ protected func RejectEntrance(container)
             )
             .expect("pusher spawns");
 
-        engine.tick().expect("failed Push executes");
+        engine.tick_without_snapshot().expect("failed Push executes");
 
         let object = engine.object_snapshot(id).expect("pusher survives");
         assert_eq!(object.action.name, "Walk");
@@ -16334,7 +16334,7 @@ protected func GrabLost()
             )
             .expect("wagon arms loss trace");
 
-        engine.tick().expect("horse loses the distant wagon");
+        engine.tick_without_snapshot().expect("horse loses the distant wagon");
 
         assert_l073_pull_stopped(
             &engine,
@@ -17579,7 +17579,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         // C4MaxPhysical)` — the gate fires on frames divisible by 5 only;
         // temporary physicals train whenever they exist (C4Object.cpp:2136-2146).
         for _ in 0..4 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert_eq!(
             engine.objects[fighter_idx]
@@ -17591,7 +17591,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
             "no training before the first Tick5 frame"
         );
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let trained = engine.objects[fighter_idx]
             .state
             .temporary_physical
@@ -17887,7 +17887,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let _late = engine
             .spawn_object(SpawnConfig::new("PROB").with_owner(9))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine
@@ -17941,7 +17941,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let p2 = engine
             .spawn_object(SpawnConfig::new("PROB"))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine
@@ -17992,7 +17992,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         engine
             .spawn_object(SpawnConfig::new("PROB"))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine.call_object_function(finder_idx, "Boom", Vec::new());
@@ -18022,7 +18022,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine
@@ -18064,7 +18064,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         engine
             .spawn_object(SpawnConfig::new("PROB"))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let strings = engine
@@ -18101,7 +18101,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine
@@ -18157,7 +18157,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let p3 = engine
             .spawn_object(SpawnConfig::new("PROB").with_owner(3))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine
@@ -18231,7 +18231,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let c = engine
             .spawn_object(SpawnConfig::new("PROB"))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         for (id, rank) in [(a, 1), (b, 2), (c, 3)] {
             let idx = engine.find_object_index(id).expect("probe exists");
             engine
@@ -18300,7 +18300,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let p3 = engine
             .spawn_object(SpawnConfig::new("PROB").with_owner(3))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine
@@ -18367,7 +18367,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let s2 = engine
             .spawn_object(SpawnConfig::new("PROB").with_owner(2))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let finder_idx = engine.find_object_index(finder).expect("finder exists");
         let result = engine
@@ -18412,7 +18412,7 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
         let id = engine
             .spawn_object(SpawnConfig::new("TSTD"))
             .expect("object spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(
             engine
@@ -20131,7 +20131,7 @@ func Trigger() {
         let id = engine
             .spawn_object(SpawnConfig::new("CLLR").with_energy(50))
             .expect("object spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let idx = engine.find_object_index(id).expect("object exists");
         let energy_before = engine.objects[idx].state.energy;
@@ -20225,7 +20225,7 @@ func Trigger() {
         let namespace_target = engine
             .spawn_object(SpawnConfig::new("OTHR"))
             .expect("namespace target spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let caller_idx = engine.find_object_index(caller).expect("caller exists");
         let target_arg = vec![Value::Object(probe.as_u64())];
@@ -20361,7 +20361,7 @@ func Trigger() {
         let revive = engine
             .spawn_object(SpawnConfig::new("RVIV"))
             .expect("revive spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let caller_idx = engine.find_object_index(caller).expect("caller exists");
         engine
@@ -20435,7 +20435,7 @@ func Trigger() {
         let probe = engine
             .spawn_object(SpawnConfig::new("PROB"))
             .expect("probe spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let caller_idx = engine.find_object_index(caller).expect("caller exists");
         let target_arg = vec![Value::Object(probe.as_u64())];
@@ -20518,7 +20518,7 @@ func Trigger() {
         let caller = engine
             .spawn_object(SpawnConfig::new("CLLR"))
             .expect("caller spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let caller_idx = engine.find_object_index(caller).expect("caller exists");
         let result = engine
@@ -20571,7 +20571,7 @@ func Trigger() {
         let caller = engine
             .spawn_object(SpawnConfig::new("CLLR"))
             .expect("caller spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let caller_idx = engine.find_object_index(caller).expect("caller exists");
         let result = engine
@@ -20831,7 +20831,7 @@ func Trigger() {
         let rule = engine
             .spawn_object(SpawnConfig::new("RULE"))
             .expect("rule spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let goal_index = engine.find_object_index(goal).expect("goal exists");
         assert_eq!(
@@ -20929,7 +20929,7 @@ func Trigger() {
         let rule = engine
             .spawn_object(SpawnConfig::new("RULE"))
             .expect("rule spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, id: ObjectId, function: &str, args: Vec<Value>| {
             let index = engine.find_object_index(id).expect("object exists");
@@ -21018,7 +21018,7 @@ func Trigger() {
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
             .expect("caller spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         (engine, caller)
     }
 
@@ -21179,7 +21179,7 @@ func Trigger() {
         let rule = engine
             .spawn_object(SpawnConfig::new("RULE"))
             .expect("rule spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         (engine, caller, rule)
     }
 
@@ -21539,7 +21539,7 @@ func Trigger() {
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
@@ -21649,7 +21649,7 @@ func Trigger() {
         let caller = engine
             .spawn_object(SpawnConfig::new("CALL"))
             .expect("caller spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let target_index = engine.find_object_index(target).expect("target exists");
         engine
@@ -21692,7 +21692,7 @@ func Trigger() {
                     .with_crew_member(true),
             )
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let clonk_index = engine.find_object_index(clonk).expect("clonk exists");
         engine
             .call_object_function(clonk_index, "OpenMenu", Vec::new())
@@ -21747,7 +21747,7 @@ func Trigger() {
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -21823,7 +21823,7 @@ func Trigger() {
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -21951,7 +21951,7 @@ func Trigger() {
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -22093,7 +22093,7 @@ func Trigger() {
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -22321,7 +22321,7 @@ func Probe(object target)
                 },
             )
             .expect("custom graphics apply");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let call = |engine: &mut Engine, function: &str| {
             let index = engine.find_object_index(clonk).expect("clonk exists");
             engine
@@ -22377,7 +22377,7 @@ func Probe(object target)
         let controller = engine
             .spawn_object(SpawnConfig::new("CTRL"))
             .expect("controller spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let index = engine
             .find_object_index(controller)
             .expect("controller exists");
@@ -22465,7 +22465,7 @@ func Probe(object target)
         let command = engine
             .spawn_object(SpawnConfig::new("CMND"))
             .expect("command spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine,
                     object: ObjectId,
@@ -22606,7 +22606,7 @@ func Probe(object target)
         let command = engine
             .spawn_object(SpawnConfig::new("CMND"))
             .expect("command spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let command_index = engine.find_object_index(command).expect("command exists");
         assert_eq!(
             engine
@@ -22686,7 +22686,7 @@ func Probe(object target)
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -22790,7 +22790,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str| {
             let index = engine.find_object_index(clonk).expect("clonk exists");
@@ -22860,7 +22860,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK").with_container(hut))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
@@ -22914,7 +22914,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
@@ -23006,7 +23006,7 @@ func ReadMenu() { return GetMenu(); }
         let moving = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("moving object spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let index = engine
@@ -23109,7 +23109,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         engine
@@ -23167,7 +23167,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         engine
@@ -23313,7 +23313,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -23361,7 +23361,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -23429,7 +23429,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -23501,7 +23501,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -23553,7 +23553,7 @@ func ReadMenu() { return GetMenu(); }
         assert_eq!(menu(&engine).items[4].text_display_progress, 0);
 
         call(&mut engine, "Prog", vec![Value::Int(0)]);
-        engine.tick().expect("menu progress tick succeeds");
+        engine.tick_without_snapshot().expect("menu progress tick succeeds");
         assert_eq!(
             menu(&engine).items[1].text_display_progress,
             4,
@@ -23622,7 +23622,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -23721,7 +23721,7 @@ func ReadMenu() { return GetMenu(); }
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
             .expect("clonk spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
@@ -23863,7 +23863,7 @@ func ReadMenu() { return GetMenu(); }
         let horse = engine
             .spawn_object(SpawnConfig::new("HORS"))
             .expect("horse spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let idx = engine.find_object_index(horse).expect("horse exists");
         assert_eq!(
@@ -23977,7 +23977,7 @@ func ReadMenu() { return GetMenu(); }
                     .with_energy(50_000),
             )
             .expect("pillow spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         // tdir = +1 for a right-facing attacker (C4ObjectCom.cpp:745).
         let snake_idx = engine.find_object_index(snake).expect("snake exists");
@@ -24118,7 +24118,7 @@ func ReadMenu() { return GetMenu(); }
         let minion = engine
             .spawn_object(SpawnConfig::new("MNON"))
             .expect("minion spawns");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         let boss_idx = engine.find_object_index(boss).expect("boss exists");
         assert_eq!(
@@ -24212,7 +24212,7 @@ func ReadMenu() { return GetMenu(); }
         let container = engine
             .spawn_object(SpawnConfig::new("CONT"))
             .expect("container spawns");
-        engine.tick().expect("fixture initializes");
+        engine.tick_without_snapshot().expect("fixture initializes");
 
         (engine, caller, crew, container)
     }
@@ -24749,7 +24749,7 @@ protected func RejectGrabbed(clonk)
             .call_object_function(removed_actor_index, "RemoveOnJump", Vec::new())
             .expect("jump removal arms");
 
-        engine.tick().expect("Grab commands execute");
+        engine.tick_without_snapshot().expect("Grab commands execute");
 
         let veto = engine.object_snapshot(veto_actor).expect("veto actor remains");
         assert_eq!(veto.action.name, "Walk");
@@ -24860,7 +24860,7 @@ protected func RejectGrabbed(clonk)
             mutating.command_stack.command_names(),
             vec!["Wait".to_string(), "Grab".to_string()]
         );
-        engine.tick().expect("callback-added Wait completes");
+        engine.tick_without_snapshot().expect("callback-added Wait completes");
         let mutating = engine
             .object_snapshot(mutating_actor)
             .expect("command-mutating actor remains");
@@ -24977,7 +24977,7 @@ protected func RejectGrabbed(clonk)
             "Scale only lets go inside Grab's at-target branch"
         );
 
-        engine.tick().expect("callback-added Wait completes");
+        engine.tick_without_snapshot().expect("callback-added Wait completes");
         assert!(
             engine
                 .object_snapshot(mutating_actor)
@@ -25496,7 +25496,7 @@ protected func Grabbed(clonk, grab)
             )
             .expect("Reject detach-before-remove arms");
 
-        engine.tick().expect("Grab commands execute");
+        engine.tick_without_snapshot().expect("Grab commands execute");
 
         for (actor, target) in std::iter::once((walk_actor, walk_target)).chain(stopped) {
             let actor = engine.object_snapshot(actor).expect("grabber remains");
@@ -26371,7 +26371,7 @@ protected func WorkFailed(caller, tx, ty, other)
         queue_failed_call(&mut engine, silent_actor, falsy_target);
         queue_failed_call(&mut engine, noncrew_actor, falsy_target);
 
-        engine.tick().expect("failure-tail tick succeeds");
+        engine.tick_without_snapshot().expect("failure-tail tick succeeds");
 
         let normal = engine
             .object_snapshot(normal_actor)
@@ -26645,7 +26645,7 @@ protected func ControlCommandFinished() { finished_dir = GetComDir(); }
             .fail_front_if(CommandId::Build));
         engine.refresh_object_ocf(actor_index);
 
-        engine.tick().expect("Build failure tick succeeds");
+        engine.tick_without_snapshot().expect("Build failure tick succeeds");
 
         let actor = engine.object_snapshot(actor).expect("builder remains");
         assert_eq!(
@@ -27017,7 +27017,7 @@ protected func WalkStart() { stop_order = stop_order * 10 + 2; }
                     .with_evaluated(true),
             )
             .expect("tick MoveTo queues");
-        engine.tick().expect("MoveTo tick succeeds");
+        engine.tick_without_snapshot().expect("MoveTo tick succeeds");
         let tick_worker = engine
             .object_snapshot(tick_worker)
             .expect("tick worker remains");
@@ -27099,7 +27099,7 @@ protected func ControlCommandFinished(command)
             Value::Bool(true)
         );
 
-        engine.tick().expect("command tick succeeds");
+        engine.tick_without_snapshot().expect("command tick succeeds");
 
         let index = engine.find_object_index(clonk).expect("clonk exists");
         assert_eq!(
@@ -27268,7 +27268,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         let crate_id = engine
             .spawn_object(SpawnConfig::new("Actor").with_alive(false))
             .expect("spawn succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(crate_id).expect("object exists");
         engine
             .change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3)
@@ -27284,7 +27284,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         let clonk_id = engine
             .spawn_object(SpawnConfig::new("Actor").with_alive(true))
             .expect("spawn succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(clonk_id).expect("object exists");
         engine
             .change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3)
@@ -27340,7 +27340,7 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
                     .with_energy(50_000),
             )
             .expect("spawn succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
 
         // List order is ascending priority: Ward (100) runs before Armor
@@ -27533,9 +27533,9 @@ func FxAmplifierDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
         // (C4Movement.cpp:34) = raw 32768 per frame, clamped to
         // lLimit = ValByPhysical(280, 35000) = itofix(35000*56, 2000000)
         // = raw 64225.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 64225);
     }
 
@@ -27764,8 +27764,8 @@ func Death(by) { death_by = by; return 1; }
         // The current command port executes Exit on frame 11; C++ spends
         // that frame on InitEvaluation and exits on frame 12. Checking after
         // both command phases accepts either timing without pinning L120.
-        engine.tick().expect("first Exit command phase runs");
-        engine.tick().expect("second Exit command phase runs");
+        engine.tick_without_snapshot().expect("first Exit command phase runs");
+        engine.tick_without_snapshot().expect("second Exit command phase runs");
         assert_eq!(engine.frame, 12);
         for &(actor, _) in &actors {
             let snapshot = engine.object_snapshot(actor).expect("flier remains");
@@ -27811,7 +27811,7 @@ func Death(by) { death_by = by; return 1; }
             .push_back(CommandRequest::new(CommandId::Exit).with_mode(CommandMode::Base))
             .expect("Exit queues");
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let snapshot = engine.object_snapshot(actor_id).expect("actor remains");
         assert_eq!(snapshot.action.name, "Idle");
         assert_eq!(snapshot.container, Some(container_id));
@@ -27820,7 +27820,7 @@ func Death(by) { death_by = by; return 1; }
             vec!["Exit".to_string()]
         );
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let snapshot = engine.object_snapshot(actor_id).expect("actor remains");
         assert_eq!(snapshot.action.name, "Idle");
         assert_eq!(snapshot.container, None);
@@ -27896,7 +27896,7 @@ func Death(by) { death_by = by; return 1; }
             )
             .expect("evaluated Exit queues");
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let actor_index = engine.find_object_index(actor_id).expect("actor remains");
         let actor = &engine.objects[actor_index];
@@ -28196,17 +28196,17 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // DFA_SCALE (C4Object.cpp:4805-4837): ydir -= WalkAccel (raw 32768),
         // clamped to lLimit = ValByPhysical(200, 30000)
         // = itofix(30000*40, 2000000) = raw 39321.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -32768);
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -39321);
         assert_eq!(engine.objects[idx].state.info_physical, None);
 
         // Tick5 at-limit training (C4Object.cpp:4810-4812): frame 5 sees
         // |ydir| == lLimit and trains Scale by 1.
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let trained = engine.objects[idx]
             .state
             .temporary_physical
@@ -28289,7 +28289,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
             )
             .expect("climber spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("climber exists");
         let object = &engine.objects[idx];
         assert_eq!(object.state.action.name, "Hangle");
@@ -28352,18 +28352,18 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
         // DFA_HANGLE (C4Object.cpp:4840-4872): xdir += WalkAccel (raw 32768),
         // clamped to lLimit = ValByPhysical(160, 40000)
         // = itofix(40000*32, 2000000) = raw 41943; ydir = 0.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 41943);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[idx].state.direction, Direction::Right);
         assert_eq!(engine.objects[idx].state.info_physical, None);
 
         // Tick5 at-limit training (C4Object.cpp:4844-4846).
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let trained = engine.objects[idx]
             .state
             .temporary_physical
@@ -28411,7 +28411,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
             let idx = engine.find_object_index(id).expect("swimmer exists");
             engine.objects[idx].state.in_liquid = true;
         }
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         assert_eq!(
             engine.objects[idx].state.action.phase, 1,
@@ -28462,7 +28462,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
             91750, 78643, 65536, 52429, 39322, 26215, 13108, 0, 0,
         ];
         for (tick, expected) in ladder.iter().enumerate() {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
             let idx = engine.find_object_index(id).expect("exists");
             assert_eq!(
                 engine.objects[idx].fixed_velocity.x.val(),
@@ -28565,7 +28565,7 @@ protected func Activity()
         // One tick: the swim arm accelerates 13107 -> 26214 (comdir
         // Right), movement integrates it, THEN the TimerCall Activity
         // turns: SetXDir(0) must survive the TurnAction switch.
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         let object = &engine.objects[idx];
         assert_eq!(
@@ -28610,7 +28610,7 @@ protected func Activity() { SetActionTargets(); return(1); }
         engine.objects[idx].state.action.target = Some(coach);
         engine.objects[idx].state.action.target2 = Some(coach);
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         assert_eq!(
             engine.objects[idx].state.action.target, None,
@@ -28682,11 +28682,11 @@ protected func Activity() { SetActionTargets(); return(1); }
             let idx = engine.find_object_index(id).expect("swimmer exists");
             engine.objects[idx].state.in_liquid = true;
         }
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13107);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         for _ in 0..4 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 52428);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
@@ -28695,7 +28695,7 @@ protected func Activity() { SetActionTargets(); return(1); }
 
         // Tick10 at-limit training (C4Object.cpp:4924-4926).
         for _ in 0..5 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         let trained = engine.objects[idx]
             .state
@@ -28889,7 +28889,7 @@ protected func Activity() { SetActionTargets(); return(1); }
         // DFA_DIG (C4Object.cpp:4888-4915): direct dirs from
         // lLimit = ValByPhysical(125, 40000) = itofix(40000*25, 2000000)
         // = raw 32768; COMD_UpRight sets xdir = +lLimit, ydir = -lLimit/2.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -16384);
         assert_eq!(engine.objects[idx].state.direction, Direction::Right);
@@ -28927,7 +28927,7 @@ protected func Activity() { SetActionTargets(); return(1); }
             )
             .expect("digger spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         // DFA_DIG COMD_Stop sets iPhaseAdvance=0 (C4Object.cpp:4906-4935),
         // while Action.Time still increments before phase handling (:4763,
@@ -28982,12 +28982,12 @@ protected func Activity() { SetActionTargets(); return(1); }
         // DFA_FLOAT (C4Object.cpp:5268-5286): xdir += FloatAccel = FIXED100(10)
         // (C4Movement.cpp:33) = raw 6553, clamped to lLimit = FIXED100(Float)
         // = FIXED100(20) = raw 13107 — NOT ValByPhysical.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 6553);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13106);
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13107);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
@@ -29444,7 +29444,7 @@ func Death(by) { death_by = by; return 1; }
             )
             .expect("actor Enter queues");
 
-        engine.tick().expect("actor hands Enter to vehicle");
+        engine.tick_without_snapshot().expect("actor hands Enter to vehicle");
 
         let actor = engine.object_snapshot(actor_id).expect("actor remains");
         assert!(
@@ -29461,7 +29461,7 @@ func Death(by) { death_by = by; return 1; }
         assert_eq!(vehicle.controller, 9, "SetCommand preserves Controller");
         assert_eq!(vehicle.container, None, "vehicle executes on its next turn");
 
-        engine.tick().expect("vehicle executes its Enter");
+        engine.tick_without_snapshot().expect("vehicle executes its Enter");
         assert_eq!(
             engine
                 .object_snapshot(vehicle_id)
@@ -29794,7 +29794,7 @@ func Stuck()
             )
             .expect("pusher spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
         let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
         // Target: Towards(0, +64225) by dforce = 73728*100/200 = raw 36864
@@ -29850,7 +29850,7 @@ func Stuck()
             )
             .expect("pusher spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
         let rock_idx = engine.find_object_index(rock_id).expect("rock exists");
         assert_ne!(engine.objects[pusher_idx].state.action.name, "Push");
@@ -29890,7 +29890,7 @@ func Stuck()
             )
             .expect("puller spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let puller_idx = engine.find_object_index(puller_id).expect("puller exists");
         let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
         // iPullDistance = 8+8; iPullX = 0-16 = -16; iTXDir = 64225 +
@@ -29937,7 +29937,7 @@ func Stuck()
                 .expect("actor spawns");
 
             for frame in 1_u32..=20 {
-                engine.tick().expect("stationary procedure tick succeeds");
+                engine.tick_without_snapshot().expect("stationary procedure tick succeeds");
                 let index = engine.find_object_index(actor).expect("actor survives");
                 let object = &engine.objects[index];
                 assert_eq!(
@@ -29985,7 +29985,7 @@ func Stuck()
             engine.objects[crate_index].set_position(Vector2::new(10, 0));
             engine.objects[crate_index].set_fixed_velocity(FixedVec2::ZERO);
 
-            engine.tick().expect("pinned push tick succeeds");
+            engine.tick_without_snapshot().expect("pinned push tick succeeds");
             let pusher_index = engine.find_object_index(pusher).expect("pusher survives");
             let object = &engine.objects[pusher_index];
             assert_eq!(object.fixed_velocity.x.val(), 64225);
@@ -30078,7 +30078,7 @@ func Stuck()
             engine.objects[wagon_index].set_position(Vector2::new(12, 0));
             engine.objects[wagon_index].set_fixed_velocity(FixedVec2::ZERO);
 
-            engine.tick().expect("pinned pull tick succeeds");
+            engine.tick_without_snapshot().expect("pinned pull tick succeeds");
             let horse_index = engine.find_object_index(horse).expect("horse survives");
             let action = &engine.objects[horse_index].state.action;
             assert_eq!(engine.objects[horse_index].fixed_velocity.x.val(), 183500);
@@ -30869,7 +30869,7 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
             .incinerate_object(idx, -1, false, None)
             .expect("incinerates"));
         engine.objects[idx].state.fire_phase = 0;
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(
             engine.objects[idx].state.fire_phase, 1,
             "ExecFire once per frame"
@@ -30944,11 +30944,11 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
 
         let mut mirror = engine.rng.clone();
         for _ in 0..4 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
             let _ = mirror.random(i32::MAX); // the per-object Step draw
         }
         assert_eq!(engine.objects[idx].state.breath, 50_000, "Tick5 gate");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(
             engine.objects[idx].state.breath,
             50_000 - 2 * C4_MAX_PHYSICAL / 100
@@ -30966,7 +30966,7 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         engine.objects[idx].state.breath = 0;
         engine.objects[idx].last_energy_loss_cause = 7;
         for _ in 0..5 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert_eq!(engine.objects[idx].state.energy, 49_000);
         assert_eq!(engine.objects[idx].last_energy_loss_cause, 7);
@@ -31060,7 +31060,7 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         engine.objects[idx].state.breath = 10_000;
 
         for _ in 0..5 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert_eq!(engine.objects[idx].state.breath, 50_000);
         assert_eq!(engine.objects[idx].state.energy, 50_000);
@@ -31099,7 +31099,7 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         engine.objects[idx].state.breath = 10_000;
 
         for _ in 0..5 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert_eq!(engine.objects[idx].state.breath, 50_000);
     }
@@ -31192,10 +31192,10 @@ func FxCreditProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
             EffectState::new("CreditProbe").with_command_target(Some(crew_id.as_u64() as i32)),
         );
 
-        engine.tick()?;
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 10_000);
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 12_000);
         assert_eq!(engine.object_snapshot(base_id).unwrap().energy, 48_000);
         assert_eq!(engine.player(1).unwrap().wealth(), 5);
@@ -31212,14 +31212,14 @@ func FxCreditProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         engine.objects[base_idx].state.energy = 1_200;
         engine.objects[crew_idx].state.energy = 49_500;
         for _ in 0..3 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 50_000);
         assert_eq!(engine.object_snapshot(base_id).unwrap().energy, 700);
 
         engine.objects[crew_idx].state.energy = 48_000;
         for _ in 0..3 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.object_snapshot(crew_id).unwrap().energy, 48_700);
         assert_eq!(engine.object_snapshot(base_id).unwrap().energy, 0);
@@ -31258,7 +31258,7 @@ func FxCreditProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
                     .with_container(donor_id),
             )?;
             for _ in 0..3 {
-                engine.tick()?;
+                engine.tick_without_snapshot()?;
             }
             Ok((
                 engine.object_snapshot(donor_id).unwrap().magic_energy,
@@ -31365,10 +31365,10 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         )?;
 
         for _ in 0..9 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.object_snapshot(direct).unwrap().energy, 50_000);
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.object_snapshot(direct).unwrap().energy, 48_000);
         assert_eq!(engine.objects[direct_idx].last_energy_loss_cause, 7);
         assert_eq!(
@@ -31436,7 +31436,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         );
         mild_engine.objects[mild_idx].last_energy_loss_cause = 9;
         mild_engine.frame = 9;
-        mild_engine.tick()?;
+        mild_engine.tick_without_snapshot()?;
         assert_eq!(mild_engine.object_snapshot(mild).unwrap().energy, 49_000);
         assert_eq!(
             mild_engine.objects[mild_idx]
@@ -31505,7 +31505,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         if expected_rng.random(60) == 0 {
             let _ = expected_rng.random(100);
         }
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let state = engine.object_snapshot(id).unwrap();
         assert_ne!(state.position.x, 1, "movement left the lava pixel");
@@ -31554,7 +31554,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         engine.objects[protected_idx].state.base = 1;
 
         for _ in 0..10 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.object_snapshot(ordinary).unwrap().energy, 4_000);
         assert_eq!(engine.object_snapshot(held).unwrap().energy, 5_000);
@@ -31562,7 +31562,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
 
         engine.set_base_regenerate_energy_enabled(false);
         for _ in 0..10 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.object_snapshot(protected).unwrap().energy, 4_000);
         Ok(())
@@ -31583,7 +31583,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
         let idx = engine.find_object_index(id).unwrap();
         engine.objects[idx].state.on_fire = true;
         engine.frame = 34;
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.object_snapshot(id).unwrap().construction, 50_000);
         Ok(())
     }
@@ -31769,7 +31769,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
             .spawn_object(SpawnConfig::new("Mutant"))
             .expect("mutant spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("mutant exists");
         assert_eq!(
             engine.objects[idx].state.temporary_physical,
@@ -32384,7 +32384,7 @@ func Activate(inMat, inLength, inStrength)
         );
 
         for _ in 0..35 {
-            engine.tick().expect("weather tick succeeds");
+            engine.tick_without_snapshot().expect("weather tick succeeds");
         }
         assert_eq!(engine.environment().temperature, 19);
         let probe_index = engine.find_object_index(probe).expect("probe remains");
@@ -32579,10 +32579,10 @@ func Activate(inMat, inLength, inStrength)
 
         assert_eq!(engine.environment().time_of_day, 2300);
 
-        engine.tick().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
         assert_eq!(engine.environment().time_of_day, 2375);
 
-        engine.tick().expect("second tick succeeds");
+        engine.tick_without_snapshot().expect("second tick succeeds");
         assert_eq!(engine.environment().time_of_day, 50);
     }
 
@@ -33930,7 +33930,7 @@ protected func CalcDefValue(object base, int player)
         engine.spawn_object(SpawnConfig::new("DefinitionOverride").with_owner(1))?;
 
         for _ in 0..34 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.frame(), 34);
         let probe_index = engine
@@ -33957,7 +33957,7 @@ protected func CalcDefValue(object base, int player)
             Value::Int(0)
         );
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.frame(), 35);
         let probe_index = engine
             .find_object_index(value_probe)
@@ -34012,12 +34012,12 @@ protected func CalcValue(object base, int player)
         engine.spawn_object(SpawnConfig::new("ValueMirror").with_owner(1))?;
 
         for _ in 0..35 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.player(1).expect("player remains").value(), 34);
 
         for _ in 0..35 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         let player = engine.player(1).expect("player remains");
         assert_eq!(engine.frame(), 70);
@@ -34063,7 +34063,7 @@ protected func CalcValue(object base, int player)
         engine.spawn_object(SpawnConfig::new("PARN").with_owner(1))?;
 
         for _ in 0..35 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         let player = engine.player(1).expect("player remains");
@@ -34533,7 +34533,7 @@ global func InitializePlayer(int player)
         engine.spawn_object(SpawnConfig::new("VALU").with_owner(1))?;
 
         for _ in 0..34 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         assert_eq!(engine.snapshot().frame, 34);
         assert_eq!(
@@ -34542,7 +34542,7 @@ global func InitializePlayer(int player)
             "asset changes do not refresh the cached value before Tick35"
         );
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.snapshot().frame, 35);
         assert_eq!(
             engine.player(1).expect("player remains").view_value(),
@@ -34556,7 +34556,7 @@ global func InitializePlayer(int player)
         assert_eq!(player.view_value(), 100);
         assert_eq!(player.view_wealth(), 100);
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let player = engine.player(1).expect("player remains");
         assert_eq!(player.view_value(), 99);
         assert_eq!(player.view_wealth(), 99);
@@ -35009,7 +35009,7 @@ func ControlUpSingle()
             )
             .expect("queue succeeds");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         assert!(engine.selected_crew(1).is_empty());
         assert_eq!(engine.crew_cursor(1), None);
@@ -35086,7 +35086,7 @@ func ControlUpSingle()
             )
             .expect("queue succeeds");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
 
         assert!(engine.crew_role_assignments(1).is_empty());
     }
@@ -35709,15 +35709,15 @@ public func ReadIDs(int first, int second)
         engine.sec1_timer();
         assert_eq!(engine.game_time(), 0);
 
-        engine.tick().expect("first tick");
-        engine.tick().expect("second tick");
+        engine.tick_without_snapshot().expect("first tick");
+        engine.tick_without_snapshot().expect("second tick");
         assert_eq!(engine.game_time(), 0, "frames are not seconds");
         engine.sec1_timer();
         assert_eq!(engine.game_time(), 1);
         engine.sec1_timer();
         assert_eq!(engine.game_time(), 1, "latch was already consumed");
 
-        engine.tick().expect("third tick");
+        engine.tick_without_snapshot().expect("third tick");
         engine.sec1_timer();
         assert_eq!(engine.game_time(), 2);
     }
@@ -36131,13 +36131,13 @@ public func ReadIDs(int first, int second)
         // C4Player::CheckElimination runs on the Tick35 boundary only
         // (C4Player.cpp:225-235): the crewless owner survives frames 1-34
         // (the C++ recruit-in-the-window grace) and eliminates at 35.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert!(
             !engine.is_owner_eliminated(1),
             "no elimination before the Tick35 boundary"
         );
         for _ in 1..35 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert!(engine.is_owner_eliminated(1));
         assert_eq!(engine.eliminated_owners(), vec![1]);
@@ -36173,7 +36173,7 @@ public func ReadIDs(int first, int second)
             )
             .expect("queue succeeds");
         for _ in 0..35 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert!(engine.is_owner_eliminated(1));
 
@@ -36186,7 +36186,7 @@ public func ReadIDs(int first, int second)
             )
             .expect("spawn succeeds");
         for _ in 0..35 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
 
         assert!(engine.is_owner_eliminated(1), "elimination is one-way");
@@ -36286,7 +36286,7 @@ public func ReadIDs(int first, int second)
             .expect("queue succeeds");
         // Elimination lands at the Tick35 boundary (C4Player.cpp:225-235).
         for _ in 0..35 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
 
         assert!(engine.is_owner_eliminated(1));
@@ -38109,7 +38109,7 @@ protected func Script1() { StartTheMovie(); }
 
         engine.scenario_script_go = true;
         for _ in 0..20 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let idx = engine.find_object_index(animal).expect("animal exists");
@@ -38343,7 +38343,7 @@ protected func Script1() { PrivateCall(CreateObject(TALK), "Begin"); }
 
         engine.scenario_script_go = true;
         for _ in 0..20 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let talker_idx = engine
@@ -39351,7 +39351,7 @@ func Trigger() {
                 .any(|effect| effect.name == "Life" && effect.priority == 0),
             "RemoveEffect right after CreateObject leaves Life linked dead"
         );
-        engine.tick().expect("next Execute cleans the dead Life node");
+        engine.tick_without_snapshot().expect("next Execute cleans the dead Life node");
         let bandit = engine
             .objects
             .iter()
@@ -40370,7 +40370,7 @@ func Cull()
             "the layer mismatch blocks a collection-eligible CrossCheck"
         );
         for _ in 0..2 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
             assert_eq!(
                 engine.object_snapshot(item).expect("item remains").container,
                 None,
@@ -40385,7 +40385,7 @@ func Cull()
             Some(layer)
         );
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         assert!(engine.object_snapshot(layer).is_none(), "layer was removed");
         let remover_index = engine.find_object_index(remover).expect("remover remains");
@@ -40495,7 +40495,7 @@ func Probe() { cleared_before_callback = !GetObjectLayer(member); }
         );
 
         for _ in 0..2 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
             assert_eq!(
                 engine.object_snapshot(item).expect("item remains").container,
                 None
@@ -40506,7 +40506,7 @@ func Probe() { cleared_before_callback = !GetObjectLayer(member); }
             QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
         )?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let observer_index = engine.find_object_index(observer).expect("observer remains");
         assert_eq!(
@@ -42103,7 +42103,7 @@ protected func RejectEntrance(pContainer)
         );
         assert!(engine.objects[changed_index].unsorted);
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let changed_index = engine
             .find_object_index(changed)
             .expect("changed object remains");
@@ -42448,7 +42448,7 @@ protected func Activity() { return(Fling(GetActionTarget(), 1, -3)); }
             )
             .expect("spawns");
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         let object = &engine.objects[idx];
         assert_eq!(
@@ -43850,7 +43850,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
             )
             .expect("action set");
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(beam_id).expect("beam exists");
         let vertices = &engine.objects[idx].state.vertices;
         assert_eq!(
@@ -43874,7 +43874,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
             .state
             .local_vars
             .insert("__local_3".to_string(), Value::Int(99));
-        engine.tick().expect("invalid vertex indices tick");
+        engine.tick_without_snapshot().expect("invalid vertex indices tick");
         let idx = engine.find_object_index(beam_id).expect("beam exists");
         let vertices = &engine.objects[idx].state.vertices;
         assert_eq!((vertices[0].x, vertices[0].y), (77, 250));
@@ -43885,7 +43885,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
             let horse_idx = engine.find_object_index(horse).expect("horse exists");
             engine.objects[horse_idx].mark_destroyed();
         }
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         assert!(
             engine.find_object_index(beam_id).is_none(),
             "broken line fires LineBreak and removes itself (C4Object.cpp:5347-5354)"
@@ -44015,7 +44015,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
             )
             .expect("shipped PWRL spawns");
 
-        engine.tick().expect("CONNECT line executes");
+        engine.tick_without_snapshot().expect("CONNECT line executes");
 
         let index = engine.find_object_index(line).expect("PWRL survives");
         assert_eq!(
@@ -44107,7 +44107,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
                 )
                 .expect("shipped PWRL spawns");
 
-            engine.tick().expect("CONNECT line executes");
+            engine.tick_without_snapshot().expect("CONNECT line executes");
             engine.find_object_index(line).map(|index| {
                 engine.objects[index]
                     .state
@@ -44221,7 +44221,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
             .expect("connect action sets");
 
         for _ in 0..34 {
-            engine.tick().expect("pre-reduction tick succeeds");
+            engine.tick_without_snapshot().expect("pre-reduction tick succeeds");
         }
         let idx = engine.find_object_index(line_id).expect("line exists");
         assert_eq!(
@@ -44230,7 +44230,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
             "line is unchanged before !Tick35"
         );
 
-        engine.tick().expect("Tick35 reduction succeeds");
+        engine.tick_without_snapshot().expect("Tick35 reduction succeeds");
         let idx = engine.find_object_index(line_id).expect("line survives");
         assert_eq!(
             engine.objects[idx]
@@ -44282,7 +44282,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
                     .with_loaded(true),
             )
             .expect("spawns");
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         assert_eq!(
             engine.objects[idx].state.position.y, 91,
@@ -44355,7 +44355,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
         engine.objects[idx].fixed_velocity = FixedVec2::new(C4Fixed::ZERO, C4Fixed::from_raw(52428));
         engine.objects[idx].state.mobile = true;
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         let object = &engine.objects[idx];
         assert_eq!(object.state.position, Vector2::new(100, 10), "no net motion");
@@ -44411,7 +44411,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
         let idx = engine.find_object_index(id).expect("bird exists");
         engine.objects[idx].state.mobile = true;
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("bird exists");
         assert_eq!(
             engine.objects[idx].fixed_velocity.x.val(),
@@ -44454,7 +44454,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
         engine.objects[idx].state.mobile = true;
         engine.objects[idx].fixed_velocity.x = itofix(1);
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("barrel exists");
         assert_eq!(
             engine.objects[idx].fixed_velocity.y.val(),
@@ -44468,7 +44468,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
         );
 
         for _ in 0..15 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let idx = engine.find_object_index(id).expect("barrel exists");
         assert!(
@@ -45277,7 +45277,7 @@ func Die() { DoEnergy(-100); return 1; }
         );
 
         for _ in 0..35 {
-            engine.tick().expect("Tick35 window advances");
+            engine.tick_without_snapshot().expect("Tick35 window advances");
         }
         assert!(engine.is_owner_eliminated(0));
         assert!(
@@ -47365,7 +47365,7 @@ protected func Script6() { FindObject(CREW)->LateRemove(); return 1; }
         engine.scenario_script_go = true;
 
         for _ in 0..70 {
-            engine.tick().expect("frame through late Script6 advances");
+            engine.tick_without_snapshot().expect("frame through late Script6 advances");
         }
         assert!(engine.player(0).expect("player").crew().is_empty());
         assert!(
@@ -47374,7 +47374,7 @@ protected func Script6() { FindObject(CREW)->LateRemove(); return 1; }
         );
 
         for _ in 70..105 {
-            engine.tick().expect("next Tick35 window advances");
+            engine.tick_without_snapshot().expect("next Tick35 window advances");
         }
         assert!(engine.is_owner_eliminated(0));
     }
@@ -47403,7 +47403,7 @@ protected func Script6() { FindObject(CREW)->LateRemove(); return 1; }
             .expect("creator spawns");
 
         for _ in 0..35 {
-            engine.tick().expect("Tick35 recruit window advances");
+            engine.tick_without_snapshot().expect("Tick35 recruit window advances");
         }
         assert_eq!(engine.player(0).expect("player").crew().len(), 1);
         assert!(
@@ -50149,7 +50149,7 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
 
         for frame in 1..=3 {
             engine
-                .tick()
+                .tick_without_snapshot()
                 .unwrap_or_else(|err| panic!("tick {frame} must survive the Fx error: {err}"));
         }
         // The erroring callback yields nil each interval — the effect is
@@ -50214,7 +50214,7 @@ public func Consume() { RemoveObject(); return(7); }
             .expect("boot runs");
 
         for _ in 0..6 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let idx = engine.find_object_index(holder).expect("holder exists");
@@ -50287,7 +50287,7 @@ public func Poke(pClonk) {
             .expect("boot runs");
 
         for _ in 0..6 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let idx = engine.find_object_index(holder_id).expect("holder exists");
@@ -50353,7 +50353,7 @@ public func Tag(pClonk) { LocalN("iFromItem", pClonk) = 7; return(1); }
             .expect("boot runs");
 
         for _ in 0..6 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let idx = engine.find_object_index(holder).expect("holder exists");
@@ -50843,7 +50843,7 @@ public func Make(pClonk) {
             .expect("boot runs");
 
         for _ in 0..12 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let marker_idx = engine
@@ -50907,7 +50907,7 @@ func FxProbeTimer(pThis, iNumber) {
         // that tick's ExecAction; ticks 6 and 7 increment PhaseDelay to
         // 1 and 2 (< Delay 3) — phase stays 0.
         for _ in 0..7 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let idx = engine.find_object_index(id).expect("actor exists");
         assert_eq!(engine.objects[idx].state.action.name, "Load");
@@ -50920,7 +50920,7 @@ func FxProbeTimer(pThis, iNumber) {
 
         // Tick 8 is the third post-entry exec: PhaseDelay reaches 3 and
         // the phase advances (C4Object.cpp:5458-5466).
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("actor exists");
         assert_eq!(
             engine.objects[idx].state.action.phase, 1,
@@ -50967,7 +50967,7 @@ func FxProbeTimer(pThis, iNumber) {
             .expect("boot runs");
 
         for _ in 0..6 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let idx = engine.find_object_index(id).expect("actor exists");
@@ -51024,7 +51024,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             .into_iter()
             .enumerate()
         {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
             let index = engine.find_object_index(id).expect("object exists");
             assert_eq!(
                 engine.objects[index].state.local_vars.get("iTimes"),
@@ -51181,7 +51181,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             .call_object_function(idx, "Install", Vec::new())
             .expect("effects install");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         let object = engine.object_snapshot(id).expect("target remains live");
         assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(123)));
@@ -51255,7 +51255,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             .call_object_function(idx, "Install", Vec::new())
             .expect("driver installs");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         let object = engine.object_snapshot(id).expect("target remains live");
         assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(12)));
@@ -51317,7 +51317,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             .call_object_function(idx, "Install", Vec::new())
             .expect("driver installs");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         let object = engine.object_snapshot(id).expect("target remains live");
         assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(12)));
@@ -51401,7 +51401,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             .call_object_function(idx, "Install", Vec::new())
             .expect("effects install");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         let object = engine.object_snapshot(id).expect("target remains live");
         assert_eq!(object.local_vars.get("iOrder"), Some(&Value::Int(1234)));
@@ -51485,7 +51485,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             .call_object_function(idx, "Install", Vec::new())
             .expect("effects install");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         assert!(engine.object_snapshot(id).is_none());
         let globals = engine.snapshot().script_globals.named;
@@ -51548,7 +51548,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             .call_object_function(idx, "Install", Vec::new())
             .expect("effects install");
 
-        engine.tick().expect("destruction timer frame succeeds");
+        engine.tick_without_snapshot().expect("destruction timer frame succeeds");
 
         assert!(engine.object_snapshot(id).is_none());
         assert_eq!(
@@ -51677,7 +51677,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
 
         assert_eq!(engine.global_effects().len(), 1);
 
-        engine.tick().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
         assert_eq!(
             engine.global_effects()[0].timer,
             1,
@@ -51689,7 +51689,7 @@ func FxNegativeTimer(pThis, iNumber, iTime)
             "interval 2 has not elapsed at iTime 1 (C4Effect.cpp:342)"
         );
 
-        engine.tick().expect("second tick succeeds");
+        engine.tick_without_snapshot().expect("second tick succeeds");
         assert_eq!(
             engine.global_effects()[0].var(0),
             EffectVarValue::Int(2),
@@ -51697,8 +51697,8 @@ func FxNegativeTimer(pThis, iNumber, iTime)
              and its EffectVar write folded back"
         );
 
-        engine.tick().expect("third tick succeeds");
-        engine.tick().expect("fourth tick succeeds");
+        engine.tick_without_snapshot().expect("third tick succeeds");
+        engine.tick_without_snapshot().expect("fourth tick succeeds");
         assert_eq!(
             engine.global_effects()[0].var(0),
             EffectVarValue::Int(4),
@@ -51783,7 +51783,7 @@ func Helper(target)
             .call_object_function(idx, "Arm", Vec::new())
             .expect("effect arms");
 
-        engine.tick().expect("global effect callback runs");
+        engine.tick_without_snapshot().expect("global effect callback runs");
         let idx = engine.find_object_index(id).expect("probe remains");
         assert_eq!(
             engine
@@ -51847,7 +51847,7 @@ func Helper() { return 17; }
             "synchronous Fx*Start retained its System helper and command-target this"
         );
 
-        engine.tick().expect("command-target callback runs");
+        engine.tick_without_snapshot().expect("command-target callback runs");
         let idx = engine.find_object_index(id).expect("probe remains");
         assert_eq!(
             engine
@@ -51917,7 +51917,7 @@ func FxForeignObjectBTimer(target, number, time)
             )
             .expect("foreign-target effect arms");
 
-        engine.tick().expect("foreign-target timer runs");
+        engine.tick_without_snapshot().expect("foreign-target timer runs");
         let command_index = engine
             .find_object_index(command_target)
             .expect("command target remains");
@@ -51990,7 +51990,7 @@ func FxForeignObjectAfterErrorTimer(target, number, time)
             )
             .expect("foreign-target effects arm");
 
-        engine.tick().expect("fail-safe timer batch continues");
+        engine.tick_without_snapshot().expect("fail-safe timer batch continues");
         let command_index = engine
             .find_object_index(command_target)
             .expect("command target remains");
@@ -52062,7 +52062,7 @@ func FxForeignGlobalCTimer(target, number, time)
             .call_object_function(command_index, "ArmGlobalEffect", Vec::new())
             .expect("global effect arms");
 
-        engine.tick().expect("global timer runs");
+        engine.tick_without_snapshot().expect("global timer runs");
         let command_index = engine
             .find_object_index(command_target)
             .expect("command target remains");
@@ -52128,7 +52128,7 @@ func FxForeignGlobalAfterErrorTimer(target, number, time)
             .call_object_function(command_index, "ArmGlobalEffectsWithError", Vec::new())
             .expect("global effects arm");
 
-        engine.tick().expect("fail-safe global timer batch continues");
+        engine.tick_without_snapshot().expect("fail-safe global timer batch continues");
         let command_index = engine
             .find_object_index(command_target)
             .expect("command target remains");
@@ -52158,7 +52158,7 @@ func FxForeignGlobalAfterErrorTimer(target, number, time)
         state.global_effects = vec![effect];
         engine.restore_state(&state).expect("effect-only state restores");
 
-        engine.tick().expect("definition-free global callback runs");
+        engine.tick_without_snapshot().expect("definition-free global callback runs");
         assert_eq!(engine.global_effects().len(), 1);
         assert_eq!(engine.global_effects()[0].var(0), EffectVarValue::Int(1));
     }
@@ -52221,7 +52221,7 @@ func Read() { return result; }
             .call_object_function(idx, "Arm", Vec::new())
             .expect("effect arms");
 
-        engine.tick().expect("timer and rebound Stop run");
+        engine.tick_without_snapshot().expect("timer and rebound Stop run");
         let snapshot = engine.object_snapshot(id).expect("target remains");
         assert_eq!(snapshot.definition_id, "FXNW");
         let idx = engine.find_object_index(id).expect("target remains indexed");
@@ -52270,7 +52270,7 @@ func Read() { return result; }
             .expect("spawn succeeds");
         assert_eq!(engine.global_effects().len(), 1);
 
-        engine.tick().expect("scheduled callback succeeds");
+        engine.tick_without_snapshot().expect("scheduled callback succeeds");
 
         assert!(
             engine
@@ -52423,7 +52423,7 @@ func Probe(target) {
 
         assert_eq!(engine.global_effects().len(), 3);
         for _ in 0..8 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
 
         let names: Vec<&str> = engine
@@ -52490,7 +52490,7 @@ func Probe(target) {
             .call_object_function(idx, "Install", Vec::new())
             .expect("effects install");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         let snapshot = engine.snapshot();
         assert_eq!(
@@ -52566,7 +52566,7 @@ func Probe(target) {
             .call_object_function(idx, "Install", Vec::new())
             .expect("driver installs");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         let snapshot = engine.snapshot();
         assert_eq!(
@@ -52655,7 +52655,7 @@ func Probe(target) {
             .call_object_function(idx, "Install", Vec::new())
             .expect("effects install");
 
-        engine.tick().expect("timer frame succeeds");
+        engine.tick_without_snapshot().expect("timer frame succeeds");
 
         let snapshot = engine.snapshot();
         assert_eq!(
@@ -52713,7 +52713,7 @@ func Probe(target) {
             .expect("spawn succeeds");
 
         for _ in 0..6 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert_eq!(
             engine.global_effects().len(),
@@ -52771,7 +52771,7 @@ func Probe(target) {
             .expect("spawn succeeds");
 
         for _ in 0..4 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
 
         let names: Vec<&str> = engine
@@ -52861,7 +52861,7 @@ func Probe(target) {
             "Fx*Start(nil, iNumber, 0, rVal1) ran synchronously inside \
              AddEffect and saw rVal1"
         );
-        engine.tick().expect("global Execute cleans the dead node");
+        engine.tick_without_snapshot().expect("global Execute cleans the dead node");
         assert_eq!(
             engine
                 .global_effects()
@@ -52950,7 +52950,7 @@ func Probe(target) {
             .expect("spawn succeeds");
 
         for _ in 0..4 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(
@@ -53057,7 +53057,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             Value::Array(vec![Value::Int(2), Value::Int(1), Value::Int(1)])
         );
         for _ in 0..5 {
-            engine.tick().expect("pre-removal tick succeeds");
+            engine.tick_without_snapshot().expect("pre-removal tick succeeds");
         }
         {
             let calls = calls.lock().unwrap();
@@ -53110,7 +53110,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .change_object_damage(carrier_idx, 5, 0, -1)
             .expect("damage traversal succeeds");
         for _ in 0..10 {
-            engine.tick().expect("post-removal tick succeeds");
+            engine.tick_without_snapshot().expect("post-removal tick succeeds");
         }
 
         let calls = calls.lock().unwrap();
@@ -53203,7 +53203,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let second = engine.tick().expect("tick succeeds");
         let object = second.object(id).expect("object present");
         let names: Vec<&str> = object
@@ -53279,8 +53279,8 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let third = engine.tick().expect("tick succeeds");
         let object = third.object(id).expect("object present");
         assert!(
@@ -53347,7 +53347,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let second = engine.tick().expect("tick succeeds");
         let object = second.object(id).expect("object present");
         let names: Vec<&str> = object
@@ -53498,7 +53498,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         call_log.lock().unwrap().clear();
 
         let second = engine.tick().expect("tick succeeds");
@@ -53614,8 +53614,8 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         call_log.lock().unwrap().clear();
 
         let third = engine.tick().expect("tick succeeds");
@@ -53741,7 +53741,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let second = engine.tick().expect("tick succeeds");
         let object = second.object(id).expect("object present");
         let names: Vec<&str> = object
@@ -53826,8 +53826,8 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let third = engine.tick().expect("tick succeeds");
         let object = third.object(id).expect("object present");
         let names: Vec<&str> = object
@@ -53908,8 +53908,8 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         call_log.lock().unwrap().clear();
 
         let third = engine.tick().expect("tick succeeds");
@@ -54006,7 +54006,7 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let second = engine.tick().expect("tick succeeds");
         let object = second.object(id).expect("object present");
         assert!(
@@ -54073,8 +54073,8 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             .spawn_object(SpawnConfig::new("Actor"))
             .expect("spawn succeeds");
 
-        engine.tick().expect("tick succeeds");
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let third = engine.tick().expect("tick succeeds");
         let object = third.object(id).expect("object present");
         let names: Vec<&str> = object
@@ -54148,8 +54148,8 @@ global func FxDefinitionBoundStop(pTarget, iNumber, iReason, fTemp) { return 0; 
             "new equal-priority effects insert before older peers"
         );
 
-        engine.tick().expect("first tick succeeds");
-        engine.tick().expect("second tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("second tick succeeds");
         let third = engine.tick().expect("third tick succeeds");
         let object = third.object(id).expect("denied target remains present");
         assert_eq!(
@@ -54278,7 +54278,7 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             .expect("boot runs");
 
         for _ in 0..2 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
 
         let idx = engine.find_object_index(id).expect("object exists");
@@ -54332,8 +54332,8 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         assert_eq!(effect.interval, 2);
         assert_eq!(effect.timer, 0);
 
-        engine.tick().expect("first timer tick");
-        engine.tick().expect("second timer tick");
+        engine.tick_without_snapshot().expect("first timer tick");
+        engine.tick_without_snapshot().expect("second timer tick");
         let idx = engine.find_object_index(id).expect("actor remains");
         assert_eq!(
             engine.objects[idx]
@@ -54891,7 +54891,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
             )
             .expect("below-bottom HUD object spawns");
 
-        engine.tick().expect("movement tick succeeds");
+        engine.tick_without_snapshot().expect("movement tick succeeds");
 
         let boundary = engine.object_snapshot(boundary).expect("boundary remains");
         assert!(boundary.alive);
@@ -55039,7 +55039,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
             effect.command_target = Some(command_target);
         }
 
-        engine.tick().expect("Death error is fail-safe");
+        engine.tick_without_snapshot().expect("Death error is fail-safe");
 
         assert!(engine.object_snapshot(object).is_none());
         let globals = engine.snapshot().script_globals.named;
@@ -55099,7 +55099,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         let command_target = i32::try_from(object.as_u64()).expect("test object id fits C4 int");
         engine.objects[object_idx].state.effects[0].command_target = Some(command_target);
 
-        engine.tick().expect("out-of-bounds removal succeeds");
+        engine.tick_without_snapshot().expect("out-of-bounds removal succeeds");
 
         assert!(engine.object_snapshot(object).is_none());
         assert_eq!(
@@ -55168,7 +55168,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         let expected_ydir = [13107, 26214, 39321, 52428, 65535];
 
         for raw_ydir in expected_ydir {
-            let _ = engine.tick().expect("tick succeeds");
+            let _ = engine.tick_without_snapshot().expect("tick succeeds");
             let idx = engine.find_object_index(id).expect("object exists");
             assert_eq!(engine.objects[idx].fixed_velocity.y.val(), raw_ydir);
         }
@@ -55625,7 +55625,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 
         // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
         for _ in 0..3 {
-            let _ = engine.tick()?;
+            let _ = engine.tick_without_snapshot()?;
         }
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
@@ -56272,7 +56272,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 
         // Tick 1: the step onto the 126-alpha column is FREE — C++ sees a
         // transparent mask pixel there (C4Surface.cpp:723) and DoMotions.
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let idx = engine.find_object_index(mover_id).expect("object exists");
         assert_eq!(
             engine.objects[idx].state.position,
@@ -56284,7 +56284,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
 
         // Tick 2: the step onto the 128-alpha column contacts — 128 is the
         // lowest solid PNG alpha (255-128=127 < 128 is not transparent).
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let idx = engine.find_object_index(mover_id).expect("object exists");
         assert_eq!(
             engine.objects[idx].state.position,
@@ -56349,7 +56349,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         engine.objects[idx].state.mobile = true;
 
         engine
-            .tick()
+            .tick_without_snapshot()
             .expect("a Contact* script error must not abort the tick");
     }
 
@@ -56760,7 +56760,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             Some(2)
         );
 
-        engine.tick().expect("stationary dig frame succeeds");
+        engine.tick_without_snapshot().expect("stationary dig frame succeeds");
 
         let index = engine.find_object_index(id).expect("drill remains");
         assert_eq!(engine.debug_solid_mask_buffer(id.as_u64()), Some(vec![0x81]));
@@ -56819,7 +56819,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             let index = engine.find_object_index(id).expect("mask mover exists");
             engine.update_solid_mask(index);
 
-            engine.tick().expect("movement frame succeeds");
+            engine.tick_without_snapshot().expect("movement frame succeeds");
 
             let index = engine.find_object_index(id).expect("mask mover remains");
             assert_eq!(engine.objects[index].state.position.x, expected_x);
@@ -56904,7 +56904,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             "the old-position mask is baked before movement"
         );
 
-        engine.tick().expect("two-step movement frame succeeds");
+        engine.tick_without_snapshot().expect("two-step movement frame succeeds");
 
         let object = engine.object_snapshot(id).expect("mover remains");
         assert_eq!(object.position, Vector2::new(11, 10));
@@ -56980,7 +56980,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
                 )
                 .expect("rider spawns");
 
-            engine.tick().expect("platform movement succeeds");
+            engine.tick_without_snapshot().expect("platform movement succeeds");
 
             (
                 engine
@@ -57066,7 +57066,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             .expect("rider spawns");
         assert_eq!(vehicle_pixels(&engine), vec![(15, 10)]);
 
-        engine.tick().expect("edge movement succeeds");
+        engine.tick_without_snapshot().expect("edge movement succeeds");
 
         assert_eq!(
             engine
@@ -57207,7 +57207,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
             "object-vector order is deliberately the reverse of sector order"
         );
 
-        engine.tick().expect("platform movement succeeds");
+        engine.tick_without_snapshot().expect("platform movement succeeds");
 
         assert_eq!(
             engine.object_snapshot(platform).expect("platform remains").position,
@@ -60663,7 +60663,7 @@ func FxChildWitnessStop(object target, int number, int reason) {
             "Fire Start temporarily removes the higher-priority Witness effect"
         );
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         assert!(engine.object_snapshot(burning).is_none());
         assert!(engine.object_snapshot(child).is_none());
@@ -61078,7 +61078,7 @@ protected func Initialize() {
                 .with_action(build),
         )?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let target = engine.object_snapshot(target_id).expect("target survives");
         assert_eq!(target.construction, FULL_CON);
@@ -61108,8 +61108,8 @@ protected func Initialize() {
 
         // The next Build frame sees an already-complete target and stops;
         // the following frame executes the resulting Walk action.
-        engine.tick()?;
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(
             engine
                 .object_snapshot(builder_id)
@@ -61462,7 +61462,7 @@ protected func Initialize() {
             )
             .expect("multi-attach climber spawns");
 
-        engine.tick().expect("attachment tick succeeds");
+        engine.tick_without_snapshot().expect("attachment tick succeeds");
         for (id, action, x) in [(single, "Single", 5), (multi, "Multi", 10)] {
             let index = engine.find_object_index(id).expect("climber remains");
             let object = &engine.objects[index];
@@ -61586,7 +61586,7 @@ protected func Initialize() {
         let mut expected_spinning = spinning_start;
         let mut expected_control = control_start;
         for _ in 0..4 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
             expected_spinning += velocity;
             expected_control += velocity;
         }
@@ -61706,7 +61706,7 @@ protected func Initialize() {
         let minimum = spawn(&mut engine, 5, 100);
         let rotateable = spawn(&mut engine, 15, 101);
 
-        engine.tick().expect("rotation gate tick succeeds");
+        engine.tick_without_snapshot().expect("rotation gate tick succeeds");
 
         let minimum = engine
             .objects
@@ -62318,7 +62318,7 @@ func Arm()
         );
 
         // The next frame's Execute-start refresh picks it up.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(
             engine.object_ocf_at_index(idx) & ocf::ALIVE,
@@ -63293,7 +63293,7 @@ func Arm()
             .spawn_object(SpawnConfig::new("Miner"))
             .expect("spawn succeeds");
 
-        let _ = engine.tick().expect("first tick succeeds");
+        let _ = engine.tick_without_snapshot().expect("first tick succeeds");
         let surface = engine
             .landscape()
             .expect("landscape present")
@@ -63302,7 +63302,7 @@ func Arm()
         assert_eq!(surface[4], 10);
         assert_eq!(surface[6], 10);
 
-        let _ = engine.tick().expect("second tick succeeds");
+        let _ = engine.tick_without_snapshot().expect("second tick succeeds");
         let surface = engine
             .landscape()
             .expect("landscape present")
@@ -63359,18 +63359,18 @@ func Arm()
 
         assert_eq!(engine.frame(), 0);
 
-        let _ = engine.tick().expect("first tick succeeds");
+        let _ = engine.tick_without_snapshot().expect("first tick succeeds");
         assert!(engine.landscape().expect("landscape present").liquids()[3]
             .segments()
             .is_empty());
 
-        let _ = engine.tick().expect("second tick succeeds");
+        let _ = engine.tick_without_snapshot().expect("second tick succeeds");
         assert_eq!(
             engine.landscape().expect("landscape present").liquids()[3].segments(),
             &[LiquidSegment::new(5, 8)]
         );
 
-        let _ = engine.tick().expect("third tick succeeds");
+        let _ = engine.tick_without_snapshot().expect("third tick succeeds");
         assert!(engine.landscape().expect("landscape present").liquids()[3]
             .segments()
             .is_empty());
@@ -64068,7 +64068,7 @@ func Probe() {
             assert_eq!(particle.ydir.to_bits(), 0.0f32.to_bits());
         }
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         let gravity = engine.physics().gravity_as_c4fixed();
         let expected_ydir =
             math::fixtof(math::C4Fixed::from_raw(gravity.val().wrapping_mul(100))) / 100.0;
@@ -64129,7 +64129,7 @@ func Probe() {
             .expect("particle definition registers");
         engine.install_scenario_script("Scenario", SCRIPT)?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let particles = engine.particle_system().particles();
         assert_eq!(particles.len(), 2);
@@ -65555,7 +65555,7 @@ func OnOwnerChanged()
         )?;
 
         // Process removal and allow periodic polling to run.
-        let _ = engine.tick()?;
+        let _ = engine.tick_without_snapshot()?;
 
         let mut triggered = false;
         for _ in 0..40 {
@@ -66133,7 +66133,7 @@ EnergyUsage=10
             )
             .expect("underpowered CONNECT object spawns");
 
-        engine.tick().expect("energy-gated frame executes");
+        engine.tick_without_snapshot().expect("energy-gated frame executes");
         let stalled_idx = engine
             .find_object_index(stalled)
             .expect("underpowered object remains");
@@ -66177,7 +66177,7 @@ EnergyUsage=10
         // first action. Re-arm the saved flag to exercise the next ExecAction.
         engine.objects[stalled_idx].state.in_liquid = true;
         engine.set_structures_need_energy(false);
-        engine.tick().expect("rule-off frame executes");
+        engine.tick_without_snapshot().expect("rule-off frame executes");
         let stalled_idx = engine
             .find_object_index(stalled)
             .expect("underpowered object remains after rule-off frame");
@@ -66319,7 +66319,7 @@ protected func WetStart()
             );
         }
 
-        engine.tick().expect("incomplete-action frame executes");
+        engine.tick_without_snapshot().expect("incomplete-action frame executes");
         let reset_idx = engine.find_object_index(reset).expect("reset object remains");
         let reset_object = &engine.objects[reset_idx];
         assert_eq!(reset_object.state.action, ActionState::new("Idle"));
@@ -66381,7 +66381,7 @@ protected func WetStart()
             .expect("spawn succeeds");
 
         for frame in 1..=9 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
             let idx = engine.find_object_index(id).expect("object exists");
             let object = &engine.objects[idx];
             assert_eq!(
@@ -66399,7 +66399,7 @@ protected func WetStart()
         // Frame 10: the pulse mobilizes with zeroed dirs
         // (C4Movement.cpp:581-586); this frame's ExecAction already ran
         // without Mobile, so ydir is still zero.
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert!(
             engine.objects[idx].state.mobile,
@@ -66409,7 +66409,7 @@ protected func WetStart()
 
         // Frame 11: first gravity probe (ydir += GravAccel, raw 13107 for
         // Gravity=100 — parity/golden/parity_golden.json movement[0]).
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), 13107);
     }
@@ -66448,7 +66448,7 @@ protected func WetStart()
             )
             .expect("gem spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let wagon_idx = engine.find_object_index(wagon).expect("wagon exists");
         let gem_idx = engine.find_object_index(gem).expect("gem exists");
         let wagon_position = engine.objects[wagon_idx].state.position;
@@ -66628,7 +66628,7 @@ protected func WetStart()
             )
             .expect("multi-wrapped tilt spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let rotation_of = |engine: &Engine, id| {
             engine
                 .find_object_index(id)
@@ -66723,7 +66723,7 @@ protected func WetStart()
             )
             .expect("object spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let index = engine.find_object_index(object).expect("object remains");
         assert_eq!(engine.objects[index].state.rotation, 356, "contact keeps tilt");
         assert_eq!(
@@ -66817,7 +66817,7 @@ protected func WetStart()
             .expect("action set");
 
         for frame in 0..3 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
             let idx = engine.find_object_index(coach_id).expect("exists");
             assert_eq!(
                 engine.objects[idx].state.action.name, "Turn",
@@ -66866,7 +66866,7 @@ protected func WetStart()
             )
             .expect("tilted spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let mobile_of = |engine: &Engine, id| {
             engine
                 .find_object_index(id)
@@ -67752,8 +67752,8 @@ func ResortSwapRankProbe(object pLeft, object pRight)
             )
             .expect("collectible spawns");
 
-        engine.tick().expect("frame one succeeds");
-        engine.tick().expect("frame two succeeds");
+        engine.tick_without_snapshot().expect("frame one succeeds");
+        engine.tick_without_snapshot().expect("frame two succeeds");
         assert_eq!(
             engine.object_snapshot(item).expect("item remains").container,
             None,
@@ -67773,7 +67773,7 @@ func ResortSwapRankProbe(object pLeft, object pRight)
             Value::Bool(true)
         );
 
-        engine.tick().expect("frame-three resort succeeds");
+        engine.tick_without_snapshot().expect("frame-three resort succeeds");
 
         assert_eq!(
             engine.object_snapshot(item).expect("item remains").container,
@@ -68065,7 +68065,7 @@ func ResortExplicit(object target) { Resort(target); }
             .expect("second object spawns");
         assert_eq!(engine.debug_exec_order(), vec![mover, first, second]);
 
-        engine.tick().expect("frame succeeds");
+        engine.tick_without_snapshot().expect("frame succeeds");
 
         let mover_index = engine.find_object_index(mover).expect("mover remains");
         assert_eq!(
@@ -68149,7 +68149,7 @@ func ResortExplicit(object target) { Resort(target); }
             "C4ObjectList::Add compares the raw 6 mask between Vehicle 4 and Living 8"
         );
 
-        engine.tick().expect("subsequent frame succeeds");
+        engine.tick_without_snapshot().expect("subsequent frame succeeds");
         let mover_index = engine.find_object_index(mover).expect("mover remains");
         assert_eq!(
             engine
@@ -68292,7 +68292,7 @@ func ResortExplicit(object target) { Resort(target); }
             vec![survivor, killer, spawner, victim]
         );
 
-        engine.tick().expect("killer/spawner frame succeeds");
+        engine.tick_without_snapshot().expect("killer/spawner frame succeeds");
 
         assert!(
             engine.object_snapshot(victim).is_none(),
@@ -68679,7 +68679,7 @@ func ResortExplicit(object target) { Resort(target); }
                 .expect("object exists")
         };
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         assert_eq!(x_of(&engine, vehicle), 102, "vehicle rolls 2px");
         assert_eq!(
             x_of(&engine, rider),
@@ -68693,7 +68693,7 @@ func ResortExplicit(object target) { Resort(target); }
              + reverse exec, C4Game.cpp:1582): reads the PRE-exec rider x"
         );
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         assert_eq!(x_of(&engine, vehicle), 104);
         assert_eq!(x_of(&engine, rider), 104);
         assert_eq!(
@@ -68768,7 +68768,7 @@ func ResortExplicit(object target) { Resort(target); }
             )
             .expect("spawns");
         for _ in 0..3 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let idx = engine.find_object_index(id).expect("exists");
         let object = &engine.objects[idx];
@@ -68803,7 +68803,7 @@ func ResortExplicit(object target) { Resort(target); }
 
         // Frame A: gravity 0.2 only — no vertical step (fixtoi rounds
         // 260.2 to 260), free horizontal roll, xdir untouched.
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(object.fixed_velocity.x.val(), 109226, "no contact yet");
         assert_eq!(object.fixed_velocity.y.val(), 13107, "one gravity quantum");
@@ -68812,7 +68812,7 @@ func ResortExplicit(object target) { Resort(target); }
         // Frame B: accumulated fix_y = 260.6 rounds to 261 — the wheels
         // hit the ground: ONE wheel-friction quantum off xdir, ydir zeroed
         // (both wheels contact -> C4Movement.cpp:308-317 else-branch).
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(
             object.fixed_velocity.x.val(),
@@ -68823,13 +68823,13 @@ func ResortExplicit(object target) { Resort(target); }
         assert_eq!(object.state.position, Vector2::new(103, 260));
 
         // Frame C: airborne accumulation again — xdir keeps its value.
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(object.fixed_velocity.x.val(), 107260);
         assert_eq!(object.fixed_velocity.y.val(), 13107);
 
         // Frame D: second touch-down, second quantum.
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(object.fixed_velocity.x.val(), 107260 - 1966);
         assert_eq!(object.fixed_velocity.y, C4Fixed::ZERO);
@@ -68877,7 +68877,7 @@ func ResortExplicit(object target) { Resort(target); }
                 )
                 .expect("spawns");
             for _ in 0..3 {
-                engine.tick().expect("tick");
+                engine.tick_without_snapshot().expect("tick");
             }
             (engine, id)
         };
@@ -68891,14 +68891,14 @@ func ResortExplicit(object target) { Resort(target); }
         engine.objects[idx].state.mobile = true;
 
         // fix_x = 101.667 -> ctcox 102: steps to 101 free, 102 free.
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(object.state.position, Vector2::new(102, 260));
         assert_eq!(object.fixed_velocity.x.val(), 109226);
 
         // fix_x = 103.33 -> ctcox 103: the step to 103 is free; the
         // touch-down (fix_y = 260.6) costs one wheel quantum.
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(object.state.position, Vector2::new(103, 260));
         assert_eq!(object.fixed_velocity.x.val(), 109226 - 1966, "wheel touch-down");
@@ -68906,7 +68906,7 @@ func ResortExplicit(object target) { Resort(target); }
         // ctcox 105; the step to 104 contacts (right wheel at 120,275 in
         // the ledge): abort + fix_x snap + RedirectForce + ydir friction
         // of the first contacted vertex (the wheel, friction 10).
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(object.state.position.x, 103, "horizontal move aborted");
         assert_eq!(
@@ -68982,7 +68982,7 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
             )
             .expect("spawns");
         for _ in 0..3 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let idx = engine.find_object_index(id).expect("exists");
         assert_eq!(engine.objects[idx].state.position, Vector2::new(100, 260));
@@ -68994,7 +68994,7 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
         engine.objects[idx].fixed_velocity.x = C4Fixed::from_raw(45875);
         engine.objects[idx].state.mobile = true;
 
-        engine.tick().expect("wrap tick");
+        engine.tick_without_snapshot().expect("wrap tick");
         let object = &engine.objects[engine.find_object_index(id).expect("exists")];
         assert_eq!(
             object.state.action.name, "Glide2",
@@ -69082,7 +69082,7 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
         engine.objects[idx].state.velocity = Vector2::ZERO;
         engine.objects[idx].state.mobile = false;
 
-        engine.tick().expect("tick");
+        engine.tick_without_snapshot().expect("tick");
         let idx = engine.find_object_index(id).expect("exists");
         let object = &engine.objects[idx];
         assert_eq!(object.state.position, Vector2::new(100, 100), "no motion");
@@ -69164,7 +69164,7 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
             .expect("bush spawns");
 
         for _ in 0..34 {
-            engine.tick().expect("tick");
+            engine.tick_without_snapshot().expect("tick");
         }
         let idx = engine.find_object_index(bush).expect("exists");
         assert_eq!(
@@ -69172,7 +69172,7 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
             "no growth before the Tick35 boundary"
         );
         let y_before = engine.objects[idx].state.position.y;
-        engine.tick().expect("tick 35");
+        engine.tick_without_snapshot().expect("tick 35");
         let idx = engine.find_object_index(bush).expect("exists");
         assert_eq!(
             engine.objects[idx].state.construction, 26010,
@@ -69248,7 +69248,7 @@ func Initialize() { if (armed) CreateObject(MARK); return true; }
         );
 
         for _ in 0..35 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         let growing = engine.object_snapshot(growing_id).expect("growth survives");
@@ -69294,20 +69294,20 @@ func Initialize() { if (armed) CreateObject(MARK); return true; }
                 .and_then(|idx| engine.objects[idx].state.local_vars.get("iTicks").cloned())
         };
         for _ in 1..=4 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert!(
             !matches!(ticks_of(&engine), Some(Value::Int(_))),
             "Timer counts 1..4, below the interval (C4Object.cpp:1086)"
         );
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         assert_eq!(
             ticks_of(&engine),
             Some(Value::Int(1)),
             "the 5th Execute reaches Def->Timer and fires TimerCall (C4Object.cpp:1086-1090)"
         );
         for _ in 6..=10 {
-            engine.tick().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
         }
         assert_eq!(
             ticks_of(&engine),
@@ -69416,7 +69416,7 @@ private func Sitting()
         engine.objects[wipf_idx].fixed_velocity.y = itofix(1);
         let count_before = engine.rng.count;
 
-        engine.tick().expect("timer callback succeeds");
+        engine.tick_without_snapshot().expect("timer callback succeeds");
 
         let wipf_idx = engine.find_object_index(wipf).expect("wipf exists");
         let locals = &engine.objects[wipf_idx].state.local_vars;
@@ -69478,7 +69478,7 @@ private func Sitting()
             .spawn_object(SpawnConfig::new("PRNT"))
             .expect("parent spawns");
 
-        engine.tick().expect("tick succeeds");
+        engine.tick_without_snapshot().expect("tick succeeds");
         let child = engine
             .objects
             .iter()
@@ -69689,7 +69689,7 @@ private func Sitting()
             object_id,
             QueuedCommand::new(1, ObjectUpdate::new().with_velocity(Vector2::new(2, -3))),
         )?;
-        let _ = engine.tick()?;
+        let _ = engine.tick_without_snapshot()?;
 
         let state = engine.capture_state();
         let temp_file = NamedTempFile::new().expect("create temp state file");
@@ -69743,7 +69743,7 @@ private func Sitting()
         settings.parallax_mode = SkyParallaxMode::Wind;
         engine.set_sky(settings);
         for _ in 0..3 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         let expected = engine.snapshot().sky;
         let moved = expected
@@ -70013,7 +70013,7 @@ func ProbeSetSkyFade() {
                 .with_action(ActionState::new("Helper"))]),
         )?;
 
-        let _ = engine.tick()?;
+        let _ = engine.tick_without_snapshot()?;
 
         let state = engine.capture_state();
         assert_eq!(state.environment, engine.environment());
@@ -70089,7 +70089,7 @@ func ProbeSetSkyFade() {
         let environment = EnvironmentSettings::new(0).with_temperature(10);
         engine.set_environment(environment);
 
-        let _ = engine.tick()?;
+        let _ = engine.tick_without_snapshot()?;
 
         let water = engine
             .materials()
@@ -71049,7 +71049,7 @@ protected func Entrance(pTarget)
                 .with_category(CATEGORY_STRUCTURE),
         )?;
         for _ in 0..34 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         let structure_index = engine
             .find_object_index(structure)
@@ -71067,7 +71067,7 @@ protected func Entrance(pTarget)
             Some(fly_ashes)
         );
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
         assert_eq!(engine.landscape().unwrap().material_at(2, 2), None);
         assert_eq!(engine.landscape().unwrap().material_at(4, 3), None);
         assert_eq!(
@@ -71124,7 +71124,7 @@ protected func Entrance(pTarget)
         engine.spawn_object(SpawnConfig::new("STSN"))?;
 
         for _ in 0..34 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         let saved = engine.capture_state();
 
@@ -71139,7 +71139,7 @@ protected func Entrance(pTarget)
             BASIC_OBJECT_SCRIPT,
         )?)?;
         restored.restore_state(&saved)?;
-        restored.tick()?;
+        restored.tick_without_snapshot()?;
         assert_eq!(
             restored.landscape().unwrap().material_at(2, 2),
             Some(snow),
@@ -71159,7 +71159,7 @@ protected func Entrance(pTarget)
         let mut engine = Engine::new();
         let (hut, flag) = base_fixture(&mut engine)?;
         for _ in 0..11 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         let flag_index = engine.find_object_index(flag).expect("flag exists");
@@ -71229,7 +71229,7 @@ protected func Entrance(pTarget)
             .insert("flyBaseStartOwner".to_string(), Value::Int(2));
 
         for _ in 0..11 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         let hut_index = engine.find_object_index(hut).expect("hut exists");
@@ -71295,7 +71295,7 @@ protected func Entrance(pTarget)
         let mut engine = Engine::new();
         let (hut, flag) = base_fixture(&mut engine)?;
         for _ in 0..11 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         let hut_index = engine.find_object_index(hut).expect("hut exists");
         assert_eq!(engine.objects[hut_index].state.base, 1);
@@ -71335,7 +71335,7 @@ protected func Entrance(pTarget)
             ObjectUpdate::new().with_status(ObjectStatus::Deleted),
         )?;
         for _ in 0..36 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         let hut_index = engine.find_object_index(hut).expect("hut exists");
         assert_eq!(
@@ -71380,7 +71380,7 @@ protected func Entrance(pTarget)
         let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
 
         for _ in 0..36 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         assert_eq!(engine.player(1).expect("player exists").wealth(), 5);
@@ -71455,7 +71455,7 @@ protected func Sale(int player)
         let sold = engine.spawn_object(SpawnConfig::new("AUTO").with_container(crew))?;
 
         for _ in 0..36 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         let player = engine.player(1).expect("player exists");
@@ -71498,7 +71498,7 @@ protected func Sale(int player)
         let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
         queue_enter_command(&mut engine, crew, base)?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let crew_index = engine.find_object_index(crew).expect("crew exists");
         assert_eq!(engine.objects[crew_index].state.container, Some(base));
@@ -71571,7 +71571,7 @@ protected func Collection2(pObject)
             )?;
             let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
             queue_enter_command(&mut engine, crew, target)?;
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
 
             let crew_index = engine.find_object_index(crew).expect("crew exists");
             assert_eq!(
@@ -71651,7 +71651,7 @@ protected func Collection2(pObject)
         let gold = engine.spawn_object(SpawnConfig::new("GOLD").with_container(crew))?;
         queue_enter_command(&mut engine, crew, base)?;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         assert_eq!(engine.player(1).expect("player exists").wealth(), 0);
         let gold_index = engine.find_object_index(gold).expect("GOLD remains");
@@ -71717,7 +71717,7 @@ protected func Entrance(pTarget)
             engine.spawn_object(SpawnConfig::new("FGRV"))?;
             // C4Game::InitRules calls UpdateRules before play; the runtime
             // refresh repeats at frame one and every Tick255.
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
         let collector = engine.spawn_object(
             SpawnConfig::new("FLCN")
@@ -71845,7 +71845,7 @@ protected func Entrance(pTarget)
 
         // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
         for _ in 0..3 {
-            let _ = engine.tick()?;
+            let _ = engine.tick_without_snapshot()?;
         }
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
@@ -71927,7 +71927,7 @@ protected func Collection2(pObject)
             )?,
             Value::Bool(true)
         );
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let lorry_idx = engine.find_object_index(lorry_id).expect("lorry exists");
         let locals = &engine.objects[lorry_idx].state.local_vars;
@@ -72014,7 +72014,7 @@ protected func Entrance(pTarget)
         )?;
 
         for _ in 0..3 {
-            engine.tick()?;
+            engine.tick_without_snapshot()?;
         }
 
         let item_idx = engine.find_object_index(item_id).expect("wipf exists");
@@ -72437,7 +72437,7 @@ protected func RejectEntrance(pContainer) { return(1); }
         engine.objects[item_idx].fixed_velocity.x = C4Fixed::from_raw(147456); // 2.25
         engine.objects[item_idx].state.mobile = true;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let item_idx = engine.find_object_index(item_id).expect("item exists");
         let item = &engine.objects[item_idx];
@@ -72499,7 +72499,7 @@ protected func RejectCollect(id, pObject) { return(1); }
         engine.objects[item_idx].fixed_velocity.x = C4Fixed::from_raw(147456); // 2.25
         engine.objects[item_idx].state.mobile = true;
 
-        engine.tick()?;
+        engine.tick_without_snapshot()?;
 
         let item_idx = engine.find_object_index(item_id).expect("item exists");
         let item = &engine.objects[item_idx];
@@ -72543,7 +72543,7 @@ protected func RejectCollect(id, pObject) { return(1); }
 
         // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
         for _ in 0..3 {
-            let _ = engine.tick()?;
+            let _ = engine.tick_without_snapshot()?;
         }
 
         let first_snapshot = engine.object_snapshot(first).expect("first item snapshot");
