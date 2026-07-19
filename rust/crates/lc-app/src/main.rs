@@ -33109,6 +33109,9 @@ impl GameApp {
         &self,
         point: GuiPoint,
     ) -> Option<(i32, IngameMenuPointerTarget)> {
+        if self.engine.film_replay() {
+            return None;
+        }
         let player = match self.local_controls.mouse_owner() {
             Some(player) if self.mouse_control => player,
             None
@@ -33497,6 +33500,11 @@ impl GameApp {
         owner: i32,
         point: GuiPoint,
     ) -> Option<IngameViewportRegion> {
+        // These regions are registered while drawing the same viewport HUD,
+        // menu and control calls that native skips during a film replay.
+        if self.engine.film_replay() {
+            return None;
+        }
         let viewport = self
             .graphics
             .active_viewport_projections()
@@ -34921,7 +34929,7 @@ impl GameApp {
         owner: i32,
         point: GuiPoint,
     ) -> Result<Option<EngineScriptMenuPointerTarget>, EngineError> {
-        if !self.mouse_control {
+        if self.engine.film_replay() || !self.mouse_control {
             return Ok(None);
         }
         let Some((target, menu)) = self.engine.cursor_object_menu(owner) else {
@@ -53147,6 +53155,9 @@ impl GameApp {
 
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        // C4Viewport suppresses only its gameplay overlays for a film replay;
+        // game messages and C4GraphicsSystem-owned chrome remain independent.
+        let viewport_overlays_visible = !self.engine.film_replay();
         self.apply_show_commands_enable_request();
         self.sync_film_view_presentation();
         self.reject_classic_global_gui_bootstrap()?;
@@ -53156,35 +53167,44 @@ impl GameApp {
                 .require_classic_game_over_resources_with_hud(self.current_hud_graphics_ref())
                 .map_err(report_classic_parity_boundary)?;
         }
-        if let Some(browser) = self.save_browser.as_ref() {
-            let boundary = report_classic_parity_boundary(ClassicParityBoundary::SaveBrowser(
-                browser.mode().clone(),
-            ));
-            tracing::error!(%boundary, "refusing to render Rust-only save/load browser");
-            return Err(anyhow::Error::new(boundary));
+        if viewport_overlays_visible {
+            if let Some(browser) = self.save_browser.as_ref() {
+                let boundary = report_classic_parity_boundary(ClassicParityBoundary::SaveBrowser(
+                    browser.mode().clone(),
+                ));
+                tracing::error!(%boundary, "refusing to render Rust-only save/load browser");
+                return Err(anyhow::Error::new(boundary));
+            }
         }
-        if let Some(menu) = self.object_menu.as_ref() {
-            let boundary =
-                report_classic_parity_boundary(ClassicParityBoundary::AppObjectMenu(menu.mode()));
-            tracing::error!(%boundary, "refusing to render generic app-owned object menu");
-            return Err(anyhow::Error::new(boundary));
+        if viewport_overlays_visible {
+            if let Some(menu) = self.object_menu.as_ref() {
+                let boundary = report_classic_parity_boundary(
+                    ClassicParityBoundary::AppObjectMenu(menu.mode()),
+                );
+                tracing::error!(%boundary, "refusing to render generic app-owned object menu");
+                return Err(anyhow::Error::new(boundary));
+            }
         }
-        if self.ingame_menu.is_some() || self.engine.cursor_object_menu(self.local_owner).is_some()
+        if viewport_overlays_visible
+            && (self.ingame_menu.is_some()
+                || self.engine.cursor_object_menu(self.local_owner).is_some())
         {
             self.assets
                 .require_classic_ingame_menu_resources()
                 .map_err(report_classic_parity_boundary)?;
         }
-        if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
-            if !matches!(menu.style, 0..=3) {
-                tracing::error!(
-                    style = menu.style,
-                    "refusing to render generic script-menu style fallback"
-                );
-                anyhow::bail!(
-                    "classic script menu style {} is unavailable; refusing generic Rust fallback",
-                    menu.style
-                );
+        if viewport_overlays_visible {
+            if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
+                if !matches!(menu.style, 0..=3) {
+                    tracing::error!(
+                        style = menu.style,
+                        "refusing to render generic script-menu style fallback"
+                    );
+                    anyhow::bail!(
+                        "classic script menu style {} is unavailable; refusing generic Rust fallback",
+                        menu.style
+                    );
+                }
             }
         }
         let runtime_help_columns = self.preflight_visible_runtime_help()?;
@@ -53209,28 +53229,35 @@ impl GameApp {
         let frame_gamma = self
             .graphics
             .active_gamma_ramp(&self.snapshot.environment.gamma);
-        let value_footer_player = self
-            .engine
-            .cursor_object_menu(self.local_owner)
-            .and_then(|(_, menu)| {
-                (menu.extra == lc_engine::ObjectMenuExtra::Value)
-                    .then_some(menu.command_object)
-                    .flatten()
+        let value_footer_player = viewport_overlays_visible
+            .then(|| {
+                self.engine
+                    .cursor_object_menu(self.local_owner)
+                    .and_then(|(_, menu)| {
+                        (menu.extra == lc_engine::ObjectMenuExtra::Value)
+                            .then_some(menu.command_object)
+                            .flatten()
+                    })
+                    .and_then(|command_object| self.engine.object_controller(command_object))
+                    .filter(|controller| self.engine.player(*controller).is_some())
             })
-            .and_then(|command_object| self.engine.object_controller(command_object))
-            .filter(|controller| self.engine.player(*controller).is_some());
+            .flatten();
         if let Some(owner) = value_footer_player {
             self.engine
                 .arm_player_view_wealth(owner)
                 .map_err(anyhow::Error::new)?;
         }
-        let mut players = collect_player_overlays(
-            &self.engine,
-            &self.snapshot,
-            self.focus_id,
-            &self.bindings,
-            &self.gamepad_bindings,
-        );
+        let mut players = if viewport_overlays_visible {
+            collect_player_overlays(
+                &self.engine,
+                &self.snapshot,
+                self.focus_id,
+                &self.bindings,
+                &self.gamepad_bindings,
+            )
+        } else {
+            Vec::new()
+        };
         populate_crew_inventories(&self.engine, &self.snapshot, &mut players);
         self.populate_crew_infos(&mut players);
         self.populate_crew_portraits(&mut players);
@@ -53238,7 +53265,8 @@ impl GameApp {
         // (C4Viewport::DrawCursorInfo, src/C4Viewport.cpp:948-961),
         // skipped while the cursor's menu is active
         // (src/C4Object.cpp:2952).
-        if self.display_flags.show_commands
+        if viewport_overlays_visible
+            && self.display_flags.show_commands
             && self.object_menu.is_none()
             && self.engine.cursor_object_menu(self.local_owner).is_none()
         {
@@ -53278,6 +53306,7 @@ impl GameApp {
             frame_text: &self.frame_text,
             status_text: &self.status_text,
             debug_hud: self.debug_hud,
+            viewport_overlays_visible,
             players,
             game_time_seconds: self.game_time_seconds(),
             message_board_line: self.message_board_line(),
@@ -53341,54 +53370,61 @@ impl GameApp {
         // following and viewport-layout changes cannot leave one stale frame.
         self.refresh_construction_menu_drag();
 
-        let mut script_menu = self
-            .engine
-            .cursor_object_menu(self.local_owner)
-            .map(|(target, menu)| (target, menu.clone()));
+        let mut script_menu = viewport_overlays_visible
+            .then(|| {
+                self.engine
+                    .cursor_object_menu(self.local_owner)
+                    .map(|(target, menu)| (target, menu.clone()))
+            })
+            .flatten();
         if let Some((_, menu)) = script_menu.as_mut() {
             resolve_engine_script_menu_footer(&self.engine, &self.snapshot, menu);
         }
         let initial_script_menu_location = script_menu
             .as_ref()
             .and_then(|(_, menu)| self.script_menu_free_location(menu));
-        let script_menu_time = script_menu
-            .as_ref()
-            .map(|(target, menu)| {
-                let key = ScriptMenuPresentationKey {
-                    target: *target,
-                    symbol_id: menu.symbol_id.clone(),
-                    caption: menu.caption.clone(),
-                    selection: menu.selection,
-                };
-                let progressing = menu.text_progressing;
-                let free_location = self
-                    .script_menu_presentation
-                    .as_ref()
-                    .filter(|state| same_script_menu_presentation(state, *target, menu))
-                    .map(|state| state.free_location)
-                    .unwrap_or(initial_script_menu_location);
-                match self.script_menu_presentation.as_mut() {
-                    Some(state) if state.key == key => {
-                        if !progressing {
-                            state.time_on_selection = state.time_on_selection.saturating_add(1);
+        let script_menu_time = if viewport_overlays_visible {
+            script_menu
+                .as_ref()
+                .map(|(target, menu)| {
+                    let key = ScriptMenuPresentationKey {
+                        target: *target,
+                        symbol_id: menu.symbol_id.clone(),
+                        caption: menu.caption.clone(),
+                        selection: menu.selection,
+                    };
+                    let progressing = menu.text_progressing;
+                    let free_location = self
+                        .script_menu_presentation
+                        .as_ref()
+                        .filter(|state| same_script_menu_presentation(state, *target, menu))
+                        .map(|state| state.free_location)
+                        .unwrap_or(initial_script_menu_location);
+                    match self.script_menu_presentation.as_mut() {
+                        Some(state) if state.key == key => {
+                            if !progressing {
+                                state.time_on_selection = state.time_on_selection.saturating_add(1);
+                            }
+                            state.time_on_selection
                         }
-                        state.time_on_selection
+                        _ => {
+                            let time_on_selection = u32::from(!progressing);
+                            self.script_menu_presentation = Some(ScriptMenuPresentationState {
+                                key,
+                                time_on_selection,
+                                free_location,
+                            });
+                            time_on_selection
+                        }
                     }
-                    _ => {
-                        let time_on_selection = u32::from(!progressing);
-                        self.script_menu_presentation = Some(ScriptMenuPresentationState {
-                            key,
-                            time_on_selection,
-                            free_location,
-                        });
-                        time_on_selection
-                    }
-                }
-            })
-            .unwrap_or_else(|| {
-                self.script_menu_presentation = None;
-                0
-            });
+                })
+                .unwrap_or_else(|| {
+                    self.script_menu_presentation = None;
+                    0
+                })
+        } else {
+            0
+        };
         if let Some((target, menu)) = script_menu.as_ref() {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
@@ -53600,7 +53636,7 @@ impl GameApp {
             self.next_pending_native_overlay();
         }
 
-        if self.ingame_menu.is_some() {
+        if viewport_overlays_visible && self.ingame_menu.is_some() {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
             let show_close_button = self.local_controls.mouse_owner().is_some_and(|owner| {
@@ -53638,7 +53674,7 @@ impl GameApp {
                 );
             }
         }
-        if ordered_native && self.ingame_menu.is_some() {
+        if ordered_native && viewport_overlays_visible && self.ingame_menu.is_some() {
             self.next_pending_native_overlay();
         }
 
@@ -53677,8 +53713,7 @@ impl GameApp {
         // C4Viewport draws this local control layer after menus and game
         // messages. Classic Chat is the intentionally unsupported external
         // IRC client, so its conditional row is inactive in this port.
-        let mouse_control_overlay_visible = !(self.engine.film() && self.engine.replay());
-        if mouse_control_overlay_visible {
+        if viewport_overlays_visible {
             let mouse_viewport_index = self
                 .active_ingame_mouse_viewport()
                 .map(|viewport| viewport.index);
@@ -53694,19 +53729,22 @@ impl GameApp {
         // construction previews and selection frames therefore remain
         // legible over both (src/C4Viewport.cpp:836-870;
         // src/C4MouseControl.cpp:317-430,1093-1113).
-        let construction_cursor = self
-            .construction_menu_drag
-            .as_ref()
-            .and_then(|drag| match drag {
-                ConstructionMenuDrag::Active {
-                    definition_id,
-                    viewport_index: Some(viewport_index),
-                    pointer: Some(pointer),
-                    site_valid,
-                    ..
-                } => Some((definition_id, *viewport_index, *pointer, *site_valid)),
-                _ => None,
-            });
+        let construction_cursor = viewport_overlays_visible
+            .then(|| {
+                self.construction_menu_drag
+                    .as_ref()
+                    .and_then(|drag| match drag {
+                        ConstructionMenuDrag::Active {
+                            definition_id,
+                            viewport_index: Some(viewport_index),
+                            pointer: Some(pointer),
+                            site_valid,
+                            ..
+                        } => Some((definition_id, *viewport_index, *pointer, *site_valid)),
+                        _ => None,
+                    })
+            })
+            .flatten();
         let construction_preview = construction_cursor.and_then(
             |(definition_id, viewport_index, pointer, site_valid)| {
                 self.engine
@@ -53773,7 +53811,7 @@ impl GameApp {
                 );
             }
         }
-        let selection_frame_drawn =
+        let selection_frame_drawn = if viewport_overlays_visible {
             if let Some((selection, down_world, current_screen)) = self.ingame_selection_frame() {
                 self.graphics.draw_mouse_selection_marks(
                     &self.snapshot,
@@ -53790,8 +53828,11 @@ impl GameApp {
                 true
             } else {
                 false
-            };
-        let help_cursor = (mouse_control_overlay_visible && self.ingame_help_cursor_active())
+            }
+        } else {
+            false
+        };
+        let help_cursor = (viewport_overlays_visible && self.ingame_help_cursor_active())
             .then(|| self.ingame_pointer.map(|pointer| pointer.screen))
             .flatten();
         if !construction_cursor_drawn
@@ -53804,7 +53845,7 @@ impl GameApp {
                     screen,
                     Some(&frame_gamma),
                 );
-            } else if self.ingame_edge_cursor_active() {
+            } else if viewport_overlays_visible && self.ingame_edge_cursor_active() {
                 if let Some(scroll) = self.ingame_edge_scroll {
                     self.graphics.draw_mouse_cursor(
                         scroll.edge.cursor,
@@ -53814,7 +53855,7 @@ impl GameApp {
                 }
             }
         }
-        let help_caption = mouse_control_overlay_visible
+        let help_caption = viewport_overlays_visible
             .then(|| {
                 self.ingame_mouse_help_caption
                     .as_ref()
@@ -53840,7 +53881,7 @@ impl GameApp {
                 &caption,
                 Some(&frame_gamma),
             );
-        } else if let Some((caption, viewport)) = mouse_control_overlay_visible
+        } else if let Some((caption, viewport)) = viewport_overlays_visible
             .then(|| {
                 self.ingame_mouse_caption.caption.clone().and_then(|caption| {
                     self.graphics
@@ -66901,6 +66942,7 @@ mod tests {
             frame_text: "",
             status_text: "",
             debug_hud: false,
+            viewport_overlays_visible: true,
             players: Vec::new(),
             game_time_seconds: 0,
             message_board_line: None,
@@ -102999,6 +103041,45 @@ ScenInfoArea=70,5,25,90
         app
     }
 
+    fn set_test_scenario_head_flags(app: &mut GameApp, replay: i32, film: i32) {
+        let mut state = app.engine.capture_state();
+        let values = state
+            .scenario_values
+            .as_mut()
+            .expect("captured state retains Game.C4S values");
+        let mut encoded = serde_json::to_value(&*values).expect("serialize Game.C4S values");
+        let head = encoded
+            .get_mut("sections")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|sections| {
+                sections.iter_mut().find(|section| {
+                    section.get("name").and_then(serde_json::Value::as_str) == Some("Head")
+                })
+            })
+            .expect("Game.C4S contains Head");
+        let entries = head
+            .get_mut("entries")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("Head contains compiler entries");
+        for (name, value) in [("Replay", replay), ("Film", film)] {
+            let entry = entries
+                .iter_mut()
+                .find(|entry| {
+                    entry.get("name").and_then(serde_json::Value::as_str) == Some(name)
+                })
+                .unwrap_or_else(|| panic!("Head contains {name}"));
+            entry["values"] = serde_json::json!([{ "Int": value }]);
+        }
+        *values = serde_json::from_value(encoded).expect("deserialize adjusted Game.C4S values");
+        app.engine
+            .restore_state(&state)
+            .expect("restore adjusted Game.C4S values");
+        app.engine.set_film_viewport_available(true);
+        app.snapshot = app.engine.snapshot();
+        assert_eq!(app.engine.replay(), replay != 0);
+        assert_eq!(app.engine.film(), film != 0);
+    }
+
     fn install_test_recording_template(app: &mut GameApp, output_path: PathBuf) {
         let mut group = MutableGroup::new("Recorded.c4s");
         group
@@ -108469,6 +108550,152 @@ ScenInfoArea=70,5,25,90
         assert!(app.set_physical_film_view(OWNER_NONE));
         assert!(!app.cycle_primary_viewport_player(true));
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    }
+
+    #[test]
+    fn l066_film_replay_hides_viewport_menus_but_keeps_messages_and_film_view() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+
+        for (replay, film, overlays_visible) in [
+            (0, 0, true),
+            (1, 0, true),
+            (0, 1, true),
+            (1, 1, false),
+            (1, 2, false),
+        ] {
+            app.engine
+                .apply_object_update(
+                    cursor,
+                    ObjectUpdate {
+                        menu: Some(None),
+                        ..ObjectUpdate::default()
+                    },
+                )
+                .expect("clear prior script menu");
+            set_test_scenario_head_flags(&mut app, replay, film);
+            app.snapshot.hud.messages.clear();
+
+            let mut without_menu = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut without_menu).expect("render menu-free frame");
+            install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
+            let mut with_menu = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut with_menu).expect("render script-menu frame");
+            assert_eq!(
+                with_menu != without_menu,
+                overlays_visible,
+                "Replay={replay}, Film={film}"
+            );
+        }
+
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(None),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("clear matrix script menu");
+        set_test_scenario_head_flags(&mut app, 1, 1);
+        app.snapshot.hud.messages.clear();
+        let mut without_message = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut without_message)
+            .expect("render clean film frame");
+
+        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::GlobalPlayer,
+            lines: vec!["Film message remains".to_string()],
+            target: None,
+            player: Some(owner),
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        }];
+        let mut with_message = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut with_message)
+            .expect("film replay still renders game messages");
+        assert_ne!(
+            with_message, without_message,
+            "the clean film viewport must retain Game.Messages"
+        );
+
+        let mut invalid_hidden_menu = two_item_script_menu(cursor);
+        invalid_hidden_menu.style = 99;
+        install_test_cursor_menu(&mut app, cursor, invalid_hidden_menu);
+        app.ingame_menu.replace(
+            owner,
+            IngameMenuState::main_menu(&MainMenuConditions {
+                has_player: true,
+                player_count: 1,
+                ..MainMenuConditions::default()
+            }),
+        );
+        app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
+        let viewport = app.graphics.viewport_rect(owner).expect("film viewport");
+        let pointer = GuiPoint::new(
+            viewport.x as f32 + viewport.width as f32 / 2.0,
+            viewport.y as f32 + viewport.height as f32 / 2.0,
+        );
+        app.ingame_pointer = app.graphics.viewport_point_at(pointer);
+        app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
+            text: "Hidden mouse caption".to_string(),
+            keep_moves: 1,
+        });
+        let mut with_hidden_menus = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut with_hidden_menus)
+            .expect("hidden film menus skip their render preflights");
+        assert_eq!(
+            with_hidden_menus, with_message,
+            "script and player menus contribute no film-replay pixels"
+        );
+        assert_eq!(
+            app.script_menu_pointer_target_for_owner(owner, GuiPoint::new(160.0, 100.0))
+                .expect("hidden menu pointer routing is inert"),
+            None
+        );
+        assert_eq!(
+            app.ingame_menu_pointer_target(GuiPoint::new(160.0, 100.0)),
+            None
+        );
+        let menu_button = lc_frontend::hud::viewport_button_rect(
+            viewport,
+            lc_frontend::hud::ViewportButton::PlayerMenu,
+        );
+        assert_eq!(
+            app.ingame_viewport_region(
+                owner,
+                GuiPoint::new(menu_button.x as f32 + 1.0, menu_button.y as f32 + 1.0),
+            ),
+            None,
+            "suppressed HUD regions cannot consume film input"
+        );
+
+        app.ingame_menu.clear();
+        app.save_browser = None;
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(None),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("clear hidden script menu");
+        let next_owner = owner + 1;
+        app.engine
+            .register_player(PlayerConfig::new(next_owner, "Second film player"))
+            .expect("register second film player");
+        assert!(app.set_physical_film_view(owner));
+        app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+            .expect("production film-view key dispatch remains active");
+        assert_eq!(app.film_view_player, Some(next_owner));
     }
 
     #[test]

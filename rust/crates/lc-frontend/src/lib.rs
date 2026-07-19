@@ -2203,6 +2203,10 @@ pub struct GraphicsOverlay<'a> {
     pub status_text: &'a str,
     /// Opt-in debug HUD lines (not part of the C++-faithful overlay).
     pub debug_hud: bool,
+    /// `false` for `Head.Film && Head.Replay`: suppresses the per-viewport
+    /// player HUD and world cursor/select marks while leaving global chrome
+    /// to its independent `C4GraphicsSystem` pass.
+    pub viewport_overlays_visible: bool,
     pub players: Vec<PlayerOverlay>,
     /// `Game.Time` seconds for the upper board clock
     /// (C4Game::Sec1Timer, src/C4Game.cpp:1737-1741).
@@ -2601,6 +2605,9 @@ pub struct GraphicsSystem {
     scenario_label_text: String,
     /// Per-player HUD state fed by [`Self::update_overlay`].
     hud_players: Vec<PlayerOverlay>,
+    /// The two native film-replay gates in `C4Viewport::Draw` and
+    /// `C4Viewport::DrawOverlay` (src/C4Viewport.cpp:838-881,1088).
+    viewport_overlays_visible: bool,
     game_time_seconds: u64,
     message_board_line: Option<String>,
     /// `Config.Graphics.ShowPortraits` / `ShowCommands` / `ShowCommandKeys`
@@ -2695,6 +2702,7 @@ impl GraphicsSystem {
             clonk_fonts: None,
             scenario_label_text: scenario_label.to_string(),
             hud_players: Vec::new(),
+            viewport_overlays_visible: true,
             game_time_seconds: 0,
             message_board_line: None,
             show_portraits: true,
@@ -3698,6 +3706,7 @@ impl GraphicsSystem {
     /// (src/C4UpperBoard.cpp:37-44).
     pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) {
         self.hud_players = overlay.players.clone();
+        self.viewport_overlays_visible = overlay.viewport_overlays_visible;
         self.game_time_seconds = overlay.game_time_seconds;
         self.message_board_line = overlay.message_board_line.clone();
         self.show_portraits = overlay.show_portraits;
@@ -4231,33 +4240,35 @@ impl GraphicsSystem {
         );
         // NeedEnergy bolts are emitted inside each object's base pass so
         // background/foreground category layering matches C4Object::Draw.
-        if input.owner != OWNER_NONE {
-            if let Some(focus) = input.focus {
-                let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, focus.id);
-                self.draw_selection_marks(
-                    snapshot,
-                    &highlight_ids,
-                    input.owner,
-                    origin_x,
-                    origin_y,
-                    zoom,
-                    gamma,
-                );
-            }
-            self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
-        } else {
-            // C4Game::DrawCursors(NO_OWNER) emits every player's active
-            // cursor flash, while C4Object::DrawSelectMark requires a valid
-            // `iByPlayer` and therefore emits no per-object select marks.
-            for player in &snapshot.players {
-                self.draw_player_cursors(
-                    snapshot,
-                    player.id,
-                    origin_x,
-                    origin_y,
-                    zoom,
-                    gamma,
-                );
+        if self.viewport_overlays_visible {
+            if input.owner != OWNER_NONE {
+                if let Some(focus) = input.focus {
+                    let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, focus.id);
+                    self.draw_selection_marks(
+                        snapshot,
+                        &highlight_ids,
+                        input.owner,
+                        origin_x,
+                        origin_y,
+                        zoom,
+                        gamma,
+                    );
+                }
+                self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
+            } else {
+                // C4Game::DrawCursors(NO_OWNER) emits every player's active
+                // cursor flash, while C4Object::DrawSelectMark requires a valid
+                // `iByPlayer` and therefore emits no per-object select marks.
+                for player in &snapshot.players {
+                    self.draw_player_cursors(
+                        snapshot,
+                        player.id,
+                        origin_x,
+                        origin_y,
+                        zoom,
+                        gamma,
+                    );
+                }
             }
         }
         // C4Viewport disables ClrModMap after world cursors and before the
@@ -7817,6 +7828,9 @@ impl GraphicsSystem {
     /// Per-viewport player HUD, which precedes the fullscreen boards in
     /// C4GraphicsSystem::Execute (src/C4GraphicsSystem.cpp:352-365).
     fn draw_hud_players(&mut self, frame: u64, gamma: Option<&lc_graphics::GammaRamp>) {
+        if !self.viewport_overlays_visible {
+            return;
+        }
         // Per-viewport player info (C4Viewport::DrawOverlay,
         // src/C4Viewport.cpp:835-848).
         let viewports = self.active_viewports.clone();
@@ -7996,6 +8010,9 @@ impl GraphicsSystem {
         gui_icons2: Option<&ImageData>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        if !self.viewport_overlays_visible {
+            return;
+        }
         let viewports = self.active_viewports.clone();
         for (viewport_index, viewport) in viewports.iter().enumerate() {
             let player = self
@@ -16450,12 +16467,12 @@ mod tests {
     }
 
     #[test]
-    fn foreground_parallax_split_straddles_cursor_marks_like_cpp() {
+    fn l066_foreground_parallax_split_straddles_cursor_marks_like_cpp() {
         // ForeObjects.DrawIfCategory(... C4D_Parallax, true) draws the
         // non-parallax foreground before Game.DrawCursors; the false pass
         // draws parallax/custom-GUI objects afterwards
         // (C4Viewport.cpp:1080-1103; C4ObjectList.cpp:400-409).
-        let render = |category: i32| {
+        let render = |category: i32, viewport_overlays_visible: bool| {
             let mut snapshot = make_snapshot();
             snapshot.objects[0].position = Vector2::new(40, 40);
             snapshot.objects[0].owner = 1;
@@ -16496,6 +16513,7 @@ mod tests {
                 empty_cursor_atlas(),
                 Arc::new(hud),
             );
+            graphics.viewport_overlays_visible = viewport_overlays_visible;
             graphics.render_frame(
                 &snapshot,
                 &[ViewportInput::from_focus(&snapshot.objects[0])],
@@ -16507,7 +16525,10 @@ mod tests {
         };
 
         assert_eq!(
-            render(lc_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG),
+            render(
+                lc_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG,
+                true,
+            ),
             Some(standard_gamma_color(Color::opaque(0, 220, 0))),
             "cursor mark covers ordinary foreground",
         );
@@ -16516,9 +16537,18 @@ mod tests {
                 lc_engine::DEFAULT_CATEGORY
                     | CATEGORY_FOREGROUND_FLAG
                     | CATEGORY_PARALLAX_FLAG,
+                true,
             ),
             Some(standard_gamma_color(Color::opaque(220, 0, 0))),
             "custom-GUI/parallax foreground covers cursor mark",
+        );
+        assert_eq!(
+            render(
+                lc_engine::DEFAULT_CATEGORY | CATEGORY_FOREGROUND_FLAG,
+                false,
+            ),
+            Some(standard_gamma_color(Color::opaque(220, 0, 0))),
+            "film replay suppresses object selection marks",
         );
     }
 
@@ -16540,6 +16570,7 @@ mod tests {
             frame_text: "FRAME",
             status_text: "STATUS",
             debug_hud: false,
+            viewport_overlays_visible: true,
             players: Vec::new(),
             game_time_seconds: 61,
             message_board_line: Some("Player join: Test".to_string()),
@@ -16589,6 +16620,7 @@ mod tests {
             frame_text: "",
             status_text: "",
             debug_hud: false,
+            viewport_overlays_visible: true,
             players: vec![PlayerOverlay {
                 owner: 0,
                 name: "Player".to_string(),
@@ -19937,6 +19969,7 @@ mod tests {
             frame_text: "",
             status_text: "",
             debug_hud: false,
+            viewport_overlays_visible: true,
             players,
             game_time_seconds: 0,
             message_board_line: None,
@@ -19989,6 +20022,67 @@ mod tests {
         assert!(
             count_cursor_info_white_pixels(&graphics) > 0,
             "cursor object info also draws the white HUD row"
+        );
+    }
+
+    #[test]
+    fn l066_film_replay_hides_player_hud_and_world_cursor_marks() {
+        let (snapshot, mut graphics) = cursor_label_fixture(Some("Joe"));
+        let viewports = vec![ViewportInput::from_focus(&snapshot.objects[0])];
+        let cursor_color = standard_gamma_color(Color::opaque(0, 200, 0));
+        let count_cursor_pixels = |graphics: &GraphicsSystem| {
+            graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .filter(|pixel| {
+                    *pixel
+                        == [
+                            cursor_color.r,
+                            cursor_color.g,
+                            cursor_color.b,
+                            cursor_color.a,
+                        ]
+                })
+                .count()
+        };
+
+        graphics.render_frame(&snapshot, &viewports);
+        assert!(count_cursor_pixels(&graphics) > 0, "ordinary play draws Cursor.png");
+        assert!(count_red_text_pixels(&graphics) > 0, "ordinary play draws the cursor label");
+        assert!(
+            count_cursor_info_white_pixels(&graphics) > 0,
+            "ordinary play draws cursor-info HUD text"
+        );
+
+        let players = graphics.hud_players.clone();
+        graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            viewport_overlays_visible: false,
+            players,
+            game_time_seconds: 0,
+            message_board_line: None,
+            show_portraits: true,
+            show_commands: true,
+            show_command_keys: true,
+        });
+        graphics.render_frame(&snapshot, &viewports);
+
+        assert_eq!(count_cursor_pixels(&graphics), 0, "film replay hides Cursor.png");
+        assert_eq!(count_red_text_pixels(&graphics), 0, "film replay hides cursor labels");
+        assert_eq!(
+            count_cursor_info_white_pixels(&graphics),
+            0,
+            "film replay hides the per-player HUD"
+        );
+
+        graphics.surface_mut().fill(Color::transparent());
+        graphics.draw_viewport_control_overlays(None, false, None, None);
+        assert!(
+            graphics.surface().pixels().iter().all(|channel| *channel == 0),
+            "film replay hides the late viewport command buttons"
         );
     }
 
@@ -20098,6 +20192,7 @@ mod tests {
             frame_text: "",
             status_text: "",
             debug_hud: false,
+            viewport_overlays_visible: true,
             players,
             game_time_seconds: 0,
             message_board_line: None,
@@ -20179,6 +20274,7 @@ mod tests {
             frame_text: "",
             status_text: "",
             debug_hud: false,
+            viewport_overlays_visible: true,
             players,
             game_time_seconds: 0,
             message_board_line: None,
