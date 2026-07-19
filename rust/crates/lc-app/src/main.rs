@@ -105,8 +105,9 @@ use lc_frontend::game_lobby::{
     GameLobby as ClassicGameLobby, LobbyAction as ClassicLobbyAction, LobbyChatClipboardShortcut,
     LobbyChatContextCommand, LobbyChatEditKey, LobbyChatEditView, LobbyChatKeyModifiers,
     LobbyChatRequest, LobbyClientRow, LobbyClientStatus, LobbyControl, LobbyGameOptionInput,
-    LobbyLayout, LobbyLogLine, LobbyResources, LobbyRole, LobbyRosterId, LobbyRosterLayout,
-    LobbyRosterRow, LobbySheet, LobbySound,
+    LobbyHeaderRow, LobbyLayout, LobbyLogLine, LobbyPlayerRow, LobbyResourceRow, LobbyResources,
+    LobbyRole, LobbyRosterHeader, LobbyRosterIcon, LobbyRosterId, LobbyRosterLayout,
+    LobbyRosterRow, LobbySheet, LobbySound, LobbyTeamValue,
 };
 use lc_frontend::game_option_buttons::{
     FairCrewConstraint, GameOptionAction, GameOptionButtons, GameOptionContext,
@@ -184,8 +185,8 @@ use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
     PlayerImageWrite, SavedStartupPlayer, StartupCrewFile, StartupCrewMutationError,
     StartupPlayerFile, delete_crew_file, delete_player_file, discover_crew_files,
-    discover_player_files, persist_activations, rename_crew, save_player_properties,
-    set_crew_death_message, set_crew_participation,
+    discover_player_files, discover_player_files_in, persist_activations, rename_crew,
+    save_player_properties, set_crew_death_message, set_crew_participation,
 };
 use time::{OffsetDateTime, macros::format_description};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -3358,11 +3359,13 @@ enum AdmissionResourceState {
 struct AdmissionResourceStore {
     resources: BTreeMap<i32, AdmissionResourceState>,
     resource_types: BTreeMap<i32, u8>,
+    present_percent: BTreeMap<i32, u8>,
 }
 
 impl AdmissionResourceStore {
     fn register_lobby_resource(&mut self, core: &lc_engine::NetworkResourceCore) {
         self.resource_types.insert(core.id, core.resource_type);
+        self.present_percent.entry(core.id).or_insert(0);
         self.resources
             .entry(core.id)
             .or_insert(AdmissionResourceState::Loading { removed: false });
@@ -3430,6 +3433,7 @@ impl AdmissionResourceStore {
     }
 
     fn mark_complete(&mut self, resource_id: i32, path: PathBuf) {
+        self.present_percent.insert(resource_id, 100);
         self.resources.insert(
             resource_id,
             AdmissionResourceState::Complete {
@@ -3439,7 +3443,15 @@ impl AdmissionResourceStore {
         );
     }
 
+    fn mark_progress(&mut self, resource_id: i32, present_percent: u8) {
+        if self.resources.contains_key(&resource_id) {
+            self.present_percent
+                .insert(resource_id, present_percent.min(100));
+        }
+    }
+
     fn mark_failed(&mut self, resource_id: i32) {
+        self.present_percent.remove(&resource_id);
         self.resources.insert(
             resource_id,
             AdmissionResourceState::Unavailable(AdmissionResourceUnavailable::TransferFailed),
@@ -3449,6 +3461,7 @@ impl AdmissionResourceStore {
     fn clear(&mut self) {
         self.resources.clear();
         self.resource_types.clear();
+        self.present_percent.clear();
     }
 }
 
@@ -8150,6 +8163,22 @@ struct PendingDefinitionSelection {
     custom_definition_root: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+struct LobbyPlayerCandidate {
+    source_path: PathBuf,
+    wire_filename: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingLobbyPlayerSelection {
+    client_id: i32,
+    /// C4PlayerSelDlg snapshots `Config.General.PlayerPath` at construction;
+    /// F5 enumerates the same roots even if the config changes underneath it.
+    config: Config,
+    /// Physical selector result -> C++ `Config.AtExeRelativePath` wire name.
+    candidates: BTreeMap<String, LobbyPlayerCandidate>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ScenarioSelectorMode {
     #[default]
@@ -8250,6 +8279,9 @@ struct ClassicHostLobbyState {
     controller: ClassicGameLobby,
     pointer: Option<GuiPoint>,
     chat_history_index: i32,
+    /// C4Network2ResDlg keeps receiving network updates while inactive, but
+    /// does not reconcile its visible rows until the sheet is activated.
+    resource_rows: BTreeMap<i32, LobbyResourceRow>,
 }
 
 struct NetworkStartWaitDialogState {
@@ -8319,6 +8351,8 @@ enum AppContextMenuCommand {
     OptionsLanguage(String),
     OptionsDisplayMode(lc_frontend::startup_options_graphics::GraphicsDisplayMode),
     LobbyTeam { player_id: i32, team_id: i32 },
+    LobbyKick(i32),
+    LobbySheet(LobbySheet),
     ScenarioSearch(ScenselSearchContextCommand),
     InputDialog(InputDialogContextCommand),
 }
@@ -8373,6 +8407,311 @@ fn initial_control_clients(
         lobby_ready: false,
     }]);
     clients
+}
+
+fn lobby_rgba(color: u32) -> [u8; 4] {
+    [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        0xff,
+    ]
+}
+
+fn classic_lobby_roster_projection(
+    clients: &ControlClientRegistry,
+    player_infos: &ControlPlayerInfoRegistry,
+    teams: Option<&lc_engine::InitialNetworkTeamMetadata>,
+    local_client_id: i32,
+) -> (Vec<LobbyRosterRow>, i32) {
+    let (_, packets) = player_infos.retained_rows_snapshot();
+    let players_by_client = packets
+        .into_iter()
+        .map(|(client_id, _, players)| (client_id, players))
+        .collect::<BTreeMap<_, _>>();
+    let team_value = |client_id: i32, player: &lc_engine::ControlPlayerInfoEntry| {
+        let metadata = teams?;
+        if !metadata.active {
+            return None;
+        }
+        let current = metadata.teams.iter().find(|team| team.id == player.team);
+        let hidden_random_team = matches!(
+            metadata.team_distribution,
+            lc_engine::InitialNetworkTeamDistribution::RandomInvisible
+        );
+        let name = if hidden_random_team {
+            "Random team".to_string()
+        } else {
+            current
+                .map(|team| legacy_presentation_text(team.name.as_bytes()))
+                .unwrap_or_default()
+        };
+        let local_is_host = local_client_id == 0;
+        let distribution_selectable = match metadata.team_distribution {
+            lc_engine::InitialNetworkTeamDistribution::Free => {
+                local_is_host || client_id == local_client_id
+            }
+            lc_engine::InitialNetworkTeamDistribution::Host => local_is_host,
+            lc_engine::InitialNetworkTeamDistribution::None
+            | lc_engine::InitialNetworkTeamDistribution::Random
+            | lc_engine::InitialNetworkTeamDistribution::RandomInvisible => false,
+        };
+        let another_available = metadata.auto_generate_teams
+            || metadata.teams.iter().any(|team| {
+                team.id != player.team
+                    && (team.max_players == 0
+                        || i32::try_from(team.player_ids.len()).unwrap_or(i32::MAX)
+                            < team.max_players)
+            });
+        Some(LobbyTeamValue {
+            id: player.team,
+            name,
+            selectable: distribution_selectable
+                && another_available
+                && !player.is_joined()
+                && player.savegame_player == 0,
+        })
+    };
+    let visible_player = |player: &&lc_engine::ControlPlayerInfoEntry| {
+        player.flags
+            & (lc_engine::PLAYER_INFO_FLAG_REMOVED | lc_engine::PLAYER_INFO_FLAG_INVISIBLE)
+            == 0
+    };
+    let player_row = |client_id, player: &lc_engine::ControlPlayerInfoEntry| {
+        let name = if !player.forced_name.is_empty() {
+            legacy_presentation_text(player.forced_name.as_bytes())
+        } else {
+            legacy_presentation_text(player.name.as_bytes())
+        };
+        let hide_random_color = teams.is_some_and(|metadata| {
+            metadata.active
+                && metadata.team_colors
+                && matches!(
+                    metadata.team_distribution,
+                    lc_engine::InitialNetworkTeamDistribution::RandomInvisible
+                )
+                && metadata.teams.iter().any(|team| team.id == player.team)
+                && !player.is_joined()
+                && player.savegame_player == 0
+        });
+        LobbyRosterRow::Player(LobbyPlayerRow {
+            id: player.id,
+            client_id,
+            name,
+            color: lobby_rgba(if hide_random_color {
+                player.original_color
+            } else {
+                player.color
+            }),
+            icon: LobbyRosterIcon::Standard(9),
+            team: team_value(client_id, player),
+            league_score: (player.league_score != 0).then(|| player.league_score.to_string()),
+            league_rank: u8::try_from(player.league_rank_symbol)
+                .ok()
+                .filter(|rank| (1..=9).contains(rank)),
+        })
+    };
+
+    let script_players = players_by_client
+        .iter()
+        .flat_map(|(&client_id, players)| {
+            players
+                .iter()
+                .filter(visible_player)
+                .filter(|player| player.is_script_player())
+                .map(move |player| player_row(client_id, player))
+        })
+        .collect::<Vec<_>>();
+    let mut active_players = i32::try_from(script_players.len()).unwrap_or(i32::MAX);
+    let mut rows = Vec::new();
+    if !script_players.is_empty() || teams.is_some_and(|teams| teams.max_script_players > 0) {
+        let can_add_player = teams.is_some_and(|teams| {
+            let current = i32::try_from(script_players.len()).unwrap_or(i32::MAX);
+            local_client_id == 0 && current < teams.max_script_players
+        });
+        rows.push(LobbyRosterRow::Header(LobbyHeaderRow {
+            kind: LobbyRosterHeader::ScriptPlayers,
+            label: "Script players".to_string(),
+            icon: LobbyRosterIcon::Standard(21),
+            can_add_player,
+        }));
+        rows.extend(script_players);
+    }
+    for core in clients.snapshot() {
+        let players = players_by_client.get(&core.client_id);
+        let hide_random_colors = teams.is_some_and(|metadata| {
+            metadata.active
+                && metadata.team_colors
+                && matches!(
+                    metadata.team_distribution,
+                    lc_engine::InitialNetworkTeamDistribution::RandomInvisible
+                )
+        });
+        let first_user_color = players
+            .into_iter()
+            .flat_map(|players| players.iter())
+            .filter(visible_player)
+            .find(|player| player.player_type == lc_engine::PLAYER_INFO_TYPE_USER)
+            .map(|player| {
+                if hide_random_colors
+                    && !player.is_joined()
+                    && player.savegame_player == 0
+                    && teams.is_some_and(|metadata| {
+                        metadata.teams.iter().any(|team| team.id == player.team)
+                    })
+                {
+                    player.original_color
+                } else {
+                    player.color
+                }
+            })
+            .unwrap_or(0x00ff_ffff);
+        rows.push(LobbyRosterRow::Client(LobbyClientRow {
+            id: core.client_id,
+            name: legacy_presentation_text(core.name.as_bytes()),
+            nick: legacy_presentation_text(core.nick.as_bytes()),
+            color: lobby_rgba(first_user_color),
+            status: if players.is_none() {
+                LobbyClientStatus::Unknown
+            } else if core.client_id == 0 {
+                LobbyClientStatus::Host
+            } else if core.activated {
+                if core.lobby_ready {
+                    LobbyClientStatus::Ready
+                } else {
+                    LobbyClientStatus::Client
+                }
+            } else {
+                LobbyClientStatus::Observer
+            },
+            local: core.client_id == local_client_id,
+            connected: core.client_id != local_client_id,
+            resource_progress: None,
+            ping_ms: None,
+        }));
+        if !core.observer {
+            for player in players
+                .into_iter()
+                .flat_map(|players| players.iter())
+                .filter(visible_player)
+                .filter(|player| !player.is_script_player())
+            {
+                active_players = active_players.saturating_add(1);
+                rows.push(player_row(core.client_id, player));
+            }
+        }
+    }
+    (rows, active_players)
+}
+
+fn discover_lobby_player_selector(
+    paths: &AppPaths,
+    config: &Config,
+) -> io::Result<(
+    PathBuf,
+    Vec<lc_frontend::definition_sel::DefinitionSelEntry>,
+    BTreeMap<String, LobbyPlayerCandidate>,
+)> {
+    let configured_player_path = config
+        .get_in(Some("General"), "PlayerPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let root = if configured_player_path.is_absolute() {
+        configured_player_path
+    } else {
+        paths.install_root().join(configured_player_path)
+    };
+    let players = discover_player_files_in(paths.install_root(), config)?;
+    let mut candidates = BTreeMap::new();
+    let entries = players
+        .into_iter()
+        .filter_map(|player| {
+            let full_path = player.path.to_string_lossy().into_owned();
+            // A non-UTF-8 collision cannot be represented by the selector's
+            // string identity. Keep the first exact physical path rather
+            // than silently replacing it with a different file.
+            if candidates.contains_key(&full_path) {
+                return None;
+            }
+            let label = Path::new(&player.file_name)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| player.file_name.clone());
+            candidates.insert(
+                full_path.clone(),
+                LobbyPlayerCandidate {
+                    source_path: player.path,
+                    wire_filename: player.file_name,
+                },
+            );
+            Some(lc_frontend::definition_sel::DefinitionSelEntry::new(
+                full_path, label,
+            ))
+        })
+        .collect();
+    Ok((root, entries, candidates))
+}
+
+fn classic_lobby_resource_cores<'a>(
+    parameters: &'a lc_network::JoinGameParametersEnvelope,
+    dynamic: &'a lc_engine::NetworkResourceCore,
+) -> impl Iterator<Item = &'a lc_engine::NetworkResourceCore> + 'a {
+    let player_cores = parameters
+        .player_infos
+        .clients
+        .iter()
+        .flat_map(|client| &client.players)
+        .filter(|player| {
+            player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0
+                && player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0
+                && player.flags & lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE == 0
+        })
+        .filter_map(|player| player.resource.as_ref());
+    std::iter::once(&parameters.scenario)
+        .chain(parameters.game_resources.iter())
+        .chain(std::iter::once(dynamic))
+        .chain(player_cores)
+        .filter(|core| core.id >= 0)
+}
+
+fn initial_classic_lobby_resource_rows(
+    snapshot: Option<&lc_network::HostJoinSnapshot>,
+) -> BTreeMap<i32, LobbyResourceRow> {
+    let Some(snapshot) = snapshot else {
+        return BTreeMap::new();
+    };
+    classic_lobby_resource_cores(&snapshot.parameters, &snapshot.dynamic)
+        .map(|core| {
+            (
+                core.id,
+                LobbyResourceRow {
+                    id: core.id,
+                    filename: legacy_presentation_text(core.filename.as_bytes()),
+                    present_percent: 100,
+                },
+            )
+        })
+        .collect()
+}
+
+fn joined_classic_lobby_resource_rows(
+    join_data: &lc_network::JoinDataEnvelope,
+    present_percent: &BTreeMap<i32, u8>,
+) -> BTreeMap<i32, LobbyResourceRow> {
+    classic_lobby_resource_cores(&join_data.parameters, &join_data.dynamic)
+        .map(|core| {
+            (
+                core.id,
+                LobbyResourceRow {
+                    id: core.id,
+                    filename: legacy_presentation_text(core.filename.as_bytes()),
+                    present_percent: present_percent.get(&core.id).copied().unwrap_or(0),
+                },
+            )
+        })
+        .collect()
 }
 
 fn initial_network_control_clock(
@@ -8673,6 +9012,45 @@ fn runtime_teams_from_join_snapshot(
             .with_icon_spec(lc_script::c4_string_from_bytes(team.icon_spec.as_bytes()))
         })
         .collect()
+}
+
+fn initial_team_metadata_from_join_snapshot(
+    snapshot: &lc_network::JoinTeamListSnapshot,
+) -> Option<lc_engine::InitialNetworkTeamMetadata> {
+    let team_distribution = match snapshot.team_distribution {
+        0 => lc_engine::InitialNetworkTeamDistribution::Free,
+        1 => lc_engine::InitialNetworkTeamDistribution::Host,
+        2 => lc_engine::InitialNetworkTeamDistribution::None,
+        3 => lc_engine::InitialNetworkTeamDistribution::Random,
+        4 => lc_engine::InitialNetworkTeamDistribution::RandomInvisible,
+        _ => return None,
+    };
+    Some(lc_engine::InitialNetworkTeamMetadata {
+        active: snapshot.active != 0,
+        custom: snapshot.custom != 0,
+        allow_hostility_change: snapshot.allow_hostility_change != 0,
+        allow_team_switch: snapshot.allow_team_switch != 0,
+        auto_generate_teams: snapshot.auto_generate_teams != 0,
+        last_team_id: snapshot.last_team_id,
+        team_distribution,
+        team_colors: snapshot.team_colors != 0,
+        max_script_players: snapshot.max_script_players,
+        script_player_names: snapshot.script_player_names.clone(),
+        random_team_count: snapshot.random_team_count,
+        teams: snapshot
+            .teams
+            .iter()
+            .map(|team| lc_engine::InitialNetworkTeam {
+                id: team.id,
+                name: team.name.clone(),
+                player_start_index: team.player_start_index,
+                player_ids: team.player_ids.clone(),
+                color: team.color,
+                icon_spec: team.icon_spec.clone(),
+                max_players: team.max_players,
+            })
+            .collect(),
+    })
 }
 
 fn initial_team_from_runtime(team: &lc_engine::TeamInfo) -> lc_engine::InitialNetworkTeam {
@@ -9332,6 +9710,8 @@ struct GameApp {
     definition_selector: Option<lc_frontend::definition_sel::DefinitionSelController>,
     /// Scenario/root retained until the selector accepts or cancels.
     pending_definition_selection: Option<PendingDefinitionSelection>,
+    /// Local-client target and path/wire-name map for C4PlayerSelDlg.
+    pending_lobby_player_selection: Option<PendingLobbyPlayerSelection>,
     /// Classic non-chat input dialog opened by Password/Comment in the
     /// scenario selector's embedded C4GameOptionButtons.
     game_option_input_dialog: Option<PendingGameOptionInputDialog>,
@@ -9342,6 +9722,10 @@ struct GameApp {
     /// Player row whose C4GUI::ComboBox owns the shared context menu. This
     /// keeps the simple combo's arrow/highlight in its open phase.
     context_menu_lobby_team_player: Option<i32>,
+    /// Remote client row whose Kick popup owns the shared context menu. A
+    /// synchronized removal closes this menu before input can target a row
+    /// that no longer exists.
+    context_menu_lobby_kick_client: Option<i32>,
     /// C4GUI::ComboBox remembers the last menu index after Screen closes an
     /// outside-clicked menu. Retain that owner for the remainder of the same
     /// pointer-down so clicking the open combo closes instead of reopening it.
@@ -10102,10 +10486,7 @@ enum ClassicGameLobbyChild {
     AbortCountdown,
     Ready,
     Sheet(LobbySheet),
-    TabContext,
     RosterContext(LobbyRosterId),
-    AddPlayer(i32),
-    AddScriptPlayer,
     Chat,
     ExternalIrcChat,
     GameOptionSideEffect(&'static str),
@@ -11367,18 +11748,30 @@ enum LobbyPointerRegion {
 enum LobbyButton {
     Ready,
     Start,
+    Sheet(LobbySheet),
 }
 
 #[derive(Clone, Debug)]
 struct NetworkLobbyLayout {
     ready_button: GuiRect,
     start_button: Option<GuiRect>,
+    sheet_buttons: Vec<(LobbySheet, GuiRect)>,
     menu_region_max_x: f32,
 }
 
 #[derive(Clone, Debug)]
 struct NetworkLobbyState {
     participants: BTreeMap<ClientId, LobbyParticipantState>,
+    /// Authoritative PlayerInfo projection shared with the host's persistent
+    /// controller so peer lobbies converge after the same direct control.
+    roster_rows: Vec<LobbyRosterRow>,
+    max_players: i32,
+    has_teams: bool,
+    active_sheet: LobbySheet,
+    /// Client-side C4Network2ResDlg snapshot. Network updates continue while
+    /// hidden; the reconstructed controller receives it only when active.
+    resource_rows: BTreeMap<i32, LobbyResourceRow>,
+    resource_scroll: i32,
     logs: Vec<LobbyLogLine>,
     chat_edit: LobbyChatEditView,
     chat_history_index: i32,
@@ -11401,6 +11794,7 @@ struct NetworkLobbyState {
 enum LobbyAction {
     ToggleReady,
     StartGame,
+    SelectSheet(LobbySheet),
     SubmitMessage(String),
     ChatEdited,
 }
@@ -11639,6 +12033,12 @@ impl NetworkLobbyState {
         }
         Self {
             participants,
+            roster_rows: Vec::new(),
+            max_players: 1,
+            has_teams: false,
+            active_sheet: LobbySheet::Players,
+            resource_rows: BTreeMap::new(),
+            resource_scroll: 0,
             logs: Vec::new(),
             chat_edit: LobbyChatEditView::default(),
             chat_history_index: -1,
@@ -11686,7 +12086,7 @@ impl NetworkLobbyState {
             34,
             22,
             role,
-            false,
+            self.has_teams,
             false,
         );
         let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
@@ -11696,6 +12096,11 @@ impl NetworkLobbyState {
         self.layout = Some(NetworkLobbyLayout {
             ready_button: as_gui_rect(layout.ready_checkbox),
             start_button: layout.run_button.map(as_gui_rect),
+            sheet_buttons: layout
+                .tab_buttons
+                .into_iter()
+                .filter_map(|button| button.sheet.map(|sheet| (sheet, as_gui_rect(button.rect))))
+                .collect(),
             // C4GameLobby has no startup scenario-selector pane. Keep all
             // ordinary pointer traffic on the fullscreen dialog itself.
             menu_region_max_x: -1.0,
@@ -11731,6 +12136,7 @@ impl NetworkLobbyState {
             match hit {
                 Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
                 Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
+                Some(LobbyButton::Sheet(sheet)) => Some(LobbyAction::SelectSheet(sheet)),
                 None => None,
             }
         } else {
@@ -11852,10 +12258,10 @@ impl NetworkLobbyState {
         } else {
             LobbyRole::Client
         };
-        let rows = self
-            .participants
-            .iter()
-            .map(|(client_id, participant)| {
+        let participant_rows = || {
+            self.participants
+                .iter()
+                .map(|(client_id, participant)| {
                 LobbyRosterRow::Client(LobbyClientRow {
                     id: i32::try_from(*client_id).unwrap_or(i32::MAX),
                     name: participant.name.clone(),
@@ -11882,24 +12288,34 @@ impl NetworkLobbyState {
                     ping_ms: None,
                 })
             })
-            .collect::<Vec<_>>();
-        let active_players = self
-            .participants
-            .values()
-            .filter(|participant| !matches!(participant.kind, ParticipantKind::Observer))
+            .collect::<Vec<_>>()
+        };
+        let rows = if self.roster_rows.is_empty() {
+            participant_rows()
+        } else {
+            self.roster_rows.clone()
+        };
+        let active_players = rows
+            .iter()
+            .filter(|row| matches!(row, LobbyRosterRow::Player(_)))
             .count() as i32;
         let mut controller = ClassicGameLobby::new(
             role,
             self.selected_title.clone().unwrap_or_default(),
             active_players,
-            active_players.max(1),
-            false,
+            self.max_players.max(1),
+            self.has_teams,
             false,
             true,
             self.local_ready(),
             DEFAULT_LOBBY_COUNTDOWN_SECONDS,
             rows,
         );
+        controller.set_active_sheet(self.active_sheet);
+        if self.active_sheet == LobbySheet::Resources {
+            controller.set_resource_rows(self.resource_rows.values().cloned().collect());
+            controller.set_resource_scroll(self.resource_scroll);
+        }
         controller.set_logs(self.logs.clone());
         controller.set_chat_edit_view(self.chat_edit.clone());
         if let Some(seconds) = self.countdown {
@@ -11922,6 +12338,11 @@ impl NetworkLobbyState {
         self.layout = Some(NetworkLobbyLayout {
             ready_button: as_gui_rect(layout.ready_checkbox),
             start_button: layout.run_button.map(as_gui_rect),
+            sheet_buttons: layout
+                .tab_buttons
+                .iter()
+                .filter_map(|button| button.sheet.map(|sheet| (sheet, as_gui_rect(button.rect))))
+                .collect(),
             menu_region_max_x: -1.0,
         });
         Ok((controller, options))
@@ -11938,7 +12359,7 @@ impl NetworkLobbyState {
         let option_resources = assets.game_option_resources()?;
         let (mut controller, options) =
             self.classic_render_state(surface, assets, scenario_game_options)?;
-        if include_tooltips {
+        let result = if include_tooltips {
             controller.render(
                 surface,
                 &resources,
@@ -11956,7 +12377,9 @@ impl NetworkLobbyState {
                 true,
                 Some(startup_gamma()),
             )
-        }
+        };
+        self.resource_scroll = controller.resource_scroll();
+        result
     }
 
     fn render_classic_tooltips(
@@ -11977,6 +12400,32 @@ impl NetworkLobbyState {
             true,
             Some(startup_gamma()),
         )
+    }
+
+    fn wheel_resources(
+        &mut self,
+        delta: i32,
+        surface: &Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<bool> {
+        if self.active_sheet != LobbySheet::Resources {
+            return Ok(false);
+        }
+        let Some(point) = self.pointer else {
+            return Ok(false);
+        };
+        let fonts = assets
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let (mut controller, _) =
+            self.classic_render_state(surface, assets, scenario_game_options)?;
+        let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
+        let roster = controller.roster_layout(&layout, fonts.text.line_height);
+        let changed = controller.wheel(point, delta, &layout, &roster);
+        self.resource_scroll = controller.resource_scroll();
+        Ok(changed)
     }
 
     fn insert_chat_text(&mut self, text: &str) {
@@ -12069,6 +12518,13 @@ impl NetworkLobbyState {
             if point_in_rect(point, rect) {
                 return Some(LobbyButton::Start);
             }
+        }
+        if let Some((sheet, _)) = layout
+            .sheet_buttons
+            .iter()
+            .find(|(_, rect)| point_in_rect(point, rect))
+        {
+            return Some(LobbyButton::Sheet(*sheet));
         }
         None
     }
@@ -18232,9 +18688,11 @@ impl GameApp {
             message_dialogs: Vec::new(),
             definition_selector: None,
             pending_definition_selection: None,
+            pending_lobby_player_selection: None,
             game_option_input_dialog: None,
             context_menu: None,
             context_menu_lobby_team_player: None,
+            context_menu_lobby_kick_client: None,
             context_menu_pointer_dismissed_lobby_team_player: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
@@ -20045,6 +20503,39 @@ impl GameApp {
                 }
             };
             return self.handle_classic_lobby_wheel(amount);
+        }
+        if self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkLobby
+            && self.network_lobby.is_some()
+        {
+            let amount = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let changed = match self.network_lobby.as_mut() {
+                Some(lobby) => lobby.wheel_resources(
+                    amount,
+                    self.graphics.surface(),
+                    self.assets.as_ref(),
+                    &self.scenario_game_options,
+                )
+                .map_err(|error| {
+                    classic_parity_engine_error(report_classic_parity_boundary(
+                        ClassicParityBoundary::GameLobby(
+                            ClassicGameLobbyBoundary::Resources {
+                                detail: error.to_string(),
+                            },
+                        ),
+                    ))
+                })?,
+                None => false,
+            };
+            if changed {
+                self.mark_menu_dirty();
+            }
+            return Ok(());
         }
         if self.mode == AppMode::Running {
             if !self.mouse_control {
@@ -25252,6 +25743,7 @@ impl GameApp {
                 || !had_client_packet);
         self.admission_resources
             .register_player_info_resources(&info.players);
+        self.register_classic_lobby_player_resources(&info.players);
         self.control_player_infos.apply(info);
         let rebalance_updates = self.recheck_team_memberships_from_player_infos();
         let follow_ups = if local_origin {
@@ -25273,6 +25765,8 @@ impl GameApp {
             &self.control_player_infos,
         );
         self.publish_current_host_player_infos();
+        self.sync_classic_lobby_roster();
+        self.sync_classic_lobby_resource_ready();
         let should_issue_joins = issue_joins
             && self.mode == AppMode::Running
             && matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
@@ -25347,6 +25841,7 @@ impl GameApp {
         let client_id = info.client_id;
         self.admission_resources
             .register_player_info_resources(&info.players);
+        self.register_classic_lobby_player_resources(&info.players);
         for player in &mut join_players_on_echo {
             let Some(normalized) = info.players.iter().find(|normalized| normalized.id == player.id)
             else {
@@ -25370,6 +25865,8 @@ impl GameApp {
         if !join_players_on_echo.is_empty() {
             self.issue_reserved_joins_for_player_snapshot(client_id, &join_players_on_echo);
         }
+        self.sync_classic_lobby_roster();
+        self.sync_classic_lobby_resource_ready();
     }
 
     fn commit_host_player_info_admission(
@@ -25431,10 +25928,33 @@ impl GameApp {
     }
 
     fn submit_runtime_network_player(&mut self, file: &str) -> Result<(), String> {
+        self.submit_runtime_network_player_path(Path::new(file), file)
+    }
+
+    fn submit_runtime_network_player_path(
+        &mut self,
+        source_path: &Path,
+        wire_filename: &str,
+    ) -> Result<(), String> {
         let league_auth = self.league_player_auth_settings();
-        let host = match self.network_mode.as_ref() {
-            Some(NetworkMode::Host(_)) => true,
-            Some(NetworkMode::Client(_)) => false,
+        let fallback_group_maker = || {
+            self.configured_client_player_selection
+                .as_ref()
+                .map(|selection| selection.group_maker().clone())
+                .or_else(|| {
+                    lc_engine::LegacyCString::from_bytes(self.player_name.as_bytes().to_vec())
+                })
+                .ok_or_else(|| "network player name contains an interior NUL".to_string())
+        };
+        let (host, group_maker) = match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(settings)) => (
+                true,
+                match settings.prepared.as_ref() {
+                    Some(prepared) => prepared.host_config().group_maker.clone(),
+                    None => fallback_group_maker()?,
+                },
+            ),
+            Some(NetworkMode::Client(settings)) => (false, settings.group_maker.clone()),
             None => return Err("runtime joining requires a network session".to_string()),
         };
         let network = self
@@ -25447,14 +25967,11 @@ impl GameApp {
             return Err("network client is not active".to_string());
         }
 
-        let source_path = PathBuf::from(file);
+        let source_path = source_path.to_path_buf();
         let player_file = PlayerFile::load_from_path(&source_path)
             .map_err(|error| format!("failed to load {}: {error}", source_path.display()))?;
-        let wire_name = lc_engine::LegacyCString::from_bytes(file.as_bytes().to_vec())
+        let wire_name = lc_engine::LegacyCString::from_bytes(wire_filename.as_bytes().to_vec())
             .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
-        let group_maker =
-            lc_engine::LegacyCString::from_bytes(self.player_name.as_bytes().to_vec())
-                .ok_or_else(|| "network player name contains an interior NUL".to_string())?;
         let selected =
             SelectedClientPlayer::new(source_path.clone(), wire_name.clone(), player_file);
 
@@ -26143,7 +26660,8 @@ impl GameApp {
             .as_mut()
             .map(NetworkManager::poll_events)
             .unwrap_or_default();
-        if !events.is_empty() {
+        let had_events = !events.is_empty();
+        if had_events {
             self.mark_menu_dirty();
         }
         {
@@ -26187,24 +26705,24 @@ impl GameApp {
                     ) {
                         continue;
                     }
-                    let player_info_event = matches!(
+                    let classic_lobby_state_event = matches!(
                         &event,
                         NetworkEvent::PlayerInfoUpdateRequest { .. }
                             | NetworkEvent::PreexecutedPlayerInfoEcho { .. }
                             | NetworkEvent::DirectControl(NetworkControl::PlayerInfo(_))
-                    );
-                    let supported_classic_event = matches!(
-                        &event,
-                        NetworkEvent::ReadyCheck(_)
-                            | NetworkEvent::HostStatusAck { .. }
-                            | NetworkEvent::LobbyCountdown(_)
+                            | NetworkEvent::DirectControl(NetworkControl::ClientJoin(_))
+                            | NetworkEvent::DirectControl(NetworkControl::ClientUpdate(_))
+                            | NetworkEvent::DirectControl(NetworkControl::ClientRemove(_))
                             | NetworkEvent::PeerConnected { .. }
                             | NetworkEvent::PeerDisconnected { .. }
-                            | NetworkEvent::ResourceAction(_)
+                            | NetworkEvent::ResourceProgress { .. }
                             | NetworkEvent::ResourceComplete { .. }
                             | NetworkEvent::ResourceLoadFailed { .. }
+                            | NetworkEvent::ReadyCheck(_)
+                            | NetworkEvent::HostStatusAck { .. }
+                            | NetworkEvent::LobbyCountdown(_)
+                            | NetworkEvent::ResourceAction(_)
                             | NetworkEvent::ResourceDeriveUnsupported { .. }
-                            | NetworkEvent::DirectControl(NetworkControl::ClientJoin(_))
                     );
                     if let NetworkEvent::DirectControl(NetworkControl::Message(control)) = &event {
                         self.execute_message_control(control.clone());
@@ -26213,7 +26731,6 @@ impl GameApp {
                     let boundary = match &event {
                         NetworkEvent::HostPingMeasured { .. } => None,
                         NetworkEvent::HostStatusChanged(_) => None,
-                        NetworkEvent::PeerConnected { client_id: 0, .. } => None,
                         NetworkEvent::JoinData(_) => Some("join data"),
                         NetworkEvent::LeagueRoundResults(_) => Some("league round results"),
                         NetworkEvent::LeagueUpdate(_) => Some("league update"),
@@ -26227,8 +26744,12 @@ impl GameApp {
                         NetworkEvent::PreexecutedPlayerInfoEcho { .. } => None,
                         NetworkEvent::ReadyTick { .. } => Some("ready control tick"),
                         NetworkEvent::ScheduledSync { .. } => Some("scheduled control"),
-                        NetworkEvent::DirectControl(NetworkControl::PlayerInfo(_)) => None,
-                        NetworkEvent::DirectControl(NetworkControl::ClientJoin(_)) => None,
+                        NetworkEvent::DirectControl(
+                            NetworkControl::PlayerInfo(_)
+                            | NetworkControl::ClientJoin(_)
+                            | NetworkControl::ClientUpdate(_)
+                            | NetworkControl::ClientRemove(_),
+                        ) => None,
                         NetworkEvent::DirectControl(_) => Some("direct player/resource control"),
                         NetworkEvent::PeerConnected { .. } => None,
                         NetworkEvent::PeerDisconnected { .. } => None,
@@ -26239,6 +26760,7 @@ impl GameApp {
                             "netpuncher state is applied before the classic-lobby boundary"
                         ),
                         NetworkEvent::ResourceAction(_) => None,
+                        NetworkEvent::ResourceProgress { .. } => None,
                         NetworkEvent::ResourceComplete { .. } => None,
                         NetworkEvent::ResourceLoadFailed { .. } => None,
                         NetworkEvent::ResourceDeriveUnsupported { .. } => None,
@@ -26249,7 +26771,7 @@ impl GameApp {
                             ClassicGameLobbyChild::NetworkEvent(boundary),
                         ));
                     }
-                    if !player_info_event && !supported_classic_event {
+                    if !classic_lobby_state_event {
                         continue;
                     }
                 }
@@ -26318,6 +26840,10 @@ impl GameApp {
                         // (src/C4Network2.cpp:1574-1620,619-671).
                         self.admission_resources
                             .register_join_data_resources(&join_data);
+                        let lobby_resource_rows = joined_classic_lobby_resource_rows(
+                            &join_data,
+                            &self.admission_resources.present_percent,
+                        );
                         self.network_max_players =
                             usize::try_from(join_data.parameters.max_players).unwrap_or(0);
                         self.engine
@@ -26374,6 +26900,7 @@ impl GameApp {
                                 &join_data.parameters.clients.clients,
                             );
                             lobby.set_scenario_title(&scenario_title);
+                            lobby.resource_rows = lobby_resource_rows;
                         }
                         if !scenario_title.is_empty() {
                             self.scenario_label = scenario_title;
@@ -26395,6 +26922,8 @@ impl GameApp {
                         self.client_combined_scenario_path = None;
                         self.client_material_resource_groups = None;
                         self.pending_network_join_data = Some(join_data);
+                        self.sync_classic_lobby_roster();
+                        self.sync_classic_lobby_resource_ready();
                         self.acknowledge_initial_lobby_status_if_ready();
                     }
                     NetworkEvent::LeagueRoundResults(packet) => {
@@ -26408,7 +26937,7 @@ impl GameApp {
                             if self.control_clients.clear_nonhost_lobby_ready() {
                                 self.publish_updated_host_join_snapshot();
                             }
-                            self.sync_classic_lobby_client_rows();
+                            self.sync_classic_lobby_roster();
                             self.handle_lobby_ready_check_request(packet)?;
                         } else {
                             self.append_remote_lobby_ready_log(packet);
@@ -26422,7 +26951,7 @@ impl GameApp {
                             if ready_state_changed {
                                 self.publish_updated_host_join_snapshot();
                             }
-                            self.sync_classic_lobby_client_rows();
+                            self.sync_classic_lobby_roster();
                             let changed_client_id = ready_state_changed
                                 .then(|| ClientId::try_from(packet.client_id).ok())
                                 .flatten()
@@ -26598,8 +27127,27 @@ impl GameApp {
                                     self.network_client_activity
                                         .reset_client(join.core.client_id);
                                     self.publish_updated_host_join_snapshot();
+                                    self.sync_classic_lobby_roster();
                                 }
-                                self.sync_classic_lobby_client_rows();
+                            }
+                            NetworkControl::ClientUpdate(update) => {
+                                self.control_clients.apply_update(&update);
+                                if update.by_client == 0 {
+                                    self.publish_updated_host_join_snapshot();
+                                }
+                                self.sync_classic_lobby_roster();
+                            }
+                            NetworkControl::ClientRemove(remove) => {
+                                if self.control_clients.apply_remove(&remove) {
+                                    self.remove_classic_lobby_resources_at_client(
+                                        remove.client_id,
+                                    );
+                                    self.network_client_activity.remove_client(remove.client_id);
+                                    self.control_messages.remove_client(remove.client_id);
+                                    self.control_player_infos.on_client_part(remove.client_id);
+                                    self.publish_current_host_player_infos();
+                                    self.sync_classic_lobby_roster();
+                                }
                             }
                             NetworkControl::SyncCheck(packet) => {
                                 self.handle_sync_check(packet);
@@ -26615,7 +27163,7 @@ impl GameApp {
                                         tracing::error!(%error, "failed to broadcast updated PlayerInfo follow-up");
                                     }
                                 }
-                                self.sync_classic_lobby_client_rows();
+                                self.sync_classic_lobby_roster();
                             }
                             NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
                             NetworkControl::Set(set) => self.execute_control_set(set),
@@ -26640,9 +27188,6 @@ impl GameApp {
                                 .is_some_and(|network| network.local_client_id() == client_id);
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.register_peer(client_id, name.clone(), kind);
-                        }
-                        if !already_local_classic {
-                            self.add_classic_lobby_peer(client_id, name.clone(), kind);
                         }
                         if let (Ok(client_id), Some(wait)) =
                             (i32::try_from(client_id), self.network_start_wait.as_mut())
@@ -26676,7 +27221,6 @@ impl GameApp {
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.unregister_peer(client_id);
                         }
-                        self.remove_classic_lobby_peer(client_id);
                         self.mark_network_start_wait_client_kick(client_id);
                         if abort_countdown_for_disconnected_client {
                             self.abort_network_lobby_countdown();
@@ -26737,6 +27281,18 @@ impl GameApp {
                         tracing::debug!(?action, "network resource backend action pending");
                         self.sync_classic_lobby_resource_ready();
                     }
+                    NetworkEvent::ResourceProgress {
+                        resource_id,
+                        present_percent,
+                    } => {
+                        self.admission_resources
+                            .mark_progress(resource_id, present_percent);
+                        self.update_classic_lobby_resource_progress(
+                            resource_id,
+                            present_percent,
+                        );
+                        self.sync_classic_lobby_resource_ready();
+                    }
                     NetworkEvent::ResourceComplete {
                         resource_id,
                         core,
@@ -26745,6 +27301,7 @@ impl GameApp {
                         self.admission_resources.register_lobby_resource(&core);
                         self.admission_resources
                             .mark_complete(resource_id, path.clone());
+                        self.register_classic_lobby_resource(&core, 100);
                         tracing::info!(
                             resource_id,
                             resource = %core.filename.to_string_lossy(),
@@ -26756,6 +27313,7 @@ impl GameApp {
                     }
                     NetworkEvent::ResourceLoadFailed { resource_id } => {
                         self.admission_resources.mark_failed(resource_id);
+                        self.remove_classic_lobby_resource(resource_id);
                         tracing::warn!(resource_id, "network resource load failed");
                         self.sync_classic_lobby_resource_ready();
                     }
@@ -26772,6 +27330,9 @@ impl GameApp {
                     }
                 }
             }
+        }
+        if had_events {
+            self.sync_classic_lobby_roster();
         }
         Ok(())
     }
@@ -27358,6 +27919,7 @@ impl GameApp {
 
     fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.context_menu_pointer_dismissed_lobby_team_player = None;
         match event {
             GamepadEvent::Direction {
                 slot,
@@ -28614,13 +29176,19 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.startup_player_properties_dialog.is_some() && self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() {
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some()
-            && self.context_menu.is_none()
-            && self.message_dialogs.is_empty()
-        {
+        if self.startup_player_properties_dialog.is_some() {
+            return Ok(());
+        }
+        if self.definition_selector.is_some() {
+            return Ok(());
+        }
+        if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)? {
+            return Ok(());
+        }
+        if self.game_option_input_dialog.is_some() {
             if button_state == ElementState::Pressed {
                 let point = self.game_option_input_pointer_position;
                 let layout = self.game_option_input_layout();
@@ -28649,11 +29217,11 @@ impl GameApp {
         if input_dialog_release_latched {
             return Ok(());
         }
+        if self.game_over_dialog.is_some() {
+            return Ok(());
+        }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_middle_button(button_state);
-        }
-        if self.message_dialogs.is_empty() && self.definition_selector.is_none() {
-            self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)?;
         }
         Ok(())
     }
@@ -30658,6 +31226,7 @@ impl GameApp {
             root,
             custom_definition_root,
         });
+        self.pending_lobby_player_selection = None;
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
@@ -31574,11 +32143,18 @@ impl GameApp {
         options.set_bounds(layout.game_option_strip);
         // Prime scroll metrics before the first pointer or wheel event.
         let _ = controller.roster_layout(&layout, fonts.text.line_height);
+        let resource_rows = initial_classic_lobby_resource_rows(
+            settings
+                .prepared
+                .as_ref()
+                .and_then(|prepared| prepared.host_config().initial_join_snapshot.as_ref()),
+        );
         Ok((
             ClassicHostLobbyState {
                 controller,
                 pointer: None,
                 chat_history_index: -1,
+                resource_rows,
             },
             options,
         ))
@@ -31694,6 +32270,7 @@ impl GameApp {
                                 match prepared.install_initial_host_player_state(
                                     player_infos,
                                     |core, path| {
+                                        resources.register_lobby_resource(core);
                                         resources.mark_complete(core.id, path.to_path_buf())
                                     },
                                 ) {
@@ -31846,6 +32423,8 @@ impl GameApp {
                             self.network_control_clock = network_control_clock;
                             self.network_lobby = None;
                             self.classic_host_lobby = Some(lobby);
+                            self.sync_classic_lobby_roster();
+                            self.sync_classic_lobby_resource_ready();
                             self.scenario_game_options = options;
                             self.startup_view = StartupView::NetworkLobby;
                             self.mode = AppMode::Menu;
@@ -32176,14 +32755,28 @@ impl GameApp {
     }
 
     fn close_stale_classic_lobby_team_combo(&mut self) {
-        let Some(player_id) = self.context_menu_lobby_team_player else {
-            return;
-        };
-        let retained = self
+        let roster_active = self
             .classic_host_lobby
             .as_ref()
-            .and_then(|lobby| lobby.controller.open_team_combo_player());
-        if retained != Some(player_id) {
+            .is_some_and(|lobby| lobby.controller.active_sheet().is_roster());
+        let stale_team_combo = self.context_menu_lobby_team_player.is_some_and(|player_id| {
+            !roster_active
+                || self
+                    .classic_host_lobby
+                    .as_ref()
+                    .and_then(|lobby| lobby.controller.open_team_combo_player())
+                    != Some(player_id)
+        });
+        let stale_kick = self.context_menu_lobby_kick_client.is_some_and(|client_id| {
+            !roster_active
+                || !self.control_clients.contains(client_id)
+                || !self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                    lobby.controller.rows().iter().any(|row| {
+                        matches!(row, LobbyRosterRow::Client(client) if client.id == client_id && !client.local)
+                    })
+                })
+        });
+        if stale_team_combo || stale_kick {
             // ComboBox::SetReadOnly aborts its menu without a DoorClose sound.
             self.close_context_menu_silently();
         }
@@ -32216,6 +32809,7 @@ impl GameApp {
             minimum_width,
         );
         self.context_menu = Some(menu);
+        self.context_menu_lobby_kick_client = None;
         self.set_context_menu_lobby_team_player(lobby_team_player);
         self.process_context_menu_outcome(outcome)?;
         Ok(true)
@@ -32274,6 +32868,566 @@ impl GameApp {
             })
             .collect();
         self.open_context_menu_at(entries, anchor)
+    }
+
+    fn sync_classic_lobby_roster(&mut self) {
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        let joined_teams = self
+            .pending_network_join_data
+            .as_ref()
+            .and_then(|join| initial_team_metadata_from_join_snapshot(&join.parameters.teams));
+        let teams = self
+            .network_team_assignment
+            .as_ref()
+            .map(NetworkTeamAssignmentState::teams)
+            .or(joined_teams.as_ref());
+        let has_teams = teams.is_some_and(|teams| teams.active);
+        let (mut rows, active_players) = classic_lobby_roster_projection(
+            &self.control_clients,
+            &self.control_player_infos,
+            teams,
+            local_client_id,
+        );
+        let previous_clients = self
+            .classic_host_lobby
+            .as_ref()
+            .into_iter()
+            .flat_map(|lobby| lobby.controller.rows())
+            .filter_map(|row| match row {
+                LobbyRosterRow::Client(client) => Some((client.id, client.clone())),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        for row in &mut rows {
+            let LobbyRosterRow::Client(client) = row else {
+                continue;
+            };
+            let Some(previous) = previous_clients.get(&client.id) else {
+                continue;
+            };
+            if client.name.is_empty() {
+                client.name.clone_from(&previous.name);
+            }
+            if client.nick.is_empty() {
+                client.nick.clone_from(&previous.nick);
+            }
+            if client.id == 0
+                && client.status == LobbyClientStatus::Unknown
+                && previous.status == LobbyClientStatus::Host
+            {
+                // The staged controller is constructed from the prepared
+                // host core before the empty initial PlayerInfo packet is
+                // projected. Preserve that known host identity across this
+                // transitional synchronization pass.
+                client.status = LobbyClientStatus::Host;
+            }
+        }
+        let maximum = i32::try_from(self.network_max_players).unwrap_or(i32::MAX);
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_rows(rows.clone());
+            lobby.controller.set_player_count(active_players, maximum);
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.roster_rows = rows;
+            lobby.max_players = maximum;
+            lobby.has_teams = has_teams;
+        }
+        self.close_stale_classic_lobby_team_combo();
+    }
+
+    fn sync_visible_classic_lobby_resources(&mut self) {
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return;
+        };
+        if lobby.controller.resource_sheet_active() {
+            lobby
+                .controller
+                .set_resource_rows(lobby.resource_rows.values().cloned().collect());
+        }
+    }
+
+    fn register_classic_lobby_resource(
+        &mut self,
+        core: &lc_engine::NetworkResourceCore,
+        present_percent: u8,
+    ) {
+        if core.id < 0 {
+            return;
+        }
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.resource_rows.insert(
+                core.id,
+                LobbyResourceRow {
+                    id: core.id,
+                    filename: legacy_presentation_text(core.filename.as_bytes()),
+                    present_percent: present_percent.min(100),
+                },
+            );
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.resource_rows.insert(
+                core.id,
+                LobbyResourceRow {
+                    id: core.id,
+                    filename: legacy_presentation_text(core.filename.as_bytes()),
+                    present_percent: present_percent.min(100),
+                },
+            );
+        }
+        self.sync_visible_classic_lobby_resources();
+    }
+
+    fn register_classic_lobby_player_resources(
+        &mut self,
+        players: &[lc_engine::ControlPlayerInfoEntry],
+    ) {
+        let cores = players
+            .iter()
+            .filter(|player| {
+                player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0
+                    && player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0
+                    && player.flags & lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE == 0
+            })
+            .filter_map(|player| player.resource.as_ref())
+            .filter_map(|core| {
+                let available = matches!(
+                    self.admission_resources.status(core.id),
+                    Some(AdmissionResourceState::Loading { removed: false })
+                        | Some(AdmissionResourceState::Complete { removed: false, .. })
+                );
+                available.then(|| {
+                    let percent = self
+                        .admission_resources
+                        .present_percent
+                        .get(&core.id)
+                        .copied()
+                        .unwrap_or(0);
+                    (core.clone(), percent)
+                })
+            })
+            .collect::<Vec<_>>();
+        for (core, percent) in cores {
+            self.register_classic_lobby_resource(&core, percent);
+        }
+    }
+
+    fn update_classic_lobby_resource_progress(&mut self, resource_id: i32, percent: u8) {
+        if let Some(row) = self
+            .classic_host_lobby
+            .as_mut()
+            .and_then(|lobby| lobby.resource_rows.get_mut(&resource_id))
+        {
+            row.present_percent = percent.min(100);
+        }
+        if let Some(row) = self
+            .network_lobby
+            .as_mut()
+            .and_then(|lobby| lobby.resource_rows.get_mut(&resource_id))
+        {
+            row.present_percent = percent.min(100);
+        }
+        self.sync_visible_classic_lobby_resources();
+    }
+
+    fn remove_classic_lobby_resource(&mut self, resource_id: i32) {
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.resource_rows.remove(&resource_id);
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.resource_rows.remove(&resource_id);
+        }
+        self.sync_visible_classic_lobby_resources();
+    }
+
+    fn remove_classic_lobby_resources_at_client(&mut self, client_id: i32) {
+        let owned = |resource_id: &i32| *resource_id >= 0 && (*resource_id >> 16) == client_id;
+        self.admission_resources
+            .resources
+            .retain(|resource_id, _| !owned(resource_id));
+        self.admission_resources
+            .resource_types
+            .retain(|resource_id, _| !owned(resource_id));
+        self.admission_resources
+            .present_percent
+            .retain(|resource_id, _| !owned(resource_id));
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby
+                .resource_rows
+                .retain(|resource_id, _| !owned(resource_id));
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby
+                .resource_rows
+                .retain(|resource_id, _| !owned(resource_id));
+        }
+        self.sync_visible_classic_lobby_resources();
+        self.sync_classic_lobby_resource_ready();
+    }
+
+    fn select_classic_lobby_sheet(&mut self, sheet: LobbySheet) -> bool {
+        if matches!(sheet, LobbySheet::Options | LobbySheet::Scenario) {
+            return false;
+        }
+        let has_teams = self
+            .network_team_assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.teams().active);
+        if sheet == LobbySheet::Teams && !has_teams {
+            return false;
+        }
+        if !sheet.is_roster()
+            && (self.context_menu_lobby_team_player.is_some()
+                || self.context_menu_lobby_kick_client.is_some())
+        {
+            self.close_context_menu_silently();
+        }
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return false;
+        };
+        lobby.controller.set_active_sheet(sheet);
+        if sheet == LobbySheet::Resources {
+            lobby
+                .controller
+                .set_resource_rows(lobby.resource_rows.values().cloned().collect());
+        }
+        if sheet.is_roster() {
+            self.sync_classic_lobby_roster();
+        }
+        true
+    }
+
+    fn open_classic_lobby_tab_context(&mut self, position: GuiPoint) -> Result<bool, EngineError> {
+        let has_teams = self
+            .network_team_assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.teams().active);
+        let mut entries = vec![
+            ContextMenuEntry::new("Players")
+                .with_icon(ContextMenuIcon::Phase(9))
+                .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Players)),
+        ];
+        if has_teams {
+            entries.push(
+                ContextMenuEntry::new("Teams")
+                    .with_icon(ContextMenuIcon::Phase(19))
+                    .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Teams)),
+            );
+        }
+        entries.extend([
+            ContextMenuEntry::new("Resources")
+                .with_icon(ContextMenuIcon::Phase(10))
+                .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Resources)),
+            ContextMenuEntry::new("Options")
+                .with_icon(ContextMenuIcon::Phase(14))
+                .with_action(AppContextMenuCommand::LobbySheet(LobbySheet::Options)),
+        ]);
+        self.open_context_menu_at(entries, position)
+    }
+
+    fn open_classic_lobby_roster_context(
+        &mut self,
+        row: LobbyRosterId,
+        position: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        let LobbyRosterId::Client(client_id) = row else {
+            return Err(classic_game_lobby_child_error(
+                ClassicGameLobbyChild::RosterContext(row),
+            ));
+        };
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        let visible_remote = self
+            .classic_host_lobby
+            .as_ref()
+            .is_some_and(|lobby| {
+                lobby.controller.rows().iter().any(|row| {
+                    matches!(row, LobbyRosterRow::Client(client) if client.id == client_id && !client.local)
+                })
+            });
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || client_id == local_client_id
+            || !visible_remote
+            || !self.control_clients.contains(client_id)
+        {
+            return Ok(false);
+        }
+        let opened = self.open_context_menu_at(
+            vec![ContextMenuEntry::new("Kick")
+                .with_tooltip("Remove this client from the game.")
+                .with_icon(ContextMenuIcon::Empty)
+                .with_action(AppContextMenuCommand::LobbyKick(client_id))],
+            position,
+        )?;
+        if opened {
+            self.context_menu_lobby_kick_client = Some(client_id);
+        }
+        Ok(opened)
+    }
+
+    fn kick_classic_lobby_client(&mut self, client_id: i32) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || client_id == 0
+            || !self.control_clients.contains(client_id)
+        {
+            return;
+        }
+        let league_vote = self.network_is_league
+            && self
+                .control_player_infos
+                .retained_rows_snapshot()
+                .1
+                .into_iter()
+                .find(|(packet_client, _, _)| *packet_client == client_id)
+                .is_some_and(|(_, _, players)| {
+                    players.iter().any(|player| {
+                        player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0
+                    })
+                });
+        if league_vote {
+            self.submit_own_league_vote(
+                LeagueVoteSubject {
+                    vote_type: lc_engine::VOTE_TYPE_KICK,
+                    data: client_id,
+                },
+                true,
+            );
+            return;
+        }
+        let remove = lc_engine::ClientRemoveControlData {
+            client_id,
+            reason: LegacyCString::from_bytes(b"kicked from startup waiting dialog".to_vec())
+                .unwrap_or_default(),
+            by_client: 0,
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_client_remove(remove))
+        {
+            tracing::error!(%error, client_id, "failed to kick lobby client");
+        }
+    }
+
+    fn report_classic_lobby_error(&mut self, detail: impl Into<String>) {
+        let detail = detail.into();
+        self.status_text.clone_from(&detail);
+        self.append_control_message_log(detail, 0x00ff_1f1f, None);
+    }
+
+    fn open_classic_lobby_player_selector(
+        &mut self,
+        client_id: i32,
+    ) -> Result<bool, EngineError> {
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let local_row = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            lobby.controller.rows().iter().any(|row| {
+                matches!(row, LobbyRosterRow::Client(client) if client.id == client_id && client.local)
+            })
+        });
+        if local_client_id != Some(client_id) || !local_row {
+            return Ok(false);
+        }
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "C4PlayerSelDlg",
+            self.assets
+                .definition_sel_resources()
+                .context("exact C4PlayerSelDlg resource set is absent")
+                .and_then(|resources| {
+                    resources.validate_for_mode(lc_frontend::definition_sel::FileSelMode::Player)
+                }),
+        )?;
+        let Some(paths) = self.app_paths.clone() else {
+            let detail = "cannot open player selection without application paths";
+            tracing::error!("{detail}");
+            self.report_classic_lobby_error(detail);
+            return Ok(false);
+        };
+        let config = match Config::load(paths.config_file()) {
+            Ok(config) => config,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+            Err(error) => {
+                tracing::error!(%error, "failed to read player selector configuration");
+                self.report_classic_lobby_error(format!(
+                    "Unable to read player selection configuration: {error}"
+                ));
+                Config::new()
+            }
+        };
+        let frozen_root = startup_player_search_paths(&paths, &config)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| paths.install_root().to_path_buf());
+        let (root, entries, candidates) = match discover_lobby_player_selector(&paths, &config) {
+            Ok(selection) => selection,
+            Err(error) => {
+                tracing::error!(%error, "failed to enumerate lobby player files");
+                self.report_classic_lobby_error(format!(
+                    "Unable to enumerate player files: {error}"
+                ));
+                (frozen_root, Vec::new(), BTreeMap::new())
+            }
+        };
+        let root = root.to_string_lossy().into_owned();
+        self.close_context_menu_silently();
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.cancel_interaction();
+        }
+        self.definition_selector = Some(
+            lc_frontend::definition_sel::DefinitionSelController::new_player(root, entries),
+        );
+        self.pending_definition_selection = None;
+        self.pending_lobby_player_selection = Some(PendingLobbyPlayerSelection {
+            client_id,
+            config,
+            candidates,
+        });
+        self.definition_selector_last_click = None;
+        self.definition_selector_consumed_keys.clear();
+        self.definition_selector_pointer_capture = false;
+        self.mark_menu_dirty();
+        Ok(true)
+    }
+
+    fn submit_selected_classic_lobby_player(
+        &mut self,
+        client_id: i32,
+        source_path: &Path,
+        wire_filename: &str,
+    ) {
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        if local_client_id != Some(client_id) || !self.control_clients.contains(client_id) {
+            self.report_classic_lobby_error(
+                "The selected lobby client is no longer available for adding a player.",
+            );
+            return;
+        }
+        if !source_path.exists() {
+            self.report_classic_lobby_error(format!(
+                "The selected player file no longer exists: {}",
+                source_path.display()
+            ));
+            return;
+        }
+        let countdown_active = self
+            .classic_host_lobby
+            .as_ref()
+            .is_some_and(|lobby| lobby.controller.countdown().is_any());
+        if countdown_active {
+            let abort = lc_network::LobbyCountdownPacket::new(
+                lc_network::LobbyCountdownPacket::ABORT,
+            );
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_lobby_countdown(abort))
+            {
+                tracing::error!(%error, "failed to abort countdown before adding lobby player");
+                self.report_classic_lobby_error(format!(
+                    "Unable to abort the countdown before adding the player: {error}"
+                ));
+                return;
+            }
+            if let Some(lobby) = self.classic_host_lobby.as_mut() {
+                let _ = lobby.controller.apply_countdown_packet(
+                    lc_frontend::game_lobby::LobbyCountdownPacket::Abort,
+                );
+            }
+        }
+        if let Err(error) =
+            self.submit_runtime_network_player_path(source_path, wire_filename)
+        {
+            tracing::error!(path = %source_path.display(), %error, "failed to add lobby player");
+            self.report_classic_lobby_error(format!("Unable to add player: {error}"));
+        }
+    }
+
+    fn add_classic_lobby_script_player(&mut self) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        let Some(metadata) = self
+            .network_team_assignment
+            .as_ref()
+            .map(|assignment| assignment.teams().clone())
+        else {
+            return;
+        };
+        let (_, packets) = self.control_player_infos.retained_rows_snapshot();
+        let active = packets
+            .iter()
+            .flat_map(|(_, _, players)| players)
+            .filter(|player| {
+                player.is_script_player()
+                    && player.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED == 0
+            })
+            .collect::<Vec<_>>();
+        if metadata.max_script_players <= i32::try_from(active.len()).unwrap_or(i32::MAX) {
+            return;
+        }
+        let mut chosen_name = None;
+        for candidate in metadata
+            .script_player_names
+            .as_bytes()
+            .split(|byte| *byte == b'|')
+            .filter(|candidate| !candidate.is_empty())
+        {
+            let available = active
+                .iter()
+                .all(|player| !player.name.as_bytes().eq_ignore_ascii_case(candidate));
+            if available {
+                chosen_name = LegacyCString::from_bytes(candidate.to_vec());
+                break;
+            }
+        }
+        let name = chosen_name.unwrap_or_else(|| {
+            LegacyCString::from_bytes(b"Computer".to_vec()).unwrap_or_default()
+        });
+        let colors = [
+            0x00f4_0000,
+            0x0000_c800,
+            0x0020_20ff,
+            0x00f4_f400,
+            0x00f4_00f4,
+            0x0000_f4f4,
+        ];
+        let color = colors[active.len() % colors.len()];
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        let request = lc_engine::PlayerInfoUpdateRequest {
+            client_id: local_client_id,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                name,
+                player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                color,
+                original_color: color,
+                ..lc_engine::ControlPlayerInfoEntry::default()
+            }],
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_player_info_update(request))
+        {
+            tracing::error!(%error, "failed to submit lobby script player");
+        }
     }
 
     fn open_classic_lobby_team_combo(
@@ -32653,6 +33807,7 @@ impl GameApp {
                 ContextMenuEvent::Closed => {
                     self.context_menu = None;
                     self.set_context_menu_lobby_team_player(None);
+                    self.context_menu_lobby_kick_client = None;
                 }
                 ContextMenuEvent::Activated(command) => match command {
                     AppContextMenuCommand::StartupPlayer(
@@ -32745,6 +33900,16 @@ impl GameApp {
                     }
                     AppContextMenuCommand::LobbyTeam { player_id, team_id } => {
                         self.submit_classic_lobby_team_selection(player_id, team_id);
+                    }
+                    AppContextMenuCommand::LobbyKick(client_id) => {
+                        self.kick_classic_lobby_client(client_id);
+                    }
+                    AppContextMenuCommand::LobbySheet(sheet) => {
+                        if !self.select_classic_lobby_sheet(sheet) {
+                            return Err(classic_game_lobby_child_error(
+                                ClassicGameLobbyChild::Sheet(sheet),
+                            ));
+                        }
                     }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
@@ -33046,11 +34211,13 @@ impl GameApp {
     fn close_context_menu_silently(&mut self) {
         let Some(mut menu) = self.context_menu.take() else {
             self.set_context_menu_lobby_team_player(None);
+            self.context_menu_lobby_kick_client = None;
             self.context_menu_pointer_dismissed_lobby_team_player = None;
             return;
         };
         let _ = menu.dismiss(false);
         self.set_context_menu_lobby_team_player(None);
+        self.context_menu_lobby_kick_client = None;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_capture = None;
         self.mark_menu_dirty();
@@ -34702,7 +35869,7 @@ impl GameApp {
         if self.control_clients.clear_nonhost_lobby_ready() {
             self.publish_updated_host_join_snapshot();
         }
-        self.sync_classic_lobby_client_rows();
+        self.sync_classic_lobby_roster();
         if let Some(Err(error)) = self
             .network
             .as_ref()
@@ -35001,6 +36168,7 @@ impl GameApp {
                     {
                         self.publish_updated_host_join_snapshot();
                     }
+                    self.sync_classic_lobby_roster();
                     if let Some(Err(error)) = self
                         .network
                         .as_ref()
@@ -35014,6 +36182,21 @@ impl GameApp {
                         "You are not ready".to_string()
                     };
                     self.on_lobby_client_ready_state_change(changed_client_id)?;
+                }
+            }
+            LobbyAction::SelectSheet(sheet) => {
+                let selected = self.network_lobby.as_mut().is_some_and(|lobby| {
+                    let supported = matches!(sheet, LobbySheet::Players | LobbySheet::Resources)
+                        || sheet == LobbySheet::Teams && lobby.has_teams;
+                    if supported {
+                        lobby.active_sheet = sheet;
+                    }
+                    supported
+                });
+                if !selected {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::Sheet(sheet),
+                    ));
                 }
             }
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
@@ -35345,11 +36528,12 @@ impl GameApp {
                     self.scenario_game_options.set_focused_button(focused);
                 }
                 ClassicLobbyAction::RosterSelectionChanged(_) => {}
-                ClassicLobbyAction::SheetRequested(LobbySheet::Players) => {}
                 ClassicLobbyAction::SheetRequested(sheet) => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::Sheet(sheet),
-                    ));
+                    if !self.select_classic_lobby_sheet(sheet) {
+                        return Err(classic_game_lobby_child_error(
+                            ClassicGameLobbyChild::Sheet(sheet),
+                        ));
+                    }
                 }
                 ClassicLobbyAction::GameOptions(input) => {
                     pending.extend(self.route_classic_lobby_game_option_input(input)?);
@@ -35387,25 +36571,17 @@ impl GameApp {
                 ClassicLobbyAction::ReadyChanged(ready) => {
                     self.apply_classic_lobby_ready_change(ready)?;
                 }
-                ClassicLobbyAction::TabContextRequested { .. } => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::TabContext,
-                    ));
+                ClassicLobbyAction::TabContextRequested { position } => {
+                    self.open_classic_lobby_tab_context(position)?;
                 }
-                ClassicLobbyAction::RosterContextRequested { row, .. } => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::RosterContext(row),
-                    ));
+                ClassicLobbyAction::RosterContextRequested { row, position } => {
+                    self.open_classic_lobby_roster_context(row, position)?;
                 }
                 ClassicLobbyAction::AddPlayerRequested { client_id } => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::AddPlayer(client_id),
-                    ));
+                    self.open_classic_lobby_player_selector(client_id)?;
                 }
                 ClassicLobbyAction::AddScriptPlayerRequested => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::AddScriptPlayer,
-                    ));
+                    self.add_classic_lobby_script_player();
                 }
                 ClassicLobbyAction::TeamSelectionRequested { player_id } => {
                     self.open_classic_lobby_team_combo(player_id)?;
@@ -35639,7 +36815,7 @@ impl GameApp {
         {
             tracing::error!(%error, "failed to submit classic lobby ready state");
         }
-        self.sync_classic_lobby_client_rows();
+        self.sync_classic_lobby_roster();
         self.on_lobby_client_ready_state_change(local_client_id)?;
         Ok(())
     }
@@ -35752,66 +36928,6 @@ impl GameApp {
         Ok(true)
     }
 
-    fn sync_classic_lobby_client_rows(&mut self) {
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
-            return;
-        };
-        let local_client_id = self
-            .network
-            .as_ref()
-            .and_then(|network| i32::try_from(network.local_client_id()).ok())
-            .unwrap_or(0);
-        let clients = self.control_clients.snapshot();
-        let mut rows = lobby.controller.rows().to_vec();
-        for client in &clients {
-            let status = if client.client_id == 0 {
-                LobbyClientStatus::Host
-            } else if client.observer {
-                LobbyClientStatus::Observer
-            } else if client.lobby_ready {
-                LobbyClientStatus::Ready
-            } else {
-                LobbyClientStatus::Client
-            };
-            if let Some(LobbyRosterRow::Client(row)) = rows.iter_mut().find(|row| {
-                matches!(row, LobbyRosterRow::Client(row) if row.id == client.client_id)
-            }) {
-                row.name = client.name.to_string_lossy().into_owned();
-                row.nick = client.nick.to_string_lossy().into_owned();
-                if !matches!(row.status, LobbyClientStatus::Sound | LobbyClientStatus::MutedSound)
-                {
-                    row.status = status;
-                }
-                row.local = client.client_id == local_client_id;
-                row.connected = !row.local;
-            } else {
-                rows.push(LobbyRosterRow::Client(LobbyClientRow {
-                    id: client.client_id,
-                    name: client.name.to_string_lossy().into_owned(),
-                    nick: client.nick.to_string_lossy().into_owned(),
-                    color: [255, 255, 255, 255],
-                    status,
-                    local: client.client_id == local_client_id,
-                    connected: client.client_id != local_client_id,
-                    resource_progress: None,
-                    ping_ms: None,
-                }));
-            }
-        }
-        if let Some(local) = clients
-            .iter()
-            .find(|client| client.client_id == local_client_id)
-        {
-            lobby.controller.set_ready(local.lobby_ready);
-        }
-        lobby.controller.set_rows(rows);
-        lobby.controller.set_player_count(
-            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX),
-            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
-        );
-        self.mark_menu_dirty();
-    }
-
     fn sync_classic_lobby_resource_ready(&mut self) {
         let ready = self.admission_resources.lobby_ready_available();
         let actions = self
@@ -35827,60 +36943,6 @@ impl GameApp {
                 });
             }
         }
-        self.mark_menu_dirty();
-    }
-
-    fn add_classic_lobby_peer(
-        &mut self,
-        client_id: ClientId,
-        name: String,
-        kind: ParticipantKind,
-    ) {
-        let Ok(client_id) = i32::try_from(client_id) else {
-            return;
-        };
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
-            return;
-        };
-        let mut rows = lobby.controller.rows().to_vec();
-        if rows
-            .iter()
-            .any(|row| matches!(row, LobbyRosterRow::Client(row) if row.id == client_id))
-        {
-            return;
-        }
-        rows.push(LobbyRosterRow::Client(LobbyClientRow {
-            id: client_id,
-            name,
-            nick: String::new(),
-            color: [255, 255, 255, 255],
-            status: if matches!(kind, ParticipantKind::Observer) {
-                LobbyClientStatus::Observer
-            } else {
-                LobbyClientStatus::Client
-            },
-            local: false,
-            connected: true,
-            resource_progress: None,
-            ping_ms: None,
-        }));
-        lobby.controller.set_rows(rows);
-        self.mark_menu_dirty();
-    }
-
-    fn remove_classic_lobby_peer(&mut self, client_id: ClientId) {
-        let Ok(client_id) = i32::try_from(client_id) else {
-            return;
-        };
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
-            return;
-        };
-        let mut rows = lobby.controller.rows().to_vec();
-        rows.retain(|row| {
-            !matches!(row, LobbyRosterRow::Client(row) if row.id == client_id)
-                && !matches!(row, LobbyRosterRow::Player(row) if row.client_id == client_id)
-        });
-        lobby.controller.set_rows(rows);
         self.mark_menu_dirty();
     }
 
@@ -37052,6 +38114,7 @@ impl GameApp {
         self.scenario_game_options.cancel_interaction();
         self.definition_selector = None;
         self.pending_definition_selection = None;
+        self.pending_lobby_player_selection = None;
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
@@ -38120,6 +39183,7 @@ impl GameApp {
                             if let Some(wait) = self.network_start_wait.as_mut() {
                                 wait.controller.remove_client(remove.client_id);
                             }
+                            self.remove_classic_lobby_resources_at_client(remove.client_id);
                             self.network_client_activity.remove_client(remove.client_id);
                             self.control_messages.remove_client(remove.client_id);
                             let had_player_info = self
@@ -40113,6 +41177,54 @@ impl GameApp {
                 | DefinitionSelAction::SelectionChanged(_)
                 | DefinitionSelAction::CheckedChanged { .. } => {}
                 DefinitionSelAction::RefreshRequested => {
+                    if self.pending_lobby_player_selection.is_some() {
+                        let refreshed = self.app_paths.clone().zip(
+                            self.pending_lobby_player_selection
+                                .as_ref()
+                                .map(|pending| pending.config.clone()),
+                        );
+                        let refreshed = refreshed
+                            .map(|(paths, config)| {
+                                discover_lobby_player_selector(&paths, &config)
+                            })
+                            .transpose();
+                        match refreshed {
+                            Ok(Some((_root, entries, candidates))) => {
+                                if let Some(pending) =
+                                    self.pending_lobby_player_selection.as_mut()
+                                {
+                                    pending.candidates = candidates;
+                                }
+                                if let Some(controller) = self.definition_selector.as_mut() {
+                                    controller.rebuild_rows_after_refresh(entries);
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::error!(
+                                    "player selector refresh requested without application paths"
+                                );
+                                self.report_classic_lobby_error(
+                                    "Unable to refresh player files without application paths.",
+                                );
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "failed to refresh lobby player selector");
+                                if let Some(pending) =
+                                    self.pending_lobby_player_selection.as_mut()
+                                {
+                                    pending.candidates.clear();
+                                }
+                                if let Some(controller) = self.definition_selector.as_mut() {
+                                    controller.rebuild_rows_after_refresh(Vec::new());
+                                }
+                                self.report_classic_lobby_error(format!(
+                                    "Unable to refresh player files: {error}"
+                                ));
+                            }
+                        }
+                        self.definition_selector_last_click = None;
+                        continue;
+                    }
                     let Some(root) = self
                         .pending_definition_selection
                         .as_ref()
@@ -40152,6 +41264,28 @@ impl GameApp {
                     )?;
                 }
                 DefinitionSelAction::Accepted(modules) => {
+                    if let Some(pending) = self.pending_lobby_player_selection.take() {
+                        self.definition_selector = None;
+                        self.definition_selector_last_click = None;
+                        if let [selected] = modules.as_slice() {
+                            if let Some(candidate) = pending.candidates.get(selected).cloned() {
+                                self.submit_selected_classic_lobby_player(
+                                    pending.client_id,
+                                    &candidate.source_path,
+                                    &candidate.wire_filename,
+                                );
+                            } else {
+                                tracing::warn!(
+                                    path = selected,
+                                    "lobby player selector accepted a stale path"
+                                );
+                                self.report_classic_lobby_error(
+                                    "The selected player file is no longer available.",
+                                );
+                            }
+                        }
+                        break;
+                    }
                     let Some(pending) = self.pending_definition_selection.take() else {
                         tracing::error!("definition selector accepted without pending scenario");
                         self.definition_selector = None;
@@ -40172,6 +41306,7 @@ impl GameApp {
                 DefinitionSelAction::Cancelled => {
                     self.definition_selector = None;
                     self.pending_definition_selection = None;
+                    self.pending_lobby_player_selection = None;
                     self.definition_selector_last_click = None;
                     break;
                 }
@@ -40345,6 +41480,7 @@ impl GameApp {
         {
             self.publish_updated_host_join_snapshot();
         }
+        self.sync_classic_lobby_roster();
         if let Some(Err(error)) = self
             .network
             .as_ref()
@@ -40881,6 +42017,7 @@ impl GameApp {
             })
         })?;
         let active = self.context_menu.is_none()
+            && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.message_dialogs.is_empty();
         let gamma = self.loader_gamma.as_ref();
@@ -40926,6 +42063,7 @@ impl GameApp {
             })
         })?;
         let active = self.context_menu.is_none()
+            && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
             && self.message_dialogs.is_empty();
         lobby.controller.render_tooltips(
@@ -41009,6 +42147,12 @@ impl GameApp {
                         self.next_pending_native_overlay();
                     }
                     let gamma = self.loader_gamma.clone();
+                    if self.definition_selector.is_some() {
+                        self.render_definition_selector(gamma.as_ref())?;
+                        if ordered_native {
+                            self.next_pending_native_overlay();
+                        }
+                    }
                     if self.game_option_input_dialog.is_some() {
                         self.render_game_option_input_dialog(gamma.as_ref())?;
                         if ordered_native {
@@ -41017,6 +42161,17 @@ impl GameApp {
                     }
                     if !self.message_dialogs.is_empty() {
                         self.render_message_dialogs(gamma.as_ref())?;
+                    }
+                    if ordered_native
+                        && self.game_option_input_dialog.is_none()
+                        && self.context_menu.is_some()
+                    {
+                        self.next_pending_native_overlay();
+                        self.render_ordered_context_menu(gamma.as_ref())?;
+                    } else if !ordered_native && self.game_option_input_dialog.is_none() {
+                        if let Some(context_menu) = self.context_menu.as_ref() {
+                            context_menu.render(self.graphics.surface_mut(), gamma.as_ref())?;
+                        }
                     }
                     if !ordered_native {
                         let surface = self.graphics.surface();
@@ -41275,12 +42430,21 @@ impl GameApp {
         };
 
         if self.definition_selector.is_some() {
+            let mode = self
+                .definition_selector
+                .as_ref()
+                .map(|selector| selector.mode())
+                .unwrap_or(lc_frontend::definition_sel::FileSelMode::Definitions);
             check(
                 self.assets
                     .definition_sel_resources()
                     .context("exact C4DefinitionSelDlg resource set is absent")
-                    .and_then(|resources| resources.validate()),
-                "C4DefinitionSelDlg",
+                    .and_then(|resources| resources.validate_for_mode(mode)),
+                if mode == lc_frontend::definition_sel::FileSelMode::Player {
+                    "C4PlayerSelDlg"
+                } else {
+                    "C4DefinitionSelDlg"
+                },
             )?;
         }
         if self.game_option_input_dialog.is_some() {
@@ -43615,6 +44779,7 @@ impl GameApp {
         self.message_dialog_consumed_keys.clear();
         self.definition_selector = None;
         self.pending_definition_selection = None;
+        self.pending_lobby_player_selection = None;
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
@@ -44171,6 +45336,7 @@ impl GameApp {
         self.close_context_menu_silently();
         self.definition_selector = None;
         self.pending_definition_selection = None;
+        self.pending_lobby_player_selection = None;
         self.definition_selector_last_click = None;
         self.game_over_dialog = None;
         if scenario.path.is_none() {
@@ -64068,6 +65234,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             ),
             pointer: None,
             chat_history_index: -1,
+            resource_rows: BTreeMap::new(),
         });
         app.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::LobbyHost, GameOptionValues::default());
@@ -64302,19 +65469,44 @@ public func Grant(password) { return GainMissionAccess(password); }
             lc_frontend::game_lobby::LobbyCountdownState::None
         );
         assert!(matches!(
-            lobby.rows(),
-            [LobbyRosterRow::Client(LobbyClientRow {
+            lobby.rows().iter().find(|row| {
+                matches!(row, LobbyRosterRow::Client(client) if client.id == 0)
+            }),
+            Some(LobbyRosterRow::Client(LobbyClientRow {
                 id: 0,
                 name,
                 nick,
-                color: [255, 255, 255, 255],
                 status: LobbyClientStatus::Host,
                 local: true,
                 connected: false,
                 resource_progress: None,
                 ping_ms: None,
-            })] if name == "Exact Host" && nick == "Exact Nick"
+                ..
+            })) if name == "Exact Host" && nick == "Exact Nick"
         ));
+        let projected_player_ids = lobby
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                LobbyRosterRow::Player(player) => Some(player.id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let authoritative_player_ids = app
+            .control_player_infos
+            .retained_rows_snapshot()
+            .1
+            .into_iter()
+            .flat_map(|(_, _, players)| players)
+            .filter(|player| {
+                player.flags
+                    & (lc_engine::PLAYER_INFO_FLAG_REMOVED
+                        | lc_engine::PLAYER_INFO_FLAG_INVISIBLE)
+                    == 0
+            })
+            .map(|player| player.id)
+            .collect::<Vec<_>>();
+        assert_eq!(projected_player_ids, authoritative_player_ids);
         let fonts = app.assets.clonk_fonts.as_deref().expect("lobby fonts");
         let surface = app.graphics.surface();
         let layout = lobby.layout(surface.width() as i32, surface.height() as i32, fonts);
@@ -64608,33 +65800,23 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn classic_host_lobby_children_are_typed_fail_fast() {
         let cases = vec![
             (
-                ClassicLobbyAction::SheetRequested(LobbySheet::Resources),
-                "Resources",
-            ),
-            (
-                ClassicLobbyAction::TabContextRequested {
-                    position: GuiPoint::new(1.0, 1.0),
-                },
-                "TabContext",
-            ),
-            (
                 ClassicLobbyAction::RosterContextRequested {
-                    row: LobbyRosterId::Client(0),
+                    row: LobbyRosterId::Player(99),
                     position: GuiPoint::new(1.0, 1.0),
                 },
                 "RosterContext",
             ),
             (
-                ClassicLobbyAction::AddPlayerRequested { client_id: 0 },
-                "AddPlayer",
-            ),
-            (
-                ClassicLobbyAction::AddScriptPlayerRequested,
-                "AddScriptPlayer",
-            ),
-            (
                 ClassicLobbyAction::GameOptions(LobbyGameOptionInput::Hotkey('P')),
                 "Password/Comment dialog",
+            ),
+            (
+                ClassicLobbyAction::SheetRequested(LobbySheet::Options),
+                "Options",
+            ),
+            (
+                ClassicLobbyAction::SheetRequested(LobbySheet::Scenario),
+                "Scenario",
             ),
         ];
         for (action, expected) in cases {
@@ -64650,6 +65832,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         }
 
         let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::SheetRequested(
             LobbySheet::Players,
         )])
@@ -64930,7 +66113,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 ..Default::default()
             }],
         );
-        app.sync_classic_lobby_client_rows();
+        app.sync_classic_lobby_roster();
 
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::ReadyChanged(true)])
             .expect("submit local host ready state");
@@ -65187,6 +66370,696 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn classic_lobby_resource_sheet_refreshes_only_while_active() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        app.classic_host_lobby
+            .as_mut()
+            .unwrap()
+            .resource_rows
+            .insert(
+                7,
+                LobbyResourceRow {
+                    id: 7,
+                    filename: "Network/Packs/Scenario.c4s".to_string(),
+                    present_percent: 10,
+                },
+            );
+
+        for sheet in [LobbySheet::Resources, LobbySheet::Players] {
+            app.process_classic_lobby_actions(vec![ClassicLobbyAction::SheetRequested(sheet)])
+                .expect("implemented classic right-hand sheets open without a boundary");
+            assert_eq!(
+                app.classic_host_lobby
+                    .as_ref()
+                    .unwrap()
+                    .controller
+                    .active_sheet(),
+                sheet
+            );
+        }
+
+        app.select_classic_lobby_sheet(LobbySheet::Resources);
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .resource_rows()[0]
+                .present_percent,
+            10
+        );
+        let (manager, events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        events
+            .send(NetworkEvent::ResourceProgress {
+                resource_id: 7,
+                present_percent: 33,
+            })
+            .unwrap();
+        app.process_network_events()
+            .expect("live resource progress is valid in the classic lobby");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .resource_rows()[0]
+                .present_percent,
+            33
+        );
+
+        app.select_classic_lobby_sheet(LobbySheet::Players);
+        events
+            .send(NetworkEvent::ResourceProgress {
+                resource_id: 7,
+                present_percent: 66,
+            })
+            .unwrap();
+        app.process_network_events()
+            .expect("hidden resource progress remains nonfatal");
+        let lobby = app.classic_host_lobby.as_ref().unwrap();
+        assert_eq!(lobby.resource_rows[&7].present_percent, 66);
+        assert_eq!(
+            lobby.controller.resource_rows()[0].present_percent,
+            33,
+            "inactive C4Network2ResDlg does not reconcile its visible rows"
+        );
+        events
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 7,
+                core: lc_engine::NetworkResourceCore {
+                    id: 7,
+                    loadable: true,
+                    filename: LegacyCString::from_bytes(b"Network/Scenario.c4s".to_vec())
+                        .unwrap(),
+                    ..Default::default()
+                },
+                path: PathBuf::from("Network/Scenario.c4s"),
+            })
+            .unwrap();
+        app.process_network_events()
+            .expect("hidden completion remains nonfatal");
+        assert_eq!(
+            app.classic_host_lobby.as_ref().unwrap().resource_rows[&7].present_percent,
+            100
+        );
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .resource_rows()[0]
+                .present_percent,
+            33
+        );
+        app.select_classic_lobby_sheet(LobbySheet::Resources);
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .resource_rows()[0]
+                .present_percent,
+            100,
+            "activation forces an immediate resource-row refresh"
+        );
+        events
+            .send(NetworkEvent::ResourceLoadFailed { resource_id: 7 })
+            .unwrap();
+        app.process_network_events()
+            .expect("failed resource removal remains nonfatal");
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .resource_rows
+            .is_empty());
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .resource_rows()
+            .is_empty());
+        app.register_classic_lobby_player_resources(&[lc_engine::ControlPlayerInfoEntry {
+            flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            resource: Some(lc_engine::NetworkResourceCore {
+                id: 7,
+                loadable: true,
+                filename: LegacyCString::from_bytes(b"Network/Scenario.c4s".to_vec()).unwrap(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]);
+        assert!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .resource_rows
+                .is_empty(),
+            "an authoritative PlayerInfo replay cannot resurrect a failed resource"
+        );
+    }
+
+    #[test]
+    fn client_lobby_resource_sheet_tracks_hidden_transfer_progress() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (manager, events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        let scenario = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            id: 9,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Scenarios/Remote.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = scenario.clone();
+        events
+            .send(NetworkEvent::JoinData(lc_network::JoinDataEnvelope {
+                client_id: 7,
+                start_control_tick: 0,
+                status: host_config.initial_status,
+                dynamic: snapshot.dynamic,
+                parameters: snapshot.parameters,
+            }))
+            .unwrap();
+        app.process_network_events()
+            .expect("client JoinData seeds resource rows");
+        assert_eq!(app.network_lobby.as_ref().unwrap().resource_rows[&9].present_percent, 0);
+
+        events
+            .send(NetworkEvent::ResourceProgress {
+                resource_id: 9,
+                present_percent: 37,
+            })
+            .unwrap();
+        app.process_network_events()
+            .expect("hidden client resource progress applies");
+        assert_eq!(app.network_lobby.as_ref().unwrap().active_sheet, LobbySheet::Players);
+        assert_eq!(app.network_lobby.as_ref().unwrap().resource_rows[&9].present_percent, 37);
+
+        let action = {
+            let lobby = app.network_lobby.as_mut().unwrap();
+            let layout = lobby.update_layout(640.0, 480.0).clone();
+            let rect = layout
+                .sheet_buttons
+                .iter()
+                .find(|(sheet, _)| *sheet == LobbySheet::Resources)
+                .unwrap()
+                .1;
+            let point = GuiPoint::new(
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            );
+            lobby.handle_panel_pointer_move(point);
+            lobby.handle_panel_pointer_down(point);
+            lobby.handle_panel_pointer_up(point)
+        };
+        assert_eq!(action, Some(LobbyAction::SelectSheet(LobbySheet::Resources)));
+        app.process_lobby_action(action.unwrap())
+            .expect("client Resources tab switches sheets");
+        let (controller, _) = {
+            let surface = app.graphics.surface();
+            app.network_lobby.as_mut().unwrap().classic_render_state(
+                surface,
+                app.assets.as_ref(),
+                &app.scenario_game_options,
+            )
+        }
+        .expect("build client Resources presentation");
+        assert_eq!(controller.active_sheet(), LobbySheet::Resources);
+        assert_eq!(
+            controller
+                .resource_rows()
+                .iter()
+                .find(|row| row.id == 9)
+                .unwrap()
+                .present_percent,
+            37
+        );
+
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Players))
+            .expect("hide client Resources sheet");
+        events
+            .send(NetworkEvent::ResourceProgress {
+                resource_id: 9,
+                present_percent: 73,
+            })
+            .unwrap();
+        app.process_network_events()
+            .expect("hidden client resource progress remains retained");
+        assert_eq!(app.network_lobby.as_ref().unwrap().resource_rows[&9].present_percent, 73);
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Resources))
+            .expect("reopen client Resources sheet");
+        let (controller, _) = {
+            let surface = app.graphics.surface();
+            app.network_lobby.as_mut().unwrap().classic_render_state(
+                surface,
+                app.assets.as_ref(),
+                &app.scenario_game_options,
+            )
+        }
+        .expect("rebuild client Resources presentation");
+        assert_eq!(
+            controller
+                .resource_rows()
+                .iter()
+                .find(|row| row.id == 9)
+                .unwrap()
+                .present_percent,
+            73
+        );
+
+        {
+            let lobby = app.network_lobby.as_mut().unwrap();
+            for id in 100..150 {
+                lobby.resource_rows.insert(
+                    id,
+                    LobbyResourceRow {
+                        id,
+                        filename: format!("Resource{id}.c4g"),
+                        present_percent: 50,
+                    },
+                );
+            }
+            let fonts = app.assets.clonk_fonts.as_deref().unwrap();
+            let layout = lc_frontend::game_lobby::game_lobby_layout(
+                640,
+                480,
+                fonts.title.line_height,
+                fonts.text.line_height,
+                LobbyRole::Client,
+                lobby.has_teams,
+                false,
+            );
+            lobby.handle_panel_pointer_move(GuiPoint::new(
+                (layout.roster.x + 5) as f32,
+                (layout.roster.y + 5) as f32,
+            ));
+        }
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("client Resources wheel scrolls overflow rows");
+        assert!(app.network_lobby.as_ref().unwrap().resource_scroll > 0);
+    }
+
+    #[test]
+    fn prepared_lobby_resource_rows_seed_complete_eligible_cores_in_id_order() {
+        let core = |id, filename: &[u8]| lc_engine::NetworkResourceCore {
+            id,
+            loadable: true,
+            filename: LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let mut snapshot = lc_network::HostConfig::default()
+            .initial_join_snapshot
+            .expect("default host snapshot");
+        snapshot.parameters.scenario = core(9, b"Scenarios/Round.c4s");
+        snapshot.parameters.game_resources = vec![
+            core(3, b"System.c4g"),
+            core(5, b"Material.c4g"),
+        ];
+        snapshot.dynamic = core(7, b"Round.c4s/Material.c4g");
+        let player = |id, flags, resource| lc_engine::ControlPlayerInfoEntry {
+            id,
+            flags,
+            resource: Some(resource),
+            ..Default::default()
+        };
+        snapshot.parameters.player_infos.clients = vec![lc_network::ClientPlayerInfosSnapshot {
+            client_id: 0,
+            flags: 0,
+            players: vec![
+                player(1, lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, core(4, b"Players/A.c4p")),
+                player(
+                    2,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                    core(2, b"Players/Removed.c4p"),
+                ),
+                player(
+                    3,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
+                    core(1, b"Players/Embedded.c4p"),
+                ),
+                player(4, 0, core(6, b"Players/NoResourceFlag.c4p")),
+            ],
+        }];
+
+        let rows = initial_classic_lobby_resource_rows(Some(&snapshot));
+        assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec![3, 4, 5, 7, 9]);
+        assert!(rows.values().all(|row| row.present_percent == 100));
+        assert_eq!(rows[&9].filename, "Scenarios/Round.c4s");
+        assert_eq!(rows[&4].filename, "Players/A.c4p");
+    }
+
+    #[test]
+    fn classic_lobby_client_removal_evicts_its_resource_namespace() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let remote_resource = (7 << 16) | 1;
+        let host_resource = 2;
+        for resource_id in [host_resource, remote_resource] {
+            app.classic_host_lobby
+                .as_mut()
+                .unwrap()
+                .resource_rows
+                .insert(
+                    resource_id,
+                    LobbyResourceRow {
+                        id: resource_id,
+                        filename: format!("Resource{resource_id}.c4p"),
+                        present_percent: 100,
+                    },
+                );
+            app.admission_resources.resources.insert(
+                resource_id,
+                AdmissionResourceState::Complete {
+                    path: PathBuf::from(format!("Resource{resource_id}.c4p")),
+                    removed: false,
+                },
+            );
+            app.admission_resources
+                .resource_types
+                .insert(resource_id, lc_network::HostResourceType::Player as u8);
+            app.admission_resources
+                .present_percent
+                .insert(resource_id, 100);
+        }
+        app.control_clients.replace_snapshot([
+            lc_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: 7,
+                activated: true,
+                ..Default::default()
+            },
+        ]);
+        app.select_classic_lobby_sheet(LobbySheet::Resources);
+        let (manager, events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        events
+            .send(NetworkEvent::DirectControl(NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 7,
+                    reason: LegacyCString::default(),
+                    by_client: 0,
+                },
+            )))
+            .unwrap();
+        app.process_network_events()
+            .expect("authoritative client removal updates resource rows");
+
+        let lobby = app.classic_host_lobby.as_ref().unwrap();
+        assert_eq!(
+            lobby.resource_rows.keys().copied().collect::<Vec<_>>(),
+            vec![host_resource]
+        );
+        assert_eq!(
+            lobby
+                .controller
+                .resource_rows()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![host_resource]
+        );
+        assert!(!app
+            .admission_resources
+            .resources
+            .contains_key(&remote_resource));
+    }
+
+    #[test]
+    fn classic_lobby_remote_context_kicks_directly_or_starts_league_vote() {
+        let setup = |league: bool| {
+            let mut app = new_menu_app(640, 480);
+            install_test_classic_host_lobby(&mut app);
+            let (manager, _events, commands) = NetworkManager::test_stub_with_commands();
+            app.network = Some(manager);
+            app.network_mode = Some(NetworkMode::Host(HostSettings {
+                bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                player_name: "Host".to_string(),
+                prepared: None,
+            }));
+            app.network_is_league = league;
+            app.control_clients.replace_snapshot([
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    name: LegacyCString::from_bytes(b"Host".to_vec()).unwrap(),
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    activated: true,
+                    name: LegacyCString::from_bytes(b"Remote".to_vec()).unwrap(),
+                    ..Default::default()
+                },
+            ]);
+            if league {
+                app.control_player_infos.replace_snapshot(
+                    1,
+                    [lc_engine::PlayerInfoControlData {
+                        client_id: 7,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            id: 1,
+                            name: LegacyCString::from_bytes(b"League player".to_vec()).unwrap(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                );
+            }
+            app.sync_classic_lobby_roster();
+            (app, commands)
+        };
+
+        let (mut direct, mut direct_commands) = setup(false);
+        direct
+            .process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+                row: LobbyRosterId::Client(7),
+                position: GuiPoint::new(200.0, 150.0),
+            }])
+            .expect("remote client context opens");
+        assert_eq!(direct.context_menu.as_ref().unwrap().layout().panels[0].rows.len(), 1);
+        assert!(direct.select_classic_lobby_sheet(LobbySheet::Resources));
+        assert!(direct.context_menu.is_none());
+        assert_eq!(direct.context_menu_lobby_kick_client, None);
+        assert!(direct.select_classic_lobby_sheet(LobbySheet::Players));
+        direct
+            .process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+                row: LobbyRosterId::Client(7),
+                position: GuiPoint::new(200.0, 150.0),
+            }])
+            .expect("remote client context reopens");
+        direct.kick_classic_lobby_client(7);
+        assert_eq!(
+            direct_commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: LegacyCString::from_bytes(
+                    b"kicked from startup waiting dialog".to_vec()
+                )
+                .unwrap(),
+                by_client: 0,
+            }]
+        );
+        assert!(direct_commands.take_submitted_votes().is_empty());
+        direct
+            .control_clients
+            .apply_remove(&lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: LegacyCString::default(),
+                by_client: 0,
+            });
+        direct.sync_classic_lobby_roster();
+        assert!(direct.context_menu.is_none());
+        assert_eq!(direct.context_menu_lobby_kick_client, None);
+
+        let (mut league, mut league_commands) = setup(true);
+        league.kick_classic_lobby_client(7);
+        assert_eq!(
+            league_commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            }]
+        );
+        assert!(league_commands.take_submitted_client_removes().is_empty());
+
+        let (mut removed, mut removed_commands) = setup(true);
+        removed.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    flags: lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        removed.kick_classic_lobby_client(7);
+        assert_eq!(removed_commands.take_submitted_client_removes().len(), 1);
+        assert!(removed_commands.take_submitted_votes().is_empty());
+    }
+
+    #[test]
+    fn classic_lobby_add_player_picker_publishes_relative_file_and_projects_echo() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        install_global_gui_and_loader_test_root(install.path());
+        let player_dir = install.path().join("Players");
+        fs::create_dir_all(&player_dir).expect("create player directory");
+        let player_path = player_dir.join("Alice.c4p");
+        let mut group = lc_resources::MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Alice\n[Preferences]\nColorDw=1193046\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add player core");
+        fs::write(&player_path, group.pack().expect("pack player")).expect("write player");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover temporary install");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguageEx=US\nPlayerPath=Players\n[Network]\nLocalName=Host\n",
+        )
+        .expect("configure player selector");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        install_test_classic_host_lobby(&mut app);
+        app.control_clients.replace_snapshot([lc_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            name: LegacyCString::from_bytes(b"Host".to_vec()).unwrap(),
+            ..Default::default()
+        }]);
+        let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::AddPlayerRequested {
+            client_id: 0,
+        }])
+        .expect("C4PlayerSelDlg opens");
+        let selected = app
+            .definition_selector
+            .as_ref()
+            .expect("player selector")
+            .rows()[0]
+            .full_path()
+            .to_string();
+        assert_eq!(
+            app.definition_selector.as_ref().unwrap().root_path(),
+            player_dir.to_string_lossy(),
+            "C4PlayerSelDlg snapshots the configured PlayerPath root"
+        );
+        assert_eq!(
+            app.pending_lobby_player_selection
+                .as_ref()
+                .unwrap()
+                .candidates[&selected]
+                .wire_filename,
+            "Players/Alice.c4p",
+            "the physical picker path must not leak onto the wire"
+        );
+        assert_eq!(
+            app.pending_lobby_player_selection.as_ref().unwrap().candidates[&selected]
+                .source_path,
+            player_path,
+            "the exact physical path must survive the string-keyed selector"
+        );
+
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguageEx=US\nPlayerPath=ChangedAfterOpen\n",
+        )
+        .expect("mutate PlayerPath after selector construction");
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::RefreshRequested,
+        ])
+        .expect("F5 refreshes the frozen PlayerPath roots");
+        assert_eq!(
+            app.definition_selector.as_ref().unwrap().rows()[0].full_path(),
+            selected,
+            "F5 must not re-read PlayerPath"
+        );
+
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 17,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Players/Alice.c4p".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let (direct_ready, direct_wait) = std::sync::mpsc::channel();
+        let command_observer = thread::spawn(move || {
+            commands.complete_runtime_host_join(resource, event_tx, direct_ready)
+        });
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Accepted(vec![selected]),
+        ])
+        .expect("selected player is submitted");
+        direct_wait
+            .recv_timeout(Duration::from_secs(1))
+            .expect("authoritative PlayerInfo is broadcast");
+        app.process_network_events()
+            .expect("authoritative player echo is applied");
+        drop(app.network.take());
+        let (_, _, infos, _) = command_observer.join().expect("command observer");
+        assert_eq!(infos.len(), 1);
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.name == "Alice")));
+    }
+
+    #[test]
     fn classic_lobby_team_combo_filters_teams_and_submits_the_full_player_packet() {
         let mut app = new_menu_app(640, 480);
         let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
@@ -65264,6 +67137,204 @@ public func Grant(password) { return GainMissionAccess(password); }
             Some(1),
             "the combo text waits for the authoritative player-info echo"
         );
+
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Peer view".to_string(), false));
+        app.apply_direct_player_info_control(
+            lc_engine::PlayerInfoControlData {
+                client_id: updates[0].client_id,
+                flags: updates[0].flags,
+                players: updates[0].players.clone(),
+                by_client: 0,
+            },
+            false,
+        );
+        let projected_team = |rows: &[LobbyRosterRow]| {
+            rows.iter().find_map(|row| match row {
+                LobbyRosterRow::Player(player) if player.id == 7 => {
+                    player.team.as_ref().map(|team| team.id)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(
+            projected_team(
+                app.classic_host_lobby
+                    .as_ref()
+                    .expect("host projection")
+                    .controller
+                    .rows()
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            projected_team(
+                &app.network_lobby
+                    .as_ref()
+                    .expect("peer projection")
+                    .roster_rows
+            ),
+            Some(2),
+            "the same authoritative PlayerInfo converges every lobby projection"
+        );
+    }
+
+    #[test]
+    fn client_roster_projection_hides_foreign_team_controls_and_random_assignments() {
+        let teams = vec![
+            lc_engine::InitialNetworkTeam {
+                id: 1,
+                name: LegacyCString::from_bytes(b"One".to_vec()).unwrap(),
+                player_start_index: 0,
+                player_ids: vec![1],
+                color: 0x00f4_0000,
+                icon_spec: LegacyCString::default(),
+                max_players: 0,
+            },
+            lc_engine::InitialNetworkTeam {
+                id: 2,
+                name: LegacyCString::from_bytes(b"Two".to_vec()).unwrap(),
+                player_start_index: 0,
+                player_ids: vec![2],
+                color: 0x0000_c800,
+                icon_spec: LegacyCString::default(),
+                max_players: 0,
+            },
+        ];
+        let mut metadata = lc_engine::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: lc_engine::InitialNetworkTeamDistribution::Free,
+            team_colors: true,
+            max_script_players: 1,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams,
+        };
+        let project = |metadata: &lc_engine::InitialNetworkTeamMetadata, local_client_id| {
+            let mut clients = ControlClientRegistry::default();
+            clients.replace_snapshot([
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    activated: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 8,
+                    activated: false,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 9,
+                    activated: true,
+                    ..Default::default()
+                },
+            ]);
+            let mut infos = ControlPlayerInfoRegistry::default();
+            let random_invisible = matches!(
+                metadata.team_distribution,
+                lc_engine::InitialNetworkTeamDistribution::RandomInvisible
+            );
+            infos.replace_snapshot(
+                3,
+                [
+                    lc_engine::PlayerInfoControlData {
+                        client_id: 0,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            id: 1,
+                            team: 1,
+                            flags: if random_invisible {
+                                lc_engine::PLAYER_INFO_FLAG_JOINED
+                            } else {
+                                0
+                            },
+                            savegame_player: if random_invisible { 41 } else { 0 },
+                            name: LegacyCString::from_bytes(b"Host player".to_vec()).unwrap(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    lc_engine::PlayerInfoControlData {
+                        client_id: 7,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            id: 2,
+                            team: 2,
+                            flags: if random_invisible {
+                                lc_engine::PLAYER_INFO_FLAG_JOINED
+                            } else {
+                                0
+                            },
+                            savegame_player: if random_invisible { 42 } else { 0 },
+                            name: LegacyCString::from_bytes(b"Own player".to_vec()).unwrap(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    lc_engine::PlayerInfoControlData {
+                        client_id: 8,
+                        players: Vec::new(),
+                        ..Default::default()
+                    },
+                ],
+            );
+            classic_lobby_roster_projection(&clients, &infos, Some(metadata), local_client_id).0
+        };
+        let selectable = |rows: &[LobbyRosterRow], player_id| {
+            rows.iter().find_map(|row| match row {
+                LobbyRosterRow::Player(player) if player.id == player_id => {
+                    player.team.as_ref().map(|team| team.selectable)
+                }
+                _ => None,
+            })
+        };
+
+        let client_rows = project(&metadata, 7);
+        assert_eq!(selectable(&client_rows, 1), Some(false));
+        assert_eq!(selectable(&client_rows, 2), Some(true));
+        assert!(client_rows.iter().any(|row| matches!(
+            row,
+            LobbyRosterRow::Header(LobbyHeaderRow {
+                kind: LobbyRosterHeader::ScriptPlayers,
+                can_add_player: false,
+                ..
+            })
+        )));
+        assert!(client_rows.iter().any(|row| matches!(
+            row,
+            LobbyRosterRow::Client(LobbyClientRow {
+                id: 8,
+                status: LobbyClientStatus::Observer,
+                ..
+            })
+        )));
+        assert!(client_rows.iter().any(|row| matches!(
+            row,
+            LobbyRosterRow::Client(LobbyClientRow {
+                id: 9,
+                status: LobbyClientStatus::Unknown,
+                ..
+            })
+        )));
+
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::Host;
+        assert_eq!(selectable(&project(&metadata, 7), 2), Some(false));
+        assert_eq!(selectable(&project(&metadata, 0), 1), Some(true));
+        assert_eq!(selectable(&project(&metadata, 0), 2), Some(true));
+
+        metadata.team_distribution = lc_engine::InitialNetworkTeamDistribution::RandomInvisible;
+        let random_rows = project(&metadata, 7);
+        assert!(random_rows.iter().filter_map(|row| match row {
+            LobbyRosterRow::Player(player) => player.team.as_ref(),
+            _ => None,
+        }).all(|team| team.name == "Random team" && !team.selectable));
     }
 
     #[test]
@@ -65303,6 +67374,22 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.handle_mouse_button(ElementState::Released)
             .expect("release stays with the closed combo gesture");
         assert!(app.context_menu.is_none());
+
+        app.context_menu_pointer_dismissed_lobby_team_player = Some(7);
+        app.handle_gamepad_event(GamepadEvent::Clear {
+            slot: GamepadSlot::new(0),
+        })
+        .expect("gamepad input starts a distinct combo gesture");
+        assert_eq!(app.context_menu_pointer_dismissed_lobby_team_player, None);
+
+        app.process_classic_lobby_actions(vec![
+            ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+        ])
+        .expect("reopen team combo");
+        assert!(app.context_menu.is_some());
+        assert!(app.select_classic_lobby_sheet(LobbySheet::Resources));
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.context_menu_lobby_team_player, None);
     }
 
     #[test]
@@ -65681,13 +67768,9 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .focus(),
             LobbyControl::Roster
         );
-        let error = app
-            .handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
-            .expect_err("focused roster context must hit the typed child boundary");
-        assert!(
-            error.to_string().contains("RosterContext"),
-            "unexpected {error}"
-        );
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("local client context is safely ignored");
+        assert!(app.context_menu.is_none());
     }
 
     #[test]
@@ -65875,19 +67958,37 @@ public func Grant(password) { return GainMissionAccess(password); }
                 name: "Remote".to_string(),
                 kind: ParticipantKind::Player,
             })
-            .expect("queue remote row");
+            .expect("queue remote transport row");
         app.process_network_events()
-            .expect("remote row updates the exact classic roster");
+            .expect("remote transport notification is nonfatal");
+        events
+            .send(NetworkEvent::DirectControl(NetworkControl::ClientJoin(
+                lc_engine::ClientJoinControlData {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: 1,
+                        activated: true,
+                        observer: false,
+                        name: LegacyCString::from_bytes(b"Remote".to_vec()).unwrap(),
+                        nick: LegacyCString::from_bytes(b"Remote nick".to_vec()).unwrap(),
+                        lobby_ready: false,
+                    },
+                    by_client: 0,
+                },
+            )))
+            .expect("queue authoritative remote client");
+        app.process_network_events()
+            .expect("authoritative remote row is projected");
         assert_eq!(app.status_text, "Remote joined the lobby");
         assert!(app.network_lobby.is_none());
+        assert!(app.classic_host_lobby.is_some());
         assert!(app
             .classic_host_lobby
             .as_ref()
-            .expect("classic lobby remains")
+            .unwrap()
             .controller
             .rows()
             .iter()
-            .any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == 1 && client.name == "Remote")));
+            .any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == 1)));
     }
 
     #[test]
@@ -84860,10 +86961,13 @@ ScenInfoArea=70,5,25,90
         let (manager, _event_tx, commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+        let mut client_settings = ClientSettings::new(
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
             "Client",
-        )));
+        );
+        client_settings.group_maker =
+            LegacyCString::from_bytes(b"Exact maker".to_vec()).unwrap();
+        app.network_mode = Some(NetworkMode::Client(client_settings));
         app.control_clients.register(7, true, false);
 
         let wire_name = lc_engine::LegacyCString::from_bytes(

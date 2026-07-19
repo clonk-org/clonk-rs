@@ -1697,6 +1697,10 @@ pub enum NetworkEvent {
         local_addresses: Vec<NetworkAddress>,
     },
     ResourceAction(lc_network::ResourceCatalogAction),
+    ResourceProgress {
+        resource_id: i32,
+        present_percent: u8,
+    },
     ResourceComplete {
         resource_id: i32,
         core: lc_engine::NetworkResourceCore,
@@ -4286,6 +4290,15 @@ async fn handle_host_event(
         HostEvent::ResourceAction(action) => {
             let _ = event_tx.send(NetworkEvent::ResourceAction(action));
         }
+        HostEvent::ResourceProgress {
+            resource_id,
+            present_percent,
+        } => {
+            let _ = event_tx.send(NetworkEvent::ResourceProgress {
+                resource_id,
+                present_percent,
+            });
+        }
         HostEvent::ResourceComplete {
             resource_id,
             core,
@@ -5062,6 +5075,15 @@ async fn handle_client_event(
         }
         ClientEvent::ResourceAction(action) => {
             let _ = event_tx.send(NetworkEvent::ResourceAction(action));
+        }
+        ClientEvent::ResourceProgress {
+            resource_id,
+            present_percent,
+        } => {
+            let _ = event_tx.send(NetworkEvent::ResourceProgress {
+                resource_id,
+                present_percent,
+            });
         }
         ClientEvent::ResourceComplete {
             resource_id,
@@ -8310,6 +8332,54 @@ mod tests {
         assert_eq!(
             event_rx.recv().expect("client countdown event"),
             NetworkEvent::LobbyCountdown(packet)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resource_chunk_progress_is_forwarded_to_the_app_for_host_and_client() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
+
+        handle_host_event(
+            HostEvent::ResourceProgress {
+                resource_id: 17,
+                present_percent: 40,
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
+        )
+        .await
+        .expect("forward host resource progress");
+        handle_client_event(
+            ClientEvent::ResourceProgress {
+                resource_id: 23,
+                present_percent: 75,
+            },
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward client resource progress");
+
+        assert_eq!(
+            event_rx.recv().expect("host resource progress event"),
+            NetworkEvent::ResourceProgress {
+                resource_id: 17,
+                present_percent: 40,
+            }
+        );
+        assert_eq!(
+            event_rx.recv().expect("client resource progress event"),
+            NetworkEvent::ResourceProgress {
+                resource_id: 23,
+                present_percent: 75,
+            }
         );
     }
 

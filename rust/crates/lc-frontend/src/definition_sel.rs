@@ -1,8 +1,10 @@
-//! Pixel-faithful frontend state for the classic object-definition selector.
+//! Pixel-faithful frontend state for the classic file-selector family.
 //!
 //! Directory enumeration deliberately lives outside this module. Callers pass
-//! the immediate `*.c4d` entries in their native order and rebuild the rows
-//! after a refresh request.
+//! the immediate matching entries in their native order and rebuild the rows
+//! after a refresh request. [`FileSelMode::Definitions`] retains the checked
+//! multi-selection specialization; [`FileSelMode::Player`] models the
+//! single-selection `C4PlayerSelDlg` specialization.
 
 use crate::classic_gui::{
     draw_3d_frame, draw_clipped_text, draw_engine_box, draw_facet_stretch, ClassicButtonState,
@@ -23,6 +25,37 @@ const BUTTON_WIDTH: i32 = 120;
 const BUTTON_HEIGHT: i32 = 32;
 const SCROLLBAR_WIDTH: i32 = 16;
 const ROW_SPACING: i32 = 1;
+const PLAYER_ICON_PHASE: u32 = 9;
+const DEFINITION_ICON_PHASE: u32 = 29;
+
+/// The two `C4FileSelDlg` specializations exposed by this controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileSelMode {
+    /// `C4DefinitionSelDlg`: checked multi-selection with fixed rows.
+    Definitions,
+    /// `C4PlayerSelDlg`: one selected `*.c4p` path and no checkboxes.
+    Player,
+}
+
+impl FileSelMode {
+    const fn is_multi_selection(self) -> bool {
+        matches!(self, Self::Definitions)
+    }
+
+    const fn icon_phase(self) -> u32 {
+        match self {
+            Self::Definitions => DEFINITION_ICON_PHASE,
+            Self::Player => PLAYER_ICON_PHASE,
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Definitions => "Select Object Definitions",
+            Self::Player => "Select player...",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefinitionSelEntry {
@@ -136,7 +169,16 @@ pub struct DefinitionSelResources<'a> {
 }
 
 impl DefinitionSelResources<'_> {
+    /// Validates the resource set used by the definition specialization.
+    /// Kept as the compatibility entry point for existing callers.
     pub fn validate(self) -> Result<()> {
+        self.validate_for_mode(FileSelMode::Definitions)
+    }
+
+    /// Validates only the sheets consumed by the selected specialization.
+    /// `C4PlayerSelDlg` has no checkbox controls and therefore does not depend
+    /// on a usable `GUICheckbox` strip.
+    pub fn validate_for_mode(self, mode: FileSelMode) -> Result<()> {
         self.skin.validate_message_dialog_assets()?;
         ensure!(
             self.icons.width() >= 40
@@ -150,15 +192,17 @@ impl DefinitionSelResources<'_> {
         let icon_columns = self.icons.width() / 40;
         ensure!(
             34 / icon_columns < self.icons.height() / 40,
-            "GUIIcons.png does not contain required definition and close phases"
+            "GUIIcons.png does not contain required file-selector and close phases"
         );
-        ensure!(
-            self.checkbox.height() > 0
-                && self.checkbox.width() >= self.checkbox.height().saturating_mul(4),
-            "GUICheckbox.png must contain all four enabled/disabled phases, got {}x{}",
-            self.checkbox.width(),
-            self.checkbox.height()
-        );
+        if mode.is_multi_selection() {
+            ensure!(
+                self.checkbox.height() > 0
+                    && self.checkbox.width() >= self.checkbox.height().saturating_mul(4),
+                "GUICheckbox.png must contain all four enabled/disabled phases, got {}x{}",
+                self.checkbox.width(),
+                self.checkbox.height()
+            );
+        }
         ensure!(
             self.scroll.width() >= 32 && self.scroll.height() >= 48,
             "GUIScroll.png must contain the 32x48 classic scrollbar facets, got {}x{}",
@@ -235,6 +279,7 @@ struct TitleDrag {
 
 #[derive(Clone, Debug)]
 pub struct DefinitionSelController {
+    mode: FileSelMode,
     root_path: String,
     fixed_selection: Vec<String>,
     rows: Vec<DefinitionSelRow>,
@@ -254,13 +299,34 @@ pub struct DefinitionSelController {
 }
 
 impl DefinitionSelController {
+    /// Constructs the checked, multi-selection `C4DefinitionSelDlg` variant.
     pub fn new(
+        root_path: impl Into<String>,
+        fixed_selection: Vec<String>,
+        entries: Vec<DefinitionSelEntry>,
+    ) -> Self {
+        Self::with_mode(
+            FileSelMode::Definitions,
+            root_path,
+            fixed_selection,
+            entries,
+        )
+    }
+
+    /// Constructs the single-selection `C4PlayerSelDlg` variant.
+    pub fn new_player(root_path: impl Into<String>, entries: Vec<DefinitionSelEntry>) -> Self {
+        Self::with_mode(FileSelMode::Player, root_path, Vec::new(), entries)
+    }
+
+    fn with_mode(
+        mode: FileSelMode,
         root_path: impl Into<String>,
         fixed_selection: Vec<String>,
         entries: Vec<DefinitionSelEntry>,
     ) -> Self {
         let rows = build_rows(&entries, &fixed_selection, true);
         Self {
+            mode,
             root_path: root_path.into(),
             fixed_selection,
             rows,
@@ -280,6 +346,14 @@ impl DefinitionSelController {
         }
     }
 
+    pub const fn mode(&self) -> FileSelMode {
+        self.mode
+    }
+
+    pub const fn is_multi_selection(&self) -> bool {
+        self.mode.is_multi_selection()
+    }
+
     pub fn root_path(&self) -> &str {
         &self.root_path
     }
@@ -288,6 +362,12 @@ impl DefinitionSelController {
     }
     pub const fn selected_index(&self) -> Option<usize> {
         self.selected
+    }
+    pub fn selected_row(&self) -> Option<&DefinitionSelRow> {
+        self.selected.and_then(|index| self.rows.get(index))
+    }
+    pub fn selected_full_path(&self) -> Option<&str> {
+        self.selected_row().map(DefinitionSelRow::full_path)
     }
     pub const fn focus(&self) -> DefinitionSelControl {
         self.focus
@@ -303,14 +383,21 @@ impl DefinitionSelController {
     }
 
     pub fn caption(&self) -> String {
-        if self.root_path.is_empty() {
-            "Select Object Definitions".to_owned()
+        let title = self.mode.title();
+        if self.mode == FileSelMode::Player || self.root_path.is_empty() {
+            title.to_owned()
         } else {
-            format!("Select Object Definitions [{}]", self.root_path)
+            format!("{title} [{}]", self.root_path)
         }
     }
 
     pub fn accepted_selection(&self) -> Vec<String> {
+        if self.mode == FileSelMode::Player {
+            return self
+                .selected_row()
+                .map(|row| vec![row.full_path.clone()])
+                .unwrap_or_default();
+        }
         let mut result = self.fixed_selection.clone();
         for row in &self.rows {
             if row.checked && !result.iter().any(|value| value == &row.filename) {
@@ -365,18 +452,17 @@ impl DefinitionSelController {
             DefinitionSelKey::Escape => actions.push(DefinitionSelAction::Cancelled),
             DefinitionSelKey::Refresh => actions.push(DefinitionSelAction::RefreshRequested),
             DefinitionSelKey::Tab => self.advance_focus(backwards, layout, &mut actions),
-            DefinitionSelKey::Space if self.focus == DefinitionSelControl::FileList => {
+            DefinitionSelKey::Space
+                if self.focus == DefinitionSelControl::FileList
+                    && self.mode.is_multi_selection() =>
+            {
                 if let Some(index) = self.selected {
                     self.toggle_row(index, &mut actions);
                 }
             }
             DefinitionSelKey::Space => {
                 if let DefinitionSelControl::RowCheckbox(index) = self.focus {
-                    if self
-                        .rows
-                        .get(index)
-                        .is_some_and(|row| !row.fixed)
-                    {
+                    if self.rows.get(index).is_some_and(|row| !row.fixed) {
                         self.key_checkbox_pressed = Some(index);
                         self.sound_events.push(DefinitionSelSound::ArrowHit);
                     }
@@ -462,16 +548,21 @@ impl DefinitionSelController {
         }
     }
 
-    /// Primary gamepad action. On the list this matches `ListBox::KeyActivate`
-    /// (toggle); on buttons it follows their ordinary down/up interaction.
+    /// Primary gamepad action. On the list this matches `ListBox::KeyActivate`:
+    /// definitions toggle their check, while a player selection accepts.
+    /// Buttons follow their ordinary down/up interaction.
     pub fn handle_gamepad_low_down(
         &mut self,
         layout: &DefinitionSelLayout,
     ) -> Vec<DefinitionSelAction> {
         if self.focus == DefinitionSelControl::FileList {
             let mut actions = Vec::new();
-            if let Some(index) = self.selected {
-                self.toggle_row(index, &mut actions);
+            if self.mode.is_multi_selection() {
+                if let Some(index) = self.selected {
+                    self.toggle_row(index, &mut actions);
+                } else {
+                    self.try_accept(&mut actions);
+                }
             } else {
                 self.try_accept(&mut actions);
             }
@@ -625,7 +716,11 @@ impl DefinitionSelController {
             HitTarget::Checkbox(index) | HitTarget::Row(index) => {
                 self.set_focus(DefinitionSelControl::FileList, true, layout, &mut actions);
                 self.set_selection(Some(index), true, layout, &mut actions);
-                self.toggle_row(index, &mut actions);
+                if self.mode.is_multi_selection() {
+                    self.toggle_row(index, &mut actions);
+                } else {
+                    self.try_accept(&mut actions);
+                }
             }
             HitTarget::ListBlank => {
                 self.set_focus(DefinitionSelControl::FileList, true, layout, &mut actions);
@@ -738,14 +833,10 @@ impl DefinitionSelController {
         layout: &DefinitionSelLayout,
         actions: &mut Vec<DefinitionSelAction>,
     ) {
-        let mut order = vec![
-            DefinitionSelControl::Close,
-            DefinitionSelControl::FileList,
-        ];
-        if let Some(index) = self
-            .selected
-            .filter(|index| self.rows.get(*index).is_some_and(|row| !row.fixed))
-        {
+        let mut order = vec![DefinitionSelControl::Close, DefinitionSelControl::FileList];
+        if let Some(index) = self.selected.filter(|index| {
+            self.mode.is_multi_selection() && self.rows.get(*index).is_some_and(|row| !row.fixed)
+        }) {
             order.push(DefinitionSelControl::RowCheckbox(index));
         }
         order.extend([DefinitionSelControl::Ok, DefinitionSelControl::Cancel]);
@@ -806,6 +897,9 @@ impl DefinitionSelController {
     }
 
     fn toggle_row(&mut self, index: usize, actions: &mut Vec<DefinitionSelAction>) {
+        if !self.mode.is_multi_selection() {
+            return;
+        }
         let Some(row) = self.rows.get_mut(index) else {
             return;
         };
@@ -959,7 +1053,9 @@ impl DefinitionSelController {
                 let index = (content_y / layout.row_pitch) as usize;
                 let within = content_y % layout.row_pitch;
                 if index < self.rows.len() && within < layout.row_height {
-                    if point.x < (layout.list_client.x + layout.row_height) as f32 {
+                    if self.mode.is_multi_selection()
+                        && point.x < (layout.list_client.x + layout.row_height) as f32
+                    {
                         return HitTarget::Checkbox(index);
                     }
                     return HitTarget::Row(index);
@@ -982,7 +1078,7 @@ impl DefinitionSelController {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
-        resources.validate()?;
+        resources.validate_for_mode(self.mode)?;
         let layout = self.layout(
             i32::try_from(surface.width()).unwrap_or(i32::MAX),
             i32::try_from(surface.height()).unwrap_or(i32::MAX),
@@ -1132,32 +1228,43 @@ impl DefinitionSelController {
             if y >= layout.list_client.h || y + layout.row_height <= 0 {
                 continue;
             }
-            let checkbox_rect = IntRect {
+            let row_cell = IntRect {
                 x: 0,
                 y,
                 w: layout.row_height,
                 h: layout.row_height,
             };
-            let phase = u32::from(row.checked) + 2 * u32::from(row.fixed);
-            let cell = resources.checkbox.height();
-            draw_facet_stretch(
+            let icon_x = if self.mode.is_multi_selection() {
+                let phase = u32::from(row.checked) + 2 * u32::from(row.fixed);
+                let cell = resources.checkbox.height();
+                draw_facet_stretch(
+                    &mut clipped,
+                    resources.checkbox,
+                    ((phase * cell) as f32, 0.0, cell as f32, cell as f32),
+                    (
+                        row_cell.x as f32,
+                        row_cell.y as f32,
+                        row_cell.w as f32,
+                        row_cell.h as f32,
+                    ),
+                    gamma,
+                );
+                layout.row_height
+            } else {
+                0
+            };
+            let icon_rect = IntRect {
+                x: icon_x,
+                ..row_cell
+            };
+            draw_icon_phase(
                 &mut clipped,
-                resources.checkbox,
-                ((phase * cell) as f32, 0.0, cell as f32, cell as f32),
-                (
-                    checkbox_rect.x as f32,
-                    checkbox_rect.y as f32,
-                    checkbox_rect.w as f32,
-                    checkbox_rect.h as f32,
-                ),
+                icon_rect,
+                resources.icons,
+                self.mode.icon_phase(),
                 gamma,
             );
-            let icon_rect = IntRect {
-                x: layout.row_height,
-                ..checkbox_rect
-            };
-            draw_icon_phase(&mut clipped, icon_rect, resources.icons, 29, gamma);
-            let label_x = layout.row_height * 2;
+            let label_x = icon_x + layout.row_height;
             draw_clipped_text(
                 &mut clipped,
                 &resources.fonts.text,
@@ -1182,7 +1289,8 @@ impl DefinitionSelController {
                 },
             );
 
-            if active
+            if self.mode.is_multi_selection()
+                && active
                 && !row.fixed
                 && (self.focus == DefinitionSelControl::RowCheckbox(index)
                     || self.pointer.is_some_and(|point| {
@@ -1518,6 +1626,15 @@ mod tests {
             .collect()
     }
 
+    fn player_entries(names: &[&str]) -> Vec<DefinitionSelEntry> {
+        names
+            .iter()
+            .map(|name| {
+                DefinitionSelEntry::new(format!("/Players/{name}.c4p"), format!("{name}.c4p"))
+            })
+            .collect()
+    }
+
     fn center(rect: IntRect) -> GuiPoint {
         GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
     }
@@ -1724,6 +1841,91 @@ mod tests {
     }
 
     #[test]
+    fn player_mode_is_single_selection_and_accepts_the_full_path() {
+        let fonts = endeavour_font_set();
+        let mut controller =
+            DefinitionSelController::new_player("/Players", player_entries(&["Alice", "Bob"]));
+        let layout = controller.layout(1280, 720, &fonts.text);
+
+        assert_eq!(controller.mode(), FileSelMode::Player);
+        assert!(!controller.is_multi_selection());
+        assert_eq!(controller.caption(), "Select player...");
+        assert!(controller
+            .rows()
+            .iter()
+            .all(|row| !row.is_fixed() && !row.is_checked()));
+        assert_eq!(
+            controller.handle_key_down(DefinitionSelKey::Enter, false, &layout),
+            vec![DefinitionSelAction::PleaseSelectFile]
+        );
+        assert_eq!(
+            controller.handle_key_down(DefinitionSelKey::Down, false, &layout),
+            vec![DefinitionSelAction::SelectionChanged(Some(0))]
+        );
+        assert_eq!(controller.selected_full_path(), Some("/Players/Alice.c4p"));
+        assert!(controller
+            .handle_key_down(DefinitionSelKey::Space, false, &layout)
+            .is_empty());
+        assert_eq!(
+            controller.handle_key_down(DefinitionSelKey::Enter, false, &layout),
+            vec![DefinitionSelAction::Accepted(vec![
+                "/Players/Alice.c4p".to_owned()
+            ])]
+        );
+        assert_eq!(
+            controller.handle_gamepad_low_down(&layout),
+            vec![DefinitionSelAction::Accepted(vec![
+                "/Players/Alice.c4p".to_owned()
+            ])]
+        );
+        assert_eq!(
+            controller.handle_key_down(DefinitionSelKey::Tab, false, &layout),
+            vec![DefinitionSelAction::FocusChanged(DefinitionSelControl::Ok)],
+            "single-selection rows never insert a checkbox into tab order"
+        );
+        assert_eq!(
+            controller.handle_key_down(DefinitionSelKey::Refresh, false, &layout),
+            vec![DefinitionSelAction::RefreshRequested]
+        );
+
+        controller.rebuild_rows_after_refresh(player_entries(&["Carol"]));
+        assert_eq!(controller.selected_index(), None);
+        assert_eq!(controller.selected_full_path(), None);
+        assert!(controller.accepted_selection().is_empty());
+        assert_eq!(controller.rows()[0].label(), "Carol");
+        assert_eq!(
+            DefinitionSelController::new_player("", Vec::new()).caption(),
+            "Select player..."
+        );
+    }
+
+    #[test]
+    fn player_icon_cell_selects_and_double_click_accepts_without_a_checkbox() {
+        let fonts = endeavour_font_set();
+        let mut controller =
+            DefinitionSelController::new_player("/Players", player_entries(&["Alice", "Bob"]));
+        let layout = controller.layout(1280, 720, &fonts.text);
+        let first_icon = GuiPoint::new(
+            (layout.list_client.x + 5) as f32,
+            (layout.list_client.y + 5) as f32,
+        );
+
+        assert_eq!(controller.mode.icon_phase(), PLAYER_ICON_PHASE);
+        assert_eq!(
+            controller.hit_target(first_icon, &layout),
+            HitTarget::Row(0)
+        );
+        assert_eq!(
+            controller.handle_pointer_double_click(first_icon, &layout),
+            vec![
+                DefinitionSelAction::SelectionChanged(Some(0)),
+                DefinitionSelAction::Accepted(vec!["/Players/Alice.c4p".to_owned()]),
+            ]
+        );
+        assert!(controller.rows().iter().all(|row| !row.is_checked()));
+    }
+
+    #[test]
     fn pointer_touch_wheel_scrollbar_and_title_drag_are_exposed() {
         let fonts = endeavour_font_set();
         let mut controller = DefinitionSelController::new("/Definitions", Vec::new(), entries(30));
@@ -1831,5 +2033,11 @@ mod tests {
             .render(&mut inactive, bad_resources, true, None)
             .unwrap_err();
         assert!(error.to_string().contains("all four"));
+
+        let player = DefinitionSelController::new_player("/Players", player_entries(&["Alice"]));
+        let mut player_surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        player
+            .render(&mut player_surface, bad_resources, true, None)
+            .expect("single-selection player rows do not consume GUICheckbox.png");
     }
 }

@@ -40,6 +40,11 @@ impl ResourceDerivation {
 pub enum ResourceTransferEvent {
     /// A stock catalog transport action, preserved without translation.
     Transport(ResourceCatalogAction),
+    /// One successfully stored chunk reports the local completion percentage.
+    Progress {
+        resource_id: i32,
+        present_percent: u8,
+    },
     /// The final chunk made a remotely loaded resource complete.
     Completed {
         resource_id: i32,
@@ -511,6 +516,11 @@ impl ResourceTransferBackend {
                         self.catalog.record_chunk_stored(packet.resource_id, chunk);
                     match catalog_outcome {
                         ChunkStoreOutcome::Stored => {
+                            if let Some(progress) =
+                                resource_progress_event(&self.catalog, packet.resource_id)
+                            {
+                                events.push(progress);
+                            }
                             if matches!(
                                 write_outcome,
                                 ChunkWriteOutcome::Stored { complete: true, .. }
@@ -526,6 +536,11 @@ impl ResourceTransferBackend {
                             });
                         }
                         ChunkStoreOutcome::Completed => {
+                            if let Some(progress) =
+                                resource_progress_event(&self.catalog, packet.resource_id)
+                            {
+                                events.push(progress);
+                            }
                             if !matches!(
                                 write_outcome,
                                 ChunkWriteOutcome::Stored { complete: true, .. }
@@ -638,6 +653,23 @@ impl ResourceTransferBackend {
         file_result?;
         Ok(())
     }
+}
+
+fn resource_progress_event(
+    catalog: &ResourceCatalog,
+    resource_id: i32,
+) -> Option<ResourceTransferEvent> {
+    let chunks = catalog.local_chunks(resource_id)?;
+    let total = chunks.chunk_count();
+    if total <= 0 {
+        return None;
+    }
+    let present_percent =
+        (i64::from(chunks.present_chunk_count()) * 100 / i64::from(total)).clamp(0, 100) as u8;
+    Some(ResourceTransferEvent::Progress {
+        resource_id,
+        present_percent,
+    })
 }
 
 fn host_resource_type(resource_type: u8) -> Result<HostResourceType, ResourceTransferError> {

@@ -63,6 +63,7 @@ fn cpp_host_and_client_exchange_all_chunks_without_sockets() {
     let discover = only_transport(client.on_peer_connected(0, 0, &mut safe_random).unwrap());
     let mut wire = VecDeque::from([(1, 0, discover)]);
     let mut completed = Vec::new();
+    let mut progress = Vec::new();
 
     while let Some((from, to, packet)) = wire.pop_front() {
         let events = if to == 0 {
@@ -83,6 +84,10 @@ fn cpp_host_and_client_exchange_all_chunks_without_sockets() {
                     core,
                     path,
                 } => completed.push((resource_id, core, path)),
+                ResourceTransferEvent::Progress {
+                    resource_id,
+                    present_percent,
+                } => progress.push((resource_id, present_percent)),
                 ResourceTransferEvent::Transport(ResourceCatalogAction::Broadcast { .. }) => {
                     panic!("the direct exchange should not broadcast")
                 }
@@ -100,6 +105,7 @@ fn cpp_host_and_client_exchange_all_chunks_without_sockets() {
     assert_eq!(completed[0].0, 7);
     assert_eq!(completed[0].1, resource_core);
     assert_eq!(completed[0].2, destination);
+    assert_eq!(progress, vec![(7, 33), (7, 66), (7, 100)]);
     assert_eq!(fs::read(destination).unwrap(), b"local");
     assert!(client.catalog().outstanding_load_count(7) == 0);
 }
@@ -566,10 +572,20 @@ fn cpp_resource_chunk_failure_drops_bad_stores_and_continues_batch() {
 
     assert!(matches!(
         events.as_slice(),
-        [ResourceTransferEvent::Completed {
-            resource_id: 12,
-            ..
-        }]
+        [
+            ResourceTransferEvent::Progress {
+                resource_id: 12,
+                present_percent: 50,
+            },
+            ResourceTransferEvent::Progress {
+                resource_id: 12,
+                present_percent: 100,
+            },
+            ResourceTransferEvent::Completed {
+                resource_id: 12,
+                ..
+            }
+        ]
     ));
     assert_eq!(fs::read(path).unwrap(), b"AB");
 }

@@ -82,7 +82,8 @@ impl LobbyRole {
     }
 }
 
-/// A right-side sheet. Only [`Self::Players`] is rendered by this slice.
+/// A right-side sheet. Players/Teams and Resources have exact frontend
+/// presentations; the remaining sheets stay typed app-owned requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LobbySheet {
     Players,
@@ -92,6 +93,12 @@ pub enum LobbySheet {
     Scenario,
 }
 
+impl LobbySheet {
+    pub const fn is_roster(self) -> bool {
+        matches!(self, Self::Players | Self::Teams)
+    }
+}
+
 /// Localized resource strings used by the visible lobby slice. Templates use
 /// named braces so the frontend never bakes an English word order into layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +106,9 @@ pub struct LobbyLabels {
     pub lobby: String,
     pub scenario_lobby_template: String,
     pub players_template: String,
+    pub resources: String,
+    pub options: String,
+    pub scenario: String,
     pub chat: String,
     pub exit: String,
     pub start: String,
@@ -125,6 +135,9 @@ impl Default for LobbyLabels {
             lobby: "Lobby".into(),
             scenario_lobby_template: "{scenario} - {lobby}".into(),
             players_template: "&Players ({active}/{maximum})".into(),
+            resources: "&Resources".into(),
+            options: "&Options".into(),
+            scenario: "&Scenario".into(),
             chat: "Cha&t:".into(),
             exit: "E&xit".into(),
             start: "&Start".into(),
@@ -358,6 +371,29 @@ impl LobbyRosterRow {
                     ..
                 })
         )
+    }
+}
+
+/// One `C4Network2ResDlg::ListItem`. The source filename remains available to
+/// app code; presentation uses only its final path component like
+/// `GetFilename(C4Network2ResCore::getFileName())`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LobbyResourceRow {
+    pub id: i32,
+    pub filename: String,
+    pub present_percent: u8,
+}
+
+impl LobbyResourceRow {
+    pub fn basename(&self) -> &str {
+        self.filename
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(self.filename.as_str())
+    }
+
+    pub fn progress_label(&self) -> Option<String> {
+        (self.present_percent < 100).then(|| format!("{}%", self.present_percent))
     }
 }
 
@@ -1036,6 +1072,7 @@ enum HitTarget {
     Tab(LobbyControl),
     RosterRow(usize),
     RosterBlank,
+    RightListInert,
     AddPlayer(usize),
     Team(usize),
     RosterScrollTop,
@@ -1082,6 +1119,7 @@ pub struct GameLobby {
     role: LobbyRole,
     labels: LobbyLabels,
     scenario_title: String,
+    active_sheet: LobbySheet,
     active_players: i32,
     max_players: i32,
     has_teams: bool,
@@ -1092,6 +1130,7 @@ pub struct GameLobby {
     league_mode: bool,
     countdown: LobbyCountdownState,
     rows: Vec<LobbyRosterRow>,
+    resource_rows: Vec<LobbyResourceRow>,
     client_sound_status: HashMap<i32, (bool, Instant)>,
     logs: Vec<LobbyLogLine>,
     chat_edit: LobbyChatEditView,
@@ -1112,6 +1151,9 @@ pub struct GameLobby {
     roster_scroll: i32,
     roster_max_scroll: i32,
     roster_scroll_pin: i32,
+    resource_scroll: i32,
+    resource_max_scroll: i32,
+    resource_scroll_pin: i32,
     scrollbar_drag: Option<ScrollbarDrag>,
     collapsed_roster: bool,
     collapse_player_limit: usize,
@@ -1137,6 +1179,7 @@ impl GameLobby {
             role,
             labels: LobbyLabels::default(),
             scenario_title: scenario_title.into(),
+            active_sheet: LobbySheet::Players,
             active_players,
             max_players,
             has_teams,
@@ -1147,6 +1190,7 @@ impl GameLobby {
             league_mode: false,
             countdown: LobbyCountdownState::None,
             rows,
+            resource_rows: Vec::new(),
             client_sound_status: HashMap::new(),
             logs: Vec::new(),
             chat_edit: LobbyChatEditView::default(),
@@ -1167,6 +1211,9 @@ impl GameLobby {
             roster_scroll: 0,
             roster_max_scroll: 0,
             roster_scroll_pin: 0,
+            resource_scroll: 0,
+            resource_max_scroll: 0,
+            resource_scroll_pin: 0,
             scrollbar_drag: None,
             collapsed_roster: false,
             collapse_player_limit: usize::MAX,
@@ -1177,6 +1224,63 @@ impl GameLobby {
 
     pub const fn role(&self) -> LobbyRole {
         self.role
+    }
+
+    pub const fn active_sheet(&self) -> LobbySheet {
+        self.active_sheet
+    }
+
+    pub const fn resource_sheet_active(&self) -> bool {
+        matches!(self.active_sheet, LobbySheet::Resources)
+    }
+
+    pub fn set_active_sheet(&mut self, sheet: LobbySheet) {
+        if self.active_sheet == sheet {
+            return;
+        }
+        self.active_sheet = sheet;
+        self.open_team_combo_player = None;
+        self.scrollbar_drag = None;
+        if matches!(
+            self.hovered,
+            HitTarget::RosterRow(_)
+                | HitTarget::RosterBlank
+                | HitTarget::RightListInert
+                | HitTarget::AddPlayer(_)
+                | HitTarget::Team(_)
+                | HitTarget::RosterScrollTop
+                | HitTarget::RosterScrollBottom
+                | HitTarget::RosterScrollTrack
+                | HitTarget::RosterScrollInert
+        ) {
+            self.hovered = HitTarget::None;
+        }
+        if matches!(
+            self.pointer_pressed,
+            Some(
+                HitTarget::RosterRow(_)
+                    | HitTarget::RosterBlank
+                    | HitTarget::RightListInert
+                    | HitTarget::AddPlayer(_)
+                    | HitTarget::Team(_)
+                    | HitTarget::RosterScrollTop
+                    | HitTarget::RosterScrollBottom
+                    | HitTarget::RosterScrollTrack
+                    | HitTarget::RosterScrollInert
+            )
+        ) {
+            self.pointer_pressed = None;
+            self.pointer_inside_pressed = false;
+        }
+        if !sheet.is_roster()
+            && matches!(
+                self.focus,
+                LobbyControl::Roster | LobbyControl::RosterTeam | LobbyControl::RosterAddPlayer
+            )
+        {
+            self.focus = LobbyControl::ChatInput;
+            self.key_pressed = None;
+        }
     }
 
     pub const fn focus(&self) -> LobbyControl {
@@ -1197,6 +1301,39 @@ impl GameLobby {
 
     pub fn rows(&self) -> &[LobbyRosterRow] {
         &self.rows
+    }
+
+    pub fn resource_rows(&self) -> &[LobbyResourceRow] {
+        &self.resource_rows
+    }
+
+    /// Installs the current resource-list snapshot. Native lookup begins at
+    /// ID zero, and its reconciliation loop is ordered by resource ID.
+    pub fn set_resource_rows(&mut self, mut rows: Vec<LobbyResourceRow>) {
+        rows.retain(|row| row.id >= 0);
+        rows.iter_mut()
+            .for_each(|row| row.present_percent = row.present_percent.min(100));
+        rows.sort_by_key(|row| row.id);
+        rows.dedup_by_key(|row| row.id);
+        self.resource_rows = rows;
+    }
+
+    pub fn set_resource_progress(&mut self, resource_id: i32, present_percent: u8) -> bool {
+        let Some(row) = self
+            .resource_rows
+            .iter_mut()
+            .find(|row| row.id == resource_id)
+        else {
+            return false;
+        };
+        row.present_percent = present_percent.min(100);
+        true
+    }
+
+    pub fn remove_resource_row(&mut self, resource_id: i32) -> bool {
+        let previous_len = self.resource_rows.len();
+        self.resource_rows.retain(|row| row.id != resource_id);
+        self.resource_rows.len() != previous_len
     }
 
     pub fn set_labels(&mut self, labels: LobbyLabels) {
@@ -1243,6 +1380,16 @@ impl GameLobby {
         self.roster_scroll
     }
 
+    pub const fn resource_scroll(&self) -> i32 {
+        self.resource_scroll
+    }
+
+    /// Restores app-owned scroll state before a transient controller is
+    /// laid out. `roster_layout` applies the current content clamp and pin.
+    pub fn set_resource_scroll(&mut self, scroll: i32) {
+        self.resource_scroll = scroll.max(0);
+    }
+
     pub fn set_rows(&mut self, rows: Vec<LobbyRosterRow>) {
         let selected_id = self.selected_roster_id.clone().or_else(|| {
             self.selected_row
@@ -1286,7 +1433,11 @@ impl GameLobby {
             _ => true,
         };
         if !child_focus_valid {
-            self.focus = LobbyControl::Roster;
+            self.focus = if self.active_sheet.is_roster() {
+                LobbyControl::Roster
+            } else {
+                LobbyControl::ChatInput
+            };
         }
     }
 
@@ -1412,8 +1563,17 @@ impl GameLobby {
             .replace("{maximum}", &self.max_players.to_string())
     }
 
+    pub fn right_title(&self) -> String {
+        match self.active_sheet {
+            LobbySheet::Players | LobbySheet::Teams => self.players_title(),
+            LobbySheet::Resources => self.labels.resources.clone(),
+            LobbySheet::Options => self.labels.options.clone(),
+            LobbySheet::Scenario => self.labels.scenario.clone(),
+        }
+    }
+
     pub fn layout(&self, width: i32, height: i32, fonts: &ClonkFontSet) -> LobbyLayout {
-        game_lobby_layout(
+        let mut layout = game_lobby_layout(
             width,
             height,
             fonts.title.line_height,
@@ -1421,7 +1581,12 @@ impl GameLobby {
             self.role,
             self.has_teams,
             self.has_external_chat,
-        )
+        );
+        layout
+            .tab_buttons
+            .iter_mut()
+            .for_each(|tab| tab.selected = tab.sheet == Some(self.active_sheet));
+        layout
     }
 
     pub fn roster_layout(
@@ -1429,6 +1594,17 @@ impl GameLobby {
         layout: &LobbyLayout,
         text_line_height: i32,
     ) -> LobbyRosterLayout {
+        if self.active_sheet == LobbySheet::Resources {
+            return self.resource_list_layout(layout, text_line_height);
+        }
+        if !self.active_sheet.is_roster() {
+            return LobbyRosterLayout {
+                rows: Vec::new(),
+                content_height: 0,
+                max_scroll: 0,
+                collapsed: false,
+            };
+        }
         let expanded_height = self.stack_rows(layout, text_line_height, false).1;
         if !self.collapsed_roster && expanded_height > layout.roster_client.h {
             let player_count = self
@@ -1456,6 +1632,64 @@ impl GameLobby {
             content_height,
             max_scroll,
             collapsed: self.collapsed_roster,
+        }
+    }
+
+    fn resource_list_layout(
+        &mut self,
+        layout: &LobbyLayout,
+        text_line_height: i32,
+    ) -> LobbyRosterLayout {
+        let icon_size = text_line_height.max(1);
+        let row_height = icon_size.saturating_add(4);
+        let content_height = i32::try_from(self.resource_rows.len())
+            .unwrap_or(i32::MAX)
+            .saturating_mul(row_height);
+        let max_scroll = (content_height - layout.roster_client.h).max(0);
+        self.resource_scroll = self.resource_scroll.clamp(0, max_scroll);
+        if max_scroll != self.resource_max_scroll {
+            self.resource_scroll_pin = scroll_to_pin(
+                self.resource_scroll,
+                max_scroll,
+                scrollbar_max_pin(layout.roster_scrollbar),
+            );
+            self.resource_max_scroll = max_scroll;
+        }
+        let rows = self
+            .resource_rows
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let y = i32::try_from(index)
+                    .unwrap_or(i32::MAX)
+                    .saturating_mul(row_height);
+                let rect = IntRect {
+                    x: layout.roster_client.x,
+                    y: layout.roster_client.y + y - self.resource_scroll,
+                    w: layout.roster_client.w,
+                    h: row_height,
+                };
+                LobbyRosterRowLayout {
+                    index,
+                    rect,
+                    icon: IntRect {
+                        x: rect.x,
+                        y: rect.y + 2,
+                        w: icon_size,
+                        h: icon_size,
+                    },
+                    add_player: None,
+                    team: None,
+                    rank: None,
+                    collapsed: false,
+                }
+            })
+            .collect();
+        LobbyRosterLayout {
+            rows,
+            content_height,
+            max_scroll,
+            collapsed: false,
         }
     }
 
@@ -1792,9 +2026,8 @@ impl GameLobby {
                 return actions;
             }
             HitTarget::RightCaption => {
-                let changed = self.focus != LobbyControl::Roster;
-                self.change_focus(LobbyControl::Roster, false);
-                if changed {
+                if self.active_sheet.is_roster() && self.focus != LobbyControl::Roster {
+                    self.change_focus(LobbyControl::Roster, false);
                     let mut actions = vec![LobbyAction::FocusChanged(LobbyControl::Roster)];
                     self.append_game_option_focus_clear(previous_focus, &mut actions);
                     return actions;
@@ -1820,8 +2053,10 @@ impl GameLobby {
                 }
             }
             HitTarget::RosterScrollTop => {
-                let changed = self.focus != LobbyControl::Roster;
-                self.change_focus(LobbyControl::Roster, false);
+                let changed = self.active_sheet.is_roster() && self.focus != LobbyControl::Roster;
+                if self.active_sheet.is_roster() {
+                    self.change_focus(LobbyControl::Roster, false);
+                }
                 self.sounds.push(LobbySound::ArrowHit);
                 self.pointer_pressed = Some(hit);
                 if changed {
@@ -1831,8 +2066,10 @@ impl GameLobby {
                 }
             }
             HitTarget::RosterScrollBottom => {
-                let changed = self.focus != LobbyControl::Roster;
-                self.change_focus(LobbyControl::Roster, false);
+                let changed = self.active_sheet.is_roster() && self.focus != LobbyControl::Roster;
+                if self.active_sheet.is_roster() {
+                    self.change_focus(LobbyControl::Roster, false);
+                }
                 self.sounds.push(LobbySound::ArrowHit);
                 self.pointer_pressed = Some(hit);
                 if changed {
@@ -1842,8 +2079,10 @@ impl GameLobby {
                 }
             }
             HitTarget::RosterScrollTrack => {
-                let changed = self.focus != LobbyControl::Roster;
-                self.change_focus(LobbyControl::Roster, false);
+                let changed = self.active_sheet.is_roster() && self.focus != LobbyControl::Roster;
+                if self.active_sheet.is_roster() {
+                    self.change_focus(LobbyControl::Roster, false);
+                }
                 if roster.max_scroll > 0 {
                     self.sounds.push(LobbySound::Command);
                     self.scrollbar_drag = Some(ScrollbarDrag::Roster);
@@ -1857,9 +2096,8 @@ impl GameLobby {
                 }
             }
             HitTarget::RosterScrollInert => {
-                let changed = self.focus != LobbyControl::Roster;
-                self.change_focus(LobbyControl::Roster, false);
-                if changed {
+                if self.active_sheet.is_roster() && self.focus != LobbyControl::Roster {
+                    self.change_focus(LobbyControl::Roster, false);
                     let mut actions = vec![LobbyAction::FocusChanged(LobbyControl::Roster)];
                     self.append_game_option_focus_clear(previous_focus, &mut actions);
                     return actions;
@@ -2126,12 +2364,18 @@ impl GameLobby {
             return true;
         }
         if contains(layout.roster, point) && roster.max_scroll > 0 {
-            self.roster_scroll = (self.roster_scroll - delta).clamp(0, roster.max_scroll);
-            self.roster_scroll_pin = scroll_to_pin(
-                self.roster_scroll,
-                roster.max_scroll,
-                scrollbar_max_pin(layout.roster_scrollbar),
-            );
+            let max_pin = scrollbar_max_pin(layout.roster_scrollbar);
+            if self.active_sheet == LobbySheet::Resources {
+                self.resource_scroll = (self.resource_scroll - delta).clamp(0, roster.max_scroll);
+                self.resource_scroll_pin =
+                    scroll_to_pin(self.resource_scroll, roster.max_scroll, max_pin);
+            } else if self.active_sheet.is_roster() {
+                self.roster_scroll = (self.roster_scroll - delta).clamp(0, roster.max_scroll);
+                self.roster_scroll_pin =
+                    scroll_to_pin(self.roster_scroll, roster.max_scroll, max_pin);
+            } else {
+                return false;
+            }
             return true;
         }
         false
@@ -2450,7 +2694,7 @@ impl GameLobby {
                 },
             )];
         }
-        if self.focus == LobbyControl::Roster && vertical != 0 {
+        if self.active_sheet.is_roster() && self.focus == LobbyControl::Roster && vertical != 0 {
             return self.move_selection(vertical.signum() as i32, layout, roster);
         }
         if horizontal != 0 || vertical != 0 {
@@ -2461,7 +2705,7 @@ impl GameLobby {
     }
 
     pub fn request_focused_context(&self, position: GuiPoint) -> Vec<LobbyAction> {
-        if self.focus != LobbyControl::Roster {
+        if !self.active_sheet.is_roster() || self.focus != LobbyControl::Roster {
             return Vec::new();
         }
         self.selected_row
@@ -2590,25 +2834,28 @@ impl GameLobby {
         if self.has_external_chat {
             order.push(LobbyControl::ChatDialog);
         }
-        order.push(LobbyControl::Roster);
-        if let Some(selected) = self.selected_row.and_then(|index| self.rows.get(index)) {
-            match selected {
-                LobbyRosterRow::Player(player)
-                    if self.has_teams
-                        && !self.countdown.is_locked()
-                        && player.team.as_ref().is_some_and(|team| team.selectable) =>
-                {
-                    order.push(LobbyControl::RosterTeam);
+        if self.active_sheet.is_roster() {
+            order.push(LobbyControl::Roster);
+            if let Some(selected) = self.selected_row.and_then(|index| self.rows.get(index)) {
+                match selected {
+                    LobbyRosterRow::Player(player)
+                        if self.has_teams
+                            && !self.countdown.is_locked()
+                            && player.team.as_ref().is_some_and(|team| team.selectable) =>
+                    {
+                        order.push(LobbyControl::RosterTeam);
+                    }
+                    LobbyRosterRow::Client(client) if client.local => {
+                        order.push(LobbyControl::RosterAddPlayer);
+                    }
+                    LobbyRosterRow::Header(header)
+                        if header.kind == LobbyRosterHeader::ScriptPlayers
+                            && header.can_add_player =>
+                    {
+                        order.push(LobbyControl::RosterAddPlayer);
+                    }
+                    _ => {}
                 }
-                LobbyRosterRow::Client(client) if client.local => {
-                    order.push(LobbyControl::RosterAddPlayer);
-                }
-                LobbyRosterRow::Header(header)
-                    if header.kind == LobbyRosterHeader::ScriptPlayers && header.can_add_player =>
-                {
-                    order.push(LobbyControl::RosterAddPlayer);
-                }
-                _ => {}
             }
         }
         order.push(LobbyControl::Exit);
@@ -2694,7 +2941,7 @@ impl GameLobby {
         layout: &LobbyLayout,
         roster: &LobbyRosterLayout,
     ) -> Vec<LobbyAction> {
-        if self.rows.is_empty() {
+        if !self.active_sheet.is_roster() || self.rows.is_empty() {
             return Vec::new();
         }
         let current = self.selected_row.unwrap_or(if direction < 0 {
@@ -2717,6 +2964,9 @@ impl GameLobby {
         layout: &LobbyLayout,
         roster: &LobbyRosterLayout,
     ) -> Vec<LobbyAction> {
+        if !self.active_sheet.is_roster() {
+            return Vec::new();
+        }
         if self.selected_row == selected {
             return Vec::new();
         }
@@ -2815,7 +3065,7 @@ impl GameLobby {
                 vec![LobbyAction::Chat(LobbyChatRequest::OpenExternalDialog)]
             }
             LobbyControl::Exit => vec![LobbyAction::ExitRequested],
-            LobbyControl::RosterTeam => self
+            LobbyControl::RosterTeam if self.active_sheet.is_roster() => self
                 .selected_row
                 .and_then(|index| self.rows.get(index))
                 .and_then(|row| match row {
@@ -2831,7 +3081,7 @@ impl GameLobby {
                 })
                 .into_iter()
                 .collect(),
-            LobbyControl::RosterAddPlayer => self
+            LobbyControl::RosterAddPlayer if self.active_sheet.is_roster() => self
                 .selected_row
                 .and_then(|index| self.rows.get(index))
                 .and_then(|row| match row {
@@ -2896,12 +3146,18 @@ impl GameLobby {
         let pin =
             (point.y as i32 - layout.roster_scrollbar.y - SCROLLBAR_EXTENT - SCROLLBAR_EXTENT / 2)
                 .clamp(0, max_pin);
-        self.roster_scroll_pin = pin;
-        self.roster_scroll = if max_pin == 0 {
+        let scroll = if max_pin == 0 {
             0
         } else {
             roster.max_scroll * pin / max_pin
         };
+        if self.active_sheet == LobbySheet::Resources {
+            self.resource_scroll_pin = pin;
+            self.resource_scroll = scroll;
+        } else if self.active_sheet.is_roster() {
+            self.roster_scroll_pin = pin;
+            self.roster_scroll = scroll;
+        }
     }
 
     fn set_chat_scroll_from_pointer(&mut self, point: GuiPoint, layout: &LobbyLayout) {
@@ -2936,20 +3192,38 @@ impl GameLobby {
                     pin_to_scroll(self.chat_scroll_pin, self.chat_max_scroll, max_pin);
             }
             Some(HitTarget::RosterScrollTop) => {
-                self.roster_scroll_pin = (self.roster_scroll_pin - 1).max(0);
-                self.roster_scroll = pin_to_scroll(
-                    self.roster_scroll_pin,
-                    roster_max_scroll,
-                    scrollbar_max_pin(layout.roster_scrollbar),
-                );
+                let max_pin = scrollbar_max_pin(layout.roster_scrollbar);
+                if self.active_sheet == LobbySheet::Resources {
+                    self.resource_scroll_pin = (self.resource_scroll_pin - 1).max(0);
+                    self.resource_scroll =
+                        pin_to_scroll(self.resource_scroll_pin, roster_max_scroll, max_pin);
+                } else if self.active_sheet.is_roster() {
+                    self.roster_scroll_pin = (self.roster_scroll_pin - 1).max(0);
+                    self.roster_scroll =
+                        pin_to_scroll(self.roster_scroll_pin, roster_max_scroll, max_pin);
+                }
             }
             Some(HitTarget::RosterScrollBottom) => {
                 let max_pin = scrollbar_max_pin(layout.roster_scrollbar);
-                self.roster_scroll_pin = (self.roster_scroll_pin + 1).min(max_pin);
-                self.roster_scroll =
-                    pin_to_scroll(self.roster_scroll_pin, roster_max_scroll, max_pin);
+                if self.active_sheet == LobbySheet::Resources {
+                    self.resource_scroll_pin = (self.resource_scroll_pin + 1).min(max_pin);
+                    self.resource_scroll =
+                        pin_to_scroll(self.resource_scroll_pin, roster_max_scroll, max_pin);
+                } else if self.active_sheet.is_roster() {
+                    self.roster_scroll_pin = (self.roster_scroll_pin + 1).min(max_pin);
+                    self.roster_scroll =
+                        pin_to_scroll(self.roster_scroll_pin, roster_max_scroll, max_pin);
+                }
             }
             _ => {}
+        }
+    }
+
+    const fn right_list_scroll_pin(&self) -> i32 {
+        match self.active_sheet {
+            LobbySheet::Resources => self.resource_scroll_pin,
+            LobbySheet::Players | LobbySheet::Teams => self.roster_scroll_pin,
+            LobbySheet::Options | LobbySheet::Scenario => 0,
         }
     }
 
@@ -2987,23 +3261,29 @@ impl GameLobby {
         if contains(layout.chat_log_scrollbar, point) {
             return HitTarget::ChatScrollInert;
         }
-        for row in &roster.rows {
-            if contains(layout.roster_client, point)
-                && row.add_player.is_some_and(|rect| contains(rect, point))
-            {
-                return HitTarget::AddPlayer(row.index);
-            }
-            if contains(layout.roster_client, point)
-                && row.team.is_some_and(|rect| contains(rect, point))
-            {
-                return HitTarget::Team(row.index);
-            }
-            if contains(layout.roster_client, point) && contains(row.rect, point) {
-                return HitTarget::RosterRow(row.index);
+        if self.active_sheet.is_roster() {
+            for row in &roster.rows {
+                if contains(layout.roster_client, point)
+                    && row.add_player.is_some_and(|rect| contains(rect, point))
+                {
+                    return HitTarget::AddPlayer(row.index);
+                }
+                if contains(layout.roster_client, point)
+                    && row.team.is_some_and(|rect| contains(rect, point))
+                {
+                    return HitTarget::Team(row.index);
+                }
+                if contains(layout.roster_client, point) && contains(row.rect, point) {
+                    return HitTarget::RosterRow(row.index);
+                }
             }
         }
         if contains(layout.roster_client, point) {
-            return HitTarget::RosterBlank;
+            return if self.active_sheet.is_roster() {
+                HitTarget::RosterBlank
+            } else {
+                HitTarget::RightListInert
+            };
         }
         if contains(layout.roster_scrollbar, point) && roster.max_scroll > 0 {
             if point.y < (layout.roster_scrollbar.y + SCROLLBAR_EXTENT) as f32 {
@@ -3259,11 +3539,11 @@ impl GameLobby {
             gamma,
         );
 
-        let (players_title, _) = expand_hotkey_markup(&self.players_title());
+        let (right_title, _) = expand_hotkey_markup(&self.right_title());
         skin.draw_caption(
             surface,
             layout.right_caption,
-            &players_title,
+            &right_title,
             &resources.fonts.text,
             COLOR_WHITE,
             TextAlign::Left,
@@ -3292,12 +3572,20 @@ impl GameLobby {
             DARK_BACKGROUND,
             gamma,
         );
-        self.draw_roster(surface, &layout, &roster, resources, active, gamma)?;
+        match self.active_sheet {
+            LobbySheet::Players | LobbySheet::Teams => {
+                self.draw_roster(surface, &layout, &roster, resources, active, gamma)?
+            }
+            LobbySheet::Resources => {
+                self.draw_resource_rows(surface, &layout, &roster, resources, gamma)
+            }
+            LobbySheet::Options | LobbySheet::Scenario => {}
+        }
         draw_scrollbar(
             surface,
             layout.roster_scrollbar,
             resources.scroll,
-            self.roster_scroll_pin,
+            self.right_list_scroll_pin(),
             roster.max_scroll,
             self.pointer_pressed == Some(HitTarget::RosterScrollTop),
             self.pointer_pressed == Some(HitTarget::RosterScrollBottom),
@@ -3515,6 +3803,56 @@ impl GameLobby {
             }
         }
         Ok(())
+    }
+
+    fn draw_resource_rows(
+        &self,
+        surface: &mut Surface,
+        layout: &LobbyLayout,
+        resource_layout: &LobbyRosterLayout,
+        resources: &LobbyResources<'_>,
+        gamma: Option<&GammaRamp>,
+    ) {
+        for row_layout in &resource_layout.rows {
+            if !intersects(row_layout.rect, layout.roster_client) {
+                continue;
+            }
+            let Some(row) = self.resource_rows.get(row_layout.index) else {
+                continue;
+            };
+            draw_standard_icon_clipped(
+                surface,
+                row_layout.icon,
+                layout.roster_client,
+                &resources.icons,
+                10,
+                gamma,
+            );
+            draw_clipped_text(
+                surface,
+                &resources.fonts.text,
+                row_layout.icon.x + row_layout.icon.w + ICON_LABEL_SPACING,
+                row_layout.rect.y + 2,
+                &crate::c4_presentation_text(row.basename()),
+                COLOR_WHITE,
+                TextAlign::Left,
+                gamma,
+                layout.roster_client,
+            );
+            if let Some(progress) = row.progress_label() {
+                draw_clipped_text(
+                    surface,
+                    &resources.fonts.text,
+                    row_layout.rect.x + row_layout.rect.w - ICON_LABEL_SPACING,
+                    row_layout.rect.y + 2,
+                    &progress,
+                    COLOR_WHITE,
+                    TextAlign::Right,
+                    gamma,
+                    layout.roster_client,
+                );
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4656,6 +4994,180 @@ mod tests {
         );
         assert_eq!(layout.tab_buttons[0].rect.x, 1130);
         assert_eq!(layout.tab_buttons[5].rect.x, 1230);
+    }
+
+    #[test]
+    fn resource_rows_use_cpp_id_order_basename_progress_and_geometry() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Host, vec![client(1, true)]);
+        lobby.set_resource_rows(vec![
+            LobbyResourceRow {
+                id: 9,
+                filename: r"Network\Definitions.c4d".into(),
+                present_percent: u8::MAX,
+            },
+            LobbyResourceRow {
+                id: -2,
+                filename: "anonymous.c4s".into(),
+                present_percent: 5,
+            },
+            LobbyResourceRow {
+                id: 2,
+                filename: "Network/Scenario.c4s".into(),
+                present_percent: 42,
+            },
+        ]);
+
+        assert_eq!(
+            lobby
+                .resource_rows()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [2, 9]
+        );
+        assert_eq!(lobby.resource_rows()[0].basename(), "Scenario.c4s");
+        assert_eq!(
+            lobby.resource_rows()[0].progress_label().as_deref(),
+            Some("42%")
+        );
+        assert_eq!(lobby.resource_rows()[1].basename(), "Definitions.c4d");
+        assert_eq!(lobby.resource_rows()[1].present_percent, 100);
+        assert_eq!(lobby.resource_rows()[1].progress_label(), None);
+
+        lobby.set_active_sheet(LobbySheet::Resources);
+        let layout = lobby.layout(1280, 720, &fonts);
+        let resources = lobby.roster_layout(&layout, fonts.text.line_height);
+        let row_height = fonts.text.line_height + 4;
+        assert_eq!(resources.content_height, 2 * row_height);
+        assert_eq!(resources.rows[0].rect.h, row_height);
+        assert_eq!(resources.rows[0].icon.y, resources.rows[0].rect.y + 2);
+        assert_eq!(resources.rows[0].icon.w, fonts.text.line_height);
+        assert_eq!(resources.rows[0].icon.h, fonts.text.line_height);
+        assert!(resources
+            .rows
+            .iter()
+            .all(|row| { row.add_player.is_none() && row.team.is_none() && row.rank.is_none() }));
+
+        assert!(lobby.set_resource_progress(2, 99));
+        assert_eq!(
+            lobby.resource_rows()[0].progress_label().as_deref(),
+            Some("99%")
+        );
+        assert!(lobby.set_resource_progress(2, 101));
+        assert_eq!(lobby.resource_rows()[0].progress_label(), None);
+        assert!(!lobby.set_resource_progress(77, 10));
+        assert!(lobby.remove_resource_row(9));
+        assert!(!lobby.remove_resource_row(9));
+    }
+
+    #[test]
+    fn active_sheet_drives_caption_tab_highlight_and_resource_activation() {
+        let fonts = endeavour_font_set();
+        let mut lobby = GameLobby::new(
+            LobbyRole::Host,
+            "Gold Mine",
+            1,
+            4,
+            true,
+            false,
+            true,
+            false,
+            5,
+            vec![],
+        );
+        assert_eq!(lobby.active_sheet(), LobbySheet::Players);
+        assert!(!lobby.resource_sheet_active());
+        assert_eq!(lobby.right_title(), "&Players (1/4)");
+
+        lobby.set_active_sheet(LobbySheet::Resources);
+        assert!(lobby.resource_sheet_active());
+        assert_eq!(lobby.right_title(), "&Resources");
+        let layout = lobby.layout(1280, 720, &fonts);
+        assert_eq!(
+            layout
+                .tab_buttons
+                .iter()
+                .filter(|tab| tab.selected)
+                .map(|tab| tab.sheet)
+                .collect::<Vec<_>>(),
+            [Some(LobbySheet::Resources)]
+        );
+
+        lobby.set_active_sheet(LobbySheet::Options);
+        assert!(!lobby.resource_sheet_active());
+        assert_eq!(lobby.right_title(), "&Options");
+        lobby.set_active_sheet(LobbySheet::Scenario);
+        assert_eq!(lobby.right_title(), "&Scenario");
+        lobby.set_active_sheet(LobbySheet::Teams);
+        assert_eq!(lobby.right_title(), "&Players (1/4)");
+        let layout = lobby.layout(1280, 720, &fonts);
+        assert_eq!(
+            layout
+                .tab_buttons
+                .iter()
+                .filter(|tab| tab.selected)
+                .map(|tab| tab.sheet)
+                .collect::<Vec<_>>(),
+            [Some(LobbySheet::Teams)]
+        );
+    }
+
+    #[test]
+    fn non_roster_sheets_cannot_select_or_open_roster_rows() {
+        let fonts = endeavour_font_set();
+        let mut lobby = lobby(LobbyRole::Host, vec![client(1, true), player(2)]);
+        let layout = lobby.layout(640, 300, &fonts);
+        let roster = lobby.roster_layout(&layout, fonts.text.line_height);
+        let roster_point = GuiPoint::new(
+            (roster.rows[0].rect.x + 1) as f32,
+            (roster.rows[0].rect.y + 1) as f32,
+        );
+        assert!(lobby
+            .pointer_down(roster_point, &layout, &roster)
+            .iter()
+            .any(|action| matches!(action, LobbyAction::RosterSelectionChanged(_))));
+        assert_eq!(lobby.selected_roster_id(), Some(&LobbyRosterId::Client(1)));
+
+        lobby.set_resource_rows(
+            (0..40)
+                .map(|id| LobbyResourceRow {
+                    id,
+                    filename: format!("Network/Resource{id}.c4d"),
+                    present_percent: 50,
+                })
+                .collect(),
+        );
+        lobby.set_active_sheet(LobbySheet::Resources);
+        assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+        let layout = lobby.layout(640, 300, &fonts);
+        let resources = lobby.roster_layout(&layout, fonts.text.line_height);
+        assert!(resources.max_scroll > 0);
+        let resource_point = GuiPoint::new(
+            (resources.rows[0].rect.x + 1) as f32,
+            (resources.rows[0].rect.y + 1) as f32,
+        );
+        assert!(lobby
+            .pointer_down(resource_point, &layout, &resources)
+            .is_empty());
+        assert!(lobby
+            .pointer_secondary_down(resource_point, &layout, &resources)
+            .is_empty());
+        assert_eq!(lobby.selected_roster_id(), Some(&LobbyRosterId::Client(1)));
+        assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+        assert!(lobby.wheel(resource_point, -10, &layout, &resources));
+        assert_eq!(lobby.resource_scroll(), 10);
+        assert_eq!(lobby.roster_scroll(), 0);
+
+        lobby.set_active_sheet(LobbySheet::Options);
+        let layout = lobby.layout(640, 300, &fonts);
+        let empty = lobby.roster_layout(&layout, fonts.text.line_height);
+        assert!(empty.rows.is_empty());
+        assert!(lobby
+            .pointer_down(resource_point, &layout, &empty)
+            .is_empty());
+        assert!(lobby.request_focused_context(resource_point).is_empty());
+        assert_eq!(lobby.selected_roster_id(), Some(&LobbyRosterId::Client(1)));
     }
 
     #[test]

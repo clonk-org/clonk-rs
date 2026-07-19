@@ -423,6 +423,10 @@ pub enum HostEvent {
         packet: ReadyCheckPacket,
     },
     ResourceAction(crate::ResourceCatalogAction),
+    ResourceProgress {
+        resource_id: i32,
+        present_percent: u8,
+    },
     ResourceComplete {
         resource_id: i32,
         core: lc_engine::NetworkResourceCore,
@@ -2775,6 +2779,10 @@ pub enum ClientEvent {
         control_tick: Tick,
     },
     ResourceAction(crate::ResourceCatalogAction),
+    ResourceProgress {
+        resource_id: i32,
+        present_percent: u8,
+    },
     ResourceComplete {
         resource_id: i32,
         core: lc_engine::NetworkResourceCore,
@@ -6057,6 +6065,18 @@ async fn dispatch_host_resource_events(
         match event {
             crate::ResourceTransferEvent::Transport(action) => {
                 dispatch_host_resource_actions(vec![action], state).await;
+            }
+            crate::ResourceTransferEvent::Progress {
+                resource_id,
+                present_percent,
+            } => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceProgress {
+                        resource_id,
+                        present_percent,
+                    })
+                    .await;
             }
             crate::ResourceTransferEvent::Completed {
                 resource_id,
@@ -10149,6 +10169,17 @@ async fn dispatch_client_resource_events(
                 )
                 .await?;
             }
+            crate::ResourceTransferEvent::Progress {
+                resource_id,
+                present_percent,
+            } => {
+                let _ = event_tx
+                    .send(ClientEvent::ResourceProgress {
+                        resource_id,
+                        present_percent,
+                    })
+                    .await;
+            }
             crate::ResourceTransferEvent::Completed {
                 resource_id,
                 core,
@@ -13959,6 +13990,17 @@ mod tests {
             state,
         ));
 
+        let progress = timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("buffered resource progress stalled")
+            .expect("client event stream closed");
+        assert!(matches!(
+            progress,
+            ClientEvent::ResourceProgress {
+                resource_id: 7,
+                present_percent: 100,
+            }
+        ));
         let event = timeout(EVENT_WAIT, event_rx.recv())
             .await
             .expect("buffered resource completion stalled")
@@ -15265,6 +15307,7 @@ mod tests {
                 .await
                 .unwrap();
 
+        let mut progress = Vec::new();
         let completed_path = loop {
             match timeout(EVENT_WAIT, client.events().recv())
                 .await
@@ -15280,6 +15323,13 @@ mod tests {
                     assert_eq!(completed_core, core);
                     break path;
                 }
+                ClientEvent::ResourceProgress {
+                    resource_id,
+                    present_percent,
+                } => {
+                    assert_eq!(resource_id, core.id);
+                    progress.push(present_percent);
+                }
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected during resource transfer: {reason:?}")
                 }
@@ -15287,6 +15337,7 @@ mod tests {
             }
         };
 
+        assert_eq!(progress, vec![33, 66, 100]);
         assert_eq!(fs::read(&completed_path).unwrap(), b"local");
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
@@ -21539,6 +21590,7 @@ mod tests {
                 | ClientEvent::LobbyCountdown { .. }
                 | ClientEvent::ReadyCheck { .. }
                 | ClientEvent::ResourceAction(_)
+                | ClientEvent::ResourceProgress { .. }
                 | ClientEvent::ResourceComplete { .. }
                 | ClientEvent::ResourceLoadFailed { .. }
                 | ClientEvent::ResourceDeriveUnsupported { .. }
@@ -23632,6 +23684,7 @@ mod tests {
                 | Ok(Some(HostEvent::LobbyCountdown { .. }))
                 | Ok(Some(HostEvent::ReadyCheck { .. }))
                 | Ok(Some(HostEvent::ResourceAction(_)))
+                | Ok(Some(HostEvent::ResourceProgress { .. }))
                 | Ok(Some(HostEvent::ResourceComplete { .. }))
                 | Ok(Some(HostEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(HostEvent::ResourceDeriveUnsupported { .. }))
@@ -23662,7 +23715,8 @@ mod tests {
                 Ok(Some(ClientEvent::LobbyCountdown { .. })) => continue,
                 Ok(Some(ClientEvent::ReadyCheck { .. })) => continue,
                 Ok(Some(ClientEvent::ResourceAction(_))) => continue,
-                Ok(Some(ClientEvent::ResourceComplete { .. }))
+                Ok(Some(ClientEvent::ResourceProgress { .. }))
+                | Ok(Some(ClientEvent::ResourceComplete { .. }))
                 | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(ClientEvent::ResourceDeriveUnsupported { .. })) => continue,
                 Ok(Some(ClientEvent::LeagueRoundResults { .. })) => continue,
