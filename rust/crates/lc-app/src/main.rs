@@ -27805,7 +27805,10 @@ impl GameApp {
             MenuAction::ActivateOptions => {
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::options_menu(&self.option_flags(), 0)),
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(player),
+                        0,
+                    )),
                 );
             }
             MenuAction::ActivateDisplay => {
@@ -28010,7 +28013,7 @@ impl GameApp {
                 self.ingame_menu.replace(
                     player,
                     Some(IngameMenuState::options_menu(
-                        &self.option_flags(),
+                        &self.option_flags(player),
                         selection,
                     )),
                 );
@@ -28021,7 +28024,7 @@ impl GameApp {
                 self.ingame_menu.replace(
                     player,
                     Some(IngameMenuState::options_menu(
-                        &self.option_flags(),
+                        &self.option_flags(player),
                         selection,
                     )),
                 );
@@ -28041,7 +28044,7 @@ impl GameApp {
                 self.ingame_menu.replace(
                     player,
                     Some(IngameMenuState::options_menu(
-                        &self.option_flags(),
+                        &self.option_flags(player),
                         selection,
                     )),
                 );
@@ -28698,7 +28701,21 @@ impl GameApp {
         Ok(())
     }
 
-    fn option_flags(&self) -> OptionFlags {
+    fn option_flags(&self, player: i32) -> OptionFlags {
+        let player_mouse = self
+            .engine
+            .player(player)
+            .map(|player| player.mouse_control() != 0);
+        // C4PlayerList::MouseControlTaken scans raw MouseControl flags on
+        // local players. This is deliberately not mouse_owner(): restored
+        // data may retain a raw flag after the process-global controller has
+        // been cleared.
+        let mouse_taken = self.local_controls.assignments().any(|assignment| {
+            self.engine
+                .player(assignment.owner)
+                .is_some_and(|player| player.mouse_control() != 0)
+        });
+        let mouse = player_mouse.unwrap_or(false);
         OptionFlags {
             sound: self
                 .audio
@@ -28710,8 +28727,10 @@ impl GameApp {
                 .as_ref()
                 .map(|audio| audio.options.music_enabled)
                 .unwrap_or(false),
-            mouse_shown: self.mouse_control_allowed,
-            mouse: self.mouse_control,
+            mouse_shown: self.mouse_control_allowed
+                && player_mouse.is_some()
+                && (mouse || !mouse_taken),
+            mouse,
         }
     }
 
@@ -112823,6 +112842,107 @@ ScenInfoArea=70,5,25,90
         assert!(app.mouse_control);
     }
 
+    fn add_secondary_local_player_for_mouse_option_test(app: &mut GameApp) -> i32 {
+        let primary = app.local_owner;
+        let secondary = app.engine.next_player_number();
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary local player");
+        app.engine.set_local_players([primary, secondary]);
+        let assignment = app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.engine
+            .set_player_runtime_control(secondary, assignment.runtime_control())
+            .expect("project secondary local controls into the runtime player");
+        secondary
+    }
+
+    fn mouse_option_phase(app: &GameApp, player: i32) -> Option<u8> {
+        app.ingame_menu
+            .get(player)?
+            .items()
+            .iter()
+            .find(|item| item.action == MenuAction::ToggleMouseControl)
+            .map(|item| match &item.symbol {
+                ingame_menu::MenuSymbol::Options(phase) => *phase,
+                symbol => panic!("mouse option uses unexpected symbol {symbol:?}"),
+            })
+    }
+
+    #[test]
+    fn l075_options_mouse_entry_is_on_for_requesting_holder() {
+        let mut app = new_running_sandbox_app();
+        let holder = app.local_owner;
+
+        let flags = app.option_flags(holder);
+        assert_eq!(
+            (flags.mouse_shown, flags.mouse),
+            (true, true),
+            "holder sees the on entry"
+        );
+        assert!(
+            !app.option_flags(OWNER_NONE).mouse_shown,
+            "a playerless observer never gets the mouse entry"
+        );
+
+        app.apply_ingame_menu_action_for_player(holder, MenuAction::ActivateOptions)
+            .expect("open holder Options");
+        assert_eq!(mouse_option_phase(&app, holder), Some(12));
+    }
+
+    #[test]
+    fn l075_options_mouse_entry_is_hidden_for_non_holder_while_taken() {
+        let mut app = new_running_sandbox_app();
+        let holder = app.local_owner;
+        let other = add_secondary_local_player_for_mouse_option_test(&mut app);
+        assert_eq!(app.local_controls.mouse_owner(), Some(holder));
+
+        let flags = app.option_flags(other);
+        assert_eq!((flags.mouse_shown, flags.mouse), (false, false));
+        app.apply_ingame_menu_action_for_player(other, MenuAction::ActivateOptions)
+            .expect("open non-holder Options");
+        assert_eq!(mouse_option_phase(&app, other), None);
+
+        for action in [
+            MenuAction::ToggleSound,
+            MenuAction::ToggleMusic,
+            MenuAction::ToggleMouseControl,
+        ] {
+            app.apply_ingame_menu_action_for_player(other, action)
+                .expect("reopen non-holder Options");
+            assert_eq!(
+                mouse_option_phase(&app, other),
+                None,
+                "every Options reopen remains scoped to the requesting player"
+            );
+        }
+    }
+
+    #[test]
+    fn l075_unclaimed_mouse_entry_is_off_for_each_local_player() {
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = add_secondary_local_player_for_mouse_option_test(&mut app);
+
+        app.apply_ingame_menu_action_for_player(primary, MenuAction::ToggleMouseControl)
+            .expect("release primary mouse control");
+        assert_eq!(app.local_controls.mouse_owner(), None);
+
+        for player in [primary, secondary] {
+            let flags = app.option_flags(player);
+            assert_eq!((flags.mouse_shown, flags.mouse), (true, false));
+            app.apply_ingame_menu_action_for_player(player, MenuAction::ActivateOptions)
+                .expect("open free-player Options");
+            assert_eq!(mouse_option_phase(&app, player), Some(11));
+        }
+    }
+
     #[test]
     fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
         // A save may compile several nonzero per-player MouseControl fields.
@@ -112886,6 +113006,14 @@ ScenInfoArea=70,5,25,90
         );
         assert_eq!(app.local_controls.mouse_owner(), None);
         assert!(!app.mouse_control);
+        let primary_flags = app.option_flags(primary);
+        assert_eq!((primary_flags.mouse_shown, primary_flags.mouse), (true, true));
+        let secondary_flags = app.option_flags(secondary);
+        assert_eq!(
+            (secondary_flags.mouse_shown, secondary_flags.mouse),
+            (false, false),
+            "a surviving raw local flag remains taken after the global owner clears"
+        );
     }
 
     #[test]
@@ -129453,7 +129581,7 @@ protected func InputCallback(string answer, int player)
             "Tutorial03 DisableMouse=1 must suppress player mouse control and the menu close X like C++ (C4Player.cpp:1907-1912; C4Menu.cpp:1270-1276)"
         );
         assert!(
-            !app.option_flags().mouse_shown,
+            !app.option_flags(app.local_owner).mouse_shown,
             "DisableMouse must remove the in-game Options entry like C++ (C4MainMenu.cpp:563-571)"
         );
 
@@ -130189,7 +130317,7 @@ protected func InputCallback(string answer, int player)
             "Tutorial04 DisableMouse=1 must suppress player mouse control"
         );
         assert!(
-            !app.option_flags().mouse_shown,
+            !app.option_flags(app.local_owner).mouse_shown,
             "Tutorial04 DisableMouse=1 must remove the in-game mouse Options entry"
         );
 
@@ -141365,7 +141493,10 @@ func ControlDig() { dig_count = 1; return(1); }
         let configured_before = menu.audio.as_ref().map(|audio| audio.options.music_enabled);
         menu.ingame_menu.replace(
             menu.local_owner,
-            Some(IngameMenuState::options_menu(&menu.option_flags(), 1)),
+            Some(IngameMenuState::options_menu(
+                &menu.option_flags(menu.local_owner),
+                1,
+            )),
         );
         menu.apply_ingame_menu_action(MenuAction::ToggleMusic)
             .expect("Options:Music uses the same live producer");
