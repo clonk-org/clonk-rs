@@ -13634,13 +13634,17 @@ impl MenuState {
     }
 
     fn enter_folder(&mut self, identifier: &str) {
-        let Some(path) = find_frontend_folder_path(self.current_entries(), identifier) else {
+        let Some(folder) = self
+            .current_entries()
+            .iter()
+            .find(|entry| {
+                entry.identifier == identifier && matches!(entry.kind, ScenarioKind::Folder)
+            })
+            .cloned()
+        else {
             return;
         };
-        // Recursive search can expose a deep descendant directly. Restore
-        // every intermediate layer so Back still traverses one folder.
-        self.stack
-            .extend(path.into_iter().map(MenuLayer::for_folder));
+        self.stack.push(MenuLayer::for_folder(folder));
         self.pointer_position = None;
         self.scenario_list_scroll = 0;
         self.selection_info_scroll = 0;
@@ -13672,7 +13676,7 @@ impl MenuState {
             self.current_entries().to_vec()
         } else {
             let mut matches = Vec::new();
-            collect_frontend_search_matches(self.current_entries(), &needle, &mut matches);
+            collect_current_folder_search_matches(self.current_entries(), &needle, &mut matches);
             matches
         };
         let entries = build_menu_entries(&self.visible_entries, self.include_back);
@@ -13714,7 +13718,7 @@ impl MenuState {
     }
 }
 
-fn collect_frontend_search_matches(
+fn collect_current_folder_search_matches(
     entries: &[FrontendScenario],
     needle: &str,
     matches: &mut Vec<FrontendScenario>,
@@ -13725,29 +13729,7 @@ fn collect_frontend_search_matches(
         if name.to_lowercase().contains(needle) {
             matches.push(entry.clone());
         }
-        collect_frontend_search_matches(&entry.children, needle, matches);
     }
-}
-
-fn find_frontend_folder_path(
-    entries: &[FrontendScenario],
-    identifier: &str,
-) -> Option<Vec<FrontendScenario>> {
-    for entry in entries {
-        if !matches!(entry.kind, ScenarioKind::Folder) {
-            continue;
-        }
-        if entry.identifier == identifier {
-            return Some(vec![entry.clone()]);
-        }
-        if let Some(mut descendants) = find_frontend_folder_path(&entry.children, identifier) {
-            let mut path = Vec::with_capacity(descendants.len() + 1);
-            path.push(entry.clone());
-            path.append(&mut descendants);
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn find_frontend_entry_path(
@@ -71874,7 +71856,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn network_create_uses_recursive_selector_and_retains_netdlg_without_binding() {
+    fn network_create_navigates_nested_selector_and_retains_netdlg_without_binding() {
         let mut target = FrontendScenario::fallback();
         target.identifier = "outer/inner/target.c4s".to_string();
         target.title = "Deep Target".to_string();
@@ -71899,7 +71881,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let scenarios = vec![outer];
         let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
-            .expect("recursive selector menu");
+            .expect("nested selector menu");
         let mut app = new_menu_app(800, 600);
         app.menu_state = MenuState::new(menu, scenarios.clone());
         app.scenario_catalog = build_scenario_catalog(&scenarios);
@@ -71927,9 +71909,24 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.network_lobby.is_none());
         assert!(app.startup_network_connection.is_none());
 
-        app.menu_state.set_search_text("inner target");
-        app.handle_menu_input(|menu| menu.submit_search())
-            .expect("submit recursive search");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("outer")
+        );
+        app.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))
+            .expect("press outer folder");
+        app.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
+            .expect("release outer folder");
+        assert_eq!(
+            app.menu_state
+                .stack
+                .iter()
+                .map(|layer| layer.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Scenarios", "Outer Folder"]
+        );
         assert_eq!(
             app.menu_state
                 .selected_scenario()
@@ -71937,9 +71934,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             Some("outer/inner")
         );
         app.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))
-            .expect("press recursive folder");
+            .expect("press inner folder");
         app.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
-            .expect("release recursive folder");
+            .expect("release inner folder");
         assert_eq!(
             app.menu_state
                 .stack
@@ -72521,7 +72518,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn empty_recursive_search_clears_forced_crew_constraint() {
+    fn empty_search_clears_forced_crew_constraint() {
         let scenario_root = tempdir().expect("forced scenario root");
         let scenario_path = scenario_root.path().join("Forced.c4s");
         fs::create_dir_all(&scenario_path).expect("forced scenario group");
@@ -72554,7 +72551,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .enabled
         );
 
-        app.menu_state.set_search_text("no recursive match");
+        app.menu_state.set_search_text("no matching scenario");
         app.submit_scenario_search().expect("submit empty search");
         assert!(app.menu_state.selected_scenario().is_none());
         assert_eq!(
@@ -72793,7 +72790,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn scensel_touch_uses_classic_recursive_search_list_and_back_bounds() {
+    fn scensel_touch_uses_classic_list_search_and_back_bounds() {
         let _lock = env_lock().lock();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -72863,6 +72860,27 @@ public func Grant(password) { return GainMissionAccess(password); }
         tap(
             &mut app,
             GuiPoint::new(
+                (layout.list.x + 12) as f32,
+                (layout.list.y + 3 + 4) as f32,
+            ),
+        );
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("outer")
+        );
+        let open = GuiPoint::new(
+            (layout.open_button.x + layout.open_button.w / 2) as f32,
+            (layout.open_button.y + layout.open_button.h / 2) as f32,
+        );
+        tap(&mut app, open);
+        assert_eq!(app.menu_state.stack.len(), 2);
+        assert_eq!(app.menu_state.book_caption(), "Outer Touch Folder");
+
+        tap(
+            &mut app,
+            GuiPoint::new(
                 (layout.search_edit.x + 8) as f32,
                 (layout.search_edit.y + layout.search_edit.h / 2) as f32,
             ),
@@ -72880,13 +72898,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .map(|entry| entry.identifier.as_str()),
             Some("outer/inner")
         );
-        tap(
-            &mut app,
-            GuiPoint::new(
-                (layout.open_button.x + layout.open_button.w / 2) as f32,
-                (layout.open_button.y + layout.open_button.h / 2) as f32,
-            ),
-        );
+        tap(&mut app, open);
         assert_eq!(app.menu_state.stack.len(), 3);
         assert_eq!(app.menu_state.book_caption(), "Inner Touch Folder");
 
@@ -77158,15 +77170,51 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
-    // current folder by case-insensitive name substring and selects the
-    // first surviving entry (C4StartupScenSelDlg.cpp:1511-1537).
+    // current folder by case-insensitive name substring, retaining a
+    // surviving selection or falling back to the first row
+    // (C4StartupScenSelDlg.cpp:1511-1537).
+    #[test]
+    fn scensel_search_does_not_recurse_into_unopened_folders() {
+        let mut cavern = FrontendScenario::fallback();
+        cavern.identifier = "pack/cavern".to_string();
+        cavern.title = "<c ff0000>Cavern</c>".to_string();
+
+        let mut pack = FrontendScenario::fallback();
+        pack.identifier = "pack".to_string();
+        pack.title = "Pack".to_string();
+        pack.kind = ScenarioKind::Folder;
+        pack.is_playable = false;
+        pack.children = vec![cavern];
+
+        let scenarios = vec![pack];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state
+            .menu()
+            .select_entry_by_index(0)
+            .expect("select Pack");
+
+        state.set_search_text("cAvErN");
+        let actions = state.submit_search();
+
+        assert!(state.visible_entries().is_empty());
+        assert!(state.selected_scenario().is_none());
+        assert!(actions.is_empty());
+    }
+
     #[test]
     fn scensel_search_applies_on_submit_case_insensitively() {
         let mut scenarios = sample_scenarios();
         let mut beta = scenarios[0].children[0].clone();
         beta.identifier = "scenario_beta".to_string();
-        beta.title = "<c ff0000>Beta Caverns</c>".to_string();
+        beta.title = "<c ff0000>Crystal</c> Cavern".to_string();
+        let mut gamma = scenarios[0].children[0].clone();
+        gamma.identifier = "scenario_gamma".to_string();
+        gamma.title = "Crystal Cavern Annex".to_string();
         scenarios[0].children.push(beta);
+        scenarios[0].children.push(gamma);
         let entries = build_menu_entries(&scenarios, false);
         let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
         let mut state = MenuState::new(menu, scenarios);
@@ -77174,19 +77222,19 @@ public func Grant(password) { return GainMissionAccess(password); }
         state.enter_folder("folder_missions");
         let _ = state
             .menu()
-            .select_entry_by_index(1)
+            .select_entry_by_index(2)
             .expect("select matching non-first entry");
         assert_eq!(
             state
                 .selected_scenario()
                 .map(|entry| entry.identifier.as_str()),
-            Some("scenario_beta")
+            Some("scenario_gamma")
         );
 
-        state.set_search_text("cAvErN");
+        state.set_search_text("cRyStAl cAvErN");
         assert_eq!(
             state.visible_entries().len(),
-            2,
+            3,
             "typing alone does not submit"
         );
 
@@ -77197,18 +77245,18 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .iter()
                 .map(|entry| entry.title.as_str())
                 .collect::<Vec<_>>(),
-            vec!["<c ff0000>Beta Caverns</c>"]
+            vec!["<c ff0000>Crystal</c> Cavern", "Crystal Cavern Annex"]
         );
         assert!(matches!(
             actions.as_slice(),
             [StartupMenuAction::SelectionChanged(summary)]
-            if summary.identifier == "scenario_beta"
+            if summary.identifier == "scenario_gamma"
         ));
         assert_eq!(
             state
                 .selected_scenario()
                 .map(|entry| entry.identifier.as_str()),
-            Some("scenario_beta")
+            Some("scenario_gamma")
         );
     }
 
@@ -84741,6 +84789,7 @@ ScenInfoArea=70,5,25,90
         let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
             .expect("packed ancestry menu");
         let mut state = MenuState::new(menu, entries);
+        state.enter_folder("Outer.c4f");
         state.enter_folder(&inner_entry.identifier);
         assert!(state.configure_current_folder_map(
             true,
