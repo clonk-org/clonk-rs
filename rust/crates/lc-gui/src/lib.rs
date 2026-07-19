@@ -114,6 +114,10 @@ pub enum KeyCode {
     Down,
     Left,
     Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Clone, Copy, Debug)]

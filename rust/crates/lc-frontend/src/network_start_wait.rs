@@ -591,6 +591,7 @@ impl NetworkStartWaitState {
                 }
                 Vec::new()
             }
+            KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => Vec::new(),
         }
     }
 

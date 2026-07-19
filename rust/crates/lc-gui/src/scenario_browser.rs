@@ -387,6 +387,7 @@ impl ScenarioBrowser {
                     let _ = self.clear_selection_ui();
                 }
             }
+            _ => {}
         }
 
         (captured, messages)

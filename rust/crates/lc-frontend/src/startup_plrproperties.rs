@@ -665,6 +665,7 @@ impl PlayerPropertiesController {
                 Vec::new()
             }
             KeyCode::Space => self.activate(self.focus),
+            KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => Vec::new(),
         }
     }
 

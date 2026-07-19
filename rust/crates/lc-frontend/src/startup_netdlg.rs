@@ -1691,6 +1691,18 @@ impl NetDlgController {
                 self.move_game_selection(true);
                 Vec::new()
             }
+            KeyCode::Home if self.focus == NetDlgControl::GameList => {
+                self.select_list_boundary(false)
+            }
+            KeyCode::End if self.focus == NetDlgControl::GameList => {
+                self.select_list_boundary(true)
+            }
+            KeyCode::PageUp if self.focus == NetDlgControl::GameList => {
+                self.page_list_selection(false)
+            }
+            KeyCode::PageDown if self.focus == NetDlgControl::GameList => {
+                self.page_list_selection(true)
+            }
             KeyCode::Enter | KeyCode::Space if self.focus.is_button() => {
                 self.key_pressed = Some((self.focus, key));
                 Vec::new()
@@ -2076,6 +2088,110 @@ impl NetDlgController {
             let layout = self.layout();
             self.ensure_selection_visible(&layout);
         }
+    }
+
+    fn change_list_selection(
+        &mut self,
+        selection: Option<NetDlgSelection>,
+    ) -> Vec<NetDlgAction> {
+        if self.selection == selection {
+            return Vec::new();
+        }
+        self.selection = selection;
+        let layout = self.layout();
+        self.ensure_selection_visible(&layout);
+        selection
+            .map(|_| vec![NetDlgAction::GuiSound(NetDlgSound::Command)])
+            .unwrap_or_default()
+    }
+
+    fn select_list_boundary(&mut self, last: bool) -> Vec<NetDlgAction> {
+        let layout = self.layout();
+        let rows = self.row_layouts(&layout);
+        let selection = if last { rows.last() } else { rows.first() }.map(|row| row.selection);
+        self.change_list_selection(selection)
+    }
+
+    fn list_row_fully_visible(
+        row: &NetDlgRowLayout,
+        scroll_y: i32,
+        layout: &NetDlgLayout,
+    ) -> bool {
+        let top = row.rect.y - layout.list_viewport.y;
+        scroll_y <= top
+            && scroll_y.saturating_add(layout.list_viewport.h)
+                >= top.saturating_add(row.rect.h)
+    }
+
+    /// Exact adjacent-first paging from `C4GUI::ListBox::KeyPageDown/KeyPageUp`.
+    /// Network rows have live variable heights, so visibility is evaluated
+    /// against their current bounds instead of a fixed rows-per-page count.
+    fn page_list_selection(&mut self, forward: bool) -> Vec<NetDlgAction> {
+        let layout = self.layout();
+        let rows = self.row_layouts(&layout);
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let mut target = self
+            .selection
+            .and_then(|selection| rows.iter().position(|row| row.selection == selection))
+            .unwrap_or(if forward { 0 } else { rows.len() - 1 });
+
+        if forward {
+            if target + 1 < rows.len() {
+                target += 1;
+                if Self::list_row_fully_visible(&rows[target], self.list_scroll_y, &layout) {
+                    while target + 1 < rows.len()
+                        && Self::list_row_fully_visible(
+                            &rows[target + 1],
+                            self.list_scroll_y,
+                            &layout,
+                        )
+                    {
+                        target += 1;
+                    }
+                } else {
+                    self.scroll_list_by(layout.list_viewport.h, &layout);
+                    target = rows.len() - 1;
+                    while target > 0
+                        && !Self::list_row_fully_visible(
+                            &rows[target],
+                            self.list_scroll_y,
+                            &layout,
+                        )
+                    {
+                        target -= 1;
+                    }
+                }
+            }
+        } else if target > 0 {
+            target -= 1;
+            if Self::list_row_fully_visible(&rows[target], self.list_scroll_y, &layout) {
+                while target > 0
+                    && Self::list_row_fully_visible(
+                        &rows[target - 1],
+                        self.list_scroll_y,
+                        &layout,
+                    )
+                {
+                    target -= 1;
+                }
+            } else {
+                self.scroll_list_by(layout.list_viewport.h.saturating_neg(), &layout);
+                target = 0;
+                while target + 1 < rows.len()
+                    && !Self::list_row_fully_visible(
+                        &rows[target],
+                        self.list_scroll_y,
+                        &layout,
+                    )
+                {
+                    target += 1;
+                }
+            }
+        }
+
+        self.change_list_selection(Some(rows[target].selection))
     }
 
     fn list_content_height(&self, layout: &NetDlgLayout) -> i32 {
@@ -4619,6 +4735,112 @@ mod tests {
             assert_eq!(controller.selected_game(), Some(index));
         }
         assert_eq!(controller.list_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn l057_home_end_and_pages_use_live_network_row_ranges() {
+        let command = vec![NetDlgAction::GuiSound(NetDlgSound::Command)];
+        let mut with_master = NetDlgController::new(NetDlgConfig::default(), metrics());
+        with_master.resize(1280, 720);
+        with_master.set_games(games(3));
+        assert_eq!(with_master.handle_key_down(KeyCode::Home), command);
+        assert_eq!(with_master.selection, Some(NetDlgSelection::Masterserver));
+        assert_eq!(with_master.handle_key_down(KeyCode::End), command);
+        assert_eq!(with_master.selection, Some(NetDlgSelection::Game(2)));
+
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_games(games(20));
+
+        assert_eq!(controller.handle_key_down(KeyCode::Home), command);
+        assert_eq!(controller.selected_game(), Some(0));
+        assert_eq!(controller.list_scroll_offset(), 0);
+        assert_eq!(controller.handle_key_down(KeyCode::End), command);
+        assert_eq!(controller.selected_game(), Some(19));
+        assert_eq!(controller.list_scroll_offset(), controller.list_max_scroll());
+        assert_eq!(controller.handle_key_down(KeyCode::Home), command);
+        assert_eq!(controller.selected_game(), Some(0));
+        assert_eq!(controller.list_scroll_offset(), 0);
+
+        for (key, expected_index, expected_scroll) in [
+            (KeyCode::PageDown, 8, 0),
+            (KeyCode::PageDown, 17, 490),
+            (KeyCode::PageDown, 19, 570),
+            (KeyCode::PageUp, 11, 570),
+            (KeyCode::PageUp, 2, 80),
+            (KeyCode::PageUp, 0, 0),
+        ] {
+            assert_eq!(controller.handle_key_down(key), command);
+            assert_eq!(controller.selected_game(), Some(expected_index));
+            assert_eq!(controller.list_scroll_offset(), expected_scroll);
+        }
+
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        for key in [
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert!(controller.handle_key_down(key).is_empty());
+            assert_eq!(controller.selected_game(), Some(0));
+            assert_eq!(controller.list_scroll_offset(), 0);
+        }
+
+        let mut unselected = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        unselected.resize(1280, 720);
+        unselected.set_games(games(20));
+        assert_eq!(unselected.handle_key_down(KeyCode::PageDown), command);
+        assert_eq!(unselected.selected_game(), Some(8));
+        unselected.selection = None;
+        assert_eq!(unselected.handle_key_down(KeyCode::PageUp), command);
+        assert_eq!(unselected.selected_game(), Some(0));
+    }
+
+    #[test]
+    fn l057_network_rows_do_not_match_typed_characters() {
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_join_address("unchanged");
+        controller.set_games(vec![
+            NetDlgGameEntry {
+                title: "Thomas".into(),
+                ..NetDlgGameEntry::default()
+            },
+            NetDlgGameEntry {
+                title: "tina".into(),
+                ..NetDlgGameEntry::default()
+            },
+        ]);
+        controller.focus_game(1);
+        let scroll = controller.list_scroll_offset();
+
+        assert!(controller.handle_text_input("T", text_font()).is_empty());
+        assert_eq!(controller.focused_control(), NetDlgControl::GameList);
+        assert_eq!(controller.selected_game(), Some(1));
+        assert_eq!(controller.list_scroll_offset(), scroll);
+        assert_eq!(controller.join_address(), "unchanged");
     }
 
     #[test]

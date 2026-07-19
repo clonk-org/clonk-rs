@@ -767,7 +767,12 @@ impl InputDialogController {
             KeyCode::Escape | KeyCode::Tab | KeyCode::Enter => true,
             KeyCode::Space => focus != InputDialogControl::Edit,
             KeyCode::Left | KeyCode::Right => focus == InputDialogControl::Edit,
-            KeyCode::Up | KeyCode::Down => false,
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown => false,
         };
         let capture_release = matches!(key, KeyCode::Escape | KeyCode::Enter)
             || (key == KeyCode::Space && focus != InputDialogControl::Edit);
@@ -821,7 +826,14 @@ impl InputDialogController {
                 layout,
                 font,
             ),
-            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => Vec::new(),
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown => Vec::new(),
         }
     }
 

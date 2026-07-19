@@ -893,6 +893,7 @@ impl AdvancedConfigController {
                 self.move_edit_cursor(RenameEditCursorOperation::Right, false, false);
                 Vec::new()
             }
+            KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => Vec::new(),
         }
     }
 

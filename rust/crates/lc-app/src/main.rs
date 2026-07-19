@@ -14003,6 +14003,44 @@ impl MenuState {
         actions
     }
 
+    /// Mirrors `C4GUI::ListBox::CharIn`: search once from the row after the
+    /// selection, wrap before the current row, and compare the raw first byte.
+    fn select_list_character(&mut self, character: char) -> Vec<StartupMenuAction> {
+        if self.dialog_focus != ScenselDialogFocus::List
+            || self.current_map().is_some()
+            || !character.is_ascii()
+        {
+            return Vec::new();
+        }
+        let offset = usize::from(self.include_back);
+        let count = self.visible_entries.len() + offset;
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let selected = self.menu.selected_index().filter(|index| *index < count);
+        let start = selected.map_or(0, |index| (index + 1) % count);
+        let candidates = if selected.is_some() {
+            count.saturating_sub(1)
+        } else {
+            count
+        };
+        let input = character as u8;
+        let target = (0..candidates).find_map(|delta| {
+            let index = (start + delta) % count;
+            let entry = self.visible_entries.get(index.checked_sub(offset)?)?;
+            entry
+                .title
+                .as_bytes()
+                .first()
+                .is_some_and(|first| first.eq_ignore_ascii_case(&input))
+                .then_some(index)
+        });
+        target
+            .map(|index| self.select_list_index(index))
+            .unwrap_or_default()
+    }
+
     fn scroll_selection_info_by(
         &mut self,
         amount: i32,
@@ -21292,6 +21330,10 @@ impl GameApp {
             self.menu_state
                 .insert_search_text(character.encode_utf8(&mut encoded));
             self.mark_menu_dirty();
+            return Ok(());
+        }
+        if self.startup_view == StartupView::ScenarioBrowser {
+            self.handle_menu_input(|menu| menu.select_list_character(character))?;
             return Ok(());
         }
         if self.startup_view == StartupView::PlayerSelection {
@@ -60540,6 +60582,10 @@ fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
         VirtualKeyCode::Down => Some(KeyCode::Down),
         VirtualKeyCode::Left | VirtualKeyCode::Back => Some(KeyCode::Left),
         VirtualKeyCode::Right => Some(KeyCode::Right),
+        VirtualKeyCode::Home => Some(KeyCode::Home),
+        VirtualKeyCode::End => Some(KeyCode::End),
+        VirtualKeyCode::PageUp => Some(KeyCode::PageUp),
+        VirtualKeyCode::PageDown => Some(KeyCode::PageDown),
         _ => None,
     }
 }
@@ -86117,6 +86163,66 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
         assert_eq!(state.menu.selected_index(), Some(0));
         assert_eq!(state.scenario_list_scroll(), 0);
+    }
+
+    #[test]
+    fn l057_scensel_typeahead_cycles_only_with_list_focus() {
+        let scenarios = ["Thomas", "Ada", "tina", "Tori"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| {
+                let mut entry = FrontendScenario::fallback();
+                entry.identifier = format!("scenario_{index}");
+                entry.title = title.to_string();
+                entry
+            })
+            .collect::<Vec<_>>();
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("typeahead scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios);
+        app.open_scenario_browser();
+        app.ui_sound_log.clear();
+
+        for (character, expected) in [('T', 2), ('T', 3), ('t', 0), ('T', 2)] {
+            let sound_count = app.ui_sound_log.len();
+            app.handle_text_input(character)
+                .expect("route scenario list character");
+            assert_eq!(app.menu_state.menu.selected_index(), Some(expected));
+            assert_eq!(app.ui_sound_log.len(), sound_count + 1);
+            assert_eq!(app.ui_sound_log.last().map(String::as_str), Some("Command"));
+        }
+
+        let sound_count = app.ui_sound_log.len();
+        app.handle_text_input('x').expect("unmatched list character");
+        assert_eq!(app.menu_state.menu.selected_index(), Some(2));
+        assert_eq!(app.ui_sound_log.len(), sound_count);
+
+        app.menu_state.set_search_text("");
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Search);
+        app.handle_text_input('T').expect("type into scenario search");
+        assert_eq!(app.menu_state.search_text(), "T");
+        assert_eq!(app.menu_state.menu.selected_index(), Some(2));
+        assert_eq!(app.ui_sound_log.len(), sound_count);
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::Back);
+        app.handle_text_input('T')
+            .expect("character outside scenario list focus");
+        assert_eq!(app.menu_state.search_text(), "T");
+        assert_eq!(app.menu_state.menu.selected_index(), Some(2));
+        assert_eq!(app.ui_sound_log.len(), sound_count);
+    }
+
+    #[test]
+    fn l057_window_keys_map_to_shared_list_navigation_codes() {
+        for (window_key, gui_key) in [
+            (VirtualKeyCode::Home, KeyCode::Home),
+            (VirtualKeyCode::End, KeyCode::End),
+            (VirtualKeyCode::PageUp, KeyCode::PageUp),
+            (VirtualKeyCode::PageDown, KeyCode::PageDown),
+        ] {
+            assert_eq!(map_key_code(window_key), Some(gui_key));
+        }
     }
 
     // Selected-row -> scenario mapping honours the Back-row offset used by

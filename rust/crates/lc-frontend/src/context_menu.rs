@@ -751,7 +751,12 @@ impl<A: Clone> ClassicContextMenu<A> {
             KeyCode::Right => self.handle_direction(ContextMenuDirection::Right),
             KeyCode::Escape => self.handle_gamepad_high(),
             KeyCode::Enter => self.handle_gamepad_low(),
-            KeyCode::Space | KeyCode::Tab => ContextMenuOutcome::passed(true),
+            KeyCode::Space
+            | KeyCode::Tab
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown => ContextMenuOutcome::passed(true),
         }
     }
 

@@ -136,6 +136,10 @@ impl From<KeyCode> for DefinitionSelKey {
             KeyCode::Down => Self::Down,
             KeyCode::Left => Self::Left,
             KeyCode::Right => Self::Right,
+            KeyCode::Home => Self::Home,
+            KeyCode::End => Self::End,
+            KeyCode::PageUp => Self::PageUp,
+            KeyCode::PageDown => Self::PageDown,
         }
     }
 }

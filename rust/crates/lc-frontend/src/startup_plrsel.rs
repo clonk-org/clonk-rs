@@ -1738,6 +1738,18 @@ impl PlrSelController {
             KeyCode::Tab => self.move_focus(backwards),
             KeyCode::Up if self.focus == PlrSelControl::PlayerList => self.move_selection(-1),
             KeyCode::Down if self.focus == PlrSelControl::PlayerList => self.move_selection(1),
+            KeyCode::Home if self.focus == PlrSelControl::PlayerList => {
+                self.select_list_boundary(false)
+            }
+            KeyCode::End if self.focus == PlrSelControl::PlayerList => {
+                self.select_list_boundary(true)
+            }
+            KeyCode::PageUp if self.focus == PlrSelControl::PlayerList => {
+                self.page_list_selection(false)
+            }
+            KeyCode::PageDown if self.focus == PlrSelControl::PlayerList => {
+                self.page_list_selection(true)
+            }
             KeyCode::Right if !self.is_crew_mode() => self
                 .selected
                 .map(PlrSelAction::ShowCrew)
@@ -1910,6 +1922,75 @@ impl PlrSelController {
             (Some(index), _) => Some((index + 1).min(row_count - 1)),
         };
         self.change_selection(selected)
+    }
+
+    fn select_list_boundary(&mut self, last: bool) -> Vec<PlrSelAction> {
+        let selected = if last {
+            self.row_count().checked_sub(1)
+        } else {
+            (self.row_count() > 0).then_some(0)
+        };
+        self.change_selection(selected)
+    }
+
+    fn list_item_fully_visible(&self, index: usize, layout: &PlrSelLayout) -> bool {
+        let top = i32::try_from(index)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(layout.item_pitch);
+        self.list_scroll_y <= top
+            && self
+                .list_scroll_y
+                .saturating_add(layout.list_viewport.h)
+                >= top.saturating_add(layout.item_height)
+    }
+
+    /// Exact adjacent-first paging from `C4GUI::ListBox::KeyPageDown/KeyPageUp`:
+    /// walk through fully visible rows, or scroll one viewport and scan inward
+    /// from the global list boundary.
+    fn page_list_selection(&mut self, forward: bool) -> Vec<PlrSelAction> {
+        let row_count = self.row_count();
+        if row_count == 0 {
+            return Vec::new();
+        }
+        let layout = self.layout();
+        let mut target = self
+            .selected
+            .filter(|index| *index < row_count)
+            .unwrap_or(if forward { 0 } else { row_count - 1 });
+
+        if forward {
+            if target + 1 < row_count {
+                target += 1;
+                if self.list_item_fully_visible(target, &layout) {
+                    while target + 1 < row_count
+                        && self.list_item_fully_visible(target + 1, &layout)
+                    {
+                        target += 1;
+                    }
+                } else {
+                    self.scroll_list_by(layout.list_viewport.h, &layout);
+                    target = row_count - 1;
+                    while target > 0 && !self.list_item_fully_visible(target, &layout) {
+                        target -= 1;
+                    }
+                }
+            }
+        } else if target > 0 {
+            target -= 1;
+            if self.list_item_fully_visible(target, &layout) {
+                while target > 0 && self.list_item_fully_visible(target - 1, &layout) {
+                    target -= 1;
+                }
+            } else {
+                self.scroll_list_by(layout.list_viewport.h.saturating_neg(), &layout);
+                target = 0;
+                while target + 1 < row_count && !self.list_item_fully_visible(target, &layout) {
+                    target += 1;
+                }
+            }
+        }
+
+        self.change_selection(Some(target))
     }
 
     fn toggle_selected_activation(&mut self) -> Vec<PlrSelAction> {
@@ -3767,6 +3848,69 @@ mod tests {
         initial.resize(1280, 720);
         assert_eq!(initial.selected_index(), Some(19));
         assert_eq!(initial.list_scroll_offset(), 172);
+    }
+
+    #[test]
+    fn l057_home_end_and_pages_use_fully_visible_player_rows() {
+        let mut controller = PlrSelController::new(20);
+        controller.resize(1280, 720);
+
+        assert!(controller.handle_key_down(KeyCode::Home).is_empty());
+        assert_eq!(controller.selected_index(), Some(0));
+        assert_eq!(controller.list_scroll_offset(), 0);
+        assert_eq!(
+            controller.handle_key_down(KeyCode::End),
+            vec![PlrSelAction::SelectionChanged(Some(19))]
+        );
+        assert_eq!(controller.list_scroll_offset(), 172);
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Home),
+            vec![PlrSelAction::SelectionChanged(Some(0))]
+        );
+        assert_eq!(controller.list_scroll_offset(), 0);
+
+        for (key, expected_index, expected_scroll) in [
+            (KeyCode::PageDown, 12, 0),
+            (KeyCode::PageDown, 19, 172),
+            (KeyCode::PageUp, 7, 172),
+            (KeyCode::PageUp, 0, 0),
+        ] {
+            assert_eq!(
+                controller.handle_key_down(key),
+                vec![PlrSelAction::SelectionChanged(Some(expected_index))]
+            );
+            assert_eq!(controller.selected_index(), Some(expected_index));
+            assert_eq!(controller.list_scroll_offset(), expected_scroll);
+        }
+        assert!(controller.handle_key_down(KeyCode::PageUp).is_empty());
+
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Tab),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
+        for key in [
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert!(controller.handle_key_down(key).is_empty());
+            assert_eq!(controller.selected_index(), Some(0));
+            assert_eq!(controller.list_scroll_offset(), 0);
+        }
+
+        let mut unselected = PlrSelController::new(20);
+        unselected.resize(1280, 720);
+        unselected.set_selected_index(None);
+        assert_eq!(
+            unselected.handle_key_down(KeyCode::PageDown),
+            vec![PlrSelAction::SelectionChanged(Some(12))]
+        );
+        unselected.set_selected_index(None);
+        assert_eq!(
+            unselected.handle_key_down(KeyCode::PageUp),
+            vec![PlrSelAction::SelectionChanged(Some(0))]
+        );
     }
 
     #[test]
