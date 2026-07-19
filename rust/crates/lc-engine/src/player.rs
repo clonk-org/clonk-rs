@@ -1942,6 +1942,10 @@ impl Player {
         self.view_target
     }
 
+    pub(crate) fn raw_view_mode(&self) -> i32 {
+        self.view_mode
+    }
+
     pub(crate) fn resolved_view_object(&self) -> Option<ObjectId> {
         resolved_view_object(
             self.view_mode,

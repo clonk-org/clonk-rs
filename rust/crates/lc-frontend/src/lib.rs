@@ -107,6 +107,10 @@ const MATERIAL_OVERLAY_MONOCHROME: i32 = 8;
 const C4GFXBLIT_ADDITIVE: u32 = 1;
 /// `C4GFXBLIT_MOD2`: MOD2 source modulation for the main surface.
 const C4GFXBLIT_MOD2: u32 = 2;
+/// Green construction-placement preview used by `C4MouseControl`.
+const CONSTRUCTION_DRAG_VALID_MODULATION: u32 = 0x1f00_7f00;
+/// Red construction-placement preview used by `C4MouseControl`.
+const CONSTRUCTION_DRAG_INVALID_MODULATION: u32 = 0x8f7f_0000;
 /// `C4GFXBLIT_CLRSFC_OWNCLR`: do not fold global ColorMod into owner color.
 const C4GFXBLIT_CLRSFC_OWNCLR: u32 = 4;
 /// `C4GFXBLIT_CLRSFC_MOD2`: MOD2 source modulation for the owner surface.
@@ -1650,9 +1654,9 @@ pub struct ViewportPointer {
     pub screen: GuiPoint,
 }
 
-/// The eight C4MouseControl viewport-scroll cursor cells. The numeric atlas
-/// phases are fixed by `C4MC_Cursor_Up` through `C4MC_Cursor_DownRight`
-/// (src/C4MouseControl.cpp:51-58).
+/// The C4MouseControl cursor cells currently drawn by the Rust frontend: the
+/// eight viewport-scroll cursors, Shift add marker, and construction fallback.
+/// Their numeric atlas phases are fixed in src/C4MouseControl.cpp:45-75.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MouseCursorPhase {
     Up,
@@ -1663,6 +1667,8 @@ pub enum MouseCursorPhase {
     UpRight,
     DownLeft,
     DownRight,
+    Add,
+    Construct,
 }
 
 impl MouseCursorPhase {
@@ -1676,6 +1682,8 @@ impl MouseCursorPhase {
             Self::UpRight => 15,
             Self::DownLeft => 16,
             Self::DownRight => 17,
+            Self::Add => 31,
+            Self::Construct => 32,
         }
     }
 
@@ -1690,6 +1698,8 @@ impl MouseCursorPhase {
             Self::UpRight => (cell, 0),
             Self::DownLeft => (0, cell),
             Self::DownRight => (cell, cell),
+            Self::Add => (center, center),
+            Self::Construct => (center, center),
         }
     }
 }
@@ -3038,10 +3048,9 @@ impl GraphicsSystem {
         true
     }
 
-    /// Draw one of C4MouseControl's directional scroll cursors from the
-    /// resolution-selected 40-cell cursor sheet. `screen` is an absolute
-    /// logical output point; the native hotspot and inverse presentation
-    /// scale are applied here.
+    /// Draw one selected C4MouseControl cursor from the resolution-selected
+    /// 40-cell cursor sheet. `screen` is an absolute logical output point; the
+    /// native hotspot and inverse presentation scale are applied here.
     pub fn draw_mouse_cursor(
         &mut self,
         phase: MouseCursorPhase,
@@ -3079,6 +3088,134 @@ impl GraphicsSystem {
             false,
             None,
             SpriteBlitState::normal(),
+            gamma,
+            None,
+        );
+        true
+    }
+
+    /// Returns the selected construction cursor cell's centered native
+    /// hotspot. The offset is in source pixels and is applied before the
+    /// inverse presentation transform, just like C4MouseControl's `iOffset`.
+    pub fn construction_cursor_primary_offset(&self) -> Option<GuiPoint> {
+        let image = self
+            .cursor_atlas
+            .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)?;
+        let cell = i32::try_from(image.height()).ok()?;
+        let source = SourceRect::new(
+            MouseCursorPhase::Construct.atlas_phase().saturating_mul(cell),
+            0,
+            cell,
+            cell,
+        );
+        if !Self::source_within_image(&image, &source) {
+            return None;
+        }
+        let (x, y) = MouseCursorPhase::Construct.hotspot(cell);
+        Some(GuiPoint::new(x as f32, y as f32))
+    }
+
+    /// Draws C4MouseControl's Shift add marker relative to a construction
+    /// cursor or drag image. `primary_offset` is the native source-pixel
+    /// `iOffset` used for the primary draw; the marker's `(8, 8)` adjustment
+    /// is applied in the same physical space before inverse presentation
+    /// scaling (src/C4MouseControl.cpp:366-403).
+    pub fn draw_construction_add_marker(
+        &mut self,
+        screen: GuiPoint,
+        primary_offset: GuiPoint,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some(image) = self
+            .cursor_atlas
+            .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)
+        else {
+            return false;
+        };
+        let Ok(cell) = i32::try_from(image.height()) else {
+            return false;
+        };
+        let source = SourceRect::new(
+            MouseCursorPhase::Add.atlas_phase().saturating_mul(cell),
+            0,
+            cell,
+            cell,
+        );
+        if !Self::source_within_image(&image, &source) {
+            return false;
+        }
+
+        let scale = self.presentation_scale;
+        let inverse_scale = scale.recip();
+        let destination = GuiRect::from_origin_size(
+            GuiPoint::new(
+                (screen.x * scale - primary_offset.x + 8.0).trunc() * inverse_scale,
+                (screen.y * scale - primary_offset.y + 8.0).trunc() * inverse_scale,
+            ),
+            GuiSize::new(cell as f32 * inverse_scale, cell as f32 * inverse_scale),
+        );
+        draw_image_region(
+            &mut self.surface,
+            &destination,
+            &image,
+            None,
+            &source,
+            false,
+            None,
+            SpriteBlitState::normal(),
+            gamma,
+            None,
+        );
+        true
+    }
+
+    /// Draws C4MouseControl's construction drag image at its native logical
+    /// size. `bottom_center` is the cursor hotspot; `valid` selects the native
+    /// green or red MOD2 modulation (src/C4MouseControl.cpp:379-385).
+    pub fn draw_construction_drag_preview(
+        &mut self,
+        image: &ImageData,
+        bottom_center: GuiPoint,
+        valid: bool,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Ok(width) = i32::try_from(image.width()) else {
+            return false;
+        };
+        let Ok(height) = i32::try_from(image.height()) else {
+            return false;
+        };
+        let source = SourceRect::new(0, 0, width, height);
+        if !Self::source_within_image(image, &source) {
+            return false;
+        }
+
+        // C4MouseControl uses integer Wdt/2 and the full image height for the
+        // construction cursor hotspot.
+        let destination = GuiRect::from_origin_size(
+            GuiPoint::new(
+                bottom_center.x - (width / 2) as f32,
+                bottom_center.y - height as f32,
+            ),
+            GuiSize::new(width as f32, height as f32),
+        );
+        draw_image_region(
+            &mut self.surface,
+            &destination,
+            image,
+            None,
+            &source,
+            false,
+            None,
+            SpriteBlitState {
+                mode: C4GFXBLIT_MOD2,
+                modulation: Some(if valid {
+                    CONSTRUCTION_DRAG_VALID_MODULATION
+                } else {
+                    CONSTRUCTION_DRAG_INVALID_MODULATION
+                }),
+                fog_modulation: None,
+            },
             gamma,
             None,
         );
@@ -19171,6 +19308,8 @@ mod tests {
             (MouseCursorPhase::UpRight, (6, 10)),
             (MouseCursorPhase::DownLeft, (10, 6)),
             (MouseCursorPhase::DownRight, (6, 6)),
+            (MouseCursorPhase::Add, (8, 8)),
+            (MouseCursorPhase::Construct, (8, 8)),
         ];
         for (phase, expected_origin) in cases {
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
@@ -19200,6 +19339,152 @@ mod tests {
                 "phase {phase:?} y hotspot"
             );
         }
+    }
+
+    #[test]
+    fn construction_add_marker_uses_primary_offset_before_inverse_scale() {
+        let cell = 4u32;
+        let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                let phase = (x / cell) as u8;
+                pixels.extend_from_slice(&[phase, phase.wrapping_add(40), 200, 255]);
+            }
+        }
+        let mut entries = vec![None; 8];
+        entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
+        let mut graphics = GraphicsSystem::new(
+            24,
+            24,
+            24,
+            "Construction add marker",
+            test_font(),
+            empty_sprites(),
+            Arc::new(CursorAtlas::new(entries)),
+            empty_hud_graphics(),
+        );
+        graphics.set_presentation_scale(2.0);
+        let screen = GuiPoint::new(10.0, 10.0);
+        let marker = Color::opaque(31, 71, 200);
+        let marker_points = |graphics: &GraphicsSystem| {
+            (0..24)
+                .flat_map(|y| (0..24).map(move |x| (x, y)))
+                .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(marker))
+                .collect::<Vec<_>>()
+        };
+
+        let cursor_offset = graphics
+            .construction_cursor_primary_offset()
+            .expect("selected Construct cell");
+        assert_eq!(cursor_offset, GuiPoint::new(2.0, 2.0));
+        assert!(graphics.draw_construction_add_marker(screen, cursor_offset, None));
+        assert_eq!(
+            marker_points(&graphics),
+            vec![(13, 13), (14, 13), (13, 14), (14, 14)],
+            "(cursor*2 - centered 2px offset + 8px) / 2",
+        );
+
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        let drag_image_offset = GuiPoint::new(4.0, 6.0); // 8x6 drag image
+        assert!(graphics.draw_construction_add_marker(screen, drag_image_offset, None));
+        assert_eq!(
+            marker_points(&graphics),
+            vec![(12, 11), (13, 11), (12, 12), (13, 12)],
+            "(cursor*2 - (DragImage.Wdt/2, DragImage.Hgt) + 8px) / 2",
+        );
+    }
+
+    #[test]
+    fn construction_drag_preview_uses_native_mod2_validity_colors() {
+        let image = ImageData::new(1, 1, vec![128, 128, 128, 255]);
+        let mut graphics = GraphicsSystem::new(
+            3,
+            2,
+            2,
+            "Construction drag MOD2",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        assert!(graphics.draw_construction_drag_preview(
+            &image,
+            GuiPoint::new(1.0, 1.0),
+            true,
+            None,
+        ));
+        assert_eq!(
+            graphics.surface().get_pixel(1, 0),
+            Some(Color::opaque(1, 255, 1)),
+            "0x1f007f00 uses the native green MOD2 channels",
+        );
+
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        assert!(graphics.draw_construction_drag_preview(
+            &image,
+            GuiPoint::new(1.0, 1.0),
+            false,
+            None,
+        ));
+        assert_eq!(
+            graphics.surface().get_pixel(1, 0),
+            Some(Color::opaque(255, 1, 1)),
+            "0x8f7f0000 uses the native red MOD2 channels",
+        );
+    }
+
+    #[test]
+    fn construction_drag_preview_uses_cpp_hotspot_clipping_and_gamma() {
+        let image = ImageData::new(4, 3, (0..12).flat_map(|_| [128, 128, 128, 255]).collect());
+        let mut graphics = GraphicsSystem::new(
+            4,
+            3,
+            3,
+            "Construction drag hotspot",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_presentation_scale(2.0);
+        let background = Color::opaque(9, 11, 13);
+        graphics.surface_mut().fill(background);
+        let gamma = lc_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
+
+        assert!(graphics.draw_construction_drag_preview(
+            &image,
+            GuiPoint::new(1.0, 1.0),
+            true,
+            Some(&gamma),
+        ));
+
+        // Wdt/2 and Hgt place the 4x3 image at (-1,-2). Only its last row,
+        // columns 1..=3, remains on the logical surface; presentation scale
+        // does not alter this output-space UI primitive.
+        let modulated = gamma_encode_fragment(Color::opaque(1, 255, 1), &gamma);
+        for y in 0..3 {
+            for x in 0..4 {
+                let expected = if y == 0 && x < 3 {
+                    modulated
+                } else {
+                    background
+                };
+                assert_eq!(
+                    graphics.surface().get_pixel(x, y),
+                    Some(expected),
+                    "pixel ({x},{y})",
+                );
+            }
+        }
+
+        assert!(!graphics.draw_construction_drag_preview(
+            &ImageData::new(0, 0, Vec::new()),
+            GuiPoint::new(1.0, 1.0),
+            true,
+            None,
+        ));
     }
 
     #[test]

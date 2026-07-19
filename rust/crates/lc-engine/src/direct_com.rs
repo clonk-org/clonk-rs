@@ -4762,6 +4762,115 @@ impl Engine {
         Ok(())
     }
 
+    /// C4Object::ActivateMenu(C4MN_Construction): install the classic
+    /// structure-knowledge menu directly on the owning crew
+    /// (C4Object.cpp:1982-2005).
+    pub(crate) fn open_construction_menu(&mut self, crew_index: usize) -> Result<(), EngineError> {
+        const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
+
+        let crew_id = self.objects[crew_index].id;
+        let _ = self.close_object_menu(crew_id, true)?;
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        let owner = self.objects[crew_index].state.owner;
+        let Some(player) = self.players.get(&owner) else {
+            return Ok(());
+        };
+        let player_name = player.name().to_string();
+        let knowledge = player
+            .knowledge_entries()
+            .iter()
+            .map(|(definition_id, _)| definition_id.clone())
+            .collect::<Vec<_>>();
+        let symbol_id = if self.definitions.contains_key("CXCN") {
+            "CXCN".to_string()
+        } else if self.definitions.contains_key("WKS1") {
+            "WKS1".to_string()
+        } else {
+            String::new()
+        };
+        // C4Object::ActivateMenu initializes the shell before AddRefSym
+        // resolves each row's potentially callback-driven components.
+        self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
+            caption: format!("Player {player_name}|has no construction plans."),
+            symbol_id,
+            title_symbol: crate::ObjectMenuSymbol::default(),
+            identification: Value::Int(1),
+            style: 0,
+            equal_item_height: false,
+            permanent: false,
+            extra: crate::ObjectMenuExtra::Components,
+            extra_data: 0,
+            internal_refill_token: 0,
+            selection: -1,
+            user_menu: false,
+            command_object: Some(crew_id),
+            scenario_callbacks: false,
+            refill_object: None,
+            refill_object_contents_count: 0,
+            items: Vec::new(),
+            columns: 5,
+            lines: 0,
+            text_progressing: false,
+            decoration: None,
+        });
+
+        for definition_id in knowledge {
+            let Some((name, description)) = self
+                .definitions
+                .get(&definition_id)
+                .filter(|definition| definition.category() & crate::CATEGORY_STRUCTURE != 0)
+                .map(|definition| {
+                    (
+                        definition.name().to_string(),
+                        definition.description().unwrap_or_default().to_string(),
+                    )
+                })
+            else {
+                continue;
+            };
+            let components = self
+                .build_required_components(&definition_id, crew_id)?
+                .into_iter()
+                .map(|component| crate::ObjectMenuComponent {
+                    definition_id: component.id,
+                    count: component.count,
+                })
+                .collect();
+            let Some(crew_index) = self.find_object_index(crew_id) else {
+                return Ok(());
+            };
+            let Some(menu) = self.objects[crew_index].state.menu.as_mut().filter(|menu| {
+                menu.identification == Value::Int(1) && menu.command_object == Some(crew_id)
+            }) else {
+                return Ok(());
+            };
+            let select = menu.selection == -1;
+            menu.items.push(crate::ObjectMenuItem {
+                caption: format!("Construction: {name}"),
+                info_caption: crate::normalize_menu_info_caption(description),
+                command: format!("SetCommand(this, \"Construct\",,0,0,,{definition_id})"),
+                command2: String::new(),
+                count: C4MN_ITEM_NO_COUNT,
+                item_id: definition_id,
+                symbol: crate::ObjectMenuSymbol::default(),
+                image: crate::ObjectMenuImage::default(),
+                presentation_definition_id: None,
+                picture_snapshot: None,
+                picture_object: None,
+                components,
+                selectable: true,
+                value: None,
+                text_display_progress: -1,
+            });
+            if select {
+                menu.selection = 0;
+            }
+        }
+        Ok(())
+    }
+
     /// C4Object::ActivateMenu(C4MN_Buy) plus the immediate
     /// C4ObjectMenu::SetRefillObject/Refill pass (C4Object.cpp:1919-1930;
     /// C4ObjectMenu.cpp:207-237).
@@ -14861,7 +14970,7 @@ func FxPulseContextThree(target, number, menu, image) { [Pulse] return 1; }
     }
 
     #[test]
-    fn clonk_context_construction_emits_the_native_menu_request() {
+    fn clonk_context_construction_opens_the_native_menu() {
         // Reduced shipped CLNK::ContextConstruction: its definition-less
         // SetCommand followed by synchronous ExecuteCommand opens
         // C4MN_Construction and finishes the command successfully
@@ -14919,23 +15028,438 @@ public func ContextConstruction(object caller)
             .player_in_com(1, COM_THROW, 0)
             .expect("execute ContextConstruction");
 
-        assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew survives")
+            .expect("native construction menu opens");
+        assert_eq!(menu.identification, Value::Int(1));
+        assert_eq!(menu.caption, "Player Builder|has no construction plans.");
+        assert_eq!(menu.extra, crate::ObjectMenuExtra::Components);
+        assert_eq!(menu.selection, -1);
+        assert!(menu.items.is_empty());
+        assert!(engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack
+            .command_names()
+            .is_empty());
         assert!(
+            engine.pending_menu_requests.is_empty(),
+            "native Construction requests are consumed inside lc-engine"
+        );
+    }
+
+    #[test]
+    fn native_construction_menu_filters_knowledge_and_exposes_drag_rows() {
+        let mut engine = Engine::new();
+        register_builder_clonk(&mut engine, "CLNK", "#strict 2\n");
+        for id in ["CXCN", "WOOD", "METL"] {
             engine
-                .object_snapshot(crew)
-                .expect("crew survives")
-                .command_stack
-                .command_names()
-                .is_empty()
+                .register_definition(
+                    Definition::from_script(id, id, "#strict 2\n").expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let mut elevator = Definition::from_script(
+            "ELEV",
+            "Elevator",
+            r#"
+#strict 2
+public func GetCustomComponents(object builder)
+{
+    return [WOOD, WOOD, WOOD, WOOD, METL, METL];
+}
+"#,
+        )
+        .expect("elevator compiles");
+        elevator.set_category(crate::CATEGORY_STRUCTURE);
+        elevator.set_constructable(true);
+        elevator.set_description(Some("Lift\npeople\rquickly.".to_string()));
+        elevator.set_components(vec![crate::DefinitionComponent {
+            id: "WOOD".to_string(),
+            count: 99,
+        }]);
+        engine
+            .register_definition(elevator)
+            .expect("elevator registers");
+
+        let mut facade =
+            Definition::from_script("FACA", "Facade", "#strict 2\n").expect("facade compiles");
+        facade.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(facade)
+            .expect("facade registers");
+
+        let mut vehicle =
+            Definition::from_script("VEHI", "Vehicle", "#strict 2\n").expect("vehicle compiles");
+        vehicle.set_category(crate::CATEGORY_VEHICLE);
+        vehicle.set_constructable(true);
+        engine
+            .register_definition(vehicle)
+            .expect("vehicle registers");
+
+        engine
+            .register_player(PlayerConfig::new(1, "Builder"))
+            .expect("player registers");
+        for definition_id in ["VEHI", "ELEV", "FACA"] {
+            engine
+                .grant_player_knowledge(1, definition_id)
+                .expect("grant knowledge");
+        }
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine
+            .open_construction_menu(crew_index)
+            .expect("construction menu opens");
+
+        let menu = engine.cursor_object_menu(1).expect("cursor menu exists").1;
+        assert_eq!(menu.identification, Value::Int(1));
+        assert_eq!(menu.symbol_id, "CXCN");
+        assert_eq!(menu.extra, crate::ObjectMenuExtra::Components);
+        assert!(!menu.permanent);
+        assert_eq!(menu.command_object, Some(crew));
+        assert_eq!(menu.selection, 0);
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["ELEV", "FACA"],
+            "only known structures appear, in knowledge order"
+        );
+        let elevator = &menu.items[0];
+        assert_eq!(elevator.caption, "Construction: Elevator");
+        assert_eq!(elevator.info_caption, "Lift people|quickly.");
+        assert_eq!(
+            elevator.command,
+            "SetCommand(this, \"Construct\",,0,0,,ELEV)"
+        );
+        assert_eq!(elevator.count, 12_345_678);
+        assert_eq!(
+            elevator.components,
+            [
+                crate::ObjectMenuComponent {
+                    definition_id: "WOOD".to_string(),
+                    count: 4,
+                },
+                crate::ObjectMenuComponent {
+                    definition_id: "METL".to_string(),
+                    count: 2,
+                },
+            ]
+        );
+
+        let drag = engine
+            .object_menu_construction_drag(1, 0)
+            .expect("constructable raw item id starts a drag");
+        assert_eq!(drag.menu_object_id, crew);
+        assert_eq!(drag.definition_id, "ELEV");
+        assert_eq!(
+            drag.definition_c4id,
+            lc_script::c4_id_raw("ELEV") as u32 as i32
         );
         assert_eq!(
-            engine.pending_menu_requests,
-            [crate::MenuRequest {
-                crew_id: crew,
-                owner: 1,
-                kind: crate::MenuRequestKind::Construction,
-            }]
+            engine.object_menu_construction_drag(1, 1),
+            None,
+            "known structures remain menu rows even when not constructable"
         );
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index]
+            .state
+            .menu
+            .as_mut()
+            .expect("menu remains open")
+            .items[1]
+            .presentation_definition_id = Some("ELEV".to_string());
+        assert_eq!(
+            engine.object_menu_construction_drag(1, 1),
+            None,
+            "drag eligibility never uses the presentation fallback"
+        );
+
+        engine
+            .player_in_com(1, COM_MENU_ENTER, 0)
+            .expect("enter native construction row");
+        assert_eq!(
+            engine.debug_object_menu(crew.as_u64()),
+            Some(None),
+            "the nonpermanent construction menu closes on entry"
+        );
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "Construct");
+        assert_eq!(
+            commands[0].data,
+            CommandData::Integer(lc_script::c4_id_raw("ELEV") as u32 as i32)
+        );
+    }
+
+    #[test]
+    fn ordinary_construction_menu_event_is_consumed_by_the_crew_owner() {
+        let mut engine = Engine::new();
+        register_builder_clonk(&mut engine, "CLNK", "#strict 2\n");
+        let mut tower =
+            Definition::from_script("TOWR", "Tower", "#strict 2\n").expect("tower compiles");
+        tower.set_category(crate::CATEGORY_STRUCTURE);
+        tower.set_constructable(true);
+        engine.register_definition(tower).expect("tower registers");
+        engine
+            .register_player(PlayerConfig::new(1, "Owner"))
+            .expect("owner registers");
+        engine
+            .register_player(PlayerConfig::new(2, "Spoofed"))
+            .expect("other player registers");
+        engine
+            .grant_player_knowledge(1, "TOWR")
+            .expect("owner knowledge");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+
+        engine
+            .apply_command_event(crate::command::CommandEvent::OpenMenu(crate::MenuRequest {
+                crew_id: crew,
+                owner: 2,
+                kind: crate::MenuRequestKind::Construction,
+            }))
+            .expect("ordinary command event applies");
+
+        assert!(engine.pending_menu_requests.is_empty());
+        let menu = engine
+            .cursor_object_menu(1)
+            .expect("owner cursor receives menu")
+            .1;
+        assert_eq!(menu.caption, "Player Owner|has no construction plans.");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].item_id, "TOWR");
+    }
+
+    #[test]
+    fn construction_site_preview_reuses_terrain_support_and_overlap_checks() {
+        let mut engine = Engine::new();
+        let mut tower =
+            Definition::from_script("TOWR", "Tower", "#strict 2\n").expect("tower compiles");
+        tower.set_category(crate::CATEGORY_STRUCTURE);
+        tower.set_constructable(true);
+        tower.set_shape_rect(Some(crate::DefinitionRect::new(-10, -40, 20, 40)));
+        engine.register_definition(tower).expect("tower registers");
+        let mut facade =
+            Definition::from_script("FACA", "Facade", "#strict 2\n").expect("facade compiles");
+        facade.set_category(crate::CATEGORY_STRUCTURE);
+        facade.set_shape_rect(Some(crate::DefinitionRect::new(-5, -5, 10, 10)));
+        engine
+            .register_definition(facade)
+            .expect("facade registers");
+        engine.set_landscape(Landscape::flat(100, 50));
+
+        let site = Vector2::new(50, 50);
+        assert!(engine.construction_site_valid("TOWR", site));
+        assert!(!engine.construction_site_valid("NONE", site));
+        assert!(!engine.construction_site_valid("FACA", site));
+        assert!(
+            !engine.construction_site_valid("TOWR", Vector2::new(5, 50)),
+            "a construction rectangle crossing a closed side sees vehicle-solid border pixels"
+        );
+        let mut open_side = Landscape::flat(100, 50);
+        open_side.set_border_open(60, 0, true, false);
+        engine.set_landscape(open_side);
+        assert!(
+            engine.construction_site_valid("TOWR", Vector2::new(5, 50)),
+            "the same rectangle may cross a side that is open throughout the sampled area"
+        );
+        assert!(
+            !engine.construction_site_valid("TOWR", Vector2::new(50, 40)),
+            "the site needs two rows of support within its five-pixel strip"
+        );
+
+        engine
+            .spawn_object(
+                SpawnConfig::new("FACA")
+                    .with_category(crate::CATEGORY_STRUCTURE)
+                    .with_position(Vector2::new(50, 30)),
+            )
+            .expect("blocking structure spawns");
+        assert!(
+            !engine.construction_site_valid("TOWR", site),
+            "an overlapping live structure vetoes the site"
+        );
+    }
+
+    #[test]
+    fn construction_site_visibility_matches_repellers_generators_and_target_fallback() {
+        let mut engine = Engine::new();
+        for (id, closed) in [("VIEW", 0), ("HUT1", 1)] {
+            let mut definition =
+                Definition::from_script(id, id, "#strict 2\n").expect("definition compiles");
+            definition.set_closed_container(closed);
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+        engine
+            .register_player(PlayerConfig::new(1, "Builder"))
+            .expect("builder registers");
+        engine
+            .register_player(PlayerConfig::new(2, "Target owner"))
+            .expect("target owner registers");
+        let mut landscape = Landscape::flat(200, 100);
+        landscape.set_world_height(200);
+        engine.set_landscape(landscape);
+
+        assert!(engine.construction_site_visible(1, Vector2::new(199, 199)));
+        assert!(!engine.construction_site_visible(1, Vector2::new(200, 199)));
+        assert!(!engine.construction_site_visible(1, Vector2::new(199, 200)));
+        assert!(!engine.construction_site_visible(99, Vector2::new(50, 50)));
+
+        let repeller = engine
+            .spawn_object(
+                SpawnConfig::new("VIEW")
+                    .with_owner(1)
+                    .with_position(Vector2::new(50, 50))
+                    .with_plr_view_range(30),
+            )
+            .expect("repeller spawns");
+        engine.player_mut(1).expect("builder").set_fog_of_war(true);
+        assert!(engine.construction_site_visible(1, Vector2::new(79, 50)));
+        assert!(
+            !engine.construction_site_visible(1, Vector2::new(80, 50)),
+            "FoWIsVisible uses strict distance less-than"
+        );
+
+        let generator = engine
+            .spawn_object(
+                SpawnConfig::new("VIEW")
+                    .with_owner(1)
+                    .with_position(Vector2::new(55, 50))
+                    .with_plr_view_range(-10)
+                    .with_color_modulation(0xff00_0000),
+            )
+            .expect("generator spawns");
+        assert!(
+            engine.construction_site_visible(1, Vector2::new(50, 50)),
+            "a faded generator paints darkness but does not block visibility"
+        );
+        let generator_index = engine
+            .find_object_index(generator)
+            .expect("generator exists");
+        engine.objects[generator_index].state.color_modulation = 0;
+        assert!(
+            !engine.construction_site_visible(1, Vector2::new(50, 50)),
+            "an opaque generator overrides a covering repeller"
+        );
+        engine.objects[generator_index].state.color_modulation = 0xff00_0000;
+
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("closed container spawns");
+        engine
+            .apply_object_update(repeller, crate::ObjectUpdate::new().with_container(hut))
+            .expect("contain repeller");
+        assert!(
+            !engine.construction_site_visible(1, Vector2::new(50, 50)),
+            "ClosedContainer=1 suppresses a contained FoW source"
+        );
+
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("VIEW")
+                    .with_owner(2)
+                    .with_position(Vector2::new(100, 100)),
+            )
+            .expect("view target spawns");
+        {
+            let player = engine.player_mut(1).expect("builder");
+            player.set_cursor(Some(repeller));
+            player.set_view_target(Some(target));
+        }
+        assert!(
+            engine.construction_site_visible(1, Vector2::new(129, 100)),
+            "a zero-range target falls back to the cursor's range"
+        );
+        assert!(!engine.construction_site_visible(1, Vector2::new(130, 100)));
+        engine
+            .apply_object_update(target, crate::ObjectUpdate::new().with_container(hut))
+            .expect("contain target");
+        assert!(
+            !engine.construction_site_visible(1, Vector2::new(100, 100)),
+            "the target-view source obeys ClosedContainer too"
+        );
+    }
+
+    #[test]
+    fn construction_drag_image_selects_picture_or_raw_main_face() {
+        let sprite_pixels = (0_u8..16)
+            .flat_map(|value| [value, 0, 0, 255])
+            .collect::<Vec<_>>();
+        let mut main =
+            Definition::from_script("MAIN", "Main face", "#strict 2\n").expect("main compiles");
+        main.set_shape_rect(Some(crate::DefinitionRect::new(-3, -4, 2, 1)));
+        main.set_graphics_scale(2.0);
+        main.set_sprite_image(Some(crate::DefinitionSpriteImage {
+            width: 4,
+            height: 4,
+            pixels: std::sync::Arc::from(sprite_pixels.into_boxed_slice()),
+            color_mask: None,
+        }));
+
+        let picture_sprite_pixels = (32_u8..48)
+            .flat_map(|value| [value, 0, 0, 255])
+            .collect::<Vec<_>>();
+        let menu_picture_pixels = std::sync::Arc::from(vec![9, 8, 7, 255].into_boxed_slice());
+        let mut picture =
+            Definition::from_script("PICT", "Picture", "#strict 2\n").expect("picture compiles");
+        picture.drag_image_picture = 1;
+        picture.set_graphics_scale(2.0);
+        picture.set_picture(Some(crate::DefinitionPicture {
+            x: 1,
+            y: 2,
+            width: 2,
+            height: 1,
+        }));
+        picture.set_sprite_image(Some(crate::DefinitionSpriteImage {
+            width: 4,
+            height: 4,
+            pixels: std::sync::Arc::from(picture_sprite_pixels.into_boxed_slice()),
+            color_mask: None,
+        }));
+        picture.set_picture_image(Some(crate::DefinitionPictureImage {
+            width: 1,
+            height: 1,
+            pixels: std::sync::Arc::clone(&menu_picture_pixels),
+            color_mask: None,
+        }));
+
+        let mut engine = Engine::new();
+        engine.register_definition(main).expect("main registers");
+        engine
+            .register_definition(picture)
+            .expect("picture registers");
+
+        let main = engine
+            .definition_construction_drag_image("MAIN")
+            .expect("raw main face resolves");
+        assert_eq!((main.width(), main.height()), (2, 1));
+        assert_eq!(
+            main.pixels().len(),
+            2 * 1 * 4,
+            "Shape x/y and GraphicsScale are ignored; raw width/height crop from Graphics origin"
+        );
+        let picture = engine
+            .definition_construction_drag_image("PICT")
+            .expect("picture drag image resolves");
+        assert_eq!((picture.width(), picture.height()), (2, 1));
+        assert_eq!(
+            picture.pixels().as_ref(),
+            &[41, 0, 0, 255, 42, 0, 0, 255],
+            "DragImagePicture crops the raw PictureRect from Graphics, not the scaled menu image"
+        );
+        assert_ne!(picture.pixels().as_ref(), menu_picture_pixels.as_ref());
+        assert!(engine
+            .definition_construction_drag_image("NONE")
+            .is_none());
     }
 
     #[test]

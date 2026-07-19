@@ -223,6 +223,58 @@ impl Surface {
         true
     }
 
+    /// Extend semantic text from a temporary layer while applying the same
+    /// packed-C4 modulation that will be used to composite that layer's
+    /// raster pixels. This keeps scale-native text and inline images visually
+    /// attached to a modulated GUI surface.
+    pub fn extend_clonk_text_capture_from_modulated(
+        &mut self,
+        child: &mut Surface,
+        offset: Point,
+        modulation: Color,
+    ) -> bool {
+        if self.clonk_text_capture.is_none() {
+            return false;
+        }
+        let child_bounds = child.bounds();
+        let mut commands = child.take_clonk_text_capture();
+        for command in &mut commands {
+            command.x = command.x.saturating_add(offset.x);
+            command.y = command.y.saturating_add(offset.y);
+            let mut clip = match command.clip {
+                Some(clip) => clip
+                    .intersection(child_bounds)
+                    .unwrap_or(Rect::new(child_bounds.x, child_bounds.y, 0, 0)),
+                None => child_bounds,
+            };
+            clip.x = clip.x.saturating_add(offset.x);
+            clip.y = clip.y.saturating_add(offset.y);
+            command.clip = Some(clip);
+
+            let color = Color::new(
+                command.color[0],
+                command.color[1],
+                command.color[2],
+                command.color[3],
+            )
+            .modulate_clr(modulation);
+            command.color = [color.r, color.g, color.b, color.a];
+            for image in &mut command.images {
+                for pixel in image.rgba.chunks_exact_mut(4) {
+                    let color = Color::new(pixel[0], pixel[1], pixel[2], pixel[3])
+                        .modulate_clr(modulation);
+                    pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+                }
+            }
+        }
+        let destination = self
+            .clonk_text_capture
+            .as_mut()
+            .expect("capture presence checked above");
+        destination.extend(commands);
+        true
+    }
+
     /// Whether role-tagged ClonkFont draws are currently being captured.
     pub fn is_clonk_text_capture_active(&self) -> bool {
         self.clonk_text_capture.is_some()
@@ -819,7 +871,7 @@ impl Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clonk_font::{ClonkFontRole, TextAlign};
+    use crate::clonk_font::{CapturedFontImage, ClonkFontRole, TextAlign};
     use crate::color::Color;
     use rand::{rngs::SmallRng, Rng, SeedableRng};
 
@@ -878,6 +930,33 @@ mod tests {
             Some(Rect::new(10, 8, 3, 3)),
             "the local clip is intersected with 6x4 child bounds, then translated"
         );
+    }
+
+    #[test]
+    fn modulated_child_text_capture_matches_c4_layer_modulation() {
+        let mut command = captured_text(None);
+        command.images.push(CapturedFontImage {
+            tag: "ICON".to_owned(),
+            width: 1,
+            height: 1,
+            rgba: vec![255, 128, 0, 255],
+        });
+        let mut child = Surface::new(6, 4, PixelFormat::Rgba8888);
+        child.begin_clonk_text_capture();
+        assert!(child.capture_clonk_text(command));
+
+        let mut destination = Surface::new(30, 30, PixelFormat::Rgba8888);
+        destination.begin_clonk_text_capture();
+        assert!(destination.extend_clonk_text_capture_from_modulated(
+            &mut child,
+            Point::new(10, 7),
+            Color::new(255, 255, 255, 0xaf),
+        ));
+
+        let commands = destination.take_clonk_text_capture();
+        assert_eq!(commands[0].color, [254, 254, 254, 80]);
+        assert_eq!(commands[0].images[0].rgba, [254, 127, 0, 80]);
+        assert_eq!(commands[0].clip, Some(Rect::new(10, 7, 6, 4)));
     }
 
     #[test]

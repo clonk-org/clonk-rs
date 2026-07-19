@@ -3967,6 +3967,18 @@ pub struct ObjectMenuItem {
     pub text_display_progress: i32,
 }
 
+/// Revalidated source for a classic menu-origin construction drag.
+///
+/// `definition_id` always comes from `C4MenuItem::id` (`item_id` here),
+/// never from the presentation-definition fallback. `definition_c4id` is
+/// ready for `PlayerCommandControlData::data`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectMenuConstructionDrag {
+    pub menu_object_id: ObjectId,
+    pub definition_id: DefinitionId,
+    pub definition_c4id: i32,
+}
+
 impl ObjectMenuImage {
     fn is_definition(&self) -> bool {
         matches!(self, Self::Definition)
@@ -26903,6 +26915,28 @@ impl Engine {
             .and_then(|definition| definition.picture_image().cloned())
     }
 
+    /// `C4MouseControl::CreateDragImage`: use the definition picture when
+    /// `DragImagePicture` is set, otherwise use the main Graphics facet at
+    /// `(0, 0, Shape.Wdt, Shape.Hgt)` in its raw facet dimensions.
+    pub fn definition_construction_drag_image(
+        &self,
+        definition_id: &str,
+    ) -> Option<DefinitionPictureImage> {
+        let definition = self.definitions.get(definition_id)?;
+        if definition.drag_image_picture != 0 {
+            let picture = definition.picture()?;
+            return DefinitionPictureImage::from_sprite_rect_clipped(
+                definition.sprite_image()?,
+                DefinitionRect::new(picture.x, picture.y, picture.width, picture.height),
+            );
+        }
+        let shape = definition.shape_rect()?;
+        DefinitionPictureImage::from_sprite_rect_clipped(
+            definition.sprite_image()?,
+            DefinitionRect::new(0, 0, shape.width, shape.height),
+        )
+    }
+
     /// `C4Def::Picture2Facet` with an explicit horizontal phase. The phase
     /// selection is fixed by AddMenuItem; even an out-of-range phase remains
     /// a valid (clipped/transparent) facet instead of falling back to zero.
@@ -31221,14 +31255,7 @@ impl Engine {
                     })?;
                 }
                 MenuRequestKind::Construction => {
-                    let _ = self.close_object_menu(crew_id, true)?;
-                    if self.players.contains_key(&owner) {
-                        self.pending_menu_requests.push(MenuRequest {
-                            crew_id,
-                            owner,
-                            kind: MenuRequestKind::Construction,
-                        });
-                    }
+                    self.open_construction_menu(crew_index)?;
                 }
                 MenuRequestKind::Buy { base } => {
                     if let Some(base_index) = self.find_object_index(base) {
@@ -45333,6 +45360,139 @@ impl Engine {
             .map(|menu| (cursor, menu))
     }
 
+    /// Resolve `C4MenuItem::IsDragElement` for an item in the owner's live
+    /// cursor menu (C4Menu.cpp:128-133).
+    ///
+    /// Callers should resolve this once on button-down and again after the
+    /// drag threshold so menu/cursor/item changes cannot start a stale drag.
+    pub fn object_menu_construction_drag(
+        &self,
+        owner: i32,
+        index: usize,
+    ) -> Option<ObjectMenuConstructionDrag> {
+        let (menu_object_id, menu) = self.cursor_object_menu(owner)?;
+        let item = menu.items.get(index)?;
+        let definition = self.definitions.get(&item.item_id)?;
+        if !definition.is_constructable() {
+            return None;
+        }
+        let definition_c4id = command::definition_id_to_c4id(&item.item_id)?;
+        Some(ObjectMenuConstructionDrag {
+            menu_object_id,
+            definition_id: item.item_id.clone(),
+            definition_c4id,
+        })
+    }
+
+    /// Read-only `ConstructionCheck` for local drag feedback. Synchronized
+    /// Construct execution invokes the same core predicate again.
+    pub fn construction_site_valid(&self, definition_id: &str, site: Vector2) -> bool {
+        let Some(definition) = self.definitions.get(definition_id) else {
+            return false;
+        };
+        command::construction_check(
+            definition.is_constructable(),
+            definition.shape_rect(),
+            definition.construction_offset(),
+            definition.category(),
+            site,
+            self.landscape.as_ref(),
+            |left, top, width, height, category| {
+                Self::placement_overlaps_object(&self.objects, left, top, width, height, category)
+            },
+        )
+    }
+
+    /// `C4MouseControl::UpdateFogOfWar` plus `C4Player::FoWIsVisible` for a
+    /// construction-drag world point (C4MouseControl.cpp:1266-1277;
+    /// C4Player.cpp:1959-1993).
+    pub fn construction_site_visible(&self, owner: i32, site: Vector2) -> bool {
+        let Some(landscape) = self.landscape.as_ref() else {
+            return false;
+        };
+        if site.x < 0
+            || site.y < 0
+            || site.x >= landscape.width() as i32
+            || site.y >= landscape.estimated_height()
+        {
+            return false;
+        }
+        let Some(player) = self.players.get(&owner) else {
+            return false;
+        };
+        if !player.fog_of_war() {
+            return true;
+        }
+
+        let closed_to_fog = |object: &Object| {
+            object
+                .state
+                .container
+                .and_then(|container| self.find_object_index(container))
+                .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
+                .is_some_and(|definition| definition.closed_container() == 1)
+        };
+        let check_object = |object: &Object, range: i32, seen: &mut bool| {
+            if closed_to_fog(object)
+                || command::c4_distance(
+                    object.state.position.x,
+                    object.state.position.y,
+                    site.x,
+                    site.y,
+                ) as u32
+                    >= range.unsigned_abs()
+            {
+                return true;
+            }
+            if range < 0 {
+                // A nonzero ColorMod alpha is a faded generator: it paints
+                // darkness but does not block FoWIsVisible.
+                object.state.color_modulation & 0xff00_0000 != 0
+            } else {
+                *seen = true;
+                true
+            }
+        };
+
+        let mut seen = false;
+        let mut last_view_object = None;
+        for &object_id in player.fow_view_objects() {
+            last_view_object = Some(object_id);
+            let Some(index) = self.find_object_index(object_id) else {
+                continue;
+            };
+            let object = &self.objects[index];
+            if !check_object(object, object.state.plr_view_range, &mut seen) {
+                return false;
+            }
+        }
+
+        if player.raw_view_mode() == PLAYER_VIEW_MODE_TARGET {
+            if let Some(target_id) = player
+                .raw_view_target()
+                .filter(|target| Some(*target) != last_view_object)
+            {
+                if let Some(target_index) = self.find_object_index(target_id) {
+                    let target = &self.objects[target_index];
+                    let mut range = target.state.plr_view_range;
+                    if range == 0 {
+                        range = player
+                            .cursor()
+                            .and_then(|cursor| self.find_object_index(cursor))
+                            .map_or(0, |index| self.objects[index].state.plr_view_range);
+                    }
+                    if range == 0 {
+                        range = 500;
+                    }
+                    if !check_object(target, range, &mut seen) {
+                        return false;
+                    }
+                }
+            }
+        }
+        seen
+    }
+
     /// Live callback controller used by C4ObjectMenu::GetControllingPlayer.
     pub fn object_controller(&self, object: ObjectId) -> Option<i32> {
         self.find_object_index(object)
@@ -49823,14 +49983,7 @@ impl Engine {
                         })?;
                     }
                     MenuRequestKind::Construction => {
-                        let _ = self.close_object_menu(request.crew_id, true)?;
-                        if self.players.contains_key(&request.owner) {
-                            self.pending_menu_requests.push(MenuRequest {
-                                crew_id: request.crew_id,
-                                owner: request.owner,
-                                kind: MenuRequestKind::Construction,
-                            });
-                        }
+                        self.open_construction_menu(crew_index)?;
                     }
                     MenuRequestKind::Buy { base } => {
                         if let Some(base_index) = self.find_object_index(base) {

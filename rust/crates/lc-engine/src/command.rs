@@ -18139,7 +18139,7 @@ fn c4_angle(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
 
 /// `Distance` (C4Math.cpp:22-31): integer sqrt with the double-step
 /// correction.
-fn c4_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
+pub(crate) fn c4_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
     let dx = i64::from(x1) - i64::from(x2);
     let dy = i64::from(y1) - i64::from(y2);
     let d2 = dx * dx + dy * dy;
@@ -19529,6 +19529,56 @@ struct ConstructState {
     script_result: Option<AcquireScriptResult>,
 }
 
+/// Side-effect-free core of `ConstructionCheck` (C4Landscape.cpp:2125-2169).
+///
+/// Command execution and local construction-drag previews must use the same
+/// terrain/support/object-overlap predicate. The caller supplies the overlap
+/// lookup because command execution reads its frozen command snapshots while
+/// the public preview API reads the live object list.
+pub(crate) fn construction_check<F>(
+    constructable: bool,
+    shape: Option<DefinitionRect>,
+    construction_offset: i32,
+    category: i32,
+    site: Vector2,
+    landscape: Option<&crate::Landscape>,
+    overlaps: F,
+) -> bool
+where
+    F: FnOnce(i32, i32, i32, i32, i32) -> bool,
+{
+    if !constructable {
+        return false;
+    }
+
+    let (width, height) = shape
+        .map(|shape| (shape.width, shape.height))
+        .unwrap_or((0, 0));
+    let effective_height = height - construction_offset;
+    let left = site.x - width / 2;
+    let top = site.y - effective_height;
+
+    let Some(landscape) = landscape else {
+        return true;
+    };
+
+    let solid_count = (top..site.y)
+        .flat_map(|y| (left..left + width).map(move |x| (x, y)))
+        .filter(|&(x, y)| landscape.is_solid_at(x, y))
+        .count()
+        .min(i32::MAX as usize) as i32;
+    let support_count = (site.y..site.y + 5)
+        .flat_map(|y| (left..left + width).map(move |x| (x, y)))
+        .filter(|&(x, y)| landscape.is_solid_at(x, y))
+        .count()
+        .min(i32::MAX as usize) as i32;
+    if solid_count > width * effective_height / 20 || support_count < width * 2 {
+        return false;
+    }
+
+    !overlaps(left, top, width, effective_height, category)
+}
+
 impl ConstructState {
     fn from_request(request: &CommandRequest) -> Self {
         let definition_id = command_data_to_definition_id(&request.data);
@@ -19629,50 +19679,16 @@ impl ConstructState {
         definition: &CommandDefinitionSnapshot,
         site: Vector2,
     ) -> bool {
-        if !definition.constructable {
-            return false;
-        }
-
-        let (raw_width, raw_height) = definition
-            .shape
-            .map(|shape| (shape.width, shape.height))
-            .unwrap_or((20, 40));
-        let width = raw_width.max(1);
-        let height = raw_height.max(1);
-        let effective_height = height.saturating_sub(definition.construction_offset).max(1);
-        let left = site.x - width / 2;
-        let top = site.y - effective_height;
-
-        let Some(landscape) = ctx.landscape else {
-            return true;
-        };
-        if left < 0 || left.saturating_add(width) > landscape.width() as i32 {
-            return false;
-        }
-
-        let solid_count = (top..site.y)
-            .flat_map(|y| (left..left.saturating_add(width)).map(move |x| (x, y)))
-            .filter(|&(x, y)| landscape.is_solid_at(x, y))
-            .count()
-            .min(i32::MAX as usize) as i32;
-        let support_count = (site.y..site.y.saturating_add(5))
-            .flat_map(|y| (left..left.saturating_add(width)).map(move |x| (x, y)))
-            .filter(|&(x, y)| landscape.is_solid_at(x, y))
-            .count()
-            .min(i32::MAX as usize) as i32;
-        let area_threshold = ((i64::from(width) * i64::from(effective_height)) / 20)
-            .clamp(0, i64::from(i32::MAX)) as i32;
-        if solid_count > area_threshold || support_count < width.saturating_mul(2) {
-            return false;
-        }
-
-        !Self::overlaps_construction_rect(
-            ctx,
-            left,
-            top,
-            width,
-            effective_height,
+        construction_check(
+            definition.constructable,
+            definition.shape,
+            definition.construction_offset,
             definition.category,
+            site,
+            ctx.landscape,
+            |left, top, width, height, category| {
+                Self::overlaps_construction_rect(ctx, left, top, width, height, category)
+            },
         )
     }
 
