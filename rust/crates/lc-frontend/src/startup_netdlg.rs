@@ -3119,7 +3119,15 @@ impl NetDlgScreen {
             return;
         }
         let y = rect.y + height - 2;
-        draw_engine_box(surface, rect.x, y, rect.x + width, y, 0x0080_80ff, gamma);
+        draw_engine_box(
+            surface,
+            rect.x,
+            y,
+            rect.x + width - 1,
+            y,
+            0x0080_80ff,
+            gamma,
+        );
     }
 
     fn draw_scrollbar(
@@ -3285,7 +3293,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::endeavour_font_set;
-    use lc_graphics::PixelFormat;
+    use lc_graphics::{Color, PixelFormat};
 
     /// The two text extents the C++ constructor measures from the live fonts
     /// (C4StartupNetDlg.cpp:636,685-686), pinned to the spec's values.
@@ -3659,6 +3667,86 @@ mod tests {
         ] {
             assert!(captured.iter().any(|text| text == expected), "{expected}");
         }
+    }
+
+    #[test]
+    fn l044_hyperlink_uses_cpp_color_exact_underline_and_only_link_opens() {
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.set_text_font(&fonts.text);
+        controller.resize(1280, 720);
+        controller.set_masterserver_entry(NetDlgMasterserverEntry {
+            title: "Internet server on league.example".into(),
+            details: "3 game(s) found, 7 players online.".into(),
+            extra_lines: vec![
+                NetDlgTextLine::Plain("Message of the day: Welcome".into()),
+                NetDlgTextLine::Hyperlink {
+                    label: "https://league.example/news".into(),
+                    url: "https://league.example/news".into(),
+                },
+            ],
+            row_icon: NetDlgRowIcon::None,
+        });
+        controller.set_games(vec![NetDlgGameEntry {
+            title: "Wrong version".into(),
+            details: "Engine version: 4.9.11.0 [363]".into(),
+            joinable: false,
+            ..NetDlgGameEntry::default()
+        }]);
+
+        let layout = controller.layout();
+        let rows = controller.row_layouts(&layout);
+        let link_rect = rows[0].lines[3].rect;
+        let ordinary_rect = rows[1].lines[0].rect;
+        let ordinary_actions = controller.handle_pointer_down(
+            GuiPoint::new((ordinary_rect.x + 2) as f32, (ordinary_rect.y + 2) as f32),
+            text_font(),
+        );
+        assert!(!ordinary_actions
+            .iter()
+            .any(|action| matches!(action, NetDlgAction::OpenUrl(_))));
+        assert_eq!(
+            controller.handle_pointer_down(
+                GuiPoint::new((link_rect.x + 2) as f32, (link_rect.y + 2) as f32),
+                text_font(),
+            ),
+            vec![NetDlgAction::OpenUrl("https://league.example/news".into())]
+        );
+
+        let assets = net_assets();
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let captured = surface.take_clonk_text_capture();
+        let color_for = |text: &str| {
+            captured
+                .iter()
+                .find(|command| command.text == text)
+                .unwrap_or_else(|| panic!("missing captured text: {text}"))
+                .color
+        };
+        for text in [
+            "Internet server on league.example",
+            "3 game(s) found, 7 players online.",
+            "Message of the day: Welcome",
+        ] {
+            assert_eq!(color_for(text), CLR_WHITE, "{text}");
+        }
+        assert_eq!(color_for("https://league.example/news"), CLR_HYPERLINK);
+        for text in ["Wrong version", "Engine version: 4.9.11.0 [363]"] {
+            assert_eq!(color_for(text), CLR_DISABLED, "{text}");
+        }
+
+        let (width, height) = fonts.text.measure("https://league.example/news", true);
+        let underline_y = link_rect.y + height - 2;
+        let hyperlink_pixel = Some(Color::opaque(0x80, 0x80, 0xff));
+        assert!((link_rect.x..link_rect.x + width)
+            .all(|x| { surface.get_pixel(x as u32, underline_y as u32) == hyperlink_pixel }));
+        assert_ne!(
+            surface.get_pixel((link_rect.x + width) as u32, underline_y as u32),
+            hyperlink_pixel,
+            "the engine line endpoint is excluded, so the underline is exactly text-width pixels"
+        );
     }
 
     #[test]
