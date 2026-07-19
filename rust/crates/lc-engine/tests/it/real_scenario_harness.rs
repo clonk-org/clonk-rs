@@ -2873,16 +2873,22 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake() {
     // FXQ1 installs QuakeEffect at interval one. Its first timer computes a
     // non-zero Sin/Cos camera displacement and calls SetViewOffset for every
     // player (Earthquake effect Script.c:31-59). C++ writes that displacement
-    // to the player's live viewport immediately (C4Script.cpp:5676-5687).
+    // to the process-owned live viewport, not synchronized C4Player state
+    // (C4Script.cpp:5676-5687).
+    engine.set_film_viewport_available(true);
     let view_offset = (0..8).find_map(|_| {
         engine.tick().expect("FXQ1's quake effect advances");
         engine
-            .snapshot()
-            .players
+            .take_viewport_presentation_requests()
             .into_iter()
-            .find(|player| player.id == owner)
-            .map(|player| player.view_offset)
-            .filter(|offset| *offset != Vector2::ZERO)
+            .find_map(|request| match request {
+                lc_engine::ViewportPresentationRequest::SetViewOffset { player, offset }
+                    if player == owner && offset != Vector2::ZERO =>
+                {
+                    Some(offset)
+                }
+                _ => None,
+            })
     });
     assert!(
         view_offset.is_some(),

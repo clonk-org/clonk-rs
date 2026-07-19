@@ -1,4 +1,4 @@
-use lc_engine::{ControlEvent, PlayerRuntimeControl};
+use lc_engine::{ControlEvent, PlayerRuntimeControl, PlayerStatus};
 use winit::event::ElementState;
 
 const CONTROL_SET_NONE: i32 = -1;
@@ -137,17 +137,29 @@ impl LocalControlRegistry {
         // runtime data survives even when the current preference gate fails.
         assignment.mouse |= loaded_mouse;
         self.assignments.push(assignment);
-        if assignment.mouse {
-            // RecreatePlayers may initialize controls in player-info order,
-            // but InitGameFinal walks the number-sorted runtime player list.
-            // Every flagged local player calls C4MouseControl::Init, so the
-            // highest-numbered one is the final process-global owner.
-            self.active_mouse_owner = Some(
-                self.active_mouse_owner
-                    .map_or(assignment.owner, |owner| owner.max(assignment.owner)),
-            );
-        }
         assignment
+    }
+
+    /// Reproduce the process-global mouse controller left by restored
+    /// `C4Player::FinalInit` calls in exact `C4PlayerList` link order.
+    pub(crate) fn finalize_restored_mouse_owner<I>(&mut self, player_order: I)
+    where
+        I: IntoIterator<Item = (i32, PlayerStatus)>,
+    {
+        let mut active_mouse_owner = None;
+        for (owner, status) in player_order {
+            if status == PlayerStatus::Inactive {
+                continue;
+            }
+            if self
+                .assignments
+                .iter()
+                .any(|assignment| assignment.owner == owner && assignment.mouse)
+            {
+                active_mouse_owner = Some(owner);
+            }
+        }
+        self.active_mouse_owner = active_mouse_owner;
     }
 
     pub(crate) fn assignment(&self, owner: i32) -> Option<LocalControlAssignment> {
@@ -654,9 +666,9 @@ mod tests {
     }
 
     #[test]
-    fn restored_raw_mouse_ownership_follows_numeric_final_init_order() {
+    fn restored_raw_mouse_ownership_follows_exact_reused_player_list_order() {
         let mut controls = LocalControlRegistry::default();
-        for owner in [9, 3] {
+        for owner in [0, 1] {
             controls.initialize_after_restore(
                 LocalControlInit {
                     owner,
@@ -669,21 +681,33 @@ mod tests {
                 true,
             );
         }
+        controls.finalize_restored_mouse_owner([
+            (1, PlayerStatus::Active),
+            (0, PlayerStatus::Active),
+        ]);
 
-        // RecreatePlayers may visit player infos in a different order, but
-        // InitGameFinal calls MouseControl.Init through FinalInit in restored
-        // player-number order. The last nonzero player therefore owns it.
-        assert_eq!(controls.mouse_owner(), Some(9));
+        // Reusing zero after removing the old head can leave native's linked
+        // player order [1, 0]. FinalInit follows those links, so zero wins.
+        assert_eq!(controls.mouse_owner(), Some(0));
+        controls.finalize_restored_mouse_owner([
+            (1, PlayerStatus::Active),
+            (0, PlayerStatus::Inactive),
+        ]);
+        assert_eq!(
+            controls.mouse_owner(),
+            Some(1),
+            "inactive tail players return before FinalInit initializes the mouse"
+        );
     }
 
     #[test]
     fn disabling_restored_mouse_owner_does_not_promote_another_raw_flag() {
         // Compiled runtime data can contain several nonzero MouseControl
-        // fields. FinalInit leaves the highest-numbered player in the one
-        // process-global C4MouseControl, but ToggleMouseControl clears that
-        // global controller rather than rerunning FinalInit or selecting a
-        // surviving raw flag (pristine 9ffa0a5d src/C4Player.cpp:778-786,
-        // 2296-2315; src/C4PlayerList.cpp:556-562).
+        // fields. FinalInit leaves the last mouse-enabled player in exact
+        // player-list order in the one process-global C4MouseControl, but
+        // ToggleMouseControl clears that controller rather than rerunning
+        // FinalInit or selecting a surviving raw flag (pristine 9ffa0a5d
+        // src/C4Player.cpp:778-786,2296-2315; src/C4PlayerList.cpp:556-562).
         let mut controls = LocalControlRegistry::default();
         for owner in [9, 3] {
             controls.initialize_after_restore(
@@ -698,6 +722,10 @@ mod tests {
                 true,
             );
         }
+        controls.finalize_restored_mouse_owner([
+            (3, PlayerStatus::Active),
+            (9, PlayerStatus::Active),
+        ]);
         assert_eq!(controls.mouse_owner(), Some(9));
 
         assert_eq!(controls.toggle_mouse(9).map(|value| value.mouse), Some(false));

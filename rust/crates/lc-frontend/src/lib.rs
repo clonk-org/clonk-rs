@@ -1944,11 +1944,11 @@ impl FloatSourceRect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CameraKey {
-    owner: i32,
-    /// C4Viewport owns its smoothing state. A focus/ViewCursor change does
-    /// not create a new viewport, so the stable per-owner slot is the key.
-    slot: usize,
+enum CameraKey {
+    /// Legacy/snapshot-derived identity for a player's stable camera slot.
+    Player { owner: i32, slot: usize },
+    /// App-owned identity for one concrete native `C4Viewport` object.
+    Physical { identity: u64, slot: usize },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2411,7 +2411,15 @@ impl<'a> ViewportInput<'a> {
     /// Bind this input to an existing physical viewport across temporary
     /// player retargets.
     pub fn with_camera_identity(mut self, owner: i32, slot: usize) -> Self {
-        self.camera_identity = Some(CameraKey { owner, slot });
+        self.camera_identity = Some(CameraKey::Player { owner, slot });
+        self
+    }
+
+    /// Bind this input to one concrete physical viewport. Player numbers may
+    /// be reused while an older film-retargeted viewport remains alive, so
+    /// they cannot identify native viewport-owned smoothing state.
+    pub fn with_physical_camera_identity(mut self, identity: u64, slot: usize) -> Self {
+        self.camera_identity = Some(CameraKey::Physical { identity, slot });
         self
     }
 
@@ -2978,6 +2986,20 @@ impl GraphicsSystem {
                 zoom: viewport.zoom,
             })
             .collect()
+    }
+
+    /// Delete smoothing state owned by one destroyed physical C4Viewport.
+    /// All of its Rust-only expanded camera slots share the same identity.
+    pub fn drop_physical_camera(&mut self, identity: u64) {
+        self.camera_states.retain(|key, _| {
+            !matches!(
+                key,
+                CameraKey::Physical {
+                    identity: candidate,
+                    ..
+                } if *candidate == identity
+            )
+        });
     }
 
     /// Apply one direct C4MouseControl scroll step to an unassigned
@@ -3829,7 +3851,7 @@ impl GraphicsSystem {
             sky.settings.parallax_y = 10;
         }
         let focus = active.focus.and_then(|focus| capture.object(focus));
-        let camera_key = CameraKey {
+        let camera_key = CameraKey::Player {
             owner: OWNER_NONE,
             slot: usize::MAX,
         };
@@ -4023,7 +4045,7 @@ impl GraphicsSystem {
         let view_width = ((rect.width as f32 / zoom).ceil() as i32).max(1);
         let view_height = ((rect.height as f32 / zoom).ceil() as i32).max(1);
 
-        let key = CameraKey {
+        let key = CameraKey::Player {
             owner: input.owner,
             slot: camera_slot,
         };
@@ -4054,13 +4076,9 @@ impl GraphicsSystem {
                 input.scrolling,
                 self.scroll_smooth,
             );
-            if input.is_no_owner_viewport {
-                state.no_owner_position(view_width, view_height, world_width, world_height)
-            } else {
-                position
-            }
+            position
         };
-        let offset = if input.is_no_owner_viewport {
+        let offset = if input.owner == OWNER_NONE {
             Vector2::ZERO
         } else {
             input.offset
@@ -17176,7 +17194,7 @@ mod tests {
 
         let camera = graphics
             .camera_states
-            .get(&CameraKey { owner: 0, slot: 0 })
+            .get(&CameraKey::Player { owner: 0, slot: 0 })
             .expect("stable viewport camera");
         assert_eq!(camera.view_x, 548);
         assert_eq!(graphics.active_viewports[0].viewport_x, 548.0);
@@ -17209,7 +17227,7 @@ mod tests {
                 1.0,
                 &snapshot.objects[0],
             )
-            .with_camera_identity(0, 0)],
+            .with_physical_camera_identity(41, 0)],
         );
         graphics.render_frame(
             &snapshot,
@@ -17219,20 +17237,26 @@ mod tests {
                 1.0,
                 &snapshot.objects[1],
             )
-            .with_camera_identity(0, 0)],
+            .with_physical_camera_identity(41, 0)],
         );
         assert_eq!(graphics.active_viewports[0].owner, 1);
         assert_eq!(
             graphics
                 .camera_states
-                .get(&CameraKey { owner: 0, slot: 0 })
+                .get(&CameraKey::Physical {
+                    identity: 41,
+                    slot: 0,
+                })
                 .expect("physical viewport camera survives player switch")
                 .view_x,
             548
         );
         assert!(!graphics
             .camera_states
-            .contains_key(&CameraKey { owner: 1, slot: 0 }));
+            .contains_key(&CameraKey::Physical {
+                identity: 42,
+                slot: 0,
+            }));
 
         let mut ownerless = ViewportInput::new(
             0,
@@ -17240,19 +17264,67 @@ mod tests {
             1.0,
             &snapshot.objects[1],
         )
-        .with_camera_identity(0, 0);
+        .with_physical_camera_identity(41, 0);
         ownerless.owner = OWNER_NONE;
         graphics.render_frame(&snapshot, &[ownerless]);
         assert_eq!(graphics.active_viewports[0].owner, OWNER_NONE);
         assert_eq!(
             graphics
                 .camera_states
-                .get(&CameraKey { owner: 0, slot: 0 })
+                .get(&CameraKey::Physical {
+                    identity: 41,
+                    slot: 0,
+                })
                 .expect("temporary NO_OWNER keeps the owned viewport camera")
                 .view_x,
             548,
             "temporary NO_OWNER freezes rather than reclassifying the viewport"
         );
+        graphics.drop_physical_camera(41);
+        assert!(!graphics.camera_states.contains_key(&CameraKey::Physical {
+            identity: 41,
+            slot: 0,
+        }));
+    }
+
+    #[test]
+    fn film_assigned_ownerless_tracks_player_and_applies_current_frame_offset() {
+        let snapshot = camera_world_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Ownerless film camera",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let mut input = ViewportInput::new(
+            0,
+            Vector2::new(900, 500),
+            1.0,
+            &snapshot.objects[0],
+        )
+        .with_offset(Vector2::new(7, -4))
+        .with_physical_camera_identity(42, 0);
+        // SetFilmView changes Player but preserves fIsNoOwnerViewport.
+        input.is_no_owner_viewport = true;
+
+        graphics.render_frame(&snapshot, &[input]);
+
+        let camera = graphics
+            .camera_states
+            .get(&CameraKey::Physical {
+                identity: 42,
+                slot: 0,
+            })
+            .expect("film-assigned ownerless camera");
+        assert_eq!((camera.view_x, camera.view_y), (842, 460));
+        let projection = graphics.active_viewport_projections()[0];
+        assert_eq!(projection.owner, 0);
+        assert!(projection.is_no_owner_viewport);
+        assert_eq!((projection.target_x, projection.target_y), (849, 456));
     }
 
     #[test]
@@ -17281,7 +17353,7 @@ mod tests {
         graphics.render_frame(&snapshot, &[base]);
         let camera_before = *graphics
             .camera_states
-            .get(&CameraKey { owner: 0, slot: 0 })
+            .get(&CameraKey::Player { owner: 0, slot: 0 })
             .expect("camera state after baseline render");
 
         let shaken = ViewportInput::new(
@@ -17295,7 +17367,7 @@ mod tests {
 
         let camera_after = graphics
             .camera_states
-            .get(&CameraKey { owner: 0, slot: 0 })
+            .get(&CameraKey::Player { owner: 0, slot: 0 })
             .expect("camera state after shaken render");
         assert_eq!(camera_after.view_x, camera_before.view_x);
         assert_eq!(camera_after.view_y, camera_before.view_y);
@@ -17352,7 +17424,7 @@ mod tests {
         assert_eq!(
             graphics
                 .camera_states
-                .get(&CameraKey { owner: 0, slot: 0 })
+                .get(&CameraKey::Player { owner: 0, slot: 0 })
                 .expect("camera retained across missed draw")
                 .view_x,
             548
@@ -17395,7 +17467,7 @@ mod tests {
 
         let camera = graphics
             .camera_states
-            .get(&CameraKey { owner: 0, slot: 0 })
+            .get(&CameraKey::Player { owner: 0, slot: 0 })
             .expect("camera state");
         assert_eq!(camera.view_x, -40);
         assert_eq!(graphics.active_viewports[0].content_rect.x, 40);
@@ -17430,7 +17502,7 @@ mod tests {
         );
         let camera = graphics
             .camera_states
-            .get(&CameraKey {
+            .get(&CameraKey::Player {
                 owner: OWNER_NONE,
                 slot: 0,
             })
@@ -17462,7 +17534,7 @@ mod tests {
         );
         let camera = graphics
             .camera_states
-            .get(&CameraKey { owner: 0, slot: 0 })
+            .get(&CameraKey::Player { owner: 0, slot: 0 })
             .expect("scaled camera");
         assert_eq!((camera.view_width, camera.view_height), (67, 54));
         assert_ne!(camera.d_view_x, itofix(CAMERA_UNINITIALIZED));

@@ -7009,6 +7009,63 @@ impl AudioContext {
         focus: Option<&ObjectSnapshot>,
         viewport_center: Vector2,
     ) -> Result<bool, AudioError> {
+        let sound_enabled = self.options.sound_enabled;
+        self.try_start_sound_with_mix_enabled(
+            name,
+            target,
+            volume,
+            looped,
+            multiple,
+            custom_falloff,
+            initial_mix,
+            snapshot,
+            focus,
+            viewport_center,
+            sound_enabled,
+        )
+    }
+
+    fn try_start_global_effect(
+        &mut self,
+        name: &str,
+        game_running: bool,
+        snapshot: &SimulationSnapshot,
+    ) -> Result<bool, AudioError> {
+        let sound_enabled = if game_running {
+            self.options.sound_enabled
+        } else {
+            self.options.menu_sound_enabled
+        };
+        self.try_start_sound_with_mix_enabled(
+            name,
+            None,
+            100,
+            false,
+            true,
+            None,
+            None,
+            snapshot,
+            None,
+            Vector2::ZERO,
+            sound_enabled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_start_sound_with_mix_enabled(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        multiple: bool,
+        custom_falloff: Option<i32>,
+        initial_mix: Option<(f32, f32)>,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
+        sound_enabled: bool,
+    ) -> Result<bool, AudioError> {
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
         // caller explicitly requests multiple instances (C4Script.cpp:
         // 2317-2319). FindInst matches the prepared request against resolved
@@ -7072,7 +7129,7 @@ impl AudioContext {
         let (mut mix_volume, pan) =
             compute_mix_values(&mut info, snapshot, focus, viewport_center);
         mix_volume *= self.options.sound_volume;
-        if self.options.sound_enabled && mix_volume > 0.0 {
+        if sound_enabled && mix_volume > 0.0 {
             let channel = self.system.play_sound(&info.handle, looped)?;
             self.system
                 .channel_set_volume_and_pan(channel, mix_volume, pan);
@@ -10370,10 +10427,18 @@ struct GameApp {
     /// Temporary player assigned to the existing primary viewport by replay
     /// `SetFilmView` or viewport cycling. The physical identity is unchanged.
     film_view_player: Option<i32>,
-    /// The temporary assignment belongs to the physical fullscreen observer
-    /// viewport and must disappear if that viewport is replaced by a local
-    /// player's physical viewport.
-    film_view_player_on_observer: bool,
+    /// Ordered `C4GraphicsSystem::Viewports` membership. Unlike the local
+    /// control registry, this survives when `SetFilmView` retargets a
+    /// viewport and the player that originally caused its creation leaves.
+    physical_viewports: Vec<PhysicalViewportState>,
+    /// Monotonic identity of the next concrete native-style viewport object.
+    /// Player numbers may be reused while a film-retargeted older viewport
+    /// remains alive, so player ownership cannot identify camera smoothing.
+    next_physical_viewport_identity: u64,
+    /// Ordinary owned/ownerless layouts may still be reconciled from the app's
+    /// local-control registry. Once a film retarget makes physical lifetime
+    /// observable, never reconstruct the concrete list until the game resets.
+    physical_viewports_authoritative: bool,
     /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
     runtime_client_list: Option<lc_frontend::runtime_client_list::RuntimeClientListDialog>,
     /// Both this dialog and game-over use C4GUI's default z=0. Preserve which
@@ -20029,7 +20094,9 @@ impl GameApp {
             runtime_flash_resources_cache,
             runtime_flash_message: None,
             film_view_player: None,
-            film_view_player_on_observer: false,
+            physical_viewports: Vec::new(),
+            next_physical_viewport_identity: 1,
+            physical_viewports_authoritative: false,
             runtime_client_list: None,
             runtime_client_list_above_game_over: false,
             scoreboard_dialog: None,
@@ -26240,12 +26307,14 @@ impl GameApp {
         Ok(())
     }
 
-    fn execute_local_team_selections(&mut self) -> Result<(), EngineError> {
-        let owners = self.local_controls.owners().collect::<Vec<_>>();
-        for owner in owners {
+    fn execute_local_team_selections(&mut self) -> Result<Vec<i32>, EngineError> {
+        let mut owners = self.local_controls.owners().collect::<Vec<_>>();
+        for &owner in &owners {
             self.execute_local_team_selection(owner)?;
         }
-        Ok(())
+        owners.retain(|owner| self.engine.player(*owner).is_some());
+        self.move_classic_primary_viewport_first(&mut owners);
+        Ok(owners)
     }
 
     fn execute_init_scenario_player_control(
@@ -27128,43 +27197,21 @@ impl GameApp {
         }
     }
 
-    /// Apply replay-only `SetFilmView` requests to the app-owned physical
-    /// viewport. An absent primary viewport stays absent, matching the C++
-    /// function's successful no-op for an empty viewport list.
+    /// Reconcile legacy/direct-fixture ownership, then apply the ordered
+    /// physical viewport request stream. An absent primary stays absent.
     fn sync_film_view_presentation(&mut self) {
-        if self.film_view_player_on_observer && !self.snapshot.hud.local_players.is_empty() {
-            // FullScreen::ViewportCheck closes the old physical NO_OWNER
-            // viewport when a local player's viewport replaces it.
-            self.film_view_player = None;
-            self.film_view_player_on_observer = false;
-        }
-        let requests = self.engine.take_film_view_requests();
-        for request in requests {
-            self.film_view_player = Some(request.player);
-            self.film_view_player_on_observer = false;
-            if request.player != OWNER_NONE {
-                // C4Viewport::Init(valid player, true) clears the process-
-                // global observer flash message.
-                self.runtime_flash_message = None;
-            }
-        }
-        if self.film_view_player.is_some_and(|player| {
-            player != OWNER_NONE
-                && !self.snapshot.players.iter().any(|state| state.id == player)
-        }) {
-            // C++ closes a viewport whose temporarily assigned player is
-            // removed. Never retain that stale numeric assignment in the
-            // Rust projection; later viewport reconciliation starts clean.
-            self.film_view_player = None;
-            self.film_view_player_on_observer = false;
-        }
+        self.refresh_non_authoritative_physical_viewports();
+        self.apply_direct_film_view_projection();
+        let _ = self.apply_pending_viewport_presentation_requests();
     }
 
     /// Rust creates the fullscreen physical observer viewport from the
     /// absence of local player viewports. A temporary film target changes
     /// only its displayed owner, not this classification.
     fn primary_physical_viewport_is_no_owner(&self) -> bool {
-        self.snapshot.hud.local_players.is_empty()
+        self.physical_viewports
+            .iter()
+            .any(|viewport| viewport.matches_close(OWNER_NONE))
     }
 
     /// GUI keyboard focus and the ownerless fullscreen menu replace the
@@ -27238,6 +27285,7 @@ impl GameApp {
             || !c4_modifiers.is_empty()
             || state != ElementState::Pressed
             || !self.viewport_cycle_scope_available()
+            || self.physical_viewports.is_empty()
         {
             return false;
         }
@@ -27245,63 +27293,32 @@ impl GameApp {
         true
     }
 
-    fn primary_viewport_player(&self, film_replay: bool) -> i32 {
-        if let Some(player) = self.film_view_player {
-            return player;
-        }
-        let local_player = self
-            .snapshot
-            .hud
-            .local_players
-            .iter()
-            .filter_map(|owner| {
-                self.snapshot
-                    .players
-                    .iter()
-                    .find(|player| player.id == *owner && !player.viewports.is_empty())
-            })
-            .min_by_key(|player| classic_viewport_layout_order(player.control_set))
-            .map(|player| player.id);
-        if let Some(local_player) = local_player {
-            return local_player;
-        }
-        if film_replay {
-            // FullScreen::ViewportCheck creates/retargets a film viewport to
-            // Players.First before the first input edge.
-            return self
-                .snapshot
-                .players
-                .first()
-                .map_or(OWNER_NONE, |player| player.id);
-        }
-        // With no local viewport, Rust's fullscreen invariant supplies one
-        // physical NO_OWNER viewport even before the first render.
-        OWNER_NONE
+    fn primary_viewport_player(&self) -> Option<i32> {
+        self.physical_viewports
+            .first()
+            .map(|viewport| viewport.displayed_player)
     }
 
     /// C4Viewport::NextPlayer over the app-owned first physical viewport.
     /// `wrap` is true for film replay and false for an assigned observer key.
     fn cycle_primary_viewport_player(&mut self, wrap: bool) -> bool {
-        let current = self.primary_viewport_player(wrap);
-        let target = if let Some(index) = self
-            .snapshot
-            .players
-            .iter()
-            .position(|player| player.id == current)
-        {
-            self.snapshot
-                .players
+        let Some(current) = self.primary_viewport_player() else {
+            return false;
+        };
+        let players = self.engine.players().map(|player| player.id()).collect::<Vec<_>>();
+        let target = if let Some(index) = players.iter().position(|player| *player == current) {
+            players
                 .get(index + 1)
-                .map(|player| player.id)
+                .copied()
                 .or_else(|| {
                     if wrap {
-                        self.snapshot.players.first().map(|player| player.id)
+                        players.first().copied()
                     } else {
                         Some(OWNER_NONE)
                     }
                 })
         } else {
-            self.snapshot.players.first().map(|player| player.id)
+            players.first().copied()
         };
         let Some(target) = target else {
             return false;
@@ -27309,12 +27326,7 @@ impl GameApp {
         if target == current {
             return false;
         }
-        self.film_view_player = Some(target);
-        self.film_view_player_on_observer = !wrap && self.primary_physical_viewport_is_no_owner();
-        if target != OWNER_NONE {
-            self.runtime_flash_message = None;
-        }
-        true
+        self.set_physical_film_view(target)
     }
 
     fn submit_game_goal_rule_activation(
@@ -46532,6 +46544,377 @@ impl GameApp {
             .retain(|resource_id, _| retained_resources.contains(resource_id));
     }
 
+    fn update_film_viewport_availability(&mut self) {
+        self.engine
+            .set_film_viewport_available(!self.physical_viewports.is_empty());
+    }
+
+    fn clear_physical_viewport_states(&mut self) {
+        for viewport in std::mem::take(&mut self.physical_viewports) {
+            self.graphics
+                .drop_physical_camera(viewport.physical_identity);
+        }
+        self.update_film_viewport_availability();
+    }
+
+    /// `C4GraphicsSystem::RecalculateViewports` sorts the physical list by
+    /// the currently displayed player's control layout. `SetFilmView` itself
+    /// deliberately does not call this; create/close do.
+    fn sort_physical_viewports_by_player_control(&mut self) {
+        let engine = &self.engine;
+        self.physical_viewports.sort_by_key(|viewport| {
+            engine
+                .player(viewport.displayed_player)
+                .map_or(i32::MAX, |player| {
+                    classic_viewport_layout_order(player.control_set())
+                })
+        });
+    }
+
+    fn allocate_physical_viewport_identity(&mut self) -> u64 {
+        let identity = self.next_physical_viewport_identity;
+        self.next_physical_viewport_identity = self.next_physical_viewport_identity.wrapping_add(1);
+        identity
+    }
+
+    fn owned_physical_viewport_state(
+        &mut self,
+        player: i32,
+        expand_player_slots: bool,
+    ) -> PhysicalViewportState {
+        let identity = self.allocate_physical_viewport_identity();
+        let mut viewport = PhysicalViewportState::owned(player, expand_player_slots, identity);
+        if let Some(player) = self.engine.player(player) {
+            viewport.preserved_zoom = player
+                .viewports()
+                .first()
+                .map_or(1.0, |viewport| viewport.zoom);
+        }
+        viewport
+    }
+
+    fn ownerless_physical_viewport_state(&mut self) -> PhysicalViewportState {
+        let identity = self.allocate_physical_viewport_identity();
+        PhysicalViewportState::ownerless(identity)
+    }
+
+    /// Reconstruct the ordinary, non-retargeted list for tests and legacy
+    /// setup code that directly changes the local-control registry. This is
+    /// never used after physical identity becomes observable.
+    fn refresh_non_authoritative_physical_viewports(&mut self) {
+        if self.physical_viewports_authoritative {
+            return;
+        }
+        let mut owners = self
+            .local_controls
+            .owners()
+            .filter(|owner| self.engine.player(*owner).is_some())
+            .collect::<Vec<_>>();
+        let engine = &self.engine;
+        owners.sort_by_key(|owner| {
+            engine
+                .player(*owner)
+                .map_or(i32::MAX, |player| {
+                    classic_viewport_layout_order(player.control_set())
+                })
+        });
+        let already_current = if owners.is_empty() {
+            matches!(
+                self.physical_viewports.as_slice(),
+                [viewport]
+                    if viewport.displayed_player == OWNER_NONE
+                        && viewport.is_no_owner_viewport
+            )
+        } else {
+            self.physical_viewports.len() == owners.len()
+                && self
+                    .physical_viewports
+                    .iter()
+                    .zip(&owners)
+                    .all(|(viewport, owner)| {
+                        viewport.displayed_player == *owner
+                            && viewport.camera_identity_owner == *owner
+                            && !viewport.is_no_owner_viewport
+                            && viewport.expand_player_slots
+                            && viewport.uses_live_player_presentation
+                    })
+        };
+        if already_current {
+            self.update_film_viewport_availability();
+            return;
+        }
+        self.clear_physical_viewport_states();
+        for owner in owners {
+            let viewport = self.owned_physical_viewport_state(owner, true);
+            self.physical_viewports.push(viewport);
+        }
+        self.sort_physical_viewports_by_player_control();
+        if self.physical_viewports.is_empty() {
+            let viewport = self.ownerless_physical_viewport_state();
+            self.physical_viewports.push(viewport);
+        }
+        self.update_film_viewport_availability();
+    }
+
+    fn create_physical_viewport(
+        &mut self,
+        player: i32,
+        silent: bool,
+        game_running: bool,
+        expand_player_slots: bool,
+    ) -> bool {
+        if player != OWNER_NONE && self.engine.player(player).is_none() {
+            return false;
+        }
+        let viewport = if player == OWNER_NONE {
+            self.ownerless_physical_viewport_state()
+        } else {
+            self.owned_physical_viewport_state(player, expand_player_slots)
+        };
+        self.physical_viewports.push(viewport);
+        self.sort_physical_viewports_by_player_control();
+        self.update_film_viewport_availability();
+        if player != OWNER_NONE {
+            self.runtime_flash_message = None;
+        }
+        if !silent {
+            self.play_viewport_feedback_sound_for_game_state(game_running);
+        }
+        true
+    }
+
+    fn close_physical_viewports(
+        &mut self,
+        player: i32,
+        silent: bool,
+        game_running: bool,
+    ) -> bool {
+        let primary_removed = self
+            .physical_viewports
+            .first()
+            .is_some_and(|viewport| viewport.matches_close(player));
+        let previous_count = self.physical_viewports.len();
+        let mut removed_identities = Vec::new();
+        self.physical_viewports.retain(|viewport| {
+            let removed = viewport.matches_close(player);
+            if removed {
+                removed_identities.push(viewport.physical_identity);
+            }
+            !removed
+        });
+        let closed = self.physical_viewports.len() != previous_count;
+        if !closed {
+            return false;
+        }
+        for identity in removed_identities {
+            self.graphics.drop_physical_camera(identity);
+        }
+        if primary_removed {
+            self.film_view_player = None;
+        }
+        self.sort_physical_viewports_by_player_control();
+        self.update_film_viewport_availability();
+        if !silent {
+            self.play_viewport_feedback_sound_for_game_state(game_running);
+        }
+        true
+    }
+
+    /// `FnSetFilmView`: mutate the first physical viewport in place and keep
+    /// both its stable camera identity and `fIsNoOwnerViewport` bit.
+    fn set_physical_film_view(&mut self, player: i32) -> bool {
+        let preserved_zoom = self.physical_viewports.first().and_then(|primary| {
+            primary
+                .uses_live_player_presentation
+                .then(|| self.engine.player(primary.camera_identity_owner))
+                .flatten()
+                .map(|source| {
+                    source
+                        .viewports()
+                        .first()
+                        .map_or(primary.preserved_zoom, |viewport| viewport.zoom)
+                })
+        });
+        let Some(primary) = self.physical_viewports.first_mut() else {
+            return false;
+        };
+        if let Some(zoom) = preserved_zoom {
+            primary.preserved_zoom = zoom;
+        }
+        primary.displayed_player = player;
+        primary.uses_live_player_presentation = false;
+        self.film_view_player = Some(player);
+        self.physical_viewports_authoritative = true;
+        if player != OWNER_NONE {
+            self.runtime_flash_message = None;
+        }
+        true
+    }
+
+    /// Fold process-local replay requests at the same app seam as viewport
+    /// lifecycle operations. A request targeting a player retired inside the
+    /// just-finished engine call identifies the player whose close must still
+    /// run after the callback's retarget.
+    fn apply_pending_viewport_presentation_requests(&mut self) -> Option<i32> {
+        let requests = self.engine.take_viewport_presentation_requests();
+        let mut removed_target = None;
+        for request in requests {
+            match request {
+                lc_engine::ViewportPresentationRequest::SetFilmView { player } => {
+                    let _ = self.set_physical_film_view(player);
+                    if player != OWNER_NONE && self.engine.player(player).is_none() {
+                        removed_target = Some(player);
+                    }
+                }
+                lc_engine::ViewportPresentationRequest::SetViewOffset { player, offset } => {
+                    if let Some(viewport) = self
+                        .physical_viewports
+                        .iter_mut()
+                        .find(|viewport| viewport.displayed_player == player)
+                    {
+                        viewport.preserved_offset = offset;
+                    }
+                }
+            }
+        }
+        removed_target
+    }
+
+    /// Compatibility for focused tests that set the former scalar projection
+    /// directly. Production requests always flow through the ordered sink.
+    fn apply_direct_film_view_projection(&mut self) {
+        if self.physical_viewports_authoritative {
+            return;
+        }
+        let Some(player) = self.film_view_player else {
+            return;
+        };
+        if player != OWNER_NONE && self.engine.player(player).is_none() {
+            self.film_view_player = None;
+            return;
+        }
+        if self
+            .physical_viewports
+            .first()
+            .is_some_and(|viewport| viewport.displayed_player != player)
+        {
+            let _ = self.set_physical_film_view(player);
+        }
+    }
+
+    /// Exact fullscreen `C4FullScreen::ViewportCheck` membership behavior.
+    /// Creation of an ownerless observer and its later film retarget are
+    /// silent; creation directly for the first replay-film player is not.
+    fn check_fullscreen_physical_viewports(&mut self, game_running: bool) {
+        match self.physical_viewports.len() {
+            0 => {
+                let film_player = self
+                    .engine
+                    .is_replay_film()
+                    .then(|| self.engine.first_player_id())
+                    .flatten();
+                let player = film_player.unwrap_or(OWNER_NONE);
+                let _ = self.create_physical_viewport(
+                    player,
+                    player == OWNER_NONE,
+                    game_running,
+                    false,
+                );
+                if film_player.is_some() {
+                    self.film_view_player = film_player;
+                    self.physical_viewports_authoritative = true;
+                }
+            }
+            1 => {}
+            _ => {
+                let _ = self.close_physical_viewports(OWNER_NONE, true, game_running);
+            }
+        }
+
+        if self.engine.is_replay_film() {
+            if let Some(first_player) = self.engine.first_player_id() {
+                if let Some(index) = self
+                    .physical_viewports
+                    .iter()
+                    .position(|viewport| viewport.matches_close(OWNER_NONE))
+                {
+                    self.physical_viewports[index].displayed_player = first_player;
+                    self.physical_viewports[index].uses_live_player_presentation = false;
+                    self.film_view_player = Some(first_player);
+                    self.physical_viewports_authoritative = true;
+                    self.runtime_flash_message = None;
+                }
+            }
+        }
+        self.update_film_viewport_availability();
+    }
+
+    /// `C4Game::InitGameFinal`: create one viewport per live local player in
+    /// list/control order, then run the fullscreen fallback exactly once.
+    fn initialize_physical_viewports(&mut self, game_running: bool) {
+        self.clear_physical_viewport_states();
+        self.physical_viewports_authoritative = false;
+        self.film_view_player = None;
+        let local_players = self
+            .engine
+            .players()
+            .map(|player| player.id())
+            .filter(|owner| self.local_controls.assignment(*owner).is_some())
+            .collect::<Vec<_>>();
+        for owner in local_players {
+            let _ = self.create_physical_viewport(owner, false, game_running, true);
+        }
+        self.check_fullscreen_physical_viewports(game_running);
+    }
+
+    /// Put the physical viewport that C++ retargets through `SetFilmView`
+    /// first without allocating a second per-frame list. The close projection
+    /// only needs the first entry; the order of every later viewport is moot.
+    fn move_classic_primary_viewport_first(&self, owners: &mut [i32]) {
+        let Some((primary, _)) = owners.iter().enumerate().min_by_key(|(_, owner)| {
+            self.local_controls
+                .assignment(**owner)
+                .map_or(i32::MAX, |assignment| {
+                    classic_viewport_layout_order(assignment.set)
+                })
+        }) else {
+            return;
+        };
+        owners[..=primary].rotate_right(1);
+    }
+
+    fn live_local_viewport_owners_with_primary_first(&self) -> Vec<i32> {
+        let mut owners = self
+            .local_controls
+            .owners()
+            .filter(|owner| self.engine.player(*owner).is_some())
+            .collect::<Vec<_>>();
+        self.move_classic_primary_viewport_first(&mut owners);
+        owners
+    }
+
+    /// Remove one runtime player and mirror `C4PlayerList::Remove`'s
+    /// non-silent viewport close. A remote player stays silent unless the
+    /// replay film viewport is temporarily targeting it; failed/no-op
+    /// removals never have a viewport to close.
+    fn remove_runtime_player_with_viewport_feedback(
+        &mut self,
+        player_id: i32,
+    ) -> Result<(), EngineError> {
+        self.refresh_non_authoritative_physical_viewports();
+        self.apply_direct_film_view_projection();
+        let _ = self.apply_pending_viewport_presentation_requests();
+        self.engine.remove_player(player_id)?;
+        // RemovePlayer/OnOwnerRemoved callbacks run before native viewport
+        // closure and may synchronously retarget the primary viewport.
+        let _ = self.apply_pending_viewport_presentation_requests();
+        let game_running = matches!(self.mode, AppMode::Running);
+        let _ = self.close_physical_viewports(player_id, false, game_running);
+        self.remove_local_control_assignment(player_id);
+        self.check_fullscreen_physical_viewports(game_running);
+        Ok(())
+    }
+
     fn remove_runtime_players_at_client(&mut self, client_id: i32, disconnected: bool) {
         let info_ids: HashSet<i32> = self
             .control_player_infos
@@ -46548,9 +46931,8 @@ impl GameApp {
             .collect();
         let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
         for (player_id, info_id) in runtime_players {
-            match self.engine.remove_player(player_id) {
-                Ok(_) => {
-                    self.remove_local_control_assignment(player_id);
+            match self.remove_runtime_player_with_viewport_feedback(player_id) {
+                Ok(()) => {
                     self.control_player_infos
                         .mark_removed(info_id, disconnected, game_part_frame);
                 }
@@ -46580,8 +46962,7 @@ impl GameApp {
             return Ok(());
         };
         let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-        self.engine.remove_player(control.player)?;
-        self.remove_local_control_assignment(control.player);
+        self.remove_runtime_player_with_viewport_feedback(control.player)?;
         if info_id != 0
             && self.control_player_infos.mark_removed(
                 info_id,
@@ -46636,28 +47017,37 @@ impl GameApp {
     }
 
     fn remove_remote_runtime_players(&mut self, local_client_id: i32) {
-        let local_client = lc_engine::PlayerAtClient::new(local_client_id);
-        let runtime_players = self
-            .engine
+        // ChangeToLocal calls C4ClientList::RemoveRemote in client-list order;
+        // each C4Client::Remove repeatedly removes that client's first player
+        // in C4PlayerList order with fNoCalls=false. This is not the silent
+        // hard-abort path used by C4Game::Abort.
+        let remote_clients = self
+            .control_clients
             .snapshot()
-            .players
             .into_iter()
-            .filter(|player| {
-                player.at_client != local_client
-                    && self.control_clients.contains(player.at_client.get())
-            })
-            .map(|player| (player.id, player.player_info_id))
+            .map(|client| client.client_id)
+            .filter(|client_id| *client_id != local_client_id)
             .collect::<Vec<_>>();
         let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-        for (player_id, info_id) in runtime_players {
-            match self.engine.remove_player(player_id) {
-                Ok(_) => {
-                    self.remove_local_control_assignment(player_id);
-                    self.control_player_infos
-                        .mark_removed(info_id, true, game_part_frame);
-                }
-                Err(error) => {
-                    tracing::warn!(%player_id, %info_id, %error, "failed to remove remote player");
+        for client_id in remote_clients {
+            loop {
+                let next = self
+                    .engine
+                    .players()
+                    .find(|player| player.at_client().get() == client_id)
+                    .map(|player| (player.id(), player.player_info_id()));
+                let Some((player_id, info_id)) = next else {
+                    break;
+                };
+                match self.remove_runtime_player_with_viewport_feedback(player_id) {
+                    Ok(()) => {
+                        self.control_player_infos
+                            .mark_removed(info_id, true, game_part_frame);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%player_id, %info_id, %error, "failed to remove remote player");
+                        break;
+                    }
                 }
             }
         }
@@ -48061,6 +48451,9 @@ impl GameApp {
                 return Ok(());
             }
         };
+        self.refresh_non_authoritative_physical_viewports();
+        self.apply_direct_film_view_projection();
+        let _ = self.apply_pending_viewport_presentation_requests();
         let predicted_owner = self.engine.next_player_number();
         let control_init = LocalControlInit {
             owner: predicted_owner,
@@ -48086,6 +48479,10 @@ impl GameApp {
                 control.runtime_control(),
             ) {
             Ok(joined) if locally_controlled => {
+                // InitializePlayer callbacks run before JoinPlayer creates
+                // the new local viewport. Apply their physical mutations to
+                // the pre-existing list before CreateViewport sorts it.
+                let _ = self.apply_pending_viewport_presentation_requests();
                 debug_assert_eq!(joined.number(), predicted_owner);
                 let player_info_changed = self.control_player_infos.mark_joined(
                     join.info_id,
@@ -48104,19 +48501,23 @@ impl GameApp {
                     local_players.push(joined.number());
                     self.engine.set_local_players(local_players);
                 }
-                self.engine.set_film_viewport_available(true);
                 if matches!(
                     joined,
                     lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
                 ) {
                     self.open_initial_team_selection(joined.number());
                 }
-                // Every owned C4Viewport::Init calls FlashMessage(""). A
-                // live local join therefore clears the one process-global
-                // message before the newly owned viewport is presented.
-                self.runtime_flash_message = None;
+                let game_running = matches!(self.mode, AppMode::Running);
+                let _ = self.create_physical_viewport(
+                    joined.number(),
+                    false,
+                    game_running,
+                    true,
+                );
+                self.check_fullscreen_physical_viewports(game_running);
             }
             Ok(joined) => {
+                let _ = self.apply_pending_viewport_presentation_requests();
                 let player_info_changed = self.control_player_infos.mark_joined(
                     join.info_id,
                     joined.number(),
@@ -48125,6 +48526,13 @@ impl GameApp {
                 if player_info_changed {
                     self.publish_current_host_player_infos();
                 }
+                // JoinPlayer calls ViewportCheck even for remote/script
+                // players. In replay film mode this silently retargets an
+                // existing ownerless viewport to the first live player.
+                self.check_fullscreen_physical_viewports(matches!(
+                    self.mode,
+                    AppMode::Running
+                ));
             }
             Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
                 if locally_controlled {
@@ -48344,11 +48752,37 @@ impl GameApp {
                     self.control_playback = None;
                     self.engine.finish_replay()?;
                 }
-                self.execute_local_team_selections()?;
+                self.apply_direct_film_view_projection();
+                let _ = self.apply_pending_viewport_presentation_requests();
+                let local_viewport_owners_before_tick = self.execute_local_team_selections()?;
                 self.snapshot = self
                     .engine
                     .tick()
                     .map_err(map_runtime_flash_producer_engine_error)?;
+                let retired_viewport_owner = local_viewport_owners_before_tick
+                    .iter()
+                    .copied()
+                    .find(|owner| self.engine.player(*owner).is_none())
+                    .or_else(|| {
+                        self.physical_viewports
+                            .iter()
+                            .map(|viewport| viewport.displayed_player)
+                            .find(|owner| {
+                                *owner != OWNER_NONE && self.engine.player(*owner).is_none()
+                            })
+                    });
+                let requested_removed_player =
+                    self.apply_pending_viewport_presentation_requests();
+                let retired_viewport_owner =
+                    retired_viewport_owner.or(requested_removed_player);
+                if let Some(owner) = retired_viewport_owner {
+                    // Player::Execute retires at most one player per frame.
+                    // Its C4PlayerList::Remove path closes all of that
+                    // player's local viewports with one feedback request.
+                    let _ = self.close_physical_viewports(owner, false, true);
+                    self.remove_local_control_assignment(owner);
+                    self.check_fullscreen_physical_viewports(true);
+                }
                 // Native MouseControl::Execute runs after Players/Script on
                 // every successfully executed game frame. Re-run the last
                 // clamped border move even when the OS emitted no new motion.
@@ -52627,9 +53061,9 @@ impl GameApp {
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
-        let viewports = collect_viewport_inputs_with_film_view(
+        let viewports = collect_viewport_inputs_from_physical_state(
             &self.snapshot,
-            self.film_view_player,
+            &self.physical_viewports,
         )
         .map_err(|reason| {
             report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
@@ -52759,6 +53193,14 @@ impl GameApp {
             );
         } else {
             self.graphics.render_frame(&self.snapshot, &viewports);
+        }
+        // C4Viewport::AdjustPosition consumes ViewOffs for an ownerless
+        // physical viewport after each successful draw, even when film mode
+        // has temporarily assigned it a valid player.
+        for viewport in &mut self.physical_viewports {
+            if viewport.is_no_owner_viewport {
+                viewport.preserved_offset = Vector2::ZERO;
+            }
         }
         // Rendering latches the current C4Viewport ViewX/ViewY. Reproject a
         // stationary construction cursor before drawing its phase so camera
@@ -54733,7 +55175,8 @@ impl GameApp {
         self.ingame_mouse_help_caption = None;
         self.runtime_flash_message = None;
         self.film_view_player = None;
-        self.film_view_player_on_observer = false;
+        self.clear_physical_viewport_states();
+        self.physical_viewports_authoritative = false;
         self.runtime_client_list = None;
         self.runtime_client_list_above_game_over = false;
         self.scoreboard_dialog = None;
@@ -55948,7 +56391,8 @@ impl GameApp {
             }
         }
         self.film_view_player = None;
-        self.film_view_player_on_observer = false;
+        self.clear_physical_viewport_states();
+        self.physical_viewports_authoritative = false;
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
@@ -56212,11 +56656,6 @@ impl GameApp {
                 &self.control_player_infos,
             );
         }
-        if !network_game {
-            // C++ creates fullscreen viewports only after Script.Initialize
-            // and player initialization have completed.
-            self.engine.set_film_viewport_available(true);
-        }
         if let Some(player_infos) = offline_player_infos {
             self.control_player_infos = player_infos;
         }
@@ -56238,6 +56677,11 @@ impl GameApp {
         self.open_initial_team_selection(self.local_owner);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        if !network_game {
+            // InitGameFinal creates owned/replay-film viewports before
+            // Game.IsRunning becomes true, so C++ uses FESamples here.
+            self.initialize_physical_viewports(false);
+        }
         self.arm_initial_scoreboard_reconcile();
         // C4Game::InitGame applies the scenario gamma before its first frame
         // (C4Game.cpp:487-490).
@@ -56283,6 +56727,7 @@ impl GameApp {
         self.rebuild_definition_sprites();
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.initialize_physical_viewports(false);
         self.graphics
             .apply_gamma_now(&self.snapshot.environment.gamma);
         self.refresh_object_menu();
@@ -56325,7 +56770,8 @@ impl GameApp {
         self.loading_state = None;
         self.engine = Engine::new();
         self.film_view_player = None;
-        self.film_view_player_on_observer = false;
+        self.clear_physical_viewport_states();
+        self.physical_viewports_authoritative = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
@@ -56379,7 +56825,6 @@ impl GameApp {
         self.rebuild_definition_sprites();
         let fallback_ground = Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT);
         self.configure_running_state(scenario.title.clone(), fallback_ground);
-        self.engine.set_film_viewport_available(true);
         if matches!(self.runtime_network_role(), RuntimeNetworkRole::Offline)
             && self.engine.is_control_host()
         {
@@ -56396,6 +56841,7 @@ impl GameApp {
         }
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.initialize_physical_viewports(false);
         self.arm_initial_scoreboard_reconcile();
         self.refresh_object_menu();
         self.refresh_focus();
@@ -56736,7 +57182,8 @@ impl GameApp {
         self.control_playback = None;
         self.engine = Engine::new();
         self.film_view_player = None;
-        self.film_view_player_on_observer = false;
+        self.clear_physical_viewport_states();
+        self.physical_viewports_authoritative = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
@@ -57127,6 +57574,11 @@ impl GameApp {
                 )
                 .with_context(|| format!("failed to reinitialize restored player {number}"))?;
         }
+        rebound_local_controls.finalize_restored_mouse_owner(
+            self.engine
+                .players()
+                .map(|player| (player.id(), player.status())),
+        );
         self.local_controls = rebound_local_controls;
         if let Some(owner) = restored_primary_owner.or_else(|| local_players.first().copied()) {
             self.local_owner = owner;
@@ -57175,13 +57627,15 @@ impl GameApp {
             audio.set_scenario_music_level(Some(restored_music_level));
         }
 
-        self.engine.set_film_viewport_available(true);
         self.mouse_control = self.local_controls.mouse_owner().is_some();
         if let Some(max_players) = self.engine.max_players() {
             self.network_max_players = usize::try_from(max_players).unwrap_or(0);
         }
 
         self.snapshot = self.engine.snapshot();
+        // RecreatePlayers/InitGameFinal still runs with Game.IsRunning false
+        // even when quick-load began from a running app.
+        self.initialize_physical_viewports(false);
         self.arm_initial_scoreboard_reconcile();
         self.focus_id = save.focus_id;
         if self
@@ -57213,6 +57667,23 @@ impl GameApp {
         self.ui_sound_log.push(name.to_owned());
         if let Some(audio) = self.audio.as_mut() {
             audio.play_ui_sound(name, game_running);
+        }
+    }
+
+    fn play_viewport_feedback_sound(&mut self) {
+        self.play_viewport_feedback_sound_for_game_state(matches!(self.mode, AppMode::Running));
+    }
+
+    fn play_viewport_feedback_sound_for_game_state(&mut self, game_running: bool) {
+        #[cfg(test)]
+        self.ui_sound_log.push("CloseViewport".to_owned());
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+        if let Err(error) =
+            audio.try_start_global_effect("CloseViewport", game_running, &self.snapshot)
+        {
+            tracing::error!(sound = "CloseViewport", %error, "failed to play viewport feedback");
         }
     }
 
@@ -58619,6 +59090,101 @@ const fn classic_viewport_layout_order(control_set: i32) -> i32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PhysicalViewportState {
+    /// Current `C4Viewport::Player`. `CloseViewport(player)` matches this,
+    /// not the local player that originally caused the viewport to exist.
+    displayed_player: i32,
+    /// Stable graphics/camera identity retained across `Init(..., true)`.
+    camera_identity_owner: i32,
+    /// Identity of the concrete C4Viewport object, independent of reusable
+    /// player numbers and ownerless viewport recreation.
+    physical_identity: u64,
+    /// Native `C4Viewport::fIsNoOwnerViewport`; film retargets preserve it.
+    is_no_owner_viewport: bool,
+    /// Rust snapshots may expose several camera slots for one local player.
+    /// They remain a presentation expansion of one ordinary physical entry;
+    /// replay-created/ownerless entries always project exactly one viewport.
+    expand_player_slots: bool,
+    /// True only while this is the original owned viewport presentation.
+    /// A temporary Init stays temporary even if that player number is later
+    /// assigned again to this same physical viewport.
+    uses_live_player_presentation: bool,
+    /// `C4Viewport::Init(..., true)` keeps these physical presentation values
+    /// while switching the displayed player's center/focus.
+    preserved_zoom: f32,
+    preserved_offset: Vector2,
+}
+
+impl PhysicalViewportState {
+    const fn owned(player: i32, expand_player_slots: bool, physical_identity: u64) -> Self {
+        Self {
+            displayed_player: player,
+            camera_identity_owner: player,
+            physical_identity,
+            is_no_owner_viewport: false,
+            expand_player_slots,
+            uses_live_player_presentation: true,
+            preserved_zoom: 1.0,
+            preserved_offset: Vector2::ZERO,
+        }
+    }
+
+    const fn ownerless(physical_identity: u64) -> Self {
+        Self {
+            displayed_player: OWNER_NONE,
+            camera_identity_owner: OWNER_NONE,
+            physical_identity,
+            is_no_owner_viewport: true,
+            expand_player_slots: false,
+            uses_live_player_presentation: false,
+            preserved_zoom: 1.0,
+            preserved_offset: Vector2::ZERO,
+        }
+    }
+
+    const fn matches_close(self, player: i32) -> bool {
+        self.displayed_player == player || (player == OWNER_NONE && self.is_no_owner_viewport)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhysicalViewportCloseEffect {
+    closed_any: bool,
+    remaining_count: usize,
+}
+
+/// Project `C4GraphicsSystem::CloseViewport(player)` over the physical
+/// fullscreen viewport list. `SetFilmView` mutates the first viewport's
+/// displayed player in place, so local-control ownership alone cannot tell
+/// either whether a close matched or whether film fallback must recreate it.
+fn physical_viewport_close_effect(
+    local_owners_primary_first: &[i32],
+    film_view_player: Option<i32>,
+    closing_player: i32,
+) -> PhysicalViewportCloseEffect {
+    let mut closed_count = 0;
+    let physical_count = local_owners_primary_first.len().max(1);
+    if local_owners_primary_first.is_empty() {
+        if film_view_player.unwrap_or(OWNER_NONE) == closing_player {
+            closed_count = 1;
+        }
+    } else {
+        for (index, &local_owner) in local_owners_primary_first.iter().enumerate() {
+            let displayed_owner = if index == 0 {
+                film_view_player.unwrap_or(local_owner)
+            } else {
+                local_owner
+            };
+            closed_count += usize::from(displayed_owner == closing_player);
+        }
+    }
+    PhysicalViewportCloseEffect {
+        closed_any: closed_count != 0,
+        remaining_count: physical_count - closed_count,
+    }
+}
+
 fn collect_viewport_inputs<'a>(
     snapshot: &'a SimulationSnapshot,
 ) -> std::result::Result<Vec<ViewportInput<'a>>, ClassicViewportBoundary> {
@@ -58727,6 +59293,134 @@ fn collect_viewport_inputs_with_film_view<'a>(
     primary.set_scrolling(state.view_mode == PLAYER_VIEW_MODE_SCROLLING);
     if let Some(object) = object {
         primary.focus = Some(object);
+    }
+    Ok(inputs)
+}
+
+fn ownerless_physical_viewport_center(snapshot: &SimulationSnapshot) -> Vector2 {
+    snapshot
+        .landscape
+        .as_ref()
+        .map(|landscape| {
+            Vector2::new(
+                i32::try_from(landscape.width()).unwrap_or(i32::MAX) / 2,
+                landscape.estimated_height() / 2,
+            )
+        })
+        .unwrap_or(Vector2::ZERO)
+}
+
+fn physical_player_viewport_input<'a>(
+    snapshot: &'a SimulationSnapshot,
+    physical: PhysicalViewportState,
+    slot: usize,
+) -> std::result::Result<ViewportInput<'a>, ClassicViewportBoundary> {
+    if physical.displayed_player == OWNER_NONE {
+        let source = snapshot
+            .players
+            .iter()
+            .find(|state| state.id == physical.camera_identity_owner);
+        let source_viewport = source.and_then(|state| state.viewports.first());
+        let center = source_viewport
+            .map(|viewport| viewport.center)
+            .unwrap_or_else(|| ownerless_physical_viewport_center(snapshot));
+        let focus = source_viewport
+            .and_then(|viewport| viewport.focus)
+            .and_then(|focus| snapshot.object(focus))
+            .or_else(|| {
+                source.and_then(|state| state.cursor.and_then(|cursor| snapshot.object(cursor)))
+            })
+            .or_else(|| {
+                source.and_then(|state| {
+                    state.crew.first().and_then(|crew| snapshot.object(*crew))
+                })
+            });
+        let mut input = if physical.is_no_owner_viewport {
+            ViewportInput::ownerless(center, physical.preserved_zoom)
+        } else {
+            ViewportInput::owned_without_focus(
+                OWNER_NONE,
+                center,
+                physical.preserved_zoom,
+            )
+        };
+        input.focus = focus;
+        return Ok(input
+            .with_offset(physical.preserved_offset)
+            .with_scrolling(source.is_some_and(|state| {
+                state.view_mode == PLAYER_VIEW_MODE_SCROLLING
+            }))
+            .with_physical_camera_identity(physical.physical_identity, slot));
+    }
+
+    let state = snapshot
+        .players
+        .iter()
+        .find(|state| state.id == physical.displayed_player)
+        .ok_or(ClassicViewportBoundary::LocalViewportUnavailable {
+            owner: physical.displayed_player,
+        })?;
+    let viewport = state
+        .viewports
+        .get(slot.min(state.viewports.len().saturating_sub(1)))
+        .ok_or(ClassicViewportBoundary::LocalViewportUnavailable { owner: state.id })?;
+    let object = viewport
+        .focus
+        .and_then(|focus_id| snapshot.object(focus_id))
+        .or_else(|| state.cursor.and_then(|cursor| snapshot.object(cursor)))
+        .or_else(|| state.crew.first().and_then(|crew| snapshot.object(*crew)));
+    let use_live_player_presentation = physical.uses_live_player_presentation;
+    let zoom = if use_live_player_presentation {
+        viewport.zoom
+    } else {
+        physical.preserved_zoom
+    };
+    let offset = physical.preserved_offset;
+    let mut input = if physical.is_no_owner_viewport {
+        let mut input = ViewportInput::ownerless(viewport.center, zoom);
+        input.owner = state.id;
+        input
+    } else {
+        ViewportInput::owned_without_focus(state.id, viewport.center, zoom)
+    };
+    input.focus = object;
+    Ok(input
+        .with_offset(offset)
+        .with_scrolling(state.view_mode == PLAYER_VIEW_MODE_SCROLLING)
+        .with_physical_camera_identity(physical.physical_identity, slot))
+}
+
+/// Render the app-owned physical list without deriving membership from local
+/// controls. The output Vec is the same allocation the legacy renderer
+/// already performs; the lifecycle state itself is borrowed in place.
+fn collect_viewport_inputs_from_physical_state<'a>(
+    snapshot: &'a SimulationSnapshot,
+    physical_viewports: &[PhysicalViewportState],
+) -> std::result::Result<Vec<ViewportInput<'a>>, ClassicViewportBoundary> {
+    let mut inputs = Vec::new();
+    for &physical in physical_viewports {
+        if physical.expand_player_slots
+            && physical.uses_live_player_presentation
+            && physical.displayed_player != OWNER_NONE
+        {
+            let state = snapshot
+                .players
+                .iter()
+                .find(|state| state.id == physical.displayed_player)
+                .ok_or(ClassicViewportBoundary::LocalViewportUnavailable {
+                    owner: physical.displayed_player,
+                })?;
+            if state.viewports.is_empty() {
+                return Err(ClassicViewportBoundary::LocalViewportUnavailable {
+                    owner: state.id,
+                });
+            }
+            for slot in 0..state.viewports.len() {
+                inputs.push(physical_player_viewport_input(snapshot, physical, slot)?);
+            }
+        } else {
+            inputs.push(physical_player_viewport_input(snapshot, physical, 0)?);
+        }
     }
     Ok(inputs)
 }
@@ -73192,6 +73886,50 @@ func Award()
         assert_eq!(pan, 0.0);
     }
 
+    #[test]
+    fn l052_viewport_feedback_coalesces_global_sample_and_uses_initial_sound_gate() {
+        let dir = tempdir().expect("viewport feedback fixture");
+        let scenario = dir.path().join("Audio.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(
+            scenario.join("CloseViewport.wav"),
+            silent_pcm_wav(1_000),
+        )
+        .expect("write viewport feedback sample");
+        let mut audio = AudioContext::try_new(AudioOptions {
+            sound_enabled: false,
+            menu_sound_enabled: true,
+            max_channels: 1,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+        let key = SoundInstanceKey::new("CloseViewport", None);
+
+        assert!(
+            audio
+                .try_start_global_effect("CloseViewport", false, &snapshot)
+                .expect("pre-running feedback starts")
+        );
+        assert!(audio.active_channels[&key].channel.is_some());
+        assert!(
+            !audio
+                .try_start_global_effect("CloseViewport", false, &snapshot)
+                .expect("duplicate feedback is rejected"),
+            "C++ keeps one global instance per resolved sample"
+        );
+        assert_eq!(audio.active_channels.len(), 1);
+
+        audio.reset_sfx();
+        assert!(
+            audio
+                .try_start_global_effect("CloseViewport", true, &snapshot)
+                .expect("running muted feedback keeps a logical instance")
+        );
+        assert!(audio.active_channels[&key].channel.is_none());
+    }
+
     fn audio_viewport(
         index: usize,
         owner: i32,
@@ -75202,6 +75940,10 @@ func Award()
         secondary.name = "Secondary local".to_string();
         app.snapshot.players.push(secondary.clone());
         app.snapshot.hud.local_players.push(secondary.id);
+        let secondary_viewport = app.owned_physical_viewport_state(secondary.id, true);
+        app.physical_viewports.push(secondary_viewport);
+        app.physical_viewports_authoritative = true;
+        app.update_film_viewport_availability();
         app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
             id: 1,
             kind: MessageKind::GlobalPlayer,
@@ -105357,10 +106099,10 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn restored_mouse_toggle_clears_global_owner_without_promoting_raw_flag() {
         // A save may compile several nonzero per-player MouseControl fields.
-        // Numeric FinalInit order chooses the one process-global controller;
-        // toggling that player off clears Game.MouseControl and does not
-        // promote another player's surviving raw field (pristine 9ffa0a5d
-        // src/C4Player.cpp:778-786,2296-2315).
+        // The last flagged player in C4PlayerList FinalInit order owns the one
+        // process-global controller; toggling that player off clears
+        // Game.MouseControl and does not promote another player's surviving
+        // raw field (pristine 9ffa0a5d src/C4Player.cpp:778-786,2296-2315).
         let mut app = new_running_sandbox_app();
         let primary = app.local_owner;
         let secondary = primary + 1;
@@ -105389,6 +106131,11 @@ ScenInfoArea=70,5,25,90
                 true,
             );
         }
+        app.local_controls
+            .finalize_restored_mouse_owner([
+                (primary, PlayerStatus::Active),
+                (secondary, PlayerStatus::Active),
+            ]);
         app.mouse_control = app.local_controls.mouse_owner().is_some();
         assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
 
@@ -106526,7 +107273,7 @@ ScenInfoArea=70,5,25,90
         // SetFilmView changes the viewport's displayed Player but preserves
         // fIsNoOwnerViewport. MouseControl remains assigned to NO_OWNER, so
         // its retained VpX/VpY must continue through that owner change.
-        app.film_view_player = Some(OWNER_NONE);
+        assert!(app.set_physical_film_view(OWNER_NONE));
         app.render(&mut frame)
             .expect("retarget the same physical observer viewport");
         let retargeted = app.graphics.active_viewport_projections()[0];
@@ -107395,22 +108142,18 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn l051_viewport_player_cycle_matches_film_and_observer_end_states() {
         let mut app = new_running_sandbox_app();
-        let template = app
-            .snapshot
-            .players
-            .first()
-            .cloned()
-            .expect("sandbox player");
-        app.snapshot.players = [2, 5, 9]
-            .into_iter()
-            .map(|id| {
-                let mut player = template.clone();
-                player.id = id;
-                player.name = format!("Player {id}");
-                player
-            })
-            .collect();
-        app.snapshot.hud.local_players.clear();
+        let first = app.local_owner;
+        let second = first + 1;
+        let third = first + 2;
+        for player in [second, third] {
+            app.engine
+                .register_player(PlayerConfig::new(player, format!("Player {player}")))
+                .expect("register cycle player");
+        }
+        app.clear_physical_viewport_states();
+        let observer = app.ownerless_physical_viewport_state();
+        app.physical_viewports.push(observer);
+        app.physical_viewports_authoritative = true;
 
         let observer_flash = RuntimeFlashMessage {
             text: "Observer controls".to_string(),
@@ -107418,24 +108161,22 @@ ScenInfoArea=70,5,25,90
             y: 10,
         };
         app.runtime_flash_message = Some(observer_flash.clone());
-        app.film_view_player = Some(OWNER_NONE);
         assert!(app.cycle_primary_viewport_player(true));
-        assert_eq!(app.film_view_player, Some(2));
+        assert_eq!(app.film_view_player, Some(first));
         assert!(
             app.runtime_flash_message.is_none(),
             "temporary Init to an owned player clears the observer flash"
         );
 
-        app.film_view_player = Some(2);
         assert!(app.cycle_primary_viewport_player(true));
-        assert_eq!(app.film_view_player, Some(5));
+        assert_eq!(app.film_view_player, Some(second));
 
-        app.film_view_player = Some(9);
+        assert!(app.set_physical_film_view(third));
         assert!(app.cycle_primary_viewport_player(true));
-        assert_eq!(app.film_view_player, Some(2), "film wraps to First");
+        assert_eq!(app.film_view_player, Some(first), "film wraps to First");
 
+        assert!(app.set_physical_film_view(third));
         app.runtime_flash_message = Some(observer_flash.clone());
-        app.film_view_player = Some(9);
         assert!(app.cycle_primary_viewport_player(false));
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
         assert_eq!(
@@ -107444,24 +108185,24 @@ ScenInfoArea=70,5,25,90
             "temporary Init to NO_OWNER retains the observer flash"
         );
         assert!(app.cycle_primary_viewport_player(false));
-        assert_eq!(app.film_view_player, Some(2));
+        assert_eq!(app.film_view_player, Some(first));
 
-        app.film_view_player = Some(77);
+        assert!(app.set_physical_film_view(77));
         assert!(app.cycle_primary_viewport_player(false));
         assert_eq!(
             app.film_view_player,
-            Some(2),
+            Some(first),
             "invalid player selects First"
         );
 
-        app.snapshot.players.truncate(1);
+        app.engine.remove_player(second).expect("remove second player");
+        app.engine.remove_player(third).expect("remove third player");
         app.runtime_flash_message = Some(observer_flash.clone());
-        app.film_view_player = Some(2);
         assert!(!app.cycle_primary_viewport_player(true));
         assert_eq!(app.runtime_flash_message, Some(observer_flash.clone()));
 
-        app.snapshot.players.clear();
-        app.film_view_player = Some(OWNER_NONE);
+        app.engine.remove_player(first).expect("remove final player");
+        assert!(app.set_physical_film_view(OWNER_NONE));
         assert!(!app.cycle_primary_viewport_player(true));
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
     }
@@ -107469,29 +108210,19 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn l051_bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
         let mut app = new_running_sandbox_app();
-        let template = app
-            .snapshot
-            .players
-            .first()
-            .cloned()
-            .expect("sandbox player");
-        app.snapshot.players = [2, 5]
-            .into_iter()
-            .map(|id| {
-                let mut player = template.clone();
-                player.id = id;
-                player
-            })
-            .collect();
-        app.snapshot.hud.local_players.clear();
-        app.film_view_player = None;
+        let first = app.local_owner;
+        let second = first + 1;
+        app.engine
+            .register_player(PlayerConfig::new(second, "Second film player"))
+            .expect("register second film player");
+        assert!(app.set_physical_film_view(first));
 
         assert!(!app.handle_film_view_key_for_mode(
             VirtualKeyCode::Right,
             ElementState::Pressed,
             false,
         ));
-        assert_eq!(app.film_view_player, None);
+        assert_eq!(app.film_view_player, Some(first));
 
         assert!(app.handle_film_view_key_for_mode(
             VirtualKeyCode::Right,
@@ -107500,7 +108231,7 @@ ScenInfoArea=70,5,25,90
         ));
         assert_eq!(
             app.film_view_player,
-            Some(5),
+            Some(second),
             "ViewportCheck assigns Players.First before the first film key"
         );
         assert!(!app.handle_film_view_key_for_mode(
@@ -107510,7 +108241,7 @@ ScenInfoArea=70,5,25,90
         ));
         assert_eq!(
             app.film_view_player,
-            Some(5),
+            Some(second),
             "C4KeyCB has no key-up callback"
         );
 
@@ -107520,7 +108251,7 @@ ScenInfoArea=70,5,25,90
             ElementState::Pressed,
             true,
         ));
-        assert_eq!(app.film_view_player, Some(5));
+        assert_eq!(app.film_view_player, Some(second));
         app.keyboard_modifiers = ModifiersState::empty();
 
         app.scoreboard_dialog = Some(app.scoreboard_request());
@@ -107531,7 +108262,7 @@ ScenInfoArea=70,5,25,90
         ));
         assert_eq!(
             app.film_view_player,
-            Some(2),
+            Some(first),
             "the nonexclusive scoreboard does not acquire GUI key focus"
         );
 
@@ -107543,7 +108274,7 @@ ScenInfoArea=70,5,25,90
         ));
         assert_eq!(
             app.film_view_player,
-            Some(2),
+            Some(first),
             "the exclusive chat owns GUI scope"
         );
     }
@@ -107598,22 +108329,16 @@ ScenInfoArea=70,5,25,90
         );
 
         let mut app = new_running_sandbox_app();
-        let template = app
-            .snapshot
-            .players
-            .first()
-            .cloned()
-            .expect("sandbox player");
-        app.snapshot.players = [2, 5]
-            .into_iter()
-            .map(|id| {
-                let mut player = template.clone();
-                player.id = id;
-                player
-            })
-            .collect();
-        app.snapshot.hud.local_players.clear();
-        app.film_view_player = Some(OWNER_NONE);
+        let first = app.local_owner;
+        let second = first + 1;
+        app.engine
+            .register_player(PlayerConfig::new(second, "Second observer target"))
+            .expect("register second observer target");
+        app.clear_physical_viewport_states();
+        let observer = app.ownerless_physical_viewport_state();
+        app.physical_viewports.push(observer);
+        app.physical_viewports_authoritative = true;
+        assert!(app.set_physical_film_view(OWNER_NONE));
         app.runtime_key_config_cache = OnceLock::new();
         app.runtime_key_config_cache
             .set(Ok(parsed.clone()))
@@ -107624,13 +108349,12 @@ ScenInfoArea=70,5,25,90
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
 
         for key in [VirtualKeyCode::F5, VirtualKeyCode::F6, VirtualKeyCode::F7] {
-            app.film_view_player = Some(OWNER_NONE);
+            assert!(app.set_physical_film_view(OWNER_NONE));
             app.handle_key(key, ElementState::Pressed)
                 .expect("an assigned bare observer function key precedes the fallback boundary");
-            assert_eq!(app.film_view_player, Some(2));
+            assert_eq!(app.film_view_player, Some(first));
 
-            app.film_view_player = Some(OWNER_NONE);
-            app.film_view_player_on_observer = false;
+            assert!(app.set_physical_film_view(OWNER_NONE));
             app.keyboard_modifiers = ModifiersState::CTRL;
             let error = app
                 .handle_key(key, ElementState::Pressed)
@@ -107642,7 +108366,7 @@ ScenInfoArea=70,5,25,90
             assert_eq!(app.film_view_player, Some(OWNER_NONE));
             app.keyboard_modifiers = ModifiersState::empty();
         }
-        app.film_view_player = Some(OWNER_NONE);
+        assert!(app.set_physical_film_view(OWNER_NONE));
 
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("a modifier mismatch is inert");
@@ -107650,13 +108374,13 @@ ScenInfoArea=70,5,25,90
         app.keyboard_modifiers = ModifiersState::ALT;
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("assigned observer key dispatches");
-        assert_eq!(app.film_view_player, Some(2));
+        assert_eq!(app.film_view_player, Some(first));
         app.handle_key(VirtualKeyCode::N, ElementState::Released)
             .expect("observer release has no callback or player-control leak");
-        assert_eq!(app.film_view_player, Some(2));
+        assert_eq!(app.film_view_player, Some(first));
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("assigned observer key repeats");
-        assert_eq!(app.film_view_player, Some(5));
+        assert_eq!(app.film_view_player, Some(second));
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("observer sequence reaches NO_OWNER after the last player");
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
@@ -107683,15 +108407,15 @@ ScenInfoArea=70,5,25,90
 
         app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
             .expect("observer cycling resumes after exclusive UI closes");
-        assert_eq!(app.film_view_player, Some(2));
-        assert!(app.film_view_player_on_observer);
-        app.snapshot.hud.local_players = vec![2];
-        app.sync_film_view_presentation();
+        assert_eq!(app.film_view_player, Some(first));
+        assert!(app.physical_viewports[0].is_no_owner_viewport);
+        assert!(app.create_physical_viewport(first, true, true, true));
+        app.check_fullscreen_physical_viewports(true);
         assert_eq!(
             app.film_view_player, None,
             "replacing the physical observer viewport drops its temporary target"
         );
-        assert!(!app.film_view_player_on_observer);
+        assert!(!app.primary_physical_viewport_is_no_owner());
 
         let mut owned = new_running_sandbox_app();
         owned.runtime_key_config_cache = OnceLock::new();
@@ -107775,8 +108499,11 @@ ScenInfoArea=70,5,25,90
             app.graphics.active_viewport_projections()[0].owner,
             film_player
         );
-        let inputs = collect_viewport_inputs_with_film_view(&app.snapshot, app.film_view_player)
-            .expect("retargeted input remains projectable");
+        let inputs = collect_viewport_inputs_from_physical_state(
+            &app.snapshot,
+            &app.physical_viewports,
+        )
+        .expect("retargeted physical input remains projectable");
         assert_eq!(inputs[0].offset, Vector2::new(17, 19));
     }
 
@@ -107820,6 +108547,9 @@ ScenInfoArea=70,5,25,90
         let mut app = new_running_sandbox_app();
         app.snapshot.objects.clear();
         app.snapshot.hud.local_players.clear();
+        app.local_controls = LocalControlRegistry::default();
+        app.engine.set_local_players([]);
+        app.refresh_non_authoritative_physical_viewports();
         app.focus_id = None;
         app.focus_snapshot = None;
 
@@ -107869,14 +108599,17 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn every_declared_local_requires_a_player_and_a_viewport_before_any_pixels() {
+    fn every_physical_owned_viewport_requires_a_player_and_slot_before_any_pixels() {
         let mut app = new_running_sandbox_app();
         let local_owner = app.local_owner;
         let missing_owner = local_owner + 99;
-        app.snapshot.hud.local_players = vec![local_owner, missing_owner];
+        let missing_viewport = app.owned_physical_viewport_state(missing_owner, true);
+        app.physical_viewports.push(missing_viewport);
+        app.physical_viewports_authoritative = true;
+        app.update_film_viewport_availability();
 
-        // A valid first local must not make a mixed valid/invalid declaration
-        // partially renderable.
+        // A valid first physical viewport must not make a mixed valid/invalid
+        // physical list partially renderable.
         assert_running_viewport_boundary(
             &mut app,
             ClassicViewportBoundary::LocalViewportUnavailable {
@@ -107884,7 +108617,8 @@ ScenInfoArea=70,5,25,90
             },
         );
 
-        app.snapshot.hud.local_players = vec![local_owner];
+        app.physical_viewports
+            .retain(|viewport| viewport.displayed_player != missing_owner);
         app.snapshot
             .players
             .iter_mut()
@@ -114450,8 +115184,9 @@ ScenInfoArea=70,5,25,90
         let audio = app.audio.as_mut().expect("sandbox audio context");
         audio.options.sound_enabled = true;
         assert!(audio.resolver.configure_scenario(Some(&sound_scenario)));
-        assert!(audio.loaded_sounds.is_empty());
+        let loaded_before = audio.loaded_sounds.len();
         assert!(app.snapshot.audio.is_empty());
+        app.ui_sound_log.clear();
         let local_player = app.local_owner;
         let local_client = 1;
         let remote_player = 17;
@@ -114546,8 +115281,16 @@ ScenInfoArea=70,5,25,90
                 .expect("sandbox audio context remains")
                 .loaded_sounds
                 .len(),
-            1,
+            loaded_before + 1,
             "SyncError is resolved and played immediately"
+        );
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            0,
+            "the normally removed remote host has no local physical viewport to close"
         );
         assert!(
             app.snapshot.audio.is_empty(),
@@ -116088,12 +116831,446 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn host_direct_elimination_survives_current_frame_and_queues_next_control_tick() {
+    fn l052_close_effect_uses_displayed_film_owners_not_local_assignments() {
+        assert_eq!(
+            physical_viewport_close_effect(&[10, 11], Some(11), 11),
+            PhysicalViewportCloseEffect {
+                closed_any: true,
+                remaining_count: 0,
+            },
+            "retargeting the primary viewport can make every viewport match"
+        );
+        assert_eq!(
+            physical_viewport_close_effect(&[10], Some(11), 10),
+            PhysicalViewportCloseEffect {
+                closed_any: false,
+                remaining_count: 1,
+            },
+            "the local owner no longer owns its retargeted physical viewport"
+        );
+        assert_eq!(
+            physical_viewport_close_effect(&[], Some(11), 11),
+            PhysicalViewportCloseEffect {
+                closed_any: true,
+                remaining_count: 0,
+            },
+            "film can retarget the sole ownerless physical viewport"
+        );
+    }
+
+    #[test]
+    fn l052_retargeted_primary_survives_its_original_local_player() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let original = app.local_owner;
+        let target = original + 1;
+        app.engine
+            .register_player(PlayerConfig::new(target, "Film target"))
+            .expect("register second local player");
+        let target_control = app.local_controls.initialize(LocalControlInit {
+            owner: target,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.engine
+            .set_player_runtime_control(target, target_control.runtime_control())
+            .expect("install target control");
+        app.engine.set_local_players([original, target]);
+        app.engine
+            .replace_player_viewports(
+                original,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(300, 180))
+                    .with_zoom(1.75)],
+            )
+            .expect("install source physical zoom");
+        app.snapshot = app.engine.snapshot();
+        let _ = app.create_physical_viewport(target, false, true, true);
+        app.engine.clear_scenario_script();
+        app.engine
+            .install_scenario_script_with_convention(
+                "PhysicalViewport.c",
+                &format!(
+                    "#strict 3\nfunc Probe() {{ SetViewOffset({original}, 17, 19); SetFilmView({target}); SetViewOffset({original}, 91, 92); }}"
+                ),
+                true,
+            )
+            .expect("install film retarget probe");
+        app.engine.set_replay_control(true);
+        app.engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("retarget physical viewport");
+        let _ = app.apply_pending_viewport_presentation_requests();
+        assert_eq!(
+            app.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player)
+                .collect::<Vec<_>>(),
+            vec![target, target]
+        );
+        assert_eq!(app.physical_viewports[0].preserved_zoom, 1.75);
+        assert_eq!(
+            app.physical_viewports[0].preserved_offset,
+            Vector2::new(17, 19)
+        );
+
+        app.ui_sound_log.clear();
+        app.remove_runtime_player_with_viewport_feedback(original)
+            .expect("remove original local player");
+        assert_eq!(app.physical_viewports.len(), 2);
+        assert!(app
+            .physical_viewports
+            .iter()
+            .all(|viewport| viewport.displayed_player == target));
+        assert!(app.ui_sound_log.is_empty(), "CloseViewport(A) matches none");
+
+        app.snapshot = app.engine.snapshot();
+        let rendered = collect_viewport_inputs_from_physical_state(
+            &app.snapshot,
+            &app.physical_viewports,
+        )
+        .expect("both surviving physical viewports render");
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered.iter().all(|viewport| viewport.owner == target));
+        assert_eq!(rendered[0].zoom, 1.75);
+        assert_eq!(rendered[0].offset, Vector2::new(17, 19));
+
+        app.remove_runtime_player_with_viewport_feedback(target)
+            .expect("remove displayed target");
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1,
+            "closing both matching physical viewports requests one sound"
+        );
+        assert_eq!(app.physical_viewports.len(), 1);
+        assert!(app.physical_viewports[0].is_no_owner_viewport);
+    }
+
+    #[test]
+    fn l052_view_offset_and_film_view_share_one_physical_request_order() {
+        for (offset_after_film_view, expected_offset) in
+            [(true, Vector2::new(41, 43)), (false, Vector2::ZERO)]
+        {
+            let mut app = new_lightweight_running_sandbox_app();
+            let target = app.local_owner + 1;
+            let body = if offset_after_film_view {
+                format!("SetFilmView({target}); SetViewOffset({target}, 41, 43);")
+            } else {
+                format!("SetViewOffset({target}, 41, 43); SetFilmView({target});")
+            };
+            app.engine
+                .register_player(PlayerConfig::new(target, "Remote film target"))
+                .expect("register film target");
+            app.engine.clear_scenario_script();
+            app.engine
+                .install_scenario_script_with_convention(
+                    "ViewportRequestOrder.c",
+                    &format!("#strict 3\nfunc Probe() {{ {body} }}"),
+                    true,
+                )
+                .expect("install ordered viewport probe");
+            app.engine.set_replay_control(true);
+            app.set_runtime_flash_message(
+                "Film Init clears me",
+                RuntimeHelpCharset::Windows1252,
+            )
+            .expect("install observer flash");
+
+            app.engine
+                .call_scenario_script_function("Probe", Vec::new())
+                .expect("execute ordered viewport probe");
+            let _ = app.apply_pending_viewport_presentation_requests();
+
+            assert_eq!(app.physical_viewports[0].displayed_player, target);
+            assert_eq!(app.physical_viewports[0].preserved_offset, expected_offset);
+            assert!(
+                app.runtime_flash_message.is_none(),
+                "valid temporary C4Viewport::Init clears the flash"
+            );
+        }
+    }
+
+    #[test]
+    fn l052_film_assigned_ownerless_offset_is_consumed_after_one_draw() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let target = app.local_owner;
+        app.local_controls = LocalControlRegistry::default();
+        app.engine.set_local_players([]);
+        app.refresh_non_authoritative_physical_viewports();
+        assert!(app.physical_viewports[0].is_no_owner_viewport);
+        app.engine.clear_scenario_script();
+        app.engine
+            .install_scenario_script_with_convention(
+                "OwnerlessViewportOffset.c",
+                &format!(
+                    "#strict 3\nfunc Probe() {{ SetFilmView({target}); SetViewOffset({target}, 13, 17); }}"
+                ),
+                true,
+            )
+            .expect("install ownerless offset probe");
+        app.engine.set_replay_control(true);
+        app.engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("execute ownerless offset probe");
+        let _ = app.apply_pending_viewport_presentation_requests();
+        assert_eq!(
+            app.physical_viewports[0].preserved_offset,
+            Vector2::new(13, 17)
+        );
+
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("render film-assigned ownerless viewport");
+        assert_eq!(app.physical_viewports[0].preserved_offset, Vector2::ZERO);
+        assert!(app.physical_viewports[0].is_no_owner_viewport);
+    }
+
+    #[test]
+    fn l052_recalculation_does_not_reapply_a_stale_scalar_film_target() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let lower_layout = app.local_owner + 1;
+        let high_layout_target = app.local_owner + 2;
+        let temporary = app.local_owner + 3;
+        for (player, name, control_set) in [
+            (lower_layout, "Lower layout", 2),
+            (high_layout_target, "High layout film", 1),
+            (temporary, "Middle layout", 3),
+        ] {
+            app.engine
+                .register_player(PlayerConfig::new(player, name))
+                .expect("register viewport-order player");
+            app.engine
+                .set_player_runtime_control(
+                    player,
+                    lc_engine::PlayerRuntimeControl::new(control_set, 0),
+                )
+                .expect("install viewport layout control");
+        }
+        assert!(app.create_physical_viewport(lower_layout, true, true, false));
+        assert!(app.set_physical_film_view(high_layout_target));
+        assert_eq!(
+            app.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player)
+                .collect::<Vec<_>>(),
+            vec![high_layout_target, lower_layout]
+        );
+
+        assert!(app.create_physical_viewport(temporary, true, true, false));
+        assert!(app.close_physical_viewports(temporary, true, true));
+        assert_eq!(
+            app.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player)
+                .collect::<Vec<_>>(),
+            vec![lower_layout, high_layout_target],
+            "RecalculateViewports may sort the retargeted physical viewport away from index zero"
+        );
+
+        app.sync_film_view_presentation();
+        assert_eq!(
+            app.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player)
+                .collect::<Vec<_>>(),
+            vec![lower_layout, high_layout_target],
+            "the compatibility scalar must not execute SetFilmView a second time"
+        );
+    }
+
+    #[test]
+    fn l052_reused_player_number_gets_a_distinct_physical_camera_identity() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let original = app.local_owner;
+        let film_target = original + 1;
+        app.engine
+            .register_player(PlayerConfig::new(film_target, "Film target"))
+            .expect("register film target");
+        let original_identity = app.physical_viewports[0].physical_identity;
+        assert!(app.set_physical_film_view(film_target));
+
+        app.remove_runtime_player_with_viewport_feedback(original)
+            .expect("remove the viewport's original player");
+        app.engine
+            .register_player(PlayerConfig::new(original, "Reused player number"))
+            .expect("reuse original player number");
+        assert!(app.create_physical_viewport(original, true, true, false));
+        let new_identity = app
+            .physical_viewports
+            .iter()
+            .find(|viewport| viewport.uses_live_player_presentation)
+            .expect("new owned viewport")
+            .physical_identity;
+        assert_ne!(original_identity, new_identity);
+
+        assert!(app.set_physical_film_view(original));
+        let old = app
+            .physical_viewports
+            .iter()
+            .find(|viewport| viewport.physical_identity == original_identity)
+            .expect("old retargeted viewport survives");
+        let new = app
+            .physical_viewports
+            .iter()
+            .find(|viewport| viewport.physical_identity == new_identity)
+            .expect("new owned viewport survives");
+        assert!(!old.uses_live_player_presentation);
+        assert!(new.uses_live_player_presentation);
+        assert_eq!(old.displayed_player, original);
+        assert_eq!(new.displayed_player, original);
+    }
+
+    #[test]
+    fn l052_remote_film_close_does_not_resurrect_the_original_primary() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let remote = primary + 2;
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary local"))
+            .expect("register secondary");
+        let control = app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.engine
+            .set_player_runtime_control(secondary, control.runtime_control())
+            .expect("install secondary control");
+        app.engine.set_local_players([primary, secondary]);
+        app.engine
+            .register_player(PlayerConfig::new(remote, "Remote film target"))
+            .expect("register remote target");
+        let _ = app.create_physical_viewport(secondary, false, true, true);
+        assert!(app.set_physical_film_view(remote));
+        app.ui_sound_log.clear();
+
+        app.remove_runtime_player_with_viewport_feedback(remote)
+            .expect("close the retargeted primary");
+
+        assert_eq!(
+            app.physical_viewports
+                .iter()
+                .map(|viewport| viewport.displayed_player)
+                .collect::<Vec<_>>(),
+            vec![secondary],
+            "the erased primary must not be regenerated from local controls"
+        );
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn l052_replay_film_startup_and_late_player_follow_viewport_check() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let first = app.local_owner;
+        let mut state = app.engine.capture_state();
+        let mut scenario_values = serde_json::to_value(
+            state
+                .scenario_values
+                .take()
+                .expect("captured scenario values"),
+        )
+        .expect("serialize scenario values");
+        for (name, value) in [("Replay", 1), ("Film", 1)] {
+            let target = scenario_values["sections"]
+                .as_array_mut()
+                .and_then(|sections| sections.iter_mut().find(|section| section["name"] == "Head"))
+                .and_then(|head| head["entries"].as_array_mut())
+                .and_then(|entries| entries.iter_mut().find(|entry| entry["name"] == name))
+                .and_then(|entry| entry["values"].as_array_mut())
+                .and_then(|values| values.first_mut())
+                .expect("Head replay-film reflection entry");
+            *target = serde_json::json!({ "Int": value });
+        }
+        state.scenario_values = Some(
+            serde_json::from_value(scenario_values).expect("deserialize scenario values"),
+        );
+        app.engine
+            .restore_state(&state)
+            .expect("restore replay-film state");
+        app.engine.set_replay_control(true);
+        app.local_controls = LocalControlRegistry::default();
+        app.engine.set_local_players([]);
+        app.snapshot = app.engine.snapshot();
+        app.ui_sound_log.clear();
+
+        app.initialize_physical_viewports(false);
+        assert_eq!(app.physical_viewports.len(), 1);
+        assert_eq!(app.physical_viewports[0].displayed_player, first);
+        assert!(!app.physical_viewports[0].is_no_owner_viewport);
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1,
+            "zero-view replay film creates the first-player viewport non-silently"
+        );
+
+        app.engine.remove_player(first).expect("remove sole player");
+        app.snapshot = app.engine.snapshot();
+        app.ui_sound_log.clear();
+        app.initialize_physical_viewports(false);
+        assert!(app.physical_viewports[0].is_no_owner_viewport);
+        assert!(app.ui_sound_log.is_empty());
+
+        app.film_view_player = Some(first);
+        app.sync_film_view_presentation();
+        assert_eq!(app.film_view_player, None, "stale scalar target is ignored");
+        assert_eq!(
+            app.physical_viewports[0].displayed_player,
+            OWNER_NONE
+        );
+
+        app.engine
+            .register_player(PlayerConfig::new(first, "Late replay player"))
+            .expect("register late player");
+        app.snapshot = app.engine.snapshot();
+        app.set_runtime_flash_message(
+            "Late replay Init clears me",
+            RuntimeHelpCharset::Windows1252,
+        )
+        .expect("install pre-retarget flash");
+        app.check_fullscreen_physical_viewports(false);
+        assert_eq!(app.physical_viewports[0].displayed_player, first);
+        assert!(
+            app.physical_viewports[0].is_no_owner_viewport,
+            "late film retarget preserves the ownerless classification"
+        );
+        assert!(app.runtime_flash_message.is_none());
+        assert!(app.ui_sound_log.is_empty(), "ownerless retarget is silent");
+    }
+
+    #[test]
+    fn l052_host_direct_elimination_closes_one_viewport_then_falls_back_silently() {
         // FnEliminatePlayer(plr, true) appends CID_RemovePlr to Game.Input;
         // it does not erase the player while the calling control/frame is
         // still executing (C4Script.cpp:2823-2833; C4PlayerList.cpp:480-484).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_lightweight_running_sandbox_app();
         let player = app.local_owner;
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1,
+            "InitGameFinal creates the initial owned viewport non-silently"
+        );
+        app.ui_sound_log.clear();
         let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         let tick = u32::try_from(app.engine.frame()).expect("frame fits control tick");
@@ -116114,6 +117291,10 @@ protected func InputCallback(string answer, int player)
         app.update().expect("execute calling frame");
 
         assert!(app.engine.player(player).is_some());
+        assert!(
+            app.ui_sound_log.is_empty(),
+            "elimination retains its viewport until the later RemovePlr"
+        );
         let remove = lc_engine::RemovePlayerControlData {
             player,
             disconnected: false,
@@ -116123,6 +117304,9 @@ protected func InputCallback(string answer, int player)
             commands.take_submitted_remove_players(),
             vec![(tick.saturating_add(1), remove)]
         );
+        app.engine
+            .replace_player_viewports(player, Vec::new())
+            .expect("clear camera payload without closing the physical viewport");
 
         event_tx
             .send(NetworkEvent::ReadyTick {
@@ -116133,6 +117317,208 @@ protected func InputCallback(string answer, int player)
         app.update().expect("execute later removal control");
 
         assert!(app.engine.player(player).is_none());
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1,
+            "closing all of one player's viewports requests one sound"
+        );
+        assert!(!app.snapshot.hud.local_players.contains(&player));
+
+        app.ui_sound_log.clear();
+        for _ in 0..2 {
+            let viewports = collect_viewport_inputs(&app.snapshot)
+                .expect("removed last player falls back to an observer viewport");
+            assert_eq!(viewports.len(), 1);
+            assert_eq!(viewports[0].owner, OWNER_NONE);
+        }
+        app.execute_remove_player_control(remove)
+            .expect("missing-player removal is a synchronized no-op");
+        assert!(
+            app.ui_sound_log.is_empty(),
+            "the ownerless fallback and missing-player close are silent"
+        );
+    }
+
+    #[test]
+    fn l052_automatic_retirement_closes_viewport_and_releases_local_control() {
+        // C4Player::Execute decrements RetireDelay for 60 frames, then
+        // C4PlayerList::Retire takes the same viewport-close path as an
+        // explicit CID_RemovePlr (C4Player.cpp:2015-2021, 930-970).
+        let mut app = new_lightweight_running_sandbox_app();
+        let player = app.local_owner;
+        let secondary = player + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(player)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Retained player"))
+            .expect("register active player that prevents game over");
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(primary_crew_state.position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn retained player's crew");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select retained player's crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set retained player's cursor");
+        app.engine
+            .replace_player_viewports(player, Vec::new())
+            .expect("clear camera payload without closing the physical viewport");
+        app.snapshot = app.engine.snapshot();
+        app.ui_sound_log.clear();
+
+        app.engine
+            .set_player_surrendered(player, true)
+            .expect("start native 60-frame retirement delay");
+        for frame in 1..60 {
+            app.update().expect("advance retirement delay");
+            assert!(
+                app.engine.player(player).is_some(),
+                "player retired before frame {frame}"
+            );
+            assert!(app.ui_sound_log.is_empty());
+        }
+        app.update().expect("retire player on frame 60");
+
+        assert!(app.engine.player(player).is_none());
+        assert_eq!(app.local_controls.assignment(player), None);
+        assert!(!app.snapshot.hud.local_players.contains(&player));
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1,
+            "automatic retirement closes all matching viewports once"
+        );
+        let viewports = collect_viewport_inputs(&app.snapshot)
+            .expect("retirement leaves the silent ownerless fallback");
+        assert_eq!(viewports.len(), 1);
+        assert_eq!(viewports[0].owner, OWNER_NONE);
+    }
+
+    #[test]
+    fn l052_removing_a_remote_film_target_closes_its_physical_viewport_once() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let film_player = app.local_owner + 1;
+        app.engine
+            .register_player(PlayerConfig::new(film_player, "Film target"))
+            .expect("register remote film target");
+        app.film_view_player = Some(film_player);
+        app.snapshot = app.engine.snapshot();
+        app.ui_sound_log.clear();
+
+        app.remove_runtime_player_with_viewport_feedback(film_player)
+            .expect("remove current film target");
+
+        assert_eq!(app.film_view_player, None);
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1,
+            "the retargeted physical viewport closes once"
+        );
+    }
+
+    #[test]
+    fn l052_film_target_removal_recreates_the_first_player_viewport() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let local_player = app.local_owner;
+        let film_player = local_player + 1;
+        app.engine
+            .register_player(PlayerConfig::new(film_player, "Film target"))
+            .expect("register film target");
+        let film_control = app.local_controls.initialize(LocalControlInit {
+            owner: film_player,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.engine
+            .set_player_runtime_control(film_player, film_control.runtime_control())
+            .expect("install second local control");
+        app.engine.set_local_players([local_player, film_player]);
+
+        let mut state = app.engine.capture_state();
+        let mut scenario_values = serde_json::to_value(
+            state
+                .scenario_values
+                .take()
+                .expect("captured scenario values"),
+        )
+        .expect("serialize scenario values");
+        for name in ["Replay", "Film"] {
+            let value = scenario_values["sections"]
+                .as_array_mut()
+                .and_then(|sections| {
+                    sections
+                        .iter_mut()
+                        .find(|section| section["name"] == "Head")
+                })
+                .and_then(|head| head["entries"].as_array_mut())
+                .and_then(|entries| entries.iter_mut().find(|entry| entry["name"] == name))
+                .and_then(|entry| entry["values"].as_array_mut())
+                .and_then(|values| values.first_mut())
+                .expect("Head replay-film reflection entry");
+            *value = serde_json::json!({ "Int": 1 });
+        }
+        state.scenario_values = Some(
+            serde_json::from_value(scenario_values).expect("deserialize film scenario values"),
+        );
+        app.engine
+            .restore_state(&state)
+            .expect("restore film-mode engine state");
+        app.engine.set_replay_control(true);
+        app.film_view_player = Some(film_player);
+        app.snapshot = app.engine.snapshot();
+        app.ui_sound_log.clear();
+
+        let physical_owners = app.live_local_viewport_owners_with_primary_first();
+        assert_eq!(physical_owners, [local_player, film_player]);
+        assert_eq!(
+            physical_viewport_close_effect(
+                &physical_owners,
+                app.film_view_player,
+                film_player,
+            ),
+            PhysicalViewportCloseEffect {
+                closed_any: true,
+                remaining_count: 0,
+            },
+            "SetFilmView retargets the first physical viewport, producing two matching targets"
+        );
+
+        app.remove_runtime_player_with_viewport_feedback(film_player)
+            .expect("remove both physical viewports targeting the film player");
+
+        assert_eq!(app.film_view_player, Some(local_player));
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            2,
+            "film mode closes the old viewport and creates its replacement"
+        );
     }
 
     #[test]
@@ -118067,11 +119453,11 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn ready_tick_executes_player_info_then_embedded_join_before_simulation() {
+    fn l052_ready_tick_local_join_opens_one_viewport_with_feedback() {
         // C4Control executes the complete list in packet order, so PlrInfo is
         // visible to the following JoinPlr; only then does C4Game advance the
         // simulation (src/C4Control.cpp:93-109; src/C4Game.cpp:797-805).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_lightweight_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.engine.set_network_game(true);
@@ -118099,6 +119485,7 @@ protected func InputCallback(string answer, int player)
         app.set_runtime_flash_message("Join clears me", RuntimeHelpCharset::Windows1252)
             .expect("install pre-viewport flash");
         assert!(app.runtime_flash_message.is_some());
+        app.ui_sound_log.clear();
         event_tx
             .send(NetworkEvent::ReadyTick {
                 tick,
@@ -118135,22 +119522,31 @@ protected func InputCallback(string answer, int player)
             app.runtime_flash_message.is_none(),
             "owned C4Viewport::Init clears the process-global flash"
         );
+        assert_eq!(
+            app.ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "CloseViewport")
+                .count(),
+            1,
+            "one successful local join creates one non-silent viewport"
+        );
     }
 
     #[test]
-    fn synchronized_remote_join_retains_the_target_client_owner() {
+    fn l052_synchronized_remote_join_has_no_local_viewport_feedback() {
         // C4ControlJoinPlayer passes iAtClient through C4Game::JoinPlayer and
         // C4PlayerList::Join; C4Player::Init then stores it in AtClient
         // (pristine 9ffa0a5d src/C4Control.cpp:710-764;
         // src/C4Game.cpp:3505-3514; src/C4PlayerList.cpp:271-317;
         // src/C4Player.cpp:246-265).
-        let mut app = new_running_sandbox_app();
+        let mut app = new_lightweight_running_sandbox_app();
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         app.engine.set_network_game(true);
         let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
         let info_id = 73;
         let at_client = 3;
+        app.ui_sound_log.clear();
         app.control_clients.replace_snapshot([
             lc_engine::ClientCoreControlData {
                 client_id: 0,
@@ -118218,6 +119614,12 @@ protected func InputCallback(string answer, int player)
             b"Remote Andr\xe9"
         );
         assert_eq!(lc_script::c4_string_bytes(player.name()), b"Remote Ren\xe9");
+        assert!(
+            app.ui_sound_log
+                .iter()
+                .all(|sound| sound != "CloseViewport"),
+            "a remote player never creates a viewport on this process"
+        );
     }
 
     #[test]
@@ -129778,6 +131180,11 @@ func ControlDig() { dig_count = 1; return(1); }
         let mut app = new_running_sandbox_app();
         app.handle_game_over().expect("show game-over dialog");
         assert!(app.game_over_dialog.is_some());
+        if let Some(audio) = app.audio.as_mut() {
+            // Isolate game-over input from InitGameFinal's intentional
+            // CloseViewport feedback instance.
+            audio.active_channels.clear();
+        }
         app.status_text.clear();
         app
     }

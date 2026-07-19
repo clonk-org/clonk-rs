@@ -16290,12 +16290,13 @@ pub enum PauseGameRequest {
     Toggle,
 }
 
-/// Process-local replay viewport retarget requested by `SetFilmView`.
-/// The embedding app owns the physical viewport and applies these in script
-/// call order without changing synchronized player or snapshot state.
+/// Process-local physical-viewport mutations requested by script natives.
+/// The embedding app owns the physical viewport and applies this single
+/// ordered stream without changing synchronized player or snapshot state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FilmViewRequest {
-    pub player: i32,
+pub enum ViewportPresentationRequest {
+    SetFilmView { player: i32 },
+    SetViewOffset { player: i32, offset: Vector2 },
 }
 
 impl ScriptControlPolicy {
@@ -16582,9 +16583,9 @@ pub struct Engine {
     /// Process-local console pause requests emitted by `PauseGame`. Shared
     /// into copied host contexts so nested calls preserve script call order.
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
-    /// Process-local replay viewport requests emitted by `SetFilmView`.
-    /// Physical viewport ownership remains in the embedding app.
-    film_view_requests: Rc<RefCell<Vec<FilmViewRequest>>>,
+    /// Process-local physical viewport requests emitted by `SetFilmView` and
+    /// `SetViewOffset`. Physical viewport ownership remains in the app.
+    viewport_presentation_requests: Rc<RefCell<Vec<ViewportPresentationRequest>>>,
     /// Process-local `Console.EditCursor.Target`. The developer console owns
     /// this pointer; synchronized state and snapshots deliberately do not.
     edit_cursor_target: Option<ObjectId>,
@@ -16685,6 +16686,10 @@ pub struct Engine {
     objective_check_counter: u8,
     players_registered: bool,
     #[doc(hidden)] pub players: HashMap<i32, Player>,
+    /// Exact `C4PlayerList` link order. Player numbers normally sort ascending,
+    /// but native `RecheckPlayerSort` has observable insertion edge cases that
+    /// cannot be reconstructed from the map alone.
+    player_order: Vec<i32>,
     /// Join inputs retained while C++ postpones `ScenarioInit` for runtime
     /// team choice (`PS_TeamSelection`).
     pending_player_joins: HashMap<i32, JoinPlayerConfig>,
@@ -18765,7 +18770,7 @@ impl Engine {
             pending_remove_player_controls: Vec::new(),
             pending_game_goal_menu_requests: Vec::new(),
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
-            film_view_requests: Rc::new(RefCell::new(Vec::new())),
+            viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             edit_cursor_target: None,
             local_players: None,
             control_key_names: Rc::new(HashMap::new()),
@@ -18812,6 +18817,7 @@ impl Engine {
             objective_check_counter: 0,
             players_registered: false,
             players: HashMap::new(),
+            player_order: Vec::new(),
             pending_player_joins: HashMap::new(),
             last_player_info_id: 0,
             forced_control_style: None,
@@ -19817,6 +19823,7 @@ impl Engine {
         self.crew_info_control_counts
             .retain(|link, _| link.player_id != number);
         self.players.insert(number, player);
+        self.append_and_recheck_player_order(number);
         self.actualize_ownerless_fow_objects_for_new_player();
         self.recheck_runtime_team_memberships();
         if activates_auto_stop {
@@ -19829,6 +19836,72 @@ impl Engine {
         self.bootstrap_player_crew_from_union(number);
         self.sync_player_cursor(number);
         number
+    }
+
+    /// Append a freshly constructed player and reproduce
+    /// `C4PlayerList::RecheckPlayerSort` verbatim (C4PlayerList.cpp:597-627).
+    /// The native scan is intentionally not equivalent to a full sort: when a
+    /// reused lower number is appended directly after the current head, the
+    /// scan reaches the new player itself and returns without moving it.
+    fn append_and_recheck_player_order(&mut self, number: i32) {
+        self.player_order.push(number);
+        if self.player_order.len() == 1 {
+            return;
+        }
+
+        let joining_index = self.player_order.len() - 1;
+        let mut previous_index = 0;
+        while previous_index + 1 < self.player_order.len()
+            && self.player_order[previous_index + 1] <= number
+        {
+            previous_index += 1;
+        }
+        if previous_index == joining_index {
+            return;
+        }
+
+        let joining = self
+            .player_order
+            .pop()
+            .expect("fresh player was appended to the order ledger");
+        if previous_index == 0 && self.player_order[previous_index] > number {
+            self.player_order.insert(0, joining);
+        } else {
+            self.player_order.insert(previous_index + 1, joining);
+        }
+    }
+
+    /// Project the private link ledger while tolerating legacy test fixtures
+    /// that still mutate the public player map directly. Known ledger entries
+    /// keep their order; otherwise-untracked live players append by number.
+    fn player_ids_in_order(&self) -> Vec<i32> {
+        let mut order = Vec::with_capacity(self.players.len());
+        if self.player_order.len() == self.players.len()
+            && self
+                .player_order
+                .iter()
+                .all(|number| self.players.contains_key(number))
+        {
+            order.extend(self.player_order.iter().copied());
+            return order;
+        }
+
+        let mut seen = HashSet::with_capacity(self.players.len());
+        order.extend(
+            self.player_order
+                .iter()
+                .copied()
+                .filter(|number| self.players.contains_key(number) && seen.insert(*number)),
+        );
+        let missing_start = order.len();
+        order.extend(
+            self.players
+                .keys()
+                .copied()
+                .filter(|number| seen.insert(*number)),
+        );
+        order[missing_start..].sort_unstable();
+        order
     }
 
     /// C4PlayerList::GetFreeNumber: the lowest unused non-negative player
@@ -20036,11 +20109,9 @@ impl Engine {
     }
 
     /// C4Game::InitGameFinal savegame phase: after every recreated player has
-    /// rerun InitControl, FinalInit(false) executes in restored player-number
-    /// order.
+    /// rerun InitControl, FinalInit(false) executes in `C4PlayerList` order.
     pub fn finalize_restored_players(&mut self) -> Result<(), EngineError> {
-        let mut players = self.players.keys().copied().collect::<Vec<_>>();
-        players.sort_unstable();
+        let players = self.player_ids_in_order();
         for player in players {
             self.finalize_joining_player(player, false, true)?;
         }
@@ -21052,6 +21123,7 @@ impl Engine {
         player.control.select_flash = 30;
         player.control.cursor_flash = 30;
         self.players.insert(id, player);
+        self.append_and_recheck_player_order(id);
         self.actualize_ownerless_fow_objects_for_new_player();
         self.recheck_runtime_team_memberships();
         if activates_auto_stop {
@@ -21239,11 +21311,9 @@ impl Engine {
             .unwrap_or(OWNER_NONE);
 
         if new_owner == OWNER_NONE {
-            // C4PlayerList is modeled throughout the engine in ascending
-            // runtime-player number. The native loop has no break, so the
-            // last eligible non-hostile player becomes the fallback owner.
-            let mut player_ids = self.players.keys().copied().collect::<Vec<_>>();
-            player_ids.sort_unstable();
+            // The native C4PlayerList walk has no break, so the last eligible
+            // non-hostile player in exact link order becomes the fallback.
+            let player_ids = self.player_ids_in_order();
             for candidate in player_ids {
                 let eligible = candidate != owner
                     && self.players.get(&candidate).is_some_and(|player| {
@@ -21385,6 +21455,13 @@ impl Engine {
             .players
             .remove(&id)
             .ok_or(EngineError::UnknownPlayer(id))?;
+        self.player_order.retain(|number| *number != id);
+        // C4PlayerList unlinks the player's viewport ownership as part of
+        // the same removal. Never leave a deleted player in the app-facing
+        // local viewport projection.
+        if let Some(local_players) = self.local_players.as_mut() {
+            local_players.remove(&id);
+        }
         if self
             .active_message_board_input
             .as_ref()
@@ -21556,7 +21633,39 @@ impl Engine {
     }
 
     pub fn players(&self) -> impl Iterator<Item = &Player> {
-        self.players.values()
+        let ledger_is_complete = self.player_order.len() == self.players.len()
+            && self
+                .player_order
+                .iter()
+                .all(|number| self.players.contains_key(number));
+        let legacy_fallback = (!ledger_is_complete).then(|| {
+            let mut missing = self
+                .players
+                .keys()
+                .copied()
+                .filter(|number| !self.player_order.contains(number))
+                .collect::<Vec<_>>();
+            missing.sort_unstable();
+            missing
+        });
+        self.player_order
+            .iter()
+            .filter_map(move |number| self.players.get(number))
+            .chain(
+                legacy_fallback
+                    .into_iter()
+                    .flatten()
+                    .filter_map(move |number| self.players.get(&number)),
+            )
+    }
+
+    /// The first live player in exact native `C4PlayerList` link order.
+    pub fn first_player_id(&self) -> Option<i32> {
+        self.player_order
+            .iter()
+            .copied()
+            .find(|number| self.players.contains_key(number))
+            .or_else(|| self.players.keys().copied().min())
     }
 
     pub fn set_player_status(&mut self, id: i32, status: PlayerStatus) -> Result<(), EngineError> {
@@ -23127,6 +23236,13 @@ impl Engine {
         self.replay() && self.film()
     }
 
+    /// Whether fullscreen viewport reconciliation uses replay-film fallback:
+    /// after the sole viewport closes, C++ recreates it for the first player
+    /// instead of creating the silent ownerless observer viewport.
+    pub fn is_replay_film(&self) -> bool {
+        self.film_replay()
+    }
+
     /// Execute one synchronized `CID_CustomCommand` packet. Player ownership
     /// is checked first, followed by the running/registration gates; accepted
     /// packets execute the currently registered template in global scope.
@@ -23642,10 +23758,9 @@ impl Engine {
         std::mem::take(&mut *self.pause_game_requests.borrow_mut())
     }
 
-    /// Drain replay viewport retargets in script call order. Live and invalid
-    /// calls are filtered before reaching this app-owned request channel.
-    pub fn take_film_view_requests(&mut self) -> Vec<FilmViewRequest> {
-        std::mem::take(&mut *self.film_view_requests.borrow_mut())
+    /// Drain physical viewport mutations in exact script call order.
+    pub fn take_viewport_presentation_requests(&mut self) -> Vec<ViewportPresentationRequest> {
+        std::mem::take(&mut *self.viewport_presentation_requests.borrow_mut())
     }
 
     /// Update the process-local developer-console target queried by the
@@ -24153,15 +24268,16 @@ impl Engine {
             self.replay_control,
             Rc::clone(&self.pause_game_requests),
         )
-        .with_film_view_requests(
+        .with_viewport_presentation_requests(
             self.replay_control,
-            Rc::clone(&self.film_view_requests),
+            Rc::clone(&self.viewport_presentation_requests),
         )
         .with_film_viewport_available(self.film_viewport_available)
         .with_smoke_level(self.bubble_smoke_level())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
+        .with_player_order(self.player_order.iter().copied())
         .with_local_players(local_players)
         .with_active_message_board_input(self.active_message_board_input.clone())
         .with_mission_access(Rc::clone(&self.mission_access.inner))
@@ -24799,8 +24915,7 @@ impl Engine {
             sum / i32::try_from(self.players.len()).unwrap_or(i32::MAX)
         };
 
-        let mut player_numbers: Vec<_> = self.players.keys().copied().collect();
-        player_numbers.sort_unstable();
+        let player_numbers = self.player_ids_in_order();
         for number in player_numbers {
             let evaluated = self.evaluate_player(number, average_value_gain)?;
             let Some((player_info_id, total_playing_time, score_old, score_new)) = evaluated else {
@@ -24848,15 +24963,14 @@ impl Engine {
         &mut self,
     ) -> Result<(Vec<DefinitionId>, Vec<DefinitionId>), EngineError> {
         let first_local_player = self
-            .players
-            .keys()
-            .copied()
+            .player_ids_in_order()
+            .into_iter()
             .filter(|player| {
                 self.local_players
                     .as_ref()
                     .is_none_or(|local| local.contains(player))
             })
-            .min()
+            .next()
             .unwrap_or(OWNER_NONE);
         self.evaluate_goals_for_player(first_local_player)
     }
@@ -27628,8 +27742,7 @@ impl Engine {
             return Ok(());
         }
 
-        let mut player_ids: Vec<_> = self.players.keys().copied().collect();
-        player_ids.sort_unstable();
+        let player_ids = self.player_ids_in_order();
         let mut retire_player = None;
         for id in player_ids {
             if self.execute_one_player(id, true)? && retire_player.is_none() {
@@ -32175,45 +32288,10 @@ impl Engine {
         };
         let sky_snapshot = self.sky.as_ref().map(SkyState::snapshot);
         let weather_events = self.weather_events.clone();
-        let mut owners: Vec<_> = self
-            .players
-            .keys()
-            .copied()
-            .chain(self.known_crew_owners.iter().copied())
-            .chain(self.eliminated_crew_owners.iter().copied())
-            .collect();
-        owners.sort_unstable();
-        owners.dedup();
-        let mut hud_players = Vec::with_capacity(owners.len());
-        for owner in owners {
-            let mut crew = self.crew_members(owner);
-            // The COMPARATOR surface: the bridge std::sort's its HUD crew
-            // ascending before export (RustEngineBridge.cpp:1381), so the
-            // rust snapshot mirrors that normalization. Engine-internal
-            // crew order stays newest-first.
-            crew.sort_unstable_by_key(|id| id.as_u64());
-            let focus = self
-                .crew_selection
-                .get(&owner)
-                .and_then(|selection| selection.cursor());
-            let eliminated = self.eliminated_crew_owners.contains(&owner);
-            let (wealth, score) = self
-                .players
-                .get(&owner)
-                .map(|player| (player.wealth(), player.points()))
-                .unwrap_or((0, 0));
-            hud_players.push(HudPlayerSnapshot {
-                owner,
-                crew,
-                focus,
-                eliminated,
-                wealth,
-                score,
-            });
-        }
-        let mut player_states: Vec<_> = self
-            .players
-            .values()
+        let mut player_order = self.player_ids_in_order();
+        let player_states: Vec<_> = player_order
+            .iter()
+            .filter_map(|number| self.players.get(number))
             .map(|player| {
                 let mut state = player.to_state();
                 let owner = player.id();
@@ -32260,7 +32338,52 @@ impl Engine {
                 state
             })
             .collect();
-        player_states.sort_unstable_by_key(|state| state.id);
+        let local_players = player_order
+            .iter()
+            .copied()
+            .filter(|number| {
+                self.local_players
+                    .as_ref()
+                    .is_none_or(|players| players.contains(number))
+            })
+            .collect();
+        let synthetic_owner_start = player_order.len();
+        player_order.extend(
+            self.known_crew_owners
+                .iter()
+                .copied()
+                .chain(self.eliminated_crew_owners.iter().copied())
+                .filter(|owner| !self.players.contains_key(owner)),
+        );
+        player_order[synthetic_owner_start..].sort_unstable();
+        player_order.dedup();
+        let mut hud_players = Vec::with_capacity(player_order.len());
+        for owner in player_order {
+            let mut crew = self.crew_members(owner);
+            // The COMPARATOR surface: the bridge std::sort's its HUD crew
+            // ascending before export (RustEngineBridge.cpp:1381), so the
+            // rust snapshot mirrors that normalization. Engine-internal
+            // crew order stays newest-first.
+            crew.sort_unstable_by_key(|id| id.as_u64());
+            let focus = self
+                .crew_selection
+                .get(&owner)
+                .and_then(|selection| selection.cursor());
+            let eliminated = self.eliminated_crew_owners.contains(&owner);
+            let (wealth, score) = self
+                .players
+                .get(&owner)
+                .map(|player| (player.wealth(), player.points()))
+                .unwrap_or((0, 0));
+            hud_players.push(HudPlayerSnapshot {
+                owner,
+                crew,
+                focus,
+                eliminated,
+                wealth,
+                score,
+            });
+        }
         let fow_players = self
             .players
             .iter()
@@ -32306,11 +32429,6 @@ impl Engine {
             })
             .collect();
         let message_snapshots = self.messages.snapshot();
-        let mut local_players: Vec<i32> = self.local_players.as_ref().map_or_else(
-            || self.players.keys().copied().collect(),
-            |players| players.iter().copied().collect(),
-        );
-        local_players.sort_unstable();
         SimulationSnapshot {
             frame: self.frame,
             game_time: self.game_time,
@@ -32366,16 +32484,13 @@ impl Engine {
     /// signature hash until the mass-mover gets C++ `CreatePtr` slots.
     pub fn sync_check(&self, by_client: i32) -> SyncCheckPacket {
         let frame = saturating_u64_to_i32(self.frame);
-        let crew_positions_sum: i64 = {
-            let mut owners: Vec<&Player> = self.players.values().collect();
-            owners.sort_unstable_by_key(|player| player.id());
-            owners
-                .iter()
-                .flat_map(|player| player.crew().iter())
-                .filter_map(|id| self.find_object_index(*id))
-                .map(|index| i64::from(fixtoi_prec(self.objects[index].fixed_position.x, 100)))
-                .sum()
-        };
+        let crew_positions_sum: i64 = self
+            .players
+            .values()
+            .flat_map(|player| player.crew().iter())
+            .filter_map(|id| self.find_object_index(*id))
+            .map(|index| i64::from(fixtoi_prec(self.objects[index].fixed_position.x, 100)))
+            .sum();
         let pxs_count = i32::try_from(self.pxs_system.execute_count()).unwrap_or(i32::MAX);
         // MassMover.CreatePtr (C4Control.cpp:454)
         let mass_mover_index = self.mass_movers.create_ptr();
@@ -32613,10 +32728,14 @@ impl Engine {
                 Some((chunk * pxs::PXS_CHUNK_SIZE + slot) as u32),
             )
         }));
-        let mut players: Vec<_> = self
-            .players
-            .values()
-            .map(|player| {
+        let player_order = self.player_ids_in_order();
+        let players: Vec<_> = player_order
+            .iter()
+            .map(|number| {
+                let player = self
+                    .players
+                    .get(number)
+                    .expect("projected player order contains only live players");
                 let mut state = player.to_state();
                 if !state.evaluated {
                     let current_stint = self.game_time.wrapping_sub(player.game_join_time());
@@ -32629,7 +32748,6 @@ impl Engine {
                 state
             })
             .collect();
-        players.sort_unstable_by_key(|player| player.id);
         let joined_player_info_ids = players
             .iter()
             .map(|player| player.player_info_id)
@@ -32713,7 +32831,7 @@ impl Engine {
     pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
         self.active_message_board_input = None;
         self.pending_game_goal_menu_requests.clear();
-        self.film_view_requests.borrow_mut().clear();
+        self.viewport_presentation_requests.borrow_mut().clear();
         self.film_viewport_available = false;
         self.player_info_league_progress_updates.clear();
         for object in &state.objects {
@@ -33293,34 +33411,32 @@ impl Engine {
             .filter(|(_, roles)| !roles.is_empty())
             .collect();
 
-        self.players = state
-            .players
-            .iter()
-            .cloned()
-            .map(|mut state| {
-                // C4Player::DenumeratePointers resolves Cursor/ViewCursor,
-                // Captain, and every message-board callback object, then
-                // rebuilds Crew only after the object table is complete
-                // (C4Player.cpp:1789-1796). ViewTarget is NO-SAVE; viewport
-                // focus remains the presentation projection only.
-                denumerate_object_reference(&mut state.cursor, &object_numbers);
-                denumerate_object_reference(&mut state.view_cursor, &object_numbers);
-                denumerate_object_reference(&mut state.captain, &object_numbers);
-                for query in &mut state.message_board_queries {
-                    denumerate_object_reference(&mut query.target, &object_numbers);
-                }
-                for viewport in &mut state.viewports {
-                    denumerate_object_reference(&mut viewport.focus, &object_numbers);
-                }
-                state.restore_runtime_view();
-                state
-                    .crew
-                    .retain(|id| object_numbers.contains(&id.as_u64()));
-                state
-            })
-            .map(Player::from_state)
-            .map(|player| (player.id(), player))
-            .collect();
+        self.players.clear();
+        self.player_order.clear();
+        for mut player_state in state.players.iter().cloned() {
+            // C4Player::DenumeratePointers resolves Cursor/ViewCursor,
+            // Captain, and every message-board callback object, then
+            // rebuilds Crew only after the object table is complete
+            // (C4Player.cpp:1789-1796). ViewTarget is NO-SAVE; viewport
+            // focus remains the presentation projection only.
+            denumerate_object_reference(&mut player_state.cursor, &object_numbers);
+            denumerate_object_reference(&mut player_state.view_cursor, &object_numbers);
+            denumerate_object_reference(&mut player_state.captain, &object_numbers);
+            for query in &mut player_state.message_board_queries {
+                denumerate_object_reference(&mut query.target, &object_numbers);
+            }
+            for viewport in &mut player_state.viewports {
+                denumerate_object_reference(&mut viewport.focus, &object_numbers);
+            }
+            player_state.restore_runtime_view();
+            player_state
+                .crew
+                .retain(|id| object_numbers.contains(&id.as_u64()));
+            let player = Player::from_state(player_state);
+            let number = player.id();
+            self.player_order.push(number);
+            self.players.insert(number, player);
+        }
         if !state.player_crew_rosters_authoritative {
             let mut player_ids: Vec<_> = self.players.keys().copied().collect();
             player_ids.sort_unstable();
@@ -33426,6 +33542,8 @@ impl Engine {
 
         self.players
             .retain(|number, _| retained_numbers.contains(number));
+        self.player_order
+            .retain(|number| retained_numbers.contains(number));
         self.pending_player_joins
             .retain(|number, _| retained_numbers.contains(number));
         self.crew_selection
@@ -35730,7 +35848,7 @@ impl Engine {
                     {
                         self.active_message_board_input = None;
                     }
-                    let owners: Vec<i32> = self.players.keys().copied().collect();
+                    let owners = self.player_ids_in_order();
                     for owner in owners {
                         let removed_cursor = self.crew_cursor(owner) == Some(object);
                         if removed_cursor {
@@ -35771,11 +35889,6 @@ impl Engine {
                         player.clear_object_pointers(object);
                     }
                     self.remove_from_roles(player_id, object);
-                }
-                PlayerCommand::SetViewOffset { player_id, offset } => {
-                    if let Some(player) = self.players.get_mut(&player_id) {
-                        player.set_view_offset(offset);
-                    }
                 }
                 PlayerCommand::ClearLastPlrCom { player_id } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
@@ -50764,7 +50877,7 @@ impl Engine {
                 })
                 .map(|object| object.id)
                 .collect();
-            let owners: Vec<i32> = self.players.keys().copied().collect();
+            let owners = self.player_ids_in_order();
             for object in &destroyed {
                 // C4MessageInput::ClearPointers closes a script type-in whose
                 // callback object is being removed (C4MessageInput.cpp:737-742).
@@ -50940,7 +51053,7 @@ impl Engine {
             })
             .map(|object| object.id)
             .collect::<HashSet<_>>();
-        let owners = self.players.keys().copied().collect::<Vec<_>>();
+        let owners = self.player_ids_in_order();
         for owner in owners {
             let removed_cursor = self.crew_cursor(owner) == Some(target);
             if let Some(selection) = self.crew_selection.get_mut(&owner) {
@@ -55232,6 +55345,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         next_object_id,
         false,
     )
+    .with_player_order(snapshot.players.iter().map(|state| state.id))
     .with_sky_adjustment(sky_adjustment)
     .with_sky_fade(sky_fade[0], sky_fade[1])
     .with_scoreboard(Rc::new(RefCell::new(snapshot.hud.scoreboard.clone())))
@@ -57126,6 +57240,303 @@ mod control_message_say_regression {
             );
             assert_eq!(engine.film_replay(), expected, "Replay={replay}, Film={film}");
         }
+    }
+
+    #[test]
+    fn l052_fullscreen_film_fallback_requires_replay_and_nonzero_film_mode() {
+        let mut engine = Engine::new();
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(0, 1));
+        assert!(!engine.is_replay_film());
+
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(1, 1));
+        assert!(engine.is_replay_film());
+
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(1, 0));
+        assert!(!engine.is_replay_film());
+
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(-1, 2));
+        engine.set_replay_control(true);
+        engine.finish_replay().expect("finish replay control");
+        assert!(
+            engine.is_replay_film(),
+            "ViewportCheck keeps using persistent Head.Replay after ChangeToLocal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod player_list_order_regression {
+    use super::*;
+
+    fn joining_player(name: &str) -> JoinPlayerConfig {
+        JoinPlayerConfig {
+            name: name.to_owned(),
+            player_info_id: 0,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        }
+    }
+
+    fn register_joining_player(engine: &mut Engine, name: &str) -> i32 {
+        engine.register_joining_player(
+            &joining_player(name),
+            PlayerAtClient::HOST,
+            "Local",
+            PlayerRuntimeControl::NONE,
+            false,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn l052_player_list_order_preserves_native_id_reuse_recheck_edges() {
+        let mut two_players = Engine::new();
+        assert_eq!(register_joining_player(&mut two_players, "Zero"), 0);
+        assert_eq!(register_joining_player(&mut two_players, "One"), 1);
+        two_players.remove_player(0).expect("remove player zero");
+        assert_eq!(register_joining_player(&mut two_players, "Zero again"), 0);
+        assert_eq!(two_players.first_player_id(), Some(1));
+        assert_eq!(
+            two_players
+                .players()
+                .map(Player::id)
+                .collect::<Vec<_>>(),
+            vec![1, 0],
+            "public iteration follows C4PlayerList links"
+        );
+        let snapshot = two_players.snapshot();
+        assert_eq!(
+            snapshot
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![1, 0],
+            "simulation players follow C4PlayerList links"
+        );
+        assert_eq!(
+            snapshot
+                .hud
+                .players
+                .iter()
+                .map(|player| player.owner)
+                .collect::<Vec<_>>(),
+            vec![1, 0],
+            "HUD live-player prefix follows C4PlayerList links"
+        );
+        assert_eq!(snapshot.hud.local_players, vec![1, 0]);
+        assert_eq!(
+            two_players.host_world_context().player_ids(),
+            &[1, 0],
+            "live indexed script natives follow C4PlayerList links"
+        );
+        assert_eq!(
+            host_world_context_from_snapshot(&snapshot).player_ids(),
+            &[1, 0],
+            "snapshot indexed script natives follow serialized list order"
+        );
+        assert_eq!(
+            two_players
+                .capture_state()
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![1, 0],
+            "native's two-node scan reaches the appended player and returns"
+        );
+
+        let state = two_players.capture_state();
+        let mut restored = Engine::new();
+        restored.restore_state(&state).expect("restore player order");
+        assert_eq!(restored.first_player_id(), Some(1));
+        restored.retain_restored_players([0]);
+        assert_eq!(restored.first_player_id(), Some(0));
+
+        let mut three_players = Engine::new();
+        for number in 0..3 {
+            three_players
+                .register_player(PlayerConfig::new(number, format!("Player {number}")))
+                .expect("register player");
+        }
+        three_players
+            .remove_player(0)
+            .expect("remove first of three players");
+        three_players
+            .register_player(PlayerConfig::new(0, "Zero again"))
+            .expect("reuse player zero");
+        assert_eq!(three_players.first_player_id(), Some(0));
+        assert_eq!(
+            three_players
+                .capture_state()
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the intervening higher number makes native move zero to the head"
+        );
+
+        let mut legacy_fixture = Engine::new();
+        legacy_fixture
+            .players
+            .insert(4, PlayerConfig::new(4, "Four").build());
+        legacy_fixture
+            .players
+            .insert(2, PlayerConfig::new(2, "Two").build());
+        assert_eq!(legacy_fixture.first_player_id(), Some(2));
+        assert_eq!(
+            legacy_fixture
+                .capture_state()
+                .players
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![2, 4],
+            "legacy direct-map fixtures append untracked players deterministically"
+        );
+
+        let mut partial_ledger_fixture = Engine::new();
+        partial_ledger_fixture
+            .register_player(PlayerConfig::new(1, "Tracked"))
+            .expect("register tracked player");
+        partial_ledger_fixture
+            .players
+            .insert(4, PlayerConfig::new(4, "Direct map addition four").build());
+        partial_ledger_fixture
+            .players
+            .insert(2, PlayerConfig::new(2, "Direct map addition two").build());
+        assert_eq!(
+            partial_ledger_fixture
+                .players()
+                .map(Player::id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 4],
+            "public iteration must not hide an untracked direct-map addition"
+        );
+        partial_ledger_fixture.players.remove(&4);
+        partial_ledger_fixture.players.remove(&1);
+        assert_eq!(
+            partial_ledger_fixture
+                .players()
+                .map(Player::id)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "a stale same-length ledger must still expose every live map player"
+        );
+    }
+
+    #[test]
+    fn l052_clear_pointer_callbacks_follow_native_player_list_order() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(1, "First"))
+            .expect("register first player");
+        engine
+            .register_player(PlayerConfig::new(0, "Appended lower number"))
+            .expect("register appended lower-number player");
+        assert_eq!(
+            engine.players().map(Player::id).collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+
+        let mut definition = Definition::from_script(
+            "PORD",
+            "Player-order callback probe",
+            r#"#strict 2
+static callback_log;
+
+func CrewSelection(bool unselect, bool cursor)
+{
+    if (!unselect) callback_log = callback_log * 10 + GetOwner() + 1;
+    return true;
+}
+
+func ResetCallbackLog() { callback_log = 0; return true; }
+func ReadCallbackLog() { return callback_log; }
+"#,
+        )
+        .expect("compile callback-order probe");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("register callback-order probe");
+
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("PORD")
+                    .with_owner(1)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            )
+            .expect("spawn shared cursor target");
+        let replacement_one = engine
+            .spawn_object(
+                SpawnConfig::new("PORD")
+                    .with_owner(1)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            )
+            .expect("spawn player-one replacement");
+        let replacement_zero = engine
+            .spawn_object(
+                SpawnConfig::new("PORD")
+                    .with_owner(0)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            )
+            .expect("spawn player-zero replacement");
+        engine
+            .players
+            .get_mut(&1)
+            .expect("player one remains")
+            .set_crew(vec![target, replacement_one]);
+        engine
+            .players
+            .get_mut(&0)
+            .expect("player zero remains")
+            .set_crew(vec![target, replacement_zero]);
+        engine.crew_selection.insert(
+            1,
+            CrewSelection {
+                cursor: Some(target),
+            },
+        );
+        engine.crew_selection.insert(
+            0,
+            CrewSelection {
+                cursor: Some(target),
+            },
+        );
+
+        let replacement_index = engine
+            .find_object_index(replacement_one)
+            .expect("replacement remains live");
+        engine
+            .call_object_function(replacement_index, "ResetCallbackLog", Vec::new())
+            .expect("reset callback order");
+        engine
+            .clear_object_references_for_removal(target)
+            .expect("clear shared cursor in player-list order");
+        assert_eq!(
+            engine
+                .call_object_function(replacement_index, "ReadCallbackLog", Vec::new())
+                .expect("read callback order"),
+            Value::Int(21),
+            "player 1 callback must precede player 0 after the native reuse edge"
+        );
     }
 }
 

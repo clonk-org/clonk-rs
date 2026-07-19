@@ -35,7 +35,7 @@ use crate::{
     CrewPortrait, CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DEFAULT_MUSIC_LEVEL,
     DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FULL_CON,
     FloatVector2, GraphicsOverlayMode,
-    FilmViewRequest, Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
+    Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PauseGameRequest,
     PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, PlayerStatus, QueuedCommand,
@@ -1227,9 +1227,6 @@ pub enum PlayerCommand {
     /// exact player-list interleaving with selection callbacks: a callback
     /// may mutate another player's pointers before that player's turn.
     ClearPlayerObjectPointersWithoutAdjust { player_id: i32, object: ObjectId },
-    /// FnSetViewOffset (C4Script.cpp:5676-5687): presentation displacement
-    /// for the player's local viewport. Remote players are sync-safe no-ops.
-    SetViewOffset { player_id: i32, offset: Vector2 },
     /// FnClearLastPlrCom (C4Script.cpp:2624-2635): clear the pending
     /// single/double-click command latches, preserving LastComDelay.
     ClearLastPlrCom { player_id: i32 },
@@ -1841,8 +1838,8 @@ pub struct HostWorldContext {
     film_viewport_available: bool,
     /// App-owned console pause requests produced by `PauseGame`.
     pause_game_requests: Rc<RefCell<Vec<PauseGameRequest>>>,
-    /// App-owned primary viewport retargets produced by replay `SetFilmView`.
-    film_view_requests: Rc<RefCell<Vec<FilmViewRequest>>>,
+    /// App-owned physical viewport mutations in exact script-call order.
+    viewport_presentation_requests: Rc<RefCell<Vec<crate::ViewportPresentationRequest>>>,
     /// Effective `GetSmokeLevel` for sync-relevant FXU1 creation: 150 in
     /// network/recording sync mode, otherwise Config.Graphics.SmokeLevel.
     smoke_level: i32,
@@ -1990,7 +1987,7 @@ impl Default for HostWorldContext {
             replay_control: false,
             film_viewport_available: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
-            film_view_requests: Rc::new(RefCell::new(Vec::new())),
+            viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2242,7 +2239,7 @@ impl HostWorldContext {
             replay_control: false,
             film_viewport_available: false,
             pause_game_requests: Rc::new(RefCell::new(Vec::new())),
-            film_view_requests: Rc::new(RefCell::new(Vec::new())),
+            viewport_presentation_requests: Rc::new(RefCell::new(Vec::new())),
             smoke_level: crate::DEFAULT_SMOKE_LEVEL,
             max_players: 0,
             use_fair_crew: false,
@@ -2343,6 +2340,32 @@ impl HostWorldContext {
         I: IntoIterator<Item = i32>,
     {
         self.local_players = Rc::new(players.into_iter().collect());
+        self
+    }
+
+    /// Override the fixture-compatible numeric player order with the native
+    /// C4PlayerList order. Ignore stale/duplicate IDs and append any players
+    /// omitted by the caller deterministically so every registered player is
+    /// still visible to indexed script functions.
+    pub(crate) fn with_player_order<I>(mut self, players: I) -> Self
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        let player_order = Rc::make_mut(&mut self.player_order);
+        player_order.clear();
+        for id in players {
+            if self.players.contains_key(&id) && !player_order.contains(&id) {
+                player_order.push(id);
+            }
+        }
+
+        let fallback_start = player_order.len();
+        for id in self.players.keys().copied() {
+            if !player_order.contains(&id) {
+                player_order.push(id);
+            }
+        }
+        player_order[fallback_start..].sort_unstable();
         self
     }
 
@@ -2511,13 +2534,13 @@ impl HostWorldContext {
         self
     }
 
-    pub(crate) fn with_film_view_requests(
+    pub(crate) fn with_viewport_presentation_requests(
         mut self,
         replay_control: bool,
-        requests: Rc<RefCell<Vec<FilmViewRequest>>>,
+        requests: Rc<RefCell<Vec<crate::ViewportPresentationRequest>>>,
     ) -> Self {
         self.replay_control = replay_control;
-        self.film_view_requests = requests;
+        self.viewport_presentation_requests = requests;
         self
     }
 
@@ -8716,9 +8739,9 @@ fn set_film_view(args: &[Value]) -> Result<Value, RuntimeError> {
         }) {
             context
                 .world
-                .film_view_requests
+                .viewport_presentation_requests
                 .borrow_mut()
-                .push(FilmViewRequest { player });
+                .push(crate::ViewportPresentationRequest::SetFilmView { player });
         }
         Ok(Value::Bool(true))
     })
@@ -40829,9 +40852,9 @@ fn distance(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(dist as i32))
 }
 
-/// FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate; remote/headless
-/// players have no local viewport, so the write is skipped while the call
-/// still succeeds ("sync safety").
+/// FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate followed by a
+/// process-local first-physical-viewport lookup. An absent viewport is a
+/// successful sync-safe no-op; the app resolves the ordered request.
 fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 3 {
         return Err(RuntimeError::new(
@@ -40850,15 +40873,15 @@ fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
         if context.player_state(player).is_none() {
             return Ok(Value::Bool(false));
         }
-        if context.world.local_players.contains(&player) {
-            let offset = Vector2::new(x, y);
-            if let Some(state) = context.player_state_mut(player) {
-                state.view_offset = offset;
-            }
-            context.record_player_command(PlayerCommand::SetViewOffset {
-                player_id: player,
-                offset,
-            });
+        if context.world.film_viewport_available {
+            context
+                .world
+                .viewport_presentation_requests
+                .borrow_mut()
+                .push(crate::ViewportPresentationRequest::SetViewOffset {
+                    player,
+                    offset: Vector2::new(x, y),
+                });
         }
         Ok(Value::Bool(true))
     })
@@ -56266,7 +56289,7 @@ public func RejectConstruction(x, y, builder)
             ]),
             "validation precedes the live no-op and nil defaults to player zero"
         );
-        assert!(engine.take_film_view_requests().is_empty());
+        assert!(engine.take_viewport_presentation_requests().is_empty());
 
         engine.set_replay_control(true);
         assert_eq!(
@@ -56278,7 +56301,7 @@ public func RejectConstruction(x, y, builder)
             ]),
             "replay Initialize still runs before physical viewport creation"
         );
-        assert!(engine.take_film_view_requests().is_empty());
+        assert!(engine.take_viewport_presentation_requests().is_empty());
 
         engine.set_film_viewport_available(true);
         assert_eq!(
@@ -56290,14 +56313,16 @@ public func RejectConstruction(x, y, builder)
             ])
         );
         assert_eq!(
-            engine.take_film_view_requests(),
+            engine.take_viewport_presentation_requests(),
             vec![
-                FilmViewRequest { player: 0 },
-                FilmViewRequest { player: OWNER_NONE },
+                crate::ViewportPresentationRequest::SetFilmView { player: 0 },
+                crate::ViewportPresentationRequest::SetFilmView {
+                    player: OWNER_NONE,
+                },
             ],
             "invalid players never reach the app-owned viewport channel"
         );
-        assert!(engine.take_film_view_requests().is_empty());
+        assert!(engine.take_viewport_presentation_requests().is_empty());
 
         let mut without_viewport = crate::Engine::new();
         without_viewport.set_replay_control(true);
@@ -56311,7 +56336,9 @@ public func RejectConstruction(x, y, builder)
             "NO_OWNER remains valid when the replay has no viewport"
         );
         assert!(
-            without_viewport.take_film_view_requests().is_empty(),
+            without_viewport
+                .take_viewport_presentation_requests()
+                .is_empty(),
             "an empty viewport list is a successful no-op sampled at call time"
         );
         without_viewport.set_film_viewport_available(true);
@@ -56324,9 +56351,51 @@ public func RejectConstruction(x, y, builder)
             ])
         );
         assert_eq!(
-            without_viewport.take_film_view_requests(),
-            vec![FilmViewRequest { player: OWNER_NONE }],
+            without_viewport.take_viewport_presentation_requests(),
+            vec![crate::ViewportPresentationRequest::SetFilmView {
+                player: OWNER_NONE,
+            }],
             "an explicit observer viewport exists independently of local players"
+        );
+    }
+
+    #[test]
+    fn viewport_presentation_requests_preserve_cross_native_script_order() {
+        let mut script = ScriptEngine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 3\nfunc Probe() { SetViewOffset(0, 1, 2); SetFilmView(0); SetViewOffset(0, 3, 4); }",
+            )
+            .expect("viewport request probe compiles");
+
+        let mut engine = crate::Engine::new();
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("viewport player registers");
+        engine.set_replay_control(true);
+        engine.set_film_viewport_available(true);
+        let (result, _) = with_effect_context(
+            None,
+            &[],
+            engine.host_world_context(),
+            1,
+            || script.call("Probe", &[]),
+        );
+        result.expect("viewport request probe executes");
+        assert_eq!(
+            engine.take_viewport_presentation_requests(),
+            vec![
+                crate::ViewportPresentationRequest::SetViewOffset {
+                    player: 0,
+                    offset: Vector2::new(1, 2),
+                },
+                crate::ViewportPresentationRequest::SetFilmView { player: 0 },
+                crate::ViewportPresentationRequest::SetViewOffset {
+                    player: 0,
+                    offset: Vector2::new(3, 4),
+                },
+            ]
         );
     }
 
@@ -59875,6 +59944,35 @@ public func RejectConstruction(x, y, builder)
     }
 
     #[test]
+    fn player_order_override_drives_get_player_by_index() {
+        let mut zero = PlayerState::default();
+        zero.id = 0;
+        let mut one = PlayerState::default();
+        one.id = 1;
+        let mut two = PlayerState::default();
+        two.id = 2;
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![two, zero, one],
+        );
+        assert_eq!(world.player_ids(), &[0, 1, 2]);
+
+        let world = world.with_player_order([1, 1, 99, 0]);
+        assert_eq!(world.player_ids(), &[1, 0, 2]);
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<Value, RuntimeError>(Value::Array(vec![
+                get_player_by_index(&[Value::Int(0)])?,
+                get_player_by_index(&[Value::Int(1)])?,
+                get_player_by_index(&[Value::Int(2)])?,
+            ]))
+        });
+        assert_eq!(
+            result.expect("GetPlayerByIndex follows overridden player order"),
+            Value::Array(vec![Value::Int(1), Value::Int(0), Value::Int(2)])
+        );
+    }
+
+    #[test]
     fn get_player_name_returns_registered_name() {
         let mut player = PlayerState::default();
         player.id = 5;
@@ -63334,31 +63432,28 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
-    fn set_view_offset_writes_only_the_local_cpp_viewport() {
+    fn set_view_offset_requests_the_first_physical_match_without_sync_state() {
         // FnSetViewOffset writes C4Viewport::ViewOffsX/Y when the requested
-        // player has a local viewport. A valid remote player still returns
-        // true, but is a sync-safe no-op (C4Script.cpp:5676-5687).
+        // player has a physical viewport. A valid player with no matching
+        // viewport still returns true; the app resolves that process-local
+        // lookup after preserving script-call order (C4Script.cpp:5676-5687).
         let player = PlayerState {
             id: 15,
             ..PlayerState::default()
         };
+        let local_requests = Rc::new(RefCell::new(Vec::new()));
         let world = HostWorldContext::from_objects_with_players(
             Vec::<HostWorldObject>::new(),
             vec![player.clone()],
         )
-        .with_local_players([15]);
+        .with_local_players([15])
+        .with_viewport_presentation_requests(false, Rc::clone(&local_requests))
+        .with_film_viewport_available(true);
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
             assert_eq!(
                 set_view_offset(&[Value::Int(15), Value::Int(7), Value::Int(-4)])?,
                 Value::Bool(true)
             );
-            let offset = HOST_CONTEXT.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .and_then(|context| context.player_state(15))
-                    .map(|player| player.view_offset)
-            });
-            assert_eq!(offset, Some(Vector2::new(7, -4)));
             assert_eq!(
                 set_view_offset(&[Value::Int(99), Value::Int(1), Value::Int(2)])?,
                 Value::Bool(false)
@@ -63366,19 +63461,23 @@ func Missing() { return ComponentAll(nil, WOOD); }
             Ok::<Value, RuntimeError>(Value::Nil)
         });
         result.expect("local SetViewOffset calls succeed");
-        assert!(matches!(
-            outcome.player_commands.as_slice(),
-            [PlayerCommand::SetViewOffset {
-                player_id: 15,
-                offset,
-            }] if *offset == Vector2::new(7, -4)
-        ));
+        assert!(outcome.player_commands.is_empty());
+        assert_eq!(
+            *local_requests.borrow(),
+            vec![crate::ViewportPresentationRequest::SetViewOffset {
+                player: 15,
+                offset: Vector2::new(7, -4),
+            }]
+        );
 
+        let remote_requests = Rc::new(RefCell::new(Vec::new()));
         let remote_world = HostWorldContext::from_objects_with_players(
             Vec::<HostWorldObject>::new(),
             vec![player],
         )
-        .with_local_players([]);
+        .with_local_players([])
+        .with_viewport_presentation_requests(false, Rc::clone(&remote_requests))
+        .with_film_viewport_available(true);
         let (remote_result, remote_outcome) =
             with_effect_context(None, &[], remote_world, 1, || {
                 set_view_offset(&[Value::Int(15), Value::Int(9), Value::Int(3)])
@@ -63388,6 +63487,32 @@ func Missing() { return ComponentAll(nil, WOOD); }
             Value::Bool(true)
         );
         assert!(remote_outcome.player_commands.is_empty());
+        assert_eq!(
+            *remote_requests.borrow(),
+            vec![crate::ViewportPresentationRequest::SetViewOffset {
+                player: 15,
+                offset: Vector2::new(9, 3),
+            }],
+            "remote/replay displayed players are resolved against the physical list"
+        );
+
+        let absent_requests = Rc::new(RefCell::new(Vec::new()));
+        let absent_world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![PlayerState {
+                id: 15,
+                ..PlayerState::default()
+            }],
+        )
+        .with_viewport_presentation_requests(false, Rc::clone(&absent_requests));
+        let (absent_result, _) = with_effect_context(None, &[], absent_world, 1, || {
+            set_view_offset(&[Value::Int(15), Value::Int(5), Value::Int(6)])
+        });
+        assert_eq!(absent_result.expect("headless call succeeds"), Value::Bool(true));
+        assert!(
+            absent_requests.borrow().is_empty(),
+            "GetViewport returned null at call time"
+        );
     }
 
     #[test]
