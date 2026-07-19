@@ -51,7 +51,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use control_message::{mentions_nick, ControlMessageState};
-use control_options::format_key_label;
+use control_options::{binding_display_name, format_key_label};
 use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
     GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
@@ -5459,6 +5459,17 @@ fn main() -> Result<()> {
                     control_flow.set_exit();
                     return;
                 }
+                if let Err(err) = apply_options_display_requests(
+                    &window,
+                    &mut app,
+                    &mut presenter,
+                    &mut display_options,
+                    app_paths.as_deref(),
+                ) {
+                    tracing::error!(error = ?err, "options display change failed");
+                    control_flow.set_exit();
+                    return;
+                }
                 if app.take_exit_request() {
                     control_flow.set_exit();
                     return;
@@ -5636,6 +5647,58 @@ fn main() -> Result<()> {
     });
 }
 
+fn apply_options_display_requests(
+    window: &Window,
+    app: &mut GameApp,
+    presenter: &mut lc_scaling::FramePresenter,
+    display_options: &mut DisplayOptions,
+    paths: Option<&AppPaths>,
+) -> Result<()> {
+    while let Some(request) = app.pending_options_display_requests.pop_front() {
+        match request {
+            OptionsDisplayRequest::SetMode(mode) => {
+                let mode = match mode {
+                    lc_frontend::startup_options_graphics::GraphicsDisplayMode::Fullscreen => {
+                        DisplayMode::Fullscreen
+                    }
+                    lc_frontend::startup_options_graphics::GraphicsDisplayMode::Window => {
+                        DisplayMode::Window
+                    }
+                };
+                match mode {
+                    DisplayMode::Fullscreen if window.fullscreen().is_none() => {
+                        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    }
+                    DisplayMode::Window if window.fullscreen().is_some() => {
+                        window.set_fullscreen(None);
+                    }
+                    DisplayMode::Fullscreen | DisplayMode::Window => {}
+                }
+                display_options.record_mode(mode);
+            }
+            OptionsDisplayRequest::SetScale { percent, persist } => {
+                let percent = percent.clamp(100, 300);
+                presenter.set_scale(percent as f32 / 100.0);
+                app.configure_native_startup_fonts(
+                    presenter.scale(),
+                    display_options.point_filtering,
+                );
+                let (logical_width, logical_height) = presenter.logical_size();
+                app.resize(logical_width, logical_height)?;
+                if persist {
+                    let (physical_width, physical_height) = presenter.physical_size();
+                    display_options.record_scale_percent(percent, physical_width, physical_height);
+                }
+            }
+        }
+        if let Some(paths) = paths {
+            display_options.persist_if_dirty(paths);
+        }
+        window.request_redraw();
+    }
+    Ok(())
+}
+
 /// Drive C4Game's scheduler-owned one-second callback independently from the
 /// fixed-step frame accumulator (StdAppUnix.cpp:286-291).
 fn advance_game_clock_from_elapsed(
@@ -5729,7 +5792,10 @@ fn handle_window_event(
                 },
             ..
         } => {
-            if state == ElementState::Pressed && keycode == VirtualKeyCode::F11 {
+            if state == ElementState::Pressed
+                && keycode == VirtualKeyCode::F11
+                && !app.options_keyboard_control_capture_active()
+            {
                 app.reject_classic_global_gui_bootstrap()?;
                 toggle_fullscreen(window, display_options);
                 return Ok(());
@@ -7960,6 +8026,13 @@ enum MessageDialogContinuation {
     LobbyReadyCheck { remaining_seconds: u32 },
     LeagueVote { subject: LeagueVoteSubject },
     LeagueSurrender,
+    OptionsScaleTest {
+        old_percent: i32,
+        new_percent: i32,
+        remaining_seconds: u32,
+    },
+    OptionsControlCapture(lc_frontend::startup_options_controls::ControlCaptureTarget),
+    OptionsAlternateServerNotice,
 }
 
 #[derive(Clone, Debug)]
@@ -8012,6 +8085,8 @@ enum PendingCrewInputAction {
 enum PendingInputDialogPurpose {
     GameOption(GameOptionInputKind),
     NetworkJoinPassword,
+    OptionsGraphicsScale,
+    OptionsNetwork(lc_frontend::startup_options_network::NetworkTextField),
     ScenarioMissionAccess,
     StartupCrew(PendingCrewInputAction),
 }
@@ -8138,6 +8213,7 @@ enum AppContextMenuCommand {
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
     OptionsLanguage(String),
+    OptionsDisplayMode(lc_frontend::startup_options_graphics::GraphicsDisplayMode),
     LobbyTeam { player_id: i32, team_id: i32 },
     ScenarioSearch(ScenselSearchContextCommand),
     InputDialog(InputDialogContextCommand),
@@ -8847,6 +8923,12 @@ struct ScreenshotRequest {
     gamma: lc_graphics::GammaRamp,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptionsDisplayRequest {
+    SetMode(lc_frontend::startup_options_graphics::GraphicsDisplayMode),
+    SetScale { percent: i32, persist: bool },
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -8894,6 +8976,7 @@ struct GameApp {
     scoreboard_tab_raw_pressed: bool,
     keyboard_modifiers: ModifiersState,
     pending_screenshots: VecDeque<ScreenshotRequest>,
+    pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
     gamepads: GamepadManager,
     gamepad_gui_control: bool,
     snapshot: SimulationSnapshot,
@@ -15895,6 +15978,116 @@ fn load_options_sound_state(
     )
 }
 
+fn load_options_graphics_state(
+    paths: Option<&AppPaths>,
+) -> lc_frontend::startup_options_graphics::GraphicsSheetState {
+    use lc_frontend::startup_options_graphics::{GraphicsDisplayMode, GraphicsSheetState};
+
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let boolean = |key: &str, fallback: bool| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some("Graphics"), key))
+            .map(parse_config_bool)
+            .unwrap_or(fallback)
+    };
+    let integer = |key: &str, fallback: i32| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some("Graphics"), key))
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .unwrap_or(fallback)
+    };
+    let display = DisplayOptions::load(paths);
+    GraphicsSheetState::new(
+        match display.mode {
+            DisplayMode::Fullscreen => GraphicsDisplayMode::Fullscreen,
+            DisplayMode::Window => GraphicsDisplayMode::Window,
+        },
+        display.scale_percent(),
+        boolean("AddNewCrewPortraits", true),
+        boolean("SaveDefaultPortraits", true),
+        boolean("AutoFrameSkip", true),
+        boolean("ShowFolderMaps", true),
+        boolean("DisableGamma", false),
+        integer("SmokeLevel", lc_engine::DEFAULT_SMOKE_LEVEL),
+        boolean("FireParticles", true),
+    )
+}
+
+fn load_options_network_state(
+    paths: Option<&AppPaths>,
+) -> lc_frontend::startup_options_network::NetworkSheetState {
+    use lc_frontend::startup_options_network::NetworkSheetState;
+
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let value = |section: &str, key: &str| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some(section), key))
+    };
+    let integer = |key: &str, fallback: i32| {
+        value("Network", key)
+            .and_then(|raw| raw.trim().parse::<i32>().ok())
+            .unwrap_or(fallback)
+    };
+    let boolean = |section: &str, key: &str, fallback: bool| {
+        value(section, key)
+            .map(parse_config_bool)
+            .unwrap_or(fallback)
+    };
+    NetworkSheetState::new(
+        [
+            integer("PortTCP", 11_112),
+            integer("PortUDP", 11_113),
+            integer("PortRefServer", 11_111),
+            integer("PortDiscovery", 11_114),
+        ],
+        boolean("Network", "UseAlternateServer", false),
+        value("Network", "AlternateServerAddress")
+            .unwrap_or(OFFICIAL_LEAGUE_SERVER)
+            .to_string(),
+        boolean("Network", "EnableAutomaticUpdate", true),
+        boolean("Network", "EnableUPnP", true),
+        value("Network", "LocalName")
+            .unwrap_or("Unknown")
+            .to_string(),
+        value("Network", "Nick").unwrap_or("").to_string(),
+        boolean("Startup", "HideMsgNoOfficialLeague", false),
+    )
+}
+
+fn load_options_control_state(
+    keyboard: &KeyboardBindings,
+    gamepad: &GamepadBindings,
+    connected_gamepads: usize,
+    gamepad_gui_control: bool,
+) -> lc_frontend::startup_options_controls::ControlSheetState {
+    let keyboard_labels = std::array::from_fn(|set| {
+        std::array::from_fn(|control| {
+            ControlBindingId::ALL
+                .get(control)
+                .and_then(|id| keyboard.key_for_set(set, *id))
+                .map(format_key_label)
+                .unwrap_or_else(|| "Undefined".to_string())
+        })
+    });
+    let gamepad_labels = std::array::from_fn(|set| {
+        std::array::from_fn(|control| {
+            ControlBindingId::ALL
+                .get(control)
+                .map(|id| gamepad.key_label_for_set(set, *id))
+                .unwrap_or_else(|| "Undefined".to_string())
+        })
+    });
+    lc_frontend::startup_options_controls::ControlSheetState::new(
+        keyboard_labels,
+        gamepad_labels,
+        connected_gamepads,
+        gamepad_gui_control,
+    )
+}
+
 fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
     let masterserver_signup = config
@@ -16378,6 +16571,11 @@ fn persist_startup_options_config(
     language_ex: &str,
     show_log_timestamps: bool,
     audio_options: Option<&AudioOptions>,
+    graphics: &lc_frontend::startup_options_graphics::GraphicsSheetState,
+    network: &lc_frontend::startup_options_network::NetworkSheetState,
+    keyboard_bindings: &KeyboardBindings,
+    gamepad_bindings: &GamepadBindings,
+    gamepad_gui_control: bool,
 ) -> io::Result<()> {
     let path = paths.config_file();
     let mut config = match Config::load(&path) {
@@ -16395,6 +16593,76 @@ fn persist_startup_options_config(
     if let Some(audio_options) = audio_options {
         audio_options.write_startup_sound_config(&mut config);
     }
+    let bool_string = |value: bool| i32::from(value).to_string();
+    config.set_in(
+        Some("Graphics"),
+        "DisplayMode",
+        graphics.display_mode.config_value(),
+    );
+    config.set_in(
+        Some("Graphics"),
+        "Scale",
+        graphics.applied_scale_percent.to_string(),
+    );
+    for (key, value) in [
+        ("AddNewCrewPortraits", graphics.add_new_crew_portraits),
+        ("SaveDefaultPortraits", graphics.save_default_portraits),
+        ("AutoFrameSkip", graphics.auto_frame_skip),
+        ("ShowFolderMaps", graphics.show_folder_maps),
+        ("DisableGamma", graphics.disable_gamma),
+        ("FireParticles", graphics.fire_particles),
+    ] {
+        config.set_in(Some("Graphics"), key, bool_string(value));
+    }
+    config.set_in(
+        Some("Graphics"),
+        "SmokeLevel",
+        graphics.smoke_level.to_string(),
+    );
+    use lc_frontend::startup_options_network::{NetworkPortId, NetworkPortState};
+    let port_value = |port: &NetworkPortState| port.config_value().to_string();
+    for (key, id) in [
+        ("PortTCP", NetworkPortId::Tcp),
+        ("PortUDP", NetworkPortId::Udp),
+        ("PortRefServer", NetworkPortId::Reference),
+        ("PortDiscovery", NetworkPortId::Discovery),
+    ] {
+        config.set_in(Some("Network"), key, port_value(network.port(id)));
+    }
+    config.set_in(
+        Some("Network"),
+        "UseAlternateServer",
+        bool_string(network.use_alternate_server),
+    );
+    config.set_in(
+        Some("Network"),
+        "AlternateServerAddress",
+        &network.alternate_server_address,
+    );
+    config.set_in(
+        Some("Network"),
+        "EnableAutomaticUpdate",
+        bool_string(network.automatic_update),
+    );
+    config.set_in(
+        Some("Network"),
+        "EnableUPnP",
+        bool_string(network.enable_upnp),
+    );
+    config.set_in(Some("Network"), "LocalName", &network.local_name);
+    config.set_in(Some("Network"), "Nick", network.stored_nick());
+    config.set_in(
+        Some("Startup"),
+        "HideMsgNoOfficialLeague",
+        bool_string(network.hide_no_official_league_notice),
+    );
+    config.set_in(
+        Some("Controls"),
+        "GamepadGuiControl",
+        bool_string(gamepad_gui_control),
+    );
+    keyboard_bindings.write_to_config(&mut config);
+    gamepad_bindings.write_to_config(&mut config);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -17671,6 +17939,7 @@ impl GameApp {
             scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),
+            pending_options_display_requests: VecDeque::new(),
             gamepads: GamepadManager::new(),
             gamepad_gui_control: load_gamepad_gui_control(paths),
             snapshot,
@@ -21308,6 +21577,9 @@ impl GameApp {
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
+        if self.handle_options_control_capture_key(key, state)? {
+            return Ok(());
+        }
         self.guard_runtime_key_dispatch(key)?;
         if self.running_chat.is_some() {
             let modifiers = self.keyboard_modifiers
@@ -21875,6 +22147,70 @@ impl GameApp {
             }
             AppMode::Loading => Ok(()),
         }
+    }
+
+    fn handle_options_control_capture_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        use lc_frontend::startup_options_controls::ControlDevice;
+        let target = self
+            .message_dialogs
+            .last()
+            .and_then(|pending| match pending.continuation {
+                MessageDialogContinuation::OptionsControlCapture(target)
+                    if target.device == ControlDevice::Keyboard =>
+                {
+                    Some(target)
+                }
+                _ => None,
+            });
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        match state {
+            ElementState::Released => {
+                self.message_dialog_consumed_keys.remove(&key);
+                return Ok(true);
+            }
+            ElementState::Pressed => {
+                self.message_dialog_consumed_keys.insert(key);
+            }
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() {
+            return Ok(true);
+        }
+        if !KeyboardBindings::is_supported_key(key) {
+            tracing::warn!(?key, "ignoring control capture for an unpersistable key");
+            return Ok(true);
+        }
+        let Some(id) = ControlBindingId::ALL.get(target.control).copied() else {
+            return Ok(true);
+        };
+        if !self.bindings.rebind_for_set(target.set, id, key) {
+            return Ok(true);
+        }
+        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+            dialog
+                .controls_mut()
+                .set_label(target, format_key_label(key));
+        }
+        self.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)?;
+        Ok(true)
+    }
+
+    fn options_keyboard_control_capture_active(&self) -> bool {
+        use lc_frontend::startup_options_controls::ControlDevice;
+        self.message_dialogs.last().is_some_and(|pending| {
+            matches!(
+                pending.continuation,
+                MessageDialogContinuation::OptionsControlCapture(target)
+                    if target.device == ControlDevice::Keyboard
+            )
+        })
     }
 
     fn handle_engine_key(
@@ -26337,6 +26673,7 @@ impl GameApp {
         #[derive(Clone, Copy)]
         enum ClusterOwner {
             Suppressed,
+            GamepadCapture,
             Message,
             Definition,
             ContextPending,
@@ -26360,10 +26697,20 @@ impl GameApp {
 
             let game_over_open = self.mode == AppMode::Running && self.game_over_dialog.is_some();
             let eligible_gamepad_gui = gamepad_gui_control && gamepad == 0;
+            let gamepad_capture_open = self.message_dialogs.last().is_some_and(|pending| {
+                matches!(
+                    pending.continuation,
+                    MessageDialogContinuation::OptionsControlCapture(target)
+                        if target.device
+                            == lc_frontend::startup_options_controls::ControlDevice::Gamepad
+                )
+            });
             let mut owner = if game_over_open && !eligible_gamepad_gui {
                 // The exclusive evaluation screen owns the whole GUI stack,
                 // but C++ did not register a receiver for this source.
                 ClusterOwner::Suppressed
+            } else if gamepad_capture_open {
+                ClusterOwner::GamepadCapture
             } else if !self.message_dialogs.is_empty() {
                 ClusterOwner::Message
             } else if self.definition_selector.is_some() {
@@ -26385,8 +26732,32 @@ impl GameApp {
                 while let Some(event) = pending.take() {
                     match owner {
                         ClusterOwner::Suppressed => {}
+                        ClusterOwner::GamepadCapture => {
+                            // KeySelDialog's high-priority raw listener owns the
+                            // entire physical input cluster. GUI aliases emitted
+                            // before the raw button must neither cancel nor
+                            // activate the modal, and a wrong-pad raw button is
+                            // consumed while leaving capture open.
+                            if let GamepadEvent::Button {
+                                slot,
+                                button,
+                                state,
+                            } = event
+                            {
+                                self.handle_gamepad_button(slot, button, state)?;
+                            }
+                        }
                         ClusterOwner::Message => {
-                            self.handle_message_dialog_gamepad_event(event)?;
+                            if let GamepadEvent::Button {
+                                slot,
+                                button,
+                                state,
+                            } = event
+                            {
+                                self.handle_gamepad_button(slot, button, state)?;
+                            } else {
+                                self.handle_message_dialog_gamepad_event(event)?;
+                            }
                         }
                         ClusterOwner::Definition => {
                             self.handle_definition_selector_gamepad_event(event)?;
@@ -26766,6 +27137,39 @@ impl GameApp {
         button: LegacyGamepadButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        use lc_frontend::startup_options_controls::ControlDevice;
+        let capture = self
+            .message_dialogs
+            .last()
+            .and_then(|pending| match pending.continuation {
+                MessageDialogContinuation::OptionsControlCapture(target)
+                    if target.device == ControlDevice::Gamepad =>
+                {
+                    Some(target)
+                }
+                _ => None,
+            });
+        if let Some(target) = capture {
+            if state == ElementState::Pressed && target.set == usize::from(slot.index()) {
+                if let Some(id) = ControlBindingId::ALL.get(target.control).copied() {
+                    if self.gamepad_bindings.rebind_button(
+                        target.set,
+                        id,
+                        slot.index(),
+                        button.index(),
+                    ) {
+                        let label = self.gamepad_bindings.key_label_for_set(target.set, id);
+                        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                            dialog.controls_mut().set_label(target, label);
+                        }
+                        self.finish_message_dialog(
+                            lc_frontend::message_dialog::MessageDialogResult::Ok,
+                        )?;
+                    }
+                }
+            }
+            return Ok(());
+        }
         if !self.message_dialogs.is_empty() {
             return Ok(());
         }
@@ -31415,6 +31819,33 @@ impl GameApp {
         self.open_context_menu_at(entries, anchor)
     }
 
+    fn open_options_display_mode_combo(&mut self) -> Result<bool, EngineError> {
+        use lc_frontend::startup_options_graphics::GraphicsDisplayMode;
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(anchor) = self
+            .startup_options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.graphics_display_combo_anchor())
+        else {
+            return Ok(false);
+        };
+        let entries = GraphicsDisplayMode::ALL
+            .into_iter()
+            .map(|mode| {
+                ContextMenuEntry::new(mode.label())
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsDisplayMode(mode))
+            })
+            .collect();
+        self.open_context_menu_at(entries, anchor)
+    }
+
     fn open_classic_lobby_team_combo(
         &mut self,
         player_id: i32,
@@ -31868,6 +32299,18 @@ impl GameApp {
                                 let _ = self.reload_application_language_resources();
                                 self.open_options_menu();
                             }
+                        }
+                    }
+                    AppContextMenuCommand::OptionsDisplayMode(mode) => {
+                        let changed = self
+                            .startup_options_dialog
+                            .as_mut()
+                            .and_then(|dialog| dialog.graphics_mut().set_display_mode(mode))
+                            .is_some();
+                        if changed {
+                            self.queue_options_display_request(OptionsDisplayRequest::SetMode(
+                                mode,
+                            ));
                         }
                     }
                     AppContextMenuCommand::LobbyTeam { player_id, team_id } => {
@@ -32996,13 +33439,31 @@ impl GameApp {
         use lc_frontend::startup_options_dlg::{
             OptionsDlgAction, SoundCheckboxId, SoundSheetAction, SoundVolumeId,
         };
+        use lc_frontend::startup_options_graphics::GraphicsSheetAction;
+        use lc_frontend::startup_options_network::{NetworkCheckboxId, NetworkValidationError};
 
         for action in actions {
             match action {
-                OptionsDlgAction::Back => self.close_options_menu(),
-                OptionsDlgAction::SheetChanged(
-                    lc_frontend::startup_options_dlg::OptionsSheet::Program,
-                ) => self.play_ui_sound("Command"),
+                OptionsDlgAction::Back => {
+                    let validation = self
+                        .startup_options_dialog
+                        .as_ref()
+                        .map(|dialog| dialog.network().validate_ports())
+                        .unwrap_or(Ok(()));
+                    match validation {
+                        Ok(()) => self.close_options_menu(),
+                        Err(NetworkValidationError::TcpReferenceConflict) => {
+                            self.show_options_network_validation_error(
+                                "The TCP port and reference server port must be different.",
+                            )?;
+                        }
+                        Err(NetworkValidationError::UdpDiscoveryConflict) => {
+                            self.show_options_network_validation_error(
+                                "The UDP port and discovery port must be different.",
+                            )?;
+                        }
+                    }
+                }
                 OptionsDlgAction::SheetChanged(
                     lc_frontend::startup_options_dlg::OptionsSheet::Sound,
                 ) => {
@@ -33015,11 +33476,7 @@ impl GameApp {
                     }
                     self.play_ui_sound("Command");
                 }
-                OptionsDlgAction::SheetChanged(sheet) => {
-                    return Err(classic_startup_subscreen_error(
-                        ClassicStartupSubscreen::Options(sheet),
-                    ));
-                }
+                OptionsDlgAction::SheetChanged(_) => self.play_ui_sound("Command"),
                 OptionsDlgAction::ShowLogTimestampsChanged(enabled) => {
                     self.show_log_timestamps = enabled;
                     self.play_ui_sound("ArrowHit");
@@ -33054,6 +33511,61 @@ impl GameApp {
                         }
                     },
                 },
+                OptionsDlgAction::Graphics(action) => match action {
+                    GraphicsSheetAction::OpenDisplayModeCombo => {
+                        self.open_options_display_mode_combo()?;
+                    }
+                    GraphicsSheetAction::DisplayModeChanged(mode) => {
+                        self.queue_options_display_request(OptionsDisplayRequest::SetMode(mode));
+                    }
+                    GraphicsSheetAction::CheckboxChanged { .. }
+                    | GraphicsSheetAction::ScaleProposalChanged(_) => {
+                        self.play_ui_sound("ArrowHit");
+                    }
+                    GraphicsSheetAction::SmokeLevelChanged(value) => {
+                        self.graphics_smoke_level = value;
+                        self.engine.set_smoke_level(value);
+                        self.play_ui_sound("ArrowHit");
+                    }
+                    GraphicsSheetAction::TestScale {
+                        old_percent,
+                        new_percent,
+                    } => {
+                        self.begin_options_scale_test(old_percent, new_percent)?;
+                    }
+                },
+                OptionsDlgAction::OpenGraphicsScaleText => {
+                    self.open_options_graphics_scale_input()?;
+                }
+                OptionsDlgAction::BeginControlCapture(target) => {
+                    self.open_options_control_capture(target)?;
+                }
+                OptionsDlgAction::ResetControlBindings(device) => {
+                    self.reset_options_control_bindings(device);
+                    self.play_ui_sound("Command");
+                }
+                OptionsDlgAction::GamepadGuiControlChanged(enabled) => {
+                    self.gamepad_gui_control = enabled;
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::OpenNetworkText(field) => {
+                    self.open_options_network_input(field)?;
+                }
+                OptionsDlgAction::NetworkPortEnabledChanged { .. } => {
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::NetworkCheckboxChanged { id, checked } => {
+                    self.play_ui_sound("ArrowHit");
+                    if id == NetworkCheckboxId::UseAlternateServer && checked {
+                        let hidden = self
+                            .startup_options_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.network().hide_no_official_league_notice);
+                        if !hidden {
+                            self.show_options_alternate_server_notice()?;
+                        }
+                    }
+                }
                 OptionsDlgAction::UnsupportedProgramFocus(target) => {
                     return Err(classic_startup_action_error(
                         ClassicStartupAction::OptionsProgramFocus(target),
@@ -33069,6 +33581,233 @@ impl GameApp {
             lc_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
             lc_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
         });
+    }
+
+    fn show_options_network_validation_error(&mut self, message: &str) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                "Network configuration error",
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn begin_options_scale_test(
+        &mut self,
+        old_percent: i32,
+        new_percent: i32,
+    ) -> Result<(), EngineError> {
+        let dialog = lc_frontend::message_dialog::MessageDialogState::new(
+            "Keep this display scale?|12 seconds remaining.",
+            "Test graphics scale",
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+            lc_frontend::message_dialog::MessageDialogSize::Regular,
+            true,
+        );
+        self.push_message_dialog(
+            dialog,
+            MessageDialogContinuation::OptionsScaleTest {
+                old_percent,
+                new_percent,
+                remaining_seconds: 12,
+            },
+        )?;
+        self.queue_options_display_request(OptionsDisplayRequest::SetScale {
+            percent: new_percent,
+            persist: false,
+        });
+        Ok(())
+    }
+
+    fn open_options_control_capture(
+        &mut self,
+        target: lc_frontend::startup_options_controls::ControlCaptureTarget,
+    ) -> Result<(), EngineError> {
+        let control = ControlBindingId::ALL
+            .get(target.control)
+            .copied()
+            .map(binding_display_name)
+            .unwrap_or("Unknown control");
+        let (message, icon) = match target.device {
+            lc_frontend::startup_options_controls::ControlDevice::Keyboard => (
+                format!(
+                    "Press the key for \"{control}\" on keyboard block {}.",
+                    target.set + 1
+                ),
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(24),
+            ),
+            lc_frontend::startup_options_controls::ControlDevice::Gamepad => (
+                format!(
+                    "Press the button for \"{control}\" on gamepad {}.",
+                    target.set + 1
+                ),
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(25),
+            ),
+        };
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                message,
+                "Assign key",
+                lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                icon,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::OptionsControlCapture(target),
+        )
+    }
+
+    fn reset_options_control_bindings(
+        &mut self,
+        device: lc_frontend::startup_options_controls::ControlDevice,
+    ) {
+        match device {
+            lc_frontend::startup_options_controls::ControlDevice::Keyboard => {
+                self.bindings.reset_all();
+            }
+            lc_frontend::startup_options_controls::ControlDevice::Gamepad => {
+                self.gamepad_bindings.reset_all();
+            }
+        }
+        self.refresh_options_control_labels(device);
+    }
+
+    fn refresh_options_control_labels(
+        &mut self,
+        device: lc_frontend::startup_options_controls::ControlDevice,
+    ) {
+        use lc_frontend::startup_options_controls::{
+            ControlCaptureTarget, CONTROL_KEY_COUNT, CONTROL_SET_COUNT,
+        };
+        let Some(dialog) = self.startup_options_dialog.as_mut() else {
+            return;
+        };
+        for set in 0..CONTROL_SET_COUNT {
+            for control in 0..CONTROL_KEY_COUNT {
+                let Some(id) = ControlBindingId::ALL.get(control).copied() else {
+                    continue;
+                };
+                let label = match device {
+                    lc_frontend::startup_options_controls::ControlDevice::Keyboard => self
+                        .bindings
+                        .key_for_set(set, id)
+                        .map(format_key_label)
+                        .unwrap_or_else(|| "Undefined".to_string()),
+                    lc_frontend::startup_options_controls::ControlDevice::Gamepad => {
+                        self.gamepad_bindings.key_label_for_set(set, id)
+                    }
+                };
+                dialog.controls_mut().set_label(
+                    ControlCaptureTarget {
+                        device,
+                        set,
+                        control,
+                    },
+                    label,
+                );
+            }
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn show_options_alternate_server_notice(&mut self) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Games using an alternate server are not part of the official league.",
+                "Master server",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            )
+            .with_us_dont_show_again(false),
+            MessageDialogContinuation::OptionsAlternateServerNotice,
+        )
+    }
+
+    fn open_options_network_input(
+        &mut self,
+        field: lc_frontend::startup_options_network::NetworkTextField,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::startup_options_network::NetworkTextField;
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Options network input",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        let Some(network) = self
+            .startup_options_dialog
+            .as_ref()
+            .map(|dialog| dialog.network())
+        else {
+            return Ok(());
+        };
+        let (message, caption, initial, max_text) = match field {
+            NetworkTextField::Port(id) => (
+                "Enter network port:",
+                "Network port",
+                network.port(id).port.to_string(),
+                6,
+            ),
+            NetworkTextField::AlternateServerAddress => (
+                "Enter alternate server address:",
+                "Master server",
+                network.alternate_server_address.clone(),
+                256,
+            ),
+            NetworkTextField::LocalName => (
+                "Enter computer name:",
+                "Computer name",
+                network.local_name.clone(),
+                26,
+            ),
+            NetworkTextField::Nick => ("Enter user name:", "User name", network.nick.clone(), 26),
+        };
+        let controller = InputDialogController::new(message, caption, InputDialogIcon::None)
+            .with_max_text(max_text)
+            .with_input_text(&initial);
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::OptionsNetwork(field),
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn open_options_graphics_scale_input(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Options graphics scale input",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        let Some(scale) = self
+            .startup_options_dialog
+            .as_ref()
+            .map(|dialog| dialog.graphics().proposed_scale_percent)
+        else {
+            return Ok(());
+        };
+        let controller = InputDialogController::new(
+            "Enter display scale (100-300):",
+            "Graphics scale",
+            InputDialogIcon::None,
+        )
+        .with_max_text(4)
+        .with_input_text(&scale.to_string());
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::OptionsGraphicsScale,
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
     }
 
     fn process_about_dialog_actions(
@@ -34867,9 +35606,17 @@ impl GameApp {
 
     fn open_options_menu(&mut self) {
         self.close_context_menu_silently();
-        let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::with_sound(
+        let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::with_all(
             load_options_program_state(self.app_paths.as_ref()),
             load_options_sound_state(self.audio.as_ref()),
+            load_options_graphics_state(self.app_paths.as_ref()),
+            load_options_control_state(
+                &self.bindings,
+                &self.gamepad_bindings,
+                self.gamepads.connected_count(),
+                self.gamepad_gui_control,
+            ),
+            load_options_network_state(self.app_paths.as_ref()),
         );
         if let (Some(fonts), Some(book)) = (
             self.assets.clonk_fonts.as_deref(),
@@ -34888,18 +35635,20 @@ impl GameApp {
     }
 
     fn persist_open_options_config(&self) -> Option<io::Result<()>> {
-        self.app_paths
-            .as_ref()
-            .zip(self.startup_options_dialog.as_ref())
-            .map(|(paths, dialog)| {
-                persist_startup_options_config(
-                    paths,
-                    &dialog.program().language,
-                    &dialog.program().language_ex,
-                    dialog.program().show_log_timestamps,
-                    self.audio.as_ref().map(|audio| &audio.options),
-                )
-            })
+        let paths = self.app_paths.as_ref()?;
+        let dialog = self.startup_options_dialog.as_ref()?;
+        Some(persist_startup_options_config(
+            paths,
+            &dialog.program().language,
+            &dialog.program().language_ex,
+            dialog.program().show_log_timestamps,
+            self.audio.as_ref().map(|audio| &audio.options),
+            dialog.graphics(),
+            dialog.network(),
+            &self.bindings,
+            &self.gamepad_bindings,
+            self.gamepad_gui_control,
+        ))
     }
 
     fn reload_application_language_resources(&mut self) -> Result<String> {
@@ -35069,6 +35818,11 @@ impl GameApp {
         } else {
             false
         }
+    }
+
+    fn queue_options_display_request(&mut self, request: OptionsDisplayRequest) {
+        self.pending_options_display_requests.push_back(request);
+        self.mark_menu_dirty();
     }
 
     fn take_user_attention_request(&mut self) -> bool {
@@ -36891,6 +37645,7 @@ impl GameApp {
         self.deactivate_inactive_network_clients();
         let lobby_countdown_changed = self.tick_network_lobby_countdown();
         let ready_check_changed = self.tick_lobby_ready_check_prompt();
+        let scale_test_changed = self.tick_options_scale_test_prompt();
         let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
         let vote_timeout_changed = self.tick_host_league_vote_timeout_at(now);
         let before = self.engine.game_time();
@@ -36910,6 +37665,7 @@ impl GameApp {
         Ok(status_reached == RuntimeStatusReachOutcome::Reported
             || lobby_countdown_changed
             || ready_check_changed
+            || scale_test_changed
             || vote_timeout_changed
             || after != before)
     }
@@ -37000,6 +37756,58 @@ impl GameApp {
         } else {
             self.mark_menu_dirty();
         }
+        true
+    }
+
+    fn tick_options_scale_test_prompt(&mut self) -> bool {
+        let Some(prompt_index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::OptionsScaleTest { .. }
+            )
+        }) else {
+            return false;
+        };
+        let expires = self
+            .message_dialogs
+            .get_mut(prompt_index)
+            .is_some_and(|dialog| {
+                let MessageDialogContinuation::OptionsScaleTest {
+                    remaining_seconds, ..
+                } = &mut dialog.continuation
+                else {
+                    return false;
+                };
+                if *remaining_seconds <= 1 {
+                    return true;
+                }
+                *remaining_seconds -= 1;
+                dialog.state.set_message(format!(
+                    "Keep this display scale?|{} seconds remaining.",
+                    *remaining_seconds
+                ));
+                false
+            });
+        if expires {
+            if prompt_index + 1 == self.message_dialogs.len() {
+                if let Err(error) = self.finish_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogResult::Dismissed,
+                ) {
+                    tracing::error!(%error, "failed to expire graphics scale test");
+                }
+            } else if let MessageDialogContinuation::OptionsScaleTest { old_percent, .. } =
+                self.message_dialogs.remove(prompt_index).continuation
+            {
+                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    dialog.graphics_mut().revert_scale_test();
+                }
+                self.queue_options_display_request(OptionsDisplayRequest::SetScale {
+                    percent: old_percent,
+                    persist: false,
+                });
+            }
+        }
+        self.mark_menu_dirty();
         true
     }
 
@@ -37852,6 +38660,18 @@ impl GameApp {
                             );
                             self.finish_game_option_input(actions)?;
                         }
+                        PendingInputDialogPurpose::OptionsGraphicsScale => {
+                            if let Ok(value) = text.trim().parse::<i32>() {
+                                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                                    dialog.graphics_mut().set_scale_spinbox_value(value);
+                                }
+                            }
+                        }
+                        PendingInputDialogPurpose::OptionsNetwork(field) => {
+                            if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                                dialog.network_mut().set_text(field, text);
+                            }
+                        }
                         PendingInputDialogPurpose::ScenarioMissionAccess => {
                             self.apply_scenario_mission_access(&text)?;
                         }
@@ -37879,6 +38699,8 @@ impl GameApp {
                             );
                             self.finish_game_option_input(actions)?;
                         }
+                        PendingInputDialogPurpose::OptionsGraphicsScale
+                        | PendingInputDialogPurpose::OptionsNetwork(_) => {}
                         PendingInputDialogPurpose::ScenarioMissionAccess => {}
                         PendingInputDialogPurpose::StartupCrew(_) => {}
                     }
@@ -38060,6 +38882,7 @@ impl GameApp {
         let Some(pending) = self.message_dialogs.pop() else {
             return Ok(());
         };
+        let notice_checkbox = pending.state.checkbox_checked();
         self.mark_menu_dirty();
         if let Some(dialog) = self.message_dialogs.last_mut() {
             dialog.state.cancel_interaction();
@@ -38116,6 +38939,32 @@ impl GameApp {
                 self.delete_scenario_and_refresh(&path, next_identifier.as_deref())?;
             }
             MessageDialogContinuation::DeleteScenario { .. } => {}
+            MessageDialogContinuation::OptionsScaleTest {
+                old_percent,
+                new_percent,
+                ..
+            } => {
+                let accepted = result == lc_frontend::message_dialog::MessageDialogResult::Yes;
+                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    if accepted {
+                        dialog.graphics_mut().commit_scale_test();
+                    } else {
+                        dialog.graphics_mut().revert_scale_test();
+                    }
+                }
+                self.queue_options_display_request(OptionsDisplayRequest::SetScale {
+                    percent: if accepted { new_percent } else { old_percent },
+                    persist: accepted,
+                });
+            }
+            MessageDialogContinuation::OptionsControlCapture(_) => {}
+            MessageDialogContinuation::OptionsAlternateServerNotice => {
+                if notice_checkbox == Some(true) {
+                    if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                        dialog.network_mut().hide_no_official_league_notice = true;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -39230,15 +40079,7 @@ impl GameApp {
             )));
         }
         let subscreen = match self.startup_view {
-            StartupView::Options => self.startup_options_dialog.as_ref().and_then(|dialog| {
-                let sheet = dialog.active_sheet();
-                (!matches!(
-                    sheet,
-                    lc_frontend::startup_options_dlg::OptionsSheet::Program
-                        | lc_frontend::startup_options_dlg::OptionsSheet::Sound
-                ))
-                .then_some(ClassicStartupSubscreen::Options(sheet))
-            }),
+            StartupView::Options => None,
             StartupView::About => None,
             StartupView::NetworkGame => self.startup_network_dialog.as_ref().and_then(|dialog| {
                 (dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat)
@@ -66585,18 +67426,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                     lc_frontend::startup_options_dlg::OptionsSheet::Network,
                 ];
                 for sheet in sheets {
-                    let result = app.handle_key(VirtualKeyCode::Down, ElementState::Pressed);
-                    if sheet == lc_frontend::startup_options_dlg::OptionsSheet::Sound {
-                        result.expect("the classic Sound sheet is implemented");
-                    } else {
-                        let error = result.expect_err("unported options sheet must fail on entry");
-                        assert_engine_parity_boundary(
-                            error,
-                            ClassicParityBoundary::StartupSubscreen(
-                                ClassicStartupSubscreen::Options(sheet),
-                            ),
-                        );
-                    }
+                    app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+                        .unwrap_or_else(|error| panic!("open Options {sheet:?}: {error}"));
                     app.handle_key(VirtualKeyCode::Down, ElementState::Released)
                         .expect("release options sheet key");
                     if sheet == target {
@@ -66790,21 +67621,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn unported_startup_subscreens_precede_status_and_matching_cache_pixels() {
         let mut app = new_classic_menu_app(640, 480);
-        let cases = [
-            ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            ),
-            ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
-            ),
-            ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Gamepad,
-            ),
-            ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Network,
-            ),
-            ClassicStartupSubscreen::NetworkGameChat,
-        ];
+        let cases = [ClassicStartupSubscreen::NetworkGameChat];
 
         for (index, subscreen) in cases.into_iter().enumerate() {
             enter_unported_startup_subscreen(&mut app, subscreen);
@@ -67376,9 +68193,8 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn keyboard_subscreen_cannot_mutate_bindings_and_back_reconstructs_main() {
+    fn keyboard_subscreen_back_reconstructs_main() {
         let mut app = new_classic_menu_app(640, 480);
-        let before = ControlBindingId::ALL.map(|binding| (binding, app.bindings.key_for(binding)));
         enter_unported_startup_subscreen(
             &mut app,
             ClassicStartupSubscreen::Options(
@@ -67386,20 +68202,6 @@ public func Grant(password) { return GainMissionAccess(password); }
             ),
         );
 
-        app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
-            .expect("generic reset route is disconnected");
-        app.handle_key(VirtualKeyCode::R, ElementState::Released)
-            .expect("release generic reset probe");
-        let content = GuiPoint::new(320.0, 240.0);
-        app.handle_touch(TouchPhase::Started, content)
-            .expect("touch probe on unported sheet");
-        app.handle_touch(TouchPhase::Ended, content)
-            .expect("release touch probe");
-
-        assert_eq!(
-            ControlBindingId::ALL.map(|binding| (binding, app.bindings.key_for(binding))),
-            before
-        );
         assert!(app.status_text.is_empty());
         app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
             .expect("classic Options Back remains routed to OptionsDlgState");
@@ -67551,7 +68353,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn production_gamepad_batch_invalidates_cache_once_before_subscreen_boundary() {
+    fn production_gamepad_batch_invalidates_cache_once_when_switching_options_sheet() {
         let mut app = new_classic_menu_app(640, 480);
         let mut frame = vec![0_u8; 640 * 480 * 4];
         app.render(&mut frame).expect("cache supported main menu");
@@ -67569,33 +68371,16 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.render(&mut frame)
             .expect("cache supported Program sheet");
         let options_version = app.menu_render_version;
-        let error = app
-            .process_gamepad_event_batch([GamepadEvent::Direction {
-                slot: GamepadSlot::new(0),
-                button: ControlButton::Down,
-                state: ElementState::Pressed,
-            }])
-            .expect_err("D-pad enters unsupported Graphics sheet");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            )),
-        );
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
+            button: ControlButton::Down,
+            state: ElementState::Pressed,
+        }])
+        .expect("D-pad enters Graphics sheet");
         assert_eq!(app.menu_render_version, options_version.wrapping_add(1));
         let mut sentinel = vec![0xa9; 640 * 480 * 4];
-        let error = app
-            .render(&mut sentinel)
-            .expect_err("render also rejects Graphics before stale cache");
-        assert_eq!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(&ClassicParityBoundary::StartupSubscreen(
-                ClassicStartupSubscreen::Options(
-                    lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-                ),
-            ))
-        );
-        assert!(sentinel.iter().all(|byte| *byte == 0xa9));
+        assert!(app.render(&mut sentinel).expect("render Graphics sheet"));
+        assert!(sentinel.iter().any(|byte| *byte != 0xa9));
     }
 
     #[test]
@@ -72387,6 +73172,407 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn options_ctrl_tab_traverses_all_six_live_sheets_without_a_boundary() {
+        use lc_frontend::startup_options_dlg::OptionsSheet;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold Ctrl");
+        for expected in [
+            OptionsSheet::Graphics,
+            OptionsSheet::Sound,
+            OptionsSheet::Keyboard,
+            OptionsSheet::Gamepad,
+            OptionsSheet::Network,
+            OptionsSheet::Program,
+        ] {
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("open {expected:?}: {error}"));
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release Ctrl+Tab");
+            assert_eq!(
+                app.startup_options_dialog
+                    .as_ref()
+                    .expect("options dialog")
+                    .active_sheet(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn options_scale_test_times_out_reverts_and_yes_commits() {
+        use lc_frontend::message_dialog::MessageDialogResult;
+        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+        use lc_frontend::startup_options_graphics::GraphicsSheetAction;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        app.process_options_dialog_actions(vec![OptionsDlgAction::OpenGraphicsScaleText])
+            .expect("open scale spinbox editor");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "225".to_string(),
+        )])
+        .expect("submit scale spinbox editor");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .graphics()
+                .proposed_scale_percent,
+            225
+        );
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .graphics_mut()
+            .set_proposed_scale_percent(150);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Graphics(
+            GraphicsSheetAction::TestScale {
+                old_percent: 100,
+                new_percent: 150,
+            },
+        )])
+        .expect("begin scale test");
+        assert_eq!(
+            app.pending_options_display_requests.pop_front(),
+            Some(OptionsDisplayRequest::SetScale {
+                percent: 150,
+                persist: false,
+            })
+        );
+        assert!(app
+            .message_dialogs
+            .last()
+            .is_some_and(|dialog| dialog.state.message().contains("12 seconds")));
+        for _ in 0..12 {
+            app.sec1_timer().expect("advance scale countdown");
+        }
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(
+            app.pending_options_display_requests.pop_front(),
+            Some(OptionsDisplayRequest::SetScale {
+                percent: 100,
+                persist: false,
+            })
+        );
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .graphics()
+                .proposed_scale_percent,
+            100
+        );
+
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .graphics_mut()
+            .set_proposed_scale_percent(175);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Graphics(
+            GraphicsSheetAction::TestScale {
+                old_percent: 100,
+                new_percent: 175,
+            },
+        )])
+        .expect("begin accepted scale test");
+        assert!(app.pending_options_display_requests.pop_front().is_some());
+        app.finish_message_dialog(MessageDialogResult::Yes)
+            .expect("accept scale");
+        assert_eq!(
+            app.pending_options_display_requests.pop_front(),
+            Some(OptionsDisplayRequest::SetScale {
+                percent: 175,
+                persist: true,
+            })
+        );
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .graphics()
+                .applied_scale_percent,
+            175
+        );
+
+        app.startup_options_dialog
+            .as_mut()
+            .unwrap()
+            .graphics_mut()
+            .set_proposed_scale_percent(200);
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Graphics(
+            GraphicsSheetAction::TestScale {
+                old_percent: 175,
+                new_percent: 200,
+            },
+        )])
+        .expect("begin rejected scale test");
+        assert!(app.pending_options_display_requests.pop_front().is_some());
+        app.finish_message_dialog(MessageDialogResult::No)
+            .expect("reject scale");
+        assert_eq!(
+            app.pending_options_display_requests.pop_front(),
+            Some(OptionsDisplayRequest::SetScale {
+                percent: 175,
+                persist: false,
+            })
+        );
+    }
+
+    #[test]
+    fn options_key_capture_matches_classic_modal_and_production_input_routing() {
+        use lc_frontend::message_dialog::MessageDialogIcon;
+        use lc_frontend::startup_options_controls::{ControlCaptureTarget, ControlDevice};
+        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        let keyboard_target = ControlCaptureTarget {
+            device: ControlDevice::Keyboard,
+            set: 2,
+            control: ControlBindingId::Dig as usize,
+        };
+        app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(
+            keyboard_target,
+        )])
+        .expect("open keyboard capture");
+        let keyboard_modal = app.message_dialogs.last().expect("keyboard capture modal");
+        assert_eq!(keyboard_modal.state.caption(), "Assign key");
+        assert_eq!(
+            keyboard_modal.state.message(),
+            "Press the key for \"Dig\" on keyboard block 3."
+        );
+        assert_eq!(keyboard_modal.state.icon(), MessageDialogIcon::Standard(24));
+
+        let previous_key = app
+            .bindings
+            .key_for_set(2, ControlBindingId::Dig)
+            .expect("keyboard set 3 Dig binding");
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("ignore modified keyboard key");
+        assert_eq!(
+            app.bindings.key_for_set(2, ControlBindingId::Dig),
+            Some(previous_key)
+        );
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::OptionsControlCapture(target) if target == keyboard_target
+        )));
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release modified keyboard key");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("capture bare Escape before the dialog cancel binding");
+        assert_eq!(
+            app.bindings.key_for_set(2, ControlBindingId::Dig),
+            Some(VirtualKeyCode::Escape)
+        );
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .controls()
+                .label(keyboard_target),
+            Some("Escape")
+        );
+        let mut config = Config::new();
+        app.bindings.write_to_config(&mut config);
+        assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release captured Escape key");
+
+        let gamepad_target = ControlCaptureTarget {
+            device: ControlDevice::Gamepad,
+            set: 2,
+            control: ControlBindingId::Dig as usize,
+        };
+        app.process_options_dialog_actions(vec![OptionsDlgAction::BeginControlCapture(
+            gamepad_target,
+        )])
+        .expect("open gamepad capture");
+        let gamepad_modal = app.message_dialogs.last().expect("gamepad capture modal");
+        assert_eq!(gamepad_modal.state.caption(), "Assign key");
+        assert_eq!(
+            gamepad_modal.state.message(),
+            "Press the button for \"Dig\" on gamepad 3."
+        );
+        assert_eq!(gamepad_modal.state.icon(), MessageDialogIcon::Standard(25));
+
+        let source = |gamepad, cluster, event| SourcedGamepadEvent {
+            gamepad,
+            cluster,
+            event,
+        };
+        let wrong_slot = GamepadSlot::new(1);
+        app.process_sourced_gamepad_event_batch(
+            [
+                source(
+                    1,
+                    0,
+                    GamepadEvent::GuiButton {
+                        slot: wrong_slot,
+                        class: GuiButtonClass::High,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    1,
+                    0,
+                    GamepadEvent::Action {
+                        slot: wrong_slot,
+                        action: GamepadActionType::Cancel,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    1,
+                    0,
+                    GamepadEvent::Button {
+                        slot: wrong_slot,
+                        button: LegacyGamepadButton::new(3),
+                        state: ElementState::Pressed,
+                    },
+                ),
+            ],
+            true,
+        )
+        .expect("consume another pad's complete input cluster");
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::OptionsControlCapture(target) if target == gamepad_target
+        )));
+        assert_eq!(
+            app.gamepad_bindings
+                .raw_key_for_set(2, ControlBindingId::Dig),
+            None
+        );
+        let selected_slot = GamepadSlot::new(2);
+        app.process_sourced_gamepad_event_batch(
+            [
+                source(
+                    2,
+                    1,
+                    GamepadEvent::Direction {
+                        slot: selected_slot,
+                        button: ControlButton::Right,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    2,
+                    1,
+                    GamepadEvent::GuiButton {
+                        slot: selected_slot,
+                        class: GuiButtonClass::High,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    2,
+                    1,
+                    GamepadEvent::Action {
+                        slot: selected_slot,
+                        action: GamepadActionType::MenuToggle,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    2,
+                    1,
+                    GamepadEvent::Button {
+                        slot: selected_slot,
+                        button: LegacyGamepadButton::new(5),
+                        state: ElementState::Pressed,
+                    },
+                ),
+            ],
+            false,
+        )
+        .expect("capture selected pad's raw high button through production routing");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(
+            app.gamepad_bindings
+                .raw_key_for_set(2, ControlBindingId::Dig),
+            input::legacy_gamepad_button_key(2, 5)
+        );
+    }
+
+    #[test]
+    fn options_network_back_validates_both_port_pairs_and_alternate_notice_gate() {
+        use lc_frontend::message_dialog::MessageDialogResult;
+        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+        use lc_frontend::startup_options_network::{NetworkCheckboxId, NetworkPortId};
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        {
+            let network = app.startup_options_dialog.as_mut().unwrap().network_mut();
+            let tcp = network.port(NetworkPortId::Tcp).port;
+            network.port_mut(NetworkPortId::Reference).port = tcp;
+        }
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
+            .expect("show TCP/reference validation");
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert!(app
+            .message_dialogs
+            .last()
+            .is_some_and(|dialog| dialog.state.message().contains("TCP port")));
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("dismiss TCP error");
+
+        {
+            let network = app.startup_options_dialog.as_mut().unwrap().network_mut();
+            network.port_mut(NetworkPortId::Reference).port = 11_111;
+            let udp = network.port(NetworkPortId::Udp).port;
+            network.port_mut(NetworkPortId::Discovery).port = udp;
+        }
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Back])
+            .expect("show UDP/discovery validation");
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert!(app
+            .message_dialogs
+            .last()
+            .is_some_and(|dialog| dialog.state.message().contains("UDP port")));
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("dismiss UDP error");
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::NetworkCheckboxChanged {
+            id: NetworkCheckboxId::UseAlternateServer,
+            checked: true,
+        }])
+        .expect("show alternate-server notice");
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::OptionsAlternateServerNotice
+        )));
+        app.message_dialogs
+            .last_mut()
+            .unwrap()
+            .state
+            .handle_hotkey('D');
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("accept don't-show gate");
+        assert!(
+            app.startup_options_dialog
+                .as_ref()
+                .unwrap()
+                .network()
+                .hide_no_official_league_notice
+        );
+        app.process_options_dialog_actions(vec![OptionsDlgAction::NetworkCheckboxChanged {
+            id: NetworkCheckboxId::UseAlternateServer,
+            checked: true,
+        }])
+        .expect("hidden alternate-server notice");
+        assert!(app.message_dialogs.is_empty());
+    }
+
+    #[test]
     fn options_language_loads_real_de_and_selection_reloads_and_persists() {
         let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -72588,15 +73774,8 @@ ScenInfoArea=70,5,25,90
         app.render(&mut program_frame)
             .expect("Program remains available without audio");
 
-        let graphics_error = app
-            .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
-            .expect_err("Graphics remains an unported typed boundary");
-        assert_engine_parity_boundary(
-            graphics_error,
-            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            )),
-        );
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("Graphics remains available without audio");
         app.handle_key(VirtualKeyCode::Down, ElementState::Released)
             .expect("release Graphics navigation");
 
@@ -72697,14 +73876,16 @@ ScenInfoArea=70,5,25,90
         keyboard
             .handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::SHIFT)
             .expect("hold Ctrl+Shift");
-        let error = keyboard
+        keyboard
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect_err("Ctrl+Shift+Tab cycles the sheet despite child focus");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            )),
+            .expect("Ctrl+Shift+Tab cycles the sheet despite child focus");
+        assert_eq!(
+            keyboard
+                .startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .active_sheet(),
+            lc_frontend::startup_options_dlg::OptionsSheet::Graphics
         );
 
         let mut gamepad = new_running_sandbox_app();
@@ -73105,6 +74286,27 @@ ScenInfoArea=70,5,25,90
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("release Ctrl");
 
+        {
+            use lc_frontend::startup_options_graphics::GraphicsDisplayMode;
+            use lc_frontend::startup_options_network::NetworkPortId;
+            let dialog = app.startup_options_dialog.as_mut().unwrap();
+            dialog
+                .graphics_mut()
+                .set_display_mode(GraphicsDisplayMode::Window);
+            dialog.graphics_mut().smoke_level = 73;
+            dialog.graphics_mut().fire_particles = false;
+            dialog.network_mut().port_mut(NetworkPortId::Tcp).enabled = false;
+            dialog.network_mut().use_alternate_server = true;
+            dialog.network_mut().local_name = "Same Name".to_string();
+            dialog.network_mut().nick = "Same Name".to_string();
+            dialog.network_mut().hide_no_official_league_notice = true;
+        }
+        app.bindings
+            .rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::Z);
+        app.gamepad_bindings
+            .rebind_button(1, ControlBindingId::Up, 1, 4);
+        app.gamepad_gui_control = true;
+
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("close options");
 
@@ -73124,6 +74326,25 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             config.get_in(Some("Sound"), "VendorExtension"),
             Some("keep-me")
+        );
+        assert_eq!(config.get_in(Some("Graphics"), "DisplayMode"), Some("Window"));
+        assert_eq!(config.get_in(Some("Graphics"), "SmokeLevel"), Some("73"));
+        assert_eq!(config.get_in(Some("Graphics"), "FireParticles"), Some("0"));
+        assert_eq!(config.get_in(Some("Network"), "PortTCP"), Some("0"));
+        assert_eq!(config.get_in(Some("Network"), "UseAlternateServer"), Some("1"));
+        assert_eq!(config.get_in(Some("Network"), "LocalName"), Some("Same Name"));
+        assert_eq!(config.get_in(Some("Network"), "Nick"), Some(""));
+        assert_eq!(
+            config.get_in(Some("Startup"), "HideMsgNoOfficialLeague"),
+            Some("1")
+        );
+        assert!(config.get_in(Some("Controls"), "Kbd3Key6").is_some());
+        assert_eq!(config.get_in(Some("Controls"), "GamepadGuiControl"), Some("1"));
+        assert_eq!(
+            config.get_in(Some("Gamepad1"), "Button5"),
+            input::legacy_gamepad_button_key(1, 4)
+                .map(|key| key.to_string())
+                .as_deref()
         );
     }
 
@@ -73888,15 +75109,8 @@ ScenInfoArea=70,5,25,90
 
         click_main_button(&mut app, 3);
         assert_eq!(app.startup_view, StartupView::Options);
-        let error = app
-            .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
-            .expect_err("select Graphics sheet");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            )),
-        );
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("select Graphics sheet");
         app.handle_key(VirtualKeyCode::Down, ElementState::Released)
             .expect("release Graphics navigation");
         assert_eq!(
@@ -73918,15 +75132,8 @@ ScenInfoArea=70,5,25,90
             lc_frontend::startup_options_dlg::OptionsSheet::Sound
         );
 
-        let error = app
-            .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
-            .expect_err("advance to the unported Keyboard sheet");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
-            )),
-        );
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("advance to the Keyboard sheet");
         app.handle_key(VirtualKeyCode::Down, ElementState::Released)
             .expect("release Keyboard navigation");
         assert_eq!(

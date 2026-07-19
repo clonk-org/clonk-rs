@@ -32,6 +32,20 @@
 
 use crate::clonk_fonts::ClonkFontSet;
 use crate::startup_main_menu::{draw_bar, IntRect};
+use crate::startup_options_controls::{
+    control_sheet_hit_test, ControlCaptureTarget, ControlDevice, ControlSheetHit,
+    ControlSheetLayout, ControlSheetState, CONTROL_KEY_COUNT, CONTROL_KEY_LABELS,
+};
+use crate::startup_options_graphics::{
+    graphics_hit_test, graphics_sheet_layout, GraphicsCheckboxId, GraphicsHitTarget,
+    GraphicsSheetAction, GraphicsSheetLayout, GraphicsSheetState, GraphicsSliderId,
+    GraphicsSliderPart, SpinboxDirection, MAX_GRAPHICS_SCALE_PERCENT, MAX_SMOKE_LEVEL,
+    MIN_GRAPHICS_SCALE_PERCENT, MIN_SMOKE_LEVEL,
+};
+use crate::startup_options_network::{
+    network_sheet_hit_test, NetworkCheckboxId, NetworkPortId, NetworkSheetHit, NetworkSheetLayout,
+    NetworkSheetState, NetworkTextField,
+};
 use crate::{
     draw_image_bilinear, draw_image_bilinear_additive, draw_image_strip, GuiPoint, ImageData,
     KeyCode,
@@ -404,6 +418,9 @@ pub struct OptionsDlgLayout {
     pub advanced_button: IntRect,
     /// Sound sheet groups and children (`C4StartupOptionsDlg.cpp:921-985`).
     pub sound: SoundSheetLayout,
+    pub graphics: GraphicsSheetLayout,
+    pub controls: ControlSheetLayout,
+    pub network: NetworkSheetLayout,
 }
 
 /// Computes the dialog layout, mirroring C4StartupOptionsDlg.cpp:609-985.
@@ -712,6 +729,9 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
         loud_labels,
         sliders,
     };
+    let graphics = graphics_sheet_layout(sheet);
+    let controls = ControlSheetLayout::from_sheet(sheet, book.book.line_height);
+    let network = NetworkSheetLayout::from_sheet(sheet, book.book.line_height);
 
     OptionsDlgLayout {
         client,
@@ -742,6 +762,9 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
         reset_button,
         advanced_button,
         sound,
+        graphics,
+        controls,
+        network,
     }
 }
 
@@ -1115,6 +1138,20 @@ pub enum OptionsDlgAction {
     /// One ordered callback/feedback effect from the fully implemented Sound
     /// sheet. Ordering inside the outer action vector is observable.
     Sound(SoundSheetAction),
+    Graphics(GraphicsSheetAction),
+    OpenGraphicsScaleText,
+    BeginControlCapture(ControlCaptureTarget),
+    ResetControlBindings(ControlDevice),
+    GamepadGuiControlChanged(bool),
+    OpenNetworkText(NetworkTextField),
+    NetworkPortEnabledChanged {
+        id: NetworkPortId,
+        enabled: bool,
+    },
+    NetworkCheckboxChanged {
+        id: NetworkCheckboxId,
+        checked: bool,
+    },
     /// Gamepad focus traversal reached a Program-sheet control whose exact
     /// controller/presentation has not been ported yet.
     UnsupportedProgramFocus(OptionsProgramFocusTarget),
@@ -1150,6 +1187,9 @@ enum OptionsHit {
     ShowLogTimestamps,
     SoundCheckbox(SoundCheckboxId),
     SoundSlider(SoundVolumeId, SoundSliderPart),
+    Graphics(GraphicsHitTarget),
+    Control(ControlSheetHit),
+    Network(NetworkSheetHit),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1165,12 +1205,21 @@ enum SoundSliderDirection {
     Increment,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphicsSliderDirection {
+    Decrement,
+    Increment,
+}
+
 /// Live interaction and presentation state for the pixel-parity options
 /// dialog. It deliberately emits external work as actions instead of owning
 /// configuration persistence.
 pub struct OptionsDlgState {
     program: ProgramSheetState,
     sound: SoundSheetState,
+    graphics: GraphicsSheetState,
+    controls: ControlSheetState,
+    network: NetworkSheetState,
     active_sheet: OptionsSheet,
     /// The C++ ctor explicitly focuses the tabular after adding all controls
     /// (`C4StartupOptionsDlg.cpp:1039`).
@@ -1184,6 +1233,10 @@ pub struct OptionsDlgState {
     captured_sound_slider: Option<SoundVolumeId>,
     pressed_sound_arrow: Option<(SoundVolumeId, SoundSliderDirection)>,
     sound_slider_positions: [Option<i32>; 2],
+    captured_graphics_slider: Option<GraphicsSliderId>,
+    pressed_graphics_arrow: Option<(GraphicsSliderId, GraphicsSliderDirection)>,
+    graphics_slider_positions: [Option<i32>; 2],
+    pressed_release_target: Option<OptionsHit>,
 }
 
 impl Default for OptionsDlgState {
@@ -1200,9 +1253,28 @@ impl OptionsDlgState {
     /// Constructs the dialog from both directly bound option groups while
     /// preserving [`Self::new`] for existing Program-only callers.
     pub fn with_sound(program: ProgramSheetState, sound: SoundSheetState) -> Self {
+        Self::with_all(
+            program,
+            sound,
+            GraphicsSheetState::default(),
+            ControlSheetState::default(),
+            NetworkSheetState::default(),
+        )
+    }
+
+    pub fn with_all(
+        program: ProgramSheetState,
+        sound: SoundSheetState,
+        graphics: GraphicsSheetState,
+        controls: ControlSheetState,
+        network: NetworkSheetState,
+    ) -> Self {
         Self {
             program,
             sound,
+            graphics,
+            controls,
+            network,
             active_sheet: OptionsSheet::Program,
             focus: OptionsFocus::Tabular,
             layout: None,
@@ -1214,6 +1286,10 @@ impl OptionsDlgState {
             captured_sound_slider: None,
             pressed_sound_arrow: None,
             sound_slider_positions: [None; 2],
+            captured_graphics_slider: None,
+            pressed_graphics_arrow: None,
+            graphics_slider_positions: [None; 2],
+            pressed_release_target: None,
         }
     }
 
@@ -1228,17 +1304,26 @@ impl OptionsDlgState {
         self.layout = Some(options_dlg_layout(width.max(1), height.max(1), gui, book));
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
+        self.captured_graphics_slider = None;
+        self.pressed_graphics_arrow = None;
+        self.pressed_release_target = None;
         self.back_pointer_owned = false;
         self.pressed_back = false;
         self.sound_slider_positions = [None; 2];
+        self.graphics_slider_positions = [None; 2];
         self.sync_sound_slider_positions();
-        self.hovered = self
-            .pointer_position
-            .and_then(|point| {
-                self.layout
-                    .as_ref()
-                    .and_then(|layout| options_hit_test(layout, self.active_sheet, point))
-            });
+        self.sync_graphics_slider_positions();
+        self.hovered = self.pointer_position.and_then(|point| {
+            self.layout.as_ref().and_then(|layout| {
+                options_hit_test(
+                    layout,
+                    self.active_sheet,
+                    &self.controls,
+                    &self.network,
+                    point,
+                )
+            })
+        });
     }
 
     pub const fn active_sheet(&self) -> OptionsSheet {
@@ -1269,6 +1354,31 @@ impl OptionsDlgState {
 
     pub fn sound(&self) -> &SoundSheetState {
         &self.sound
+    }
+
+    pub fn graphics(&self) -> &GraphicsSheetState {
+        &self.graphics
+    }
+
+    pub fn graphics_mut(&mut self) -> &mut GraphicsSheetState {
+        self.graphics_slider_positions = [None; 2];
+        &mut self.graphics
+    }
+
+    pub fn controls(&self) -> &ControlSheetState {
+        &self.controls
+    }
+
+    pub fn controls_mut(&mut self) -> &mut ControlSheetState {
+        &mut self.controls
+    }
+
+    pub fn network(&self) -> &NetworkSheetState {
+        &self.network
+    }
+
+    pub fn network_mut(&mut self) -> &mut NetworkSheetState {
+        &mut self.network
     }
 
     /// Replaces all values from authoritative app configuration. Slider pixel
@@ -1312,12 +1422,28 @@ impl OptionsDlgState {
         })
     }
 
+    pub fn graphics_display_combo_anchor(&self) -> Option<GuiPoint> {
+        self.layout.as_ref().map(|layout| {
+            GuiPoint::new(
+                layout.graphics.display_mode_combo.x as f32,
+                (layout.graphics.display_mode_combo.y + layout.graphics.display_mode_combo.h)
+                    as f32,
+            )
+        })
+    }
+
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
         self.pointer_position = position;
         self.hovered = position.and_then(|point| {
-            self.layout
-                .as_ref()
-                .and_then(|layout| options_hit_test(layout, self.active_sheet, point))
+            self.layout.as_ref().and_then(|layout| {
+                options_hit_test(
+                    layout,
+                    self.active_sheet,
+                    &self.controls,
+                    &self.network,
+                    point,
+                )
+            })
         });
         if position.is_none() {
             self.pressed_back = false;
@@ -1339,6 +1465,9 @@ impl OptionsDlgState {
         self.pointer_down = false;
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
+        self.captured_graphics_slider = None;
+        self.pressed_graphics_arrow = None;
+        self.pressed_release_target = None;
         Vec::new()
     }
 
@@ -1353,13 +1482,28 @@ impl OptionsDlgState {
             self.hovered = None;
             return self.update_sound_slider_from_pointer(id, position);
         }
+        if let Some(id) = self.captured_graphics_slider {
+            self.pointer_position = Some(position);
+            self.hovered = None;
+            return self.update_graphics_slider_from_pointer(id, position);
+        }
         let previous_arrow = self.pressed_sound_arrow;
+        let previous_graphics_arrow = self.pressed_graphics_arrow;
         self.set_pointer_position(Some(position));
         if self.pointer_down
             && (previous_arrow.is_some()
                 || matches!(self.hovered, Some(OptionsHit::SoundSlider(_, _))))
         {
             return self.update_held_sound_arrow(position, previous_arrow);
+        }
+        if self.pointer_down
+            && (previous_graphics_arrow.is_some()
+                || matches!(
+                    self.hovered,
+                    Some(OptionsHit::Graphics(GraphicsHitTarget::Slider { .. }))
+                ))
+        {
+            return self.update_held_graphics_arrow(position, previous_graphics_arrow);
         }
         Vec::new()
     }
@@ -1369,6 +1513,9 @@ impl OptionsDlgState {
         self.back_pointer_owned = false;
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
+        self.captured_graphics_slider = None;
+        self.pressed_graphics_arrow = None;
+        self.pressed_release_target = None;
         self.set_pointer_position(Some(position));
         match self.hovered {
             Some(OptionsHit::Back) => {
@@ -1400,6 +1547,43 @@ impl OptionsDlgState {
                 self.pressed_back = false;
                 self.begin_sound_slider_pointer(id, part, position)
             }
+            Some(OptionsHit::Graphics(hit)) => {
+                self.pressed_back = false;
+                match hit {
+                    GraphicsHitTarget::Slider { id, part } => {
+                        self.begin_graphics_slider_pointer(id, part, position)
+                    }
+                    GraphicsHitTarget::DisplayModeCombo | GraphicsHitTarget::ScaleEdit => {
+                        // Like native ComboBox/Edit focus, the overlay opened by
+                        // these controls consumes the matching release.
+                        self.pointer_down = false;
+                        self.activate_graphics_hit(hit)
+                    }
+                    GraphicsHitTarget::ScaleSpinbox(_) | GraphicsHitTarget::ApplyScale => {
+                        self.pressed_release_target = self.hovered;
+                        Vec::new()
+                    }
+                    GraphicsHitTarget::Checkbox(_) => Vec::new(),
+                }
+            }
+            Some(OptionsHit::Control(hit)) => {
+                self.pressed_back = false;
+                if hit == ControlSheetHit::GamepadGui {
+                    Vec::new()
+                } else {
+                    self.pressed_release_target = self.hovered;
+                    Vec::new()
+                }
+            }
+            Some(OptionsHit::Network(hit)) => {
+                self.pressed_back = false;
+                if matches!(hit, NetworkSheetHit::Text(_)) {
+                    self.pointer_down = false;
+                    self.activate_network_hit(hit)
+                } else {
+                    Vec::new()
+                }
+            }
             None => {
                 self.pressed_back = false;
                 Vec::new()
@@ -1420,6 +1604,14 @@ impl OptionsDlgState {
             actions.extend(self.dispatch_pointer_up_target());
             return actions;
         }
+        if let Some(id) = self.captured_graphics_slider.take() {
+            let mut actions = self.update_graphics_slider_from_pointer(id, position);
+            self.set_pointer_position(Some(position));
+            self.pressed_graphics_arrow = None;
+            self.back_pointer_owned = false;
+            actions.extend(self.dispatch_pointer_up_target());
+            return actions;
+        }
         self.set_pointer_position(Some(position));
         if let Some((id, _)) = self.pressed_sound_arrow.take() {
             let released_inside_scrollbar = self
@@ -1432,6 +1624,7 @@ impl OptionsDlgState {
                 ))];
             }
         }
+        self.pressed_graphics_arrow = None;
         if self.back_pointer_owned {
             self.back_pointer_owned = false;
             self.pressed_back = self.hovered == Some(OptionsHit::Back);
@@ -1440,6 +1633,7 @@ impl OptionsDlgState {
     }
 
     fn dispatch_pointer_up_target(&mut self) -> Vec<OptionsDlgAction> {
+        let pressed_release_target = self.pressed_release_target.take();
         let activate_back = self.pressed_back && self.hovered == Some(OptionsHit::Back);
         self.pressed_back = false;
         if activate_back {
@@ -1454,7 +1648,25 @@ impl OptionsDlgState {
         if let Some(OptionsHit::SoundCheckbox(id)) = self.hovered {
             return self.toggle_sound_checkbox(id);
         }
-        Vec::new()
+        if pressed_release_target == self.hovered {
+            match pressed_release_target {
+                Some(OptionsHit::Graphics(hit)) => return self.activate_graphics_hit(hit),
+                Some(OptionsHit::Control(hit)) => return self.activate_control_hit(hit),
+                _ => {}
+            }
+        }
+        match self.hovered {
+            Some(OptionsHit::Graphics(hit @ GraphicsHitTarget::Checkbox(_))) => {
+                self.activate_graphics_hit(hit)
+            }
+            Some(OptionsHit::Control(ControlSheetHit::GamepadGui)) => {
+                self.activate_control_hit(ControlSheetHit::GamepadGui)
+            }
+            Some(OptionsHit::Network(
+                hit @ (NetworkSheetHit::PortCheck(_) | NetworkSheetHit::Checkbox(_)),
+            )) => self.activate_network_hit(hit),
+            _ => Vec::new(),
+        }
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<OptionsDlgAction> {
@@ -1522,28 +1734,24 @@ impl OptionsDlgState {
                     (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic), true) => {
                         OptionsFocus::Tabular
                     }
-                    (
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects),
-                        false,
-                    ) => OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic),
-                    (
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects),
-                        true,
-                    ) => OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic),
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects), false) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic)
+                    }
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects), true) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic)
+                    }
                     (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic), false) => {
                         OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects)
                     }
                     (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic), true) => {
                         OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects)
                     }
-                    (
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects),
-                        false,
-                    ) => OptionsFocus::Back,
-                    (
-                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects),
-                        true,
-                    ) => OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic),
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects), false) => {
+                        OptionsFocus::Back
+                    }
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects), true) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic)
+                    }
                     (OptionsFocus::LanguageCombo, _) => unreachable!(),
                 };
                 Vec::new()
@@ -1631,25 +1839,47 @@ impl OptionsDlgState {
     /// by one *thumb pixel* from `ScrollBar::DrawElement`, then invokes the
     /// value callback even when integer range conversion repeats a value.
     pub fn advance_frame(&mut self) -> Vec<OptionsDlgAction> {
-        if self.active_sheet != OptionsSheet::Sound {
-            return Vec::new();
+        if self.active_sheet == OptionsSheet::Sound {
+            let Some((id, direction)) = self.pressed_sound_arrow else {
+                return Vec::new();
+            };
+            let Some(rect) = self.layout.as_ref().map(|layout| layout.sound.slider(id)) else {
+                return Vec::new();
+            };
+            let max_scroll = sound_slider_max_scroll(rect);
+            let old = self.sound_slider_position(id, rect);
+            let new = match direction {
+                SoundSliderDirection::Decrement => old.saturating_sub(1),
+                SoundSliderDirection::Increment => (old + 1).min(max_scroll),
+            };
+            if new == old {
+                return Vec::new();
+            }
+            return self.set_sound_slider_position(id, rect, new);
         }
-        let Some((id, direction)) = self.pressed_sound_arrow else {
-            return Vec::new();
-        };
-        let Some(rect) = self.layout.as_ref().map(|layout| layout.sound.slider(id)) else {
-            return Vec::new();
-        };
-        let max_scroll = sound_slider_max_scroll(rect);
-        let old = self.sound_slider_position(id, rect);
-        let new = match direction {
-            SoundSliderDirection::Decrement => old.saturating_sub(1),
-            SoundSliderDirection::Increment => (old + 1).min(max_scroll),
-        };
-        if new == old {
-            return Vec::new();
+        if self.active_sheet == OptionsSheet::Graphics {
+            let Some((id, direction)) = self.pressed_graphics_arrow else {
+                return Vec::new();
+            };
+            let Some(rect) = self
+                .layout
+                .as_ref()
+                .map(|layout| layout.graphics.slider(id))
+            else {
+                return Vec::new();
+            };
+            let max_scroll = graphics_slider_max_scroll(rect);
+            let old = self.graphics_slider_position(id, rect);
+            let new = match direction {
+                GraphicsSliderDirection::Decrement => old.saturating_sub(1),
+                GraphicsSliderDirection::Increment => (old + 1).min(max_scroll),
+            };
+            if new == old {
+                return Vec::new();
+            }
+            return self.set_graphics_slider_position(id, rect, new);
         }
-        self.set_sound_slider_position(id, rect, new)
+        Vec::new()
     }
 
     fn select_sheet(&mut self, sheet: OptionsSheet) -> Vec<OptionsDlgAction> {
@@ -1663,6 +1893,9 @@ impl OptionsDlgState {
         }
         self.captured_sound_slider = None;
         self.pressed_sound_arrow = None;
+        self.captured_graphics_slider = None;
+        self.pressed_graphics_arrow = None;
+        self.pressed_release_target = None;
         self.pointer_down = false;
         self.active_sheet = sheet;
         self.set_pointer_position(self.pointer_position);
@@ -1686,12 +1919,16 @@ impl OptionsDlgState {
             || matches!(self.hovered, Some(OptionsHit::SoundCheckbox(hovered)) if hovered == id)
     }
 
-    fn sound_arrow_pressed(
-        &self,
-        id: SoundVolumeId,
-        direction: SoundSliderDirection,
-    ) -> bool {
+    fn sound_arrow_pressed(&self, id: SoundVolumeId, direction: SoundSliderDirection) -> bool {
         matches!(self.pressed_sound_arrow, Some((pressed_id, pressed_direction)) if pressed_id == id && pressed_direction == direction)
+    }
+
+    fn graphics_arrow_pressed(
+        &self,
+        id: GraphicsSliderId,
+        direction: GraphicsSliderDirection,
+    ) -> bool {
+        matches!(self.pressed_graphics_arrow, Some((pressed_id, pressed_direction)) if pressed_id == id && pressed_direction == direction)
     }
 
     const fn sound_action(action: SoundSheetAction) -> OptionsDlgAction {
@@ -1705,6 +1942,215 @@ impl OptionsDlgState {
             Self::sound_action(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit)),
             Self::sound_action(SoundSheetAction::CheckboxChanged { id, checked }),
         ]
+    }
+
+    fn activate_graphics_hit(&mut self, hit: GraphicsHitTarget) -> Vec<OptionsDlgAction> {
+        let action = match hit {
+            GraphicsHitTarget::DisplayModeCombo => Some(GraphicsSheetAction::OpenDisplayModeCombo),
+            GraphicsHitTarget::ScaleEdit => {
+                return vec![OptionsDlgAction::OpenGraphicsScaleText];
+            }
+            GraphicsHitTarget::ScaleSpinbox(direction) => {
+                let action = self.graphics.step_scale_spinbox(match direction {
+                    SpinboxDirection::Increment => 1,
+                    SpinboxDirection::Decrement => -1,
+                });
+                if action.is_some() {
+                    self.graphics_slider_positions[graphics_slider_index(GraphicsSliderId::Scale)] =
+                        None;
+                }
+                action
+            }
+            GraphicsHitTarget::ApplyScale => self.graphics.request_scale_test(),
+            GraphicsHitTarget::Checkbox(id) => Some(self.graphics.toggle_checkbox(id)),
+            GraphicsHitTarget::Slider { .. } => return Vec::new(),
+        };
+        action.map(OptionsDlgAction::Graphics).into_iter().collect()
+    }
+
+    fn begin_graphics_slider_pointer(
+        &mut self,
+        id: GraphicsSliderId,
+        part: GraphicsSliderPart,
+        position: GuiPoint,
+    ) -> Vec<OptionsDlgAction> {
+        match part {
+            GraphicsSliderPart::DecrementArrow => {
+                self.pressed_graphics_arrow = Some((id, GraphicsSliderDirection::Decrement));
+                Vec::new()
+            }
+            GraphicsSliderPart::IncrementArrow => {
+                self.pressed_graphics_arrow = Some((id, GraphicsSliderDirection::Increment));
+                Vec::new()
+            }
+            GraphicsSliderPart::Track => {
+                let actions = self.update_graphics_slider_from_pointer(id, position);
+                self.captured_graphics_slider = Some(id);
+                actions
+            }
+        }
+    }
+
+    fn update_held_graphics_arrow(
+        &mut self,
+        position: GuiPoint,
+        _previous: Option<(GraphicsSliderId, GraphicsSliderDirection)>,
+    ) -> Vec<OptionsDlgAction> {
+        let current = match self.hovered {
+            Some(OptionsHit::Graphics(GraphicsHitTarget::Slider {
+                id,
+                part: GraphicsSliderPart::DecrementArrow,
+            })) => Some((id, GraphicsSliderDirection::Decrement)),
+            Some(OptionsHit::Graphics(GraphicsHitTarget::Slider {
+                id,
+                part: GraphicsSliderPart::IncrementArrow,
+            })) => Some((id, GraphicsSliderDirection::Increment)),
+            Some(OptionsHit::Graphics(GraphicsHitTarget::Slider {
+                id,
+                part: GraphicsSliderPart::Track,
+            })) => {
+                self.pressed_graphics_arrow = None;
+                let actions = self.update_graphics_slider_from_pointer(id, position);
+                self.captured_graphics_slider = Some(id);
+                return actions;
+            }
+            _ => None,
+        };
+        self.pressed_graphics_arrow = current;
+        Vec::new()
+    }
+
+    fn update_graphics_slider_from_pointer(
+        &mut self,
+        id: GraphicsSliderId,
+        position: GuiPoint,
+    ) -> Vec<OptionsDlgAction> {
+        let Some(rect) = self
+            .layout
+            .as_ref()
+            .map(|layout| layout.graphics.slider(id))
+        else {
+            return Vec::new();
+        };
+        let max_scroll = graphics_slider_max_scroll(rect);
+        let local_x = position.x.floor() as i32 - rect.x;
+        let scroll_pos = (local_x - 16 - 8).clamp(0, max_scroll);
+        self.set_graphics_slider_position(id, rect, scroll_pos)
+    }
+
+    fn set_graphics_slider_position(
+        &mut self,
+        id: GraphicsSliderId,
+        rect: IntRect,
+        scroll_pos: i32,
+    ) -> Vec<OptionsDlgAction> {
+        let max_scroll = graphics_slider_max_scroll(rect).max(1);
+        let scroll_pos = scroll_pos.clamp(0, max_scroll);
+        self.graphics_slider_positions[graphics_slider_index(id)] = Some(scroll_pos);
+        let (minimum, maximum) = graphics_slider_range(id);
+        let value = minimum + scroll_pos * (maximum - minimum) / max_scroll;
+        let action = match id {
+            GraphicsSliderId::Scale => self
+                .graphics
+                .set_scale_slider_value(value)
+                .unwrap_or(GraphicsSheetAction::ScaleProposalChanged(
+                    self.graphics.proposed_scale_percent,
+                )),
+            GraphicsSliderId::SmokeLevel => self
+                .graphics
+                .set_smoke_slider_value(value)
+                .unwrap_or(GraphicsSheetAction::SmokeLevelChanged(
+                    self.graphics.smoke_level,
+                )),
+        };
+        vec![OptionsDlgAction::Graphics(action)]
+    }
+
+    fn sync_graphics_slider_positions(&mut self) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        for id in [GraphicsSliderId::Scale, GraphicsSliderId::SmokeLevel] {
+            let index = graphics_slider_index(id);
+            if self.graphics_slider_positions[index].is_none() {
+                let rect = layout.graphics.slider(id);
+                let max_scroll = graphics_slider_max_scroll(rect);
+                let (minimum, maximum) = graphics_slider_range(id);
+                let value = match id {
+                    GraphicsSliderId::Scale => self.graphics.scale_slider_value(),
+                    GraphicsSliderId::SmokeLevel => self.graphics.smoke_level,
+                };
+                self.graphics_slider_positions[index] =
+                    Some((value - minimum) * max_scroll / (maximum - minimum));
+            }
+        }
+    }
+
+    fn graphics_slider_position(&self, id: GraphicsSliderId, rect: IntRect) -> i32 {
+        self.graphics_slider_positions[graphics_slider_index(id)].unwrap_or_else(|| {
+            let max_scroll = graphics_slider_max_scroll(rect);
+            let (minimum, maximum) = graphics_slider_range(id);
+            let value = match id {
+                GraphicsSliderId::Scale => self.graphics.scale_slider_value(),
+                GraphicsSliderId::SmokeLevel => self.graphics.smoke_level,
+            };
+            (value - minimum) * max_scroll / (maximum - minimum)
+        })
+    }
+
+    fn activate_control_hit(&mut self, hit: ControlSheetHit) -> Vec<OptionsDlgAction> {
+        let device = match self.active_sheet {
+            OptionsSheet::Keyboard => ControlDevice::Keyboard,
+            OptionsSheet::Gamepad => ControlDevice::Gamepad,
+            _ => return Vec::new(),
+        };
+        match hit {
+            ControlSheetHit::Set(set) => {
+                self.controls.select_set(device, set);
+                Vec::new()
+            }
+            ControlSheetHit::Key(control) => self
+                .controls
+                .capture_target(device, control)
+                .map(OptionsDlgAction::BeginControlCapture)
+                .into_iter()
+                .collect(),
+            ControlSheetHit::Reset => vec![OptionsDlgAction::ResetControlBindings(device)],
+            ControlSheetHit::GamepadGui if device == ControlDevice::Gamepad => {
+                let enabled = !self.controls.gamepad_gui_control();
+                self.controls.set_gamepad_gui_control(enabled);
+                vec![OptionsDlgAction::GamepadGuiControlChanged(enabled)]
+            }
+            ControlSheetHit::GamepadGui => Vec::new(),
+        }
+    }
+
+    fn activate_network_hit(&mut self, hit: NetworkSheetHit) -> Vec<OptionsDlgAction> {
+        match hit {
+            NetworkSheetHit::Text(field) => vec![OptionsDlgAction::OpenNetworkText(field)],
+            NetworkSheetHit::PortCheck(id) => {
+                let enabled = !self.network.port(id).enabled;
+                self.network.port_mut(id).enabled = enabled;
+                vec![OptionsDlgAction::NetworkPortEnabledChanged { id, enabled }]
+            }
+            NetworkSheetHit::Checkbox(id) => {
+                let checked = match id {
+                    NetworkCheckboxId::UseAlternateServer => {
+                        self.network.use_alternate_server = !self.network.use_alternate_server;
+                        self.network.use_alternate_server
+                    }
+                    NetworkCheckboxId::AutomaticUpdate => {
+                        self.network.automatic_update = !self.network.automatic_update;
+                        self.network.automatic_update
+                    }
+                    NetworkCheckboxId::EnableUpnp => {
+                        self.network.enable_upnp = !self.network.enable_upnp;
+                        self.network.enable_upnp
+                    }
+                };
+                vec![OptionsDlgAction::NetworkCheckboxChanged { id, checked }]
+            }
+        }
     }
 
     fn begin_sound_slider_pointer(
@@ -1848,6 +2294,28 @@ fn sound_slider_max_scroll(rect: IntRect) -> i32 {
     }
 }
 
+fn graphics_slider_max_scroll(rect: IntRect) -> i32 {
+    if rect.w > 48 {
+        rect.w - 48
+    } else {
+        1
+    }
+}
+
+const fn graphics_slider_index(id: GraphicsSliderId) -> usize {
+    match id {
+        GraphicsSliderId::Scale => 0,
+        GraphicsSliderId::SmokeLevel => 1,
+    }
+}
+
+const fn graphics_slider_range(id: GraphicsSliderId) -> (i32, i32) {
+    match id {
+        GraphicsSliderId::Scale => (0, MAX_GRAPHICS_SCALE_PERCENT - MIN_GRAPHICS_SCALE_PERCENT),
+        GraphicsSliderId::SmokeLevel => (MIN_SMOKE_LEVEL, MAX_SMOKE_LEVEL),
+    }
+}
+
 const fn sound_checkbox_label(id: SoundCheckboxId) -> &'static str {
     match id {
         SoundCheckboxId::FrontendMusic | SoundCheckboxId::GameMusic => "Music",
@@ -1870,6 +2338,8 @@ const fn sound_volume_heading(id: SoundVolumeId) -> &'static str {
 fn options_hit_test(
     layout: &OptionsDlgLayout,
     active_sheet: OptionsSheet,
+    controls: &ControlSheetState,
+    network: &NetworkSheetState,
     point: GuiPoint,
 ) -> Option<OptionsHit> {
     if rect_contains(&layout.back_button, point) {
@@ -1914,6 +2384,26 @@ fn options_hit_test(
                 continue;
             };
             return Some(OptionsHit::SoundSlider(id, part));
+        }
+    }
+    if active_sheet == OptionsSheet::Graphics {
+        if let Some(hit) = graphics_hit_test(&layout.graphics, point) {
+            return Some(OptionsHit::Graphics(hit));
+        }
+    }
+    let control_device = match active_sheet {
+        OptionsSheet::Keyboard => Some(ControlDevice::Keyboard),
+        OptionsSheet::Gamepad => Some(ControlDevice::Gamepad),
+        _ => None,
+    };
+    if let Some(device) = control_device {
+        if let Some(hit) = control_sheet_hit_test(&layout.controls, controls, device, point) {
+            return Some(OptionsHit::Control(hit));
+        }
+    }
+    if active_sheet == OptionsSheet::Network {
+        if let Some(hit) = network_sheet_hit_test(&layout.network, network, point) {
+            return Some(OptionsHit::Network(hit));
         }
     }
     if !rect_contains(&layout.tabular, point) {
@@ -2079,7 +2569,13 @@ fn blacken_transparent(image: &ImageData) -> ImageData {
     let pixels = image
         .pixels()
         .chunks_exact(4)
-        .flat_map(|p| if p[3] == 0 { [0, 0, 0, 0] } else { [p[0], p[1], p[2], p[3]] })
+        .flat_map(|p| {
+            if p[3] == 0 {
+                [0, 0, 0, 0]
+            } else {
+                [p[0], p[1], p[2], p[3]]
+            }
+        })
         .collect();
     ImageData::new(image.width(), image.height(), pixels)
 }
@@ -2348,20 +2844,52 @@ impl OptionsDlgScreen {
         }
 
         // Active sheet only (C4GuiTabular.cpp:258-267).
-        if state.active_sheet() == OptionsSheet::Sound {
-            Self::draw_sound_sheet(
-                surface,
-                assets,
-                book,
-                &layout.sound,
-                state,
-                gamma,
-                draw_focus,
-            );
-            return;
-        }
-        if state.active_sheet() != OptionsSheet::Program {
-            return;
+        match state.active_sheet() {
+            OptionsSheet::Sound => {
+                Self::draw_sound_sheet(
+                    surface,
+                    assets,
+                    book,
+                    &layout.sound,
+                    state,
+                    gamma,
+                    draw_focus,
+                );
+                return;
+            }
+            OptionsSheet::Graphics => {
+                Self::draw_graphics_sheet(surface, assets, book, &layout.graphics, state, gamma);
+                return;
+            }
+            OptionsSheet::Keyboard => {
+                Self::draw_control_sheet(
+                    surface,
+                    assets,
+                    book,
+                    &layout.controls,
+                    state,
+                    ControlDevice::Keyboard,
+                    gamma,
+                );
+                return;
+            }
+            OptionsSheet::Gamepad => {
+                Self::draw_control_sheet(
+                    surface,
+                    assets,
+                    book,
+                    &layout.controls,
+                    state,
+                    ControlDevice::Gamepad,
+                    gamma,
+                );
+                return;
+            }
+            OptionsSheet::Network => {
+                Self::draw_network_sheet(surface, assets, book, &layout.network, state, gamma);
+                return;
+            }
+            OptionsSheet::Program => {}
         }
 
         // 5. Program sheet children, add order (ctor 675-792).
@@ -2613,6 +3141,272 @@ impl OptionsDlgScreen {
                 gamma,
             );
         }
+    }
+
+    fn draw_graphics_sheet(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        book: &BookFonts,
+        layout: &GraphicsSheetLayout,
+        state: &OptionsDlgState,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let graphics = state.graphics();
+        Self::draw_group_box(surface, book, &layout.display_group, "Display", gamma);
+        Self::draw_group_box(surface, book, &layout.options_group, "Options", gamma);
+        Self::draw_group_box(surface, book, &layout.effects_group, "Effects Level", gamma);
+        for (rect, text) in [
+            (&layout.display_mode_label, "Display mode:"),
+            (&layout.scale_label, "Scale:"),
+            (&layout.percent_label, "%"),
+            (&layout.low_label, "Low"),
+            (&layout.high_label, "High"),
+        ] {
+            book.book.draw_with_gamma(
+                surface,
+                rect.x,
+                rect.y,
+                text,
+                STARTUP_FONT_RGBA,
+                TextAlign::Left,
+                true,
+                gamma,
+            );
+        }
+        Self::draw_combo(
+            surface,
+            assets,
+            book,
+            &layout.display_mode_combo,
+            graphics.display_mode.label(),
+            gamma,
+        );
+        Self::draw_edit(
+            surface,
+            book,
+            &layout.scale_edit,
+            &graphics.proposed_scale_percent.to_string(),
+            gamma,
+        );
+        Self::draw_small_button(surface, book, &layout.apply_button, "Apply", gamma);
+        Self::draw_book_scrollbar(
+            surface,
+            assets,
+            &layout.scale_slider,
+            state.graphics_slider_position(GraphicsSliderId::Scale, layout.scale_slider),
+            state.graphics_arrow_pressed(
+                GraphicsSliderId::Scale,
+                GraphicsSliderDirection::Decrement,
+            ),
+            state.graphics_arrow_pressed(
+                GraphicsSliderId::Scale,
+                GraphicsSliderDirection::Increment,
+            ),
+            gamma,
+        );
+        for id in GraphicsCheckboxId::ALL {
+            Self::draw_checkbox(
+                surface,
+                assets,
+                book,
+                &layout.checkbox(id),
+                id.label(),
+                graphics.checkbox(id),
+                false,
+                gamma,
+            );
+        }
+        Self::draw_book_scrollbar(
+            surface,
+            assets,
+            &layout.smoke_slider,
+            state.graphics_slider_position(GraphicsSliderId::SmokeLevel, layout.smoke_slider),
+            state.graphics_arrow_pressed(
+                GraphicsSliderId::SmokeLevel,
+                GraphicsSliderDirection::Decrement,
+            ),
+            state.graphics_arrow_pressed(
+                GraphicsSliderId::SmokeLevel,
+                GraphicsSliderDirection::Increment,
+            ),
+            gamma,
+        );
+    }
+
+    fn draw_control_sheet(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        book: &BookFonts,
+        layout: &ControlSheetLayout,
+        state: &OptionsDlgState,
+        device: ControlDevice,
+        gamma: Option<&GammaRamp>,
+    ) {
+        for set in 0..state.controls().visible_sets(device) {
+            let label = match device {
+                ControlDevice::Keyboard => format!("Keyboard {}", set + 1),
+                ControlDevice::Gamepad => format!("Gamepad {}", set + 1),
+            };
+            Self::draw_small_button(surface, book, &layout.set_buttons[set], &label, gamma);
+        }
+        for control in 0..CONTROL_KEY_COUNT {
+            let rect = layout.key_buttons[control];
+            let binding = state
+                .controls()
+                .visible_label(device, control)
+                .unwrap_or("Undefined");
+            Self::draw_small_button(surface, book, &rect, binding, gamma);
+            book.book_small.draw_with_gamma(
+                surface,
+                rect.x + rect.w / 2,
+                rect.y - book.book_small.line_height,
+                CONTROL_KEY_LABELS[control],
+                STARTUP_FONT_RGBA,
+                TextAlign::Center,
+                true,
+                gamma,
+            );
+        }
+        Self::draw_small_button(surface, book, &layout.reset_button, "Reset", gamma);
+        if device == ControlDevice::Gamepad && state.controls().gamepad_gui_checkbox_visible() {
+            Self::draw_checkbox(
+                surface,
+                assets,
+                book,
+                &layout.gamepad_gui_check,
+                "GUI control",
+                state.controls().gamepad_gui_control(),
+                false,
+                gamma,
+            );
+        }
+    }
+
+    fn draw_network_sheet(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        book: &BookFonts,
+        layout: &NetworkSheetLayout,
+        state: &OptionsDlgState,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let network = state.network();
+        for id in NetworkPortId::ALL {
+            let title = match id {
+                NetworkPortId::Tcp => "TCP port",
+                NetworkPortId::Udp => "UDP port",
+                NetworkPortId::Reference => "Reference server port",
+                NetworkPortId::Discovery => "Discovery port",
+            };
+            let group = layout.port_controls[id.index()];
+            Self::draw_group_box(surface, book, &group, title, gamma);
+            Self::draw_checkbox(
+                surface,
+                assets,
+                book,
+                &layout.port_check(id),
+                "Enabled",
+                network.port(id).enabled,
+                false,
+                gamma,
+            );
+            if network.port(id).enabled {
+                Self::draw_edit(
+                    surface,
+                    book,
+                    &layout.port_edit(id),
+                    &network.port(id).port.to_string(),
+                    gamma,
+                );
+            }
+        }
+        Self::draw_checkbox(
+            surface,
+            assets,
+            book,
+            &layout.alternate_check,
+            "Use alternate server",
+            network.use_alternate_server,
+            false,
+            gamma,
+        );
+        if network.use_alternate_server {
+            Self::draw_edit(
+                surface,
+                book,
+                &layout.alternate_edit,
+                &network.alternate_server_address,
+                gamma,
+            );
+        }
+        Self::draw_checkbox(
+            surface,
+            assets,
+            book,
+            &layout.automatic_update_check,
+            "Automatic update",
+            network.automatic_update,
+            false,
+            gamma,
+        );
+        Self::draw_checkbox(
+            surface,
+            assets,
+            book,
+            &layout.upnp_check,
+            "Enable UPnP",
+            network.enable_upnp,
+            false,
+            gamma,
+        );
+        for (label, rect, value) in [
+            (
+                "Local name",
+                &layout.local_name_edit,
+                network.local_name.as_str(),
+            ),
+            ("Nick", &layout.nick_edit, network.nick.as_str()),
+        ] {
+            book.book_small.draw_with_gamma(
+                surface,
+                rect.x,
+                rect.y - book.book_small.line_height,
+                label,
+                STARTUP_FONT_RGBA,
+                TextAlign::Left,
+                true,
+                gamma,
+            );
+            Self::draw_edit(surface, book, rect, value, gamma);
+        }
+    }
+
+    fn draw_edit(
+        surface: &mut Surface,
+        book: &BookFonts,
+        rect: &IntRect,
+        text: &str,
+        gamma: Option<&GammaRamp>,
+    ) {
+        draw_frame_dw(
+            surface,
+            rect.x,
+            rect.y,
+            rect.x + rect.w,
+            rect.y + rect.h - 1,
+            EDIT_BORDER_COLOR,
+            gamma,
+        );
+        book.book.draw_with_gamma(
+            surface,
+            rect.x + 4,
+            rect.y + (rect.h - book.book.line_height).max(0) / 2,
+            text,
+            STARTUP_FONT_RGBA,
+            TextAlign::Left,
+            true,
+            gamma,
+        );
     }
 
     /// Titled `GroupBox::DrawElement` branch
@@ -2950,6 +3744,184 @@ mod tests {
             vec![OptionsDlgAction::SheetChanged(OptionsSheet::Sound)]
         );
         (state, options_dlg_layout(1280, 720, &gui, &book))
+    }
+
+    fn live_graphics_state() -> (OptionsDlgState, OptionsDlgLayout) {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::with_all(
+            ProgramSheetState::default(),
+            SoundSheetState::default(),
+            GraphicsSheetState::default(),
+            ControlSheetState::default(),
+            NetworkSheetState::default(),
+        );
+        state.resize(1280, 720, &gui, &book);
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Graphics)]
+        );
+        (state, options_dlg_layout(1280, 720, &gui, &book))
+    }
+
+    fn rect_center(rect: IntRect) -> GuiPoint {
+        GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+    }
+
+    #[test]
+    fn graphics_sliders_drag_and_held_arrows_advance_each_frame() {
+        let (mut state, layout) = live_graphics_state();
+        let scale = layout.graphics.scale_slider;
+        let scale_travel = graphics_slider_max_scroll(scale);
+        let midpoint = GuiPoint::new(
+            (scale.x + 24 + scale_travel / 2) as f32,
+            (scale.y + scale.h / 2) as f32,
+        );
+        let right = GuiPoint::new(
+            (scale.x + 24 + scale_travel) as f32,
+            (scale.y + scale.h / 2) as f32,
+        );
+
+        assert_eq!(
+            state.handle_pointer_down(midpoint),
+            vec![OptionsDlgAction::Graphics(
+                GraphicsSheetAction::ScaleProposalChanged(200)
+            )]
+        );
+        assert_eq!(
+            state.handle_pointer_move(right),
+            vec![OptionsDlgAction::Graphics(
+                GraphicsSheetAction::ScaleProposalChanged(300)
+            )]
+        );
+        assert_eq!(
+            state.handle_pointer_up(right),
+            vec![OptionsDlgAction::Graphics(
+                GraphicsSheetAction::ScaleProposalChanged(300)
+            )]
+        );
+        assert_eq!(state.graphics().proposed_scale_percent, 300);
+
+        let smoke = layout.graphics.smoke_slider;
+        let increment = GuiPoint::new(
+            (smoke.x + smoke.w - 2) as f32,
+            (smoke.y + smoke.h / 2) as f32,
+        );
+        assert_eq!(
+            graphics_hit_test(&layout.graphics, increment),
+            Some(GraphicsHitTarget::Slider {
+                id: GraphicsSliderId::SmokeLevel,
+                part: GraphicsSliderPart::IncrementArrow,
+            })
+        );
+        assert!(state.handle_pointer_down(increment).is_empty());
+        assert_eq!(
+            state.pressed_graphics_arrow,
+            Some((GraphicsSliderId::SmokeLevel, GraphicsSliderDirection::Increment))
+        );
+        let before = state.graphics().smoke_level;
+        let mut previous_position = state.graphics_slider_position(GraphicsSliderId::SmokeLevel, smoke);
+        for _ in 0..4 {
+            assert!(!state.advance_frame().is_empty());
+            let position = state.graphics_slider_position(GraphicsSliderId::SmokeLevel, smoke);
+            assert_eq!(position, previous_position + 1);
+            previous_position = position;
+        }
+        assert!(state.graphics().smoke_level > before);
+        assert!(state.handle_pointer_up(increment).is_empty());
+        assert!(state.advance_frame().is_empty());
+    }
+
+    #[test]
+    fn new_buttons_and_checkboxes_activate_on_release_and_cancel_on_drag_out() {
+        let (mut state, layout) = live_graphics_state();
+        let outside = GuiPoint::new(0.0, 0.0);
+        let checkbox_rect = layout
+            .graphics
+            .checkbox(GraphicsCheckboxId::AddNewCrewPortraits);
+        let checkbox = GuiPoint::new(
+            (checkbox_rect.x + checkbox_rect.h / 2) as f32,
+            (checkbox_rect.y + checkbox_rect.h / 2) as f32,
+        );
+        assert!(state.handle_pointer_down(checkbox).is_empty());
+        assert!(state.graphics().add_new_crew_portraits);
+        assert!(state.handle_pointer_move(outside).is_empty());
+        assert!(state.handle_pointer_up(outside).is_empty());
+        assert!(state.graphics().add_new_crew_portraits);
+        assert!(state.handle_pointer_down(checkbox).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(checkbox),
+            vec![OptionsDlgAction::Graphics(
+                GraphicsSheetAction::CheckboxChanged {
+                    id: GraphicsCheckboxId::AddNewCrewPortraits,
+                    checked: false,
+                }
+            )]
+        );
+
+        state.graphics_mut().set_scale_spinbox_value(150);
+        let apply = rect_center(layout.graphics.apply_button);
+        assert!(state.handle_pointer_down(apply).is_empty());
+        assert!(state.handle_pointer_move(outside).is_empty());
+        assert!(state.handle_pointer_up(outside).is_empty());
+        assert!(state.handle_pointer_down(apply).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(apply),
+            vec![OptionsDlgAction::Graphics(GraphicsSheetAction::TestScale {
+                old_percent: 100,
+                new_percent: 150,
+            })]
+        );
+
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Sound)]
+        );
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Keyboard)]
+        );
+        let key = rect_center(layout.controls.key_buttons[0]);
+        assert!(state.handle_pointer_down(key).is_empty());
+        assert!(state.handle_pointer_move(outside).is_empty());
+        assert!(state.handle_pointer_up(outside).is_empty());
+        assert!(state.handle_pointer_down(key).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(key),
+            vec![OptionsDlgAction::BeginControlCapture(
+                ControlCaptureTarget {
+                    device: ControlDevice::Keyboard,
+                    set: 0,
+                    control: 0,
+                }
+            )]
+        );
+
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)]
+        );
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Network)]
+        );
+        let port_check = rect_center(layout.network.port_check(NetworkPortId::Tcp));
+        assert!(state.handle_pointer_down(port_check).is_empty());
+        assert!(state.network().port(NetworkPortId::Tcp).enabled);
+        assert!(state.handle_pointer_move(outside).is_empty());
+        assert!(state.handle_pointer_up(outside).is_empty());
+        assert!(state.network().port(NetworkPortId::Tcp).enabled);
+        assert!(state.handle_pointer_down(port_check).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(port_check),
+            vec![OptionsDlgAction::NetworkPortEnabledChanged {
+                id: NetworkPortId::Tcp,
+                enabled: false,
+            }]
+        );
+        let port_edit = rect_center(layout.network.port_edit(NetworkPortId::Tcp));
+        assert!(state.handle_pointer_down(port_edit).is_empty());
+        assert!(state.handle_pointer_up(port_edit).is_empty());
     }
 
     #[test]

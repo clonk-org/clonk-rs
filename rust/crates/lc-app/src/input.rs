@@ -62,6 +62,11 @@ pub struct KeyboardBindings {
 #[derive(Debug, Clone)]
 pub struct GamepadBindings {
     keys: [[Option<i32>; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
+    /// `C4ConfigGamepad::Reset` clears the six persisted calibration triples
+    /// together with all twelve button entries. The runtime does not consume
+    /// those calibration values yet, so retain just the one bit needed to
+    /// reproduce Reset without rewriting calibration on an ordinary save.
+    reset_axis_calibration_on_write: bool,
 }
 
 const KEYBOARD_SET_COUNT: usize = 4;
@@ -71,6 +76,8 @@ const CONTROL_BINDING_COUNT: usize = 12;
 const LEGACY_GAMEPAD_KEY_PREFIX: i32 = 0x0042_0000;
 const LEGACY_GAMEPAD_BUTTON_OFFSET: u8 = 10;
 const LEGACY_GAMEPAD_BUTTON_COUNT: u8 = 32;
+const LEGACY_GAMEPAD_BUTTON_MAX: u8 =
+    LEGACY_GAMEPAD_BUTTON_OFFSET + LEGACY_GAMEPAD_BUTTON_COUNT - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Binding {
@@ -137,6 +144,8 @@ impl ControlBindingSpec {
 }
 
 impl KeyboardBindings {
+    pub const SET_COUNT: usize = KEYBOARD_SET_COUNT;
+
     /// Loads bindings from the user config, falling back to the built-in defaults when parsing
     /// fails or no user configuration is available.
     pub fn load(paths: Option<&AppPaths>) -> Self {
@@ -198,22 +207,70 @@ impl KeyboardBindings {
         self.keys.get(control_set).map(|keys| keys[id.spec().index])
     }
 
+    pub fn default_key_for_set(control_set: usize, id: ControlBindingId) -> Option<VirtualKeyCode> {
+        cpp_default_keyboard_keys(is_german_system())
+            .get(control_set)
+            .map(|keys| keys[id.spec().index])
+    }
+
     pub fn rebind(&mut self, id: ControlBindingId, key: VirtualKeyCode) {
         self.assign_binding(0, id, key);
+    }
+
+    /// Rebind one logical control in one of the four C++ keyboard blocks.
+    /// Returns `false` for an out-of-range block without mutating anything.
+    pub fn rebind_for_set(
+        &mut self,
+        control_set: usize,
+        id: ControlBindingId,
+        key: VirtualKeyCode,
+    ) -> bool {
+        let Some(keys) = self.keys.get_mut(control_set) else {
+            return false;
+        };
+        keys[id.spec().index] = key;
+        true
     }
 
     pub fn reset_binding(&mut self, id: ControlBindingId) {
         self.assign_binding(0, id, id.default_key());
     }
 
+    pub fn reset_binding_for_set(&mut self, control_set: usize, id: ControlBindingId) -> bool {
+        let Some(default) = Self::default_key_for_set(control_set, id) else {
+            return false;
+        };
+        self.rebind_for_set(control_set, id, default)
+    }
+
     pub fn reset_all(&mut self) {
-        for spec in CONTROL_BINDING_SPECS {
-            self.assign_binding(0, spec.id, spec.id.default_key());
-        }
+        self.keys = cpp_default_keyboard_keys(is_german_system());
     }
 
     pub fn is_supported_key(key: VirtualKeyCode) -> bool {
         encode_virtual_key_code(key).is_some()
+    }
+
+    /// Writes all four keyboard blocks into an already loaded config. This is
+    /// used by the Options dialog so its other sheets can share one atomic
+    /// load/modify/save pass on Back.
+    pub fn write_to_config(&self, config: &mut Config) {
+        for (set_index, keys) in self.keys.iter().enumerate() {
+            for spec in CONTROL_BINDING_SPECS {
+                let keycode = keys[spec.index];
+                if let Some(encoded) = encode_virtual_key_code(keycode) {
+                    let key_name = format!("Kbd{}Key{}", set_index + 1, spec.index + 1);
+                    config.set_in(Some("Controls"), key_name, encoded.to_string());
+                } else {
+                    tracing::warn!(
+                        ?keycode,
+                        set = set_index + 1,
+                        control = spec.index + 1,
+                        "skipping persistence for unsupported virtual key code"
+                    );
+                }
+            }
+        }
     }
 
     pub fn save(&self, paths: &AppPaths) {
@@ -230,21 +287,7 @@ impl KeyboardBindings {
                 return;
             }
         };
-
-        for spec in CONTROL_BINDING_SPECS {
-            let key_name = format!("Kbd{}Key{}", 1, spec.index + 1);
-            let keycode = self
-                .key_for(spec.id)
-                .unwrap_or_else(|| spec.id.default_key());
-            if let Some(encoded) = encode_virtual_key_code(keycode) {
-                config.set_in(Some("Controls"), &key_name, encoded.to_string());
-            } else {
-                tracing::warn!(
-                    ?keycode,
-                    "skipping persistence for unsupported virtual key code"
-                );
-            }
-        }
+        self.write_to_config(&mut config);
 
         if let Err(err) = config.save(&config_path) {
             tracing::warn!(
@@ -317,6 +360,8 @@ impl KeyboardBindings {
 }
 
 impl GamepadBindings {
+    pub const SET_COUNT: usize = GAMEPAD_SET_COUNT;
+
     pub fn load(paths: Option<&AppPaths>) -> Self {
         let Some(paths) = paths else {
             return Self::default();
@@ -350,6 +395,93 @@ impl GamepadBindings {
             }
         }
         bindings
+    }
+
+    /// Returns the complete legacy keycode stored for a logical control.
+    pub fn raw_key_for_set(&self, gamepad_set: usize, id: ControlBindingId) -> Option<i32> {
+        self.keys
+            .get(gamepad_set)
+            .and_then(|keys| keys[id.spec().index])
+    }
+
+    /// Human-readable form used by `KeySelButton`. This follows the gamepad
+    /// branches of `C4KeyCodeEx::KeyCode2String(..., true, false)`.
+    pub fn key_label_for_set(&self, gamepad_set: usize, id: ControlBindingId) -> String {
+        legacy_gamepad_key_label(self.raw_key_for_set(gamepad_set, id))
+    }
+
+    /// Stores a complete legacy keycode. `-1` has the C++ meaning "not
+    /// assigned". Returns `false` for an out-of-range config block.
+    pub fn rebind_raw(&mut self, gamepad_set: usize, id: ControlBindingId, raw_key: i32) -> bool {
+        let Some(keys) = self.keys.get_mut(gamepad_set) else {
+            return false;
+        };
+        keys[id.spec().index] = (raw_key != -1).then_some(raw_key);
+        true
+    }
+
+    pub fn rebind_button(
+        &mut self,
+        gamepad_set: usize,
+        id: ControlBindingId,
+        physical_slot: u8,
+        physical_button: u8,
+    ) -> bool {
+        let Some(raw_key) = legacy_gamepad_button_key(physical_slot, physical_button) else {
+            return false;
+        };
+        self.rebind_raw(gamepad_set, id, raw_key)
+    }
+
+    /// Mirrors the Options-sheet Reset button: all four gamepad button maps
+    /// and all persisted axis-calibration values return to C++ defaults.
+    pub fn reset_all(&mut self) {
+        self.keys = [[None; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT];
+        self.reset_axis_calibration_on_write = true;
+    }
+
+    pub fn write_to_config(&self, config: &mut Config) {
+        for (gamepad_index, keys) in self.keys.iter().enumerate() {
+            let section = format!("Gamepad{gamepad_index}");
+            for (control_index, raw_key) in keys.iter().enumerate() {
+                config.set_in(
+                    Some(&section),
+                    format!("Button{}", control_index + 1),
+                    raw_key.unwrap_or(-1).to_string(),
+                );
+            }
+            if self.reset_axis_calibration_on_write {
+                for axis in 0..6 {
+                    config.set_in(Some(&section), format!("Axis{axis}Min"), "0");
+                    config.set_in(Some(&section), format!("Axis{axis}Max"), "0");
+                    config.set_in(Some(&section), format!("Axis{axis}Calibrated"), "false");
+                }
+            }
+        }
+    }
+
+    pub fn save(&self, paths: &AppPaths) {
+        let config_path = paths.config_file();
+        let mut config = match Config::load(&config_path) {
+            Ok(existing) => existing,
+            Err(err) if err.kind() == ErrorKind::NotFound => Config::new(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "failed to load config for saving gamepad controls"
+                );
+                return;
+            }
+        };
+        self.write_to_config(&mut config);
+        if let Err(err) = config.save(&config_path) {
+            tracing::warn!(
+                error = %err,
+                path = %config_path.display(),
+                "failed to persist gamepad control bindings"
+            );
+        }
     }
 
     /// Reproduce the callbacks installed by the outer gamepad-set and inner
@@ -389,6 +521,7 @@ impl Default for GamepadBindings {
     fn default() -> Self {
         Self {
             keys: [[None; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
+            reset_axis_calibration_on_write: false,
         }
     }
 }
@@ -566,7 +699,7 @@ fn parse_raw_key_code_value(raw: &str) -> Option<i32> {
     }
 }
 
-fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
+pub(crate) fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
     if physical_slot >= GAMEPAD_SET_COUNT as u8 || physical_button >= LEGACY_GAMEPAD_BUTTON_COUNT {
         return None;
     }
@@ -575,6 +708,36 @@ fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i
             + (i32::from(physical_slot) << 8)
             + i32::from(LEGACY_GAMEPAD_BUTTON_OFFSET + physical_button),
     )
+}
+
+/// Human-readable gamepad key label from
+/// `C4KeyCodeEx::KeyCode2String(key, true, false)`. `None` represents the
+/// default `-1`/unassigned config value.
+pub fn legacy_gamepad_key_label(raw_key: Option<i32>) -> String {
+    let Some(raw_key) = raw_key else {
+        return "invalid".to_string();
+    };
+    let raw = raw_key as u32;
+    if raw & 0x00ff_0000 != LEGACY_GAMEPAD_KEY_PREFIX as u32 {
+        return "invalid".to_string();
+    }
+    let gamepad = ((raw >> 8) & 0xff) + 1;
+    let button = (raw & 0xff) as u8;
+    match button {
+        1 => format!("Joy{gamepad}Left"),
+        2 => format!("Joy{gamepad}Up"),
+        3 => format!("Joy{gamepad}Right"),
+        4 => format!("Joy{gamepad}Down"),
+        0x30..=0x50 => {
+            let axis = 1 + (button - 0x30) / 2;
+            let extent = if button & 1 == 0 { "Min" } else { "Max" };
+            format!("[{axis}] {extent}")
+        }
+        LEGACY_GAMEPAD_BUTTON_OFFSET..=LEGACY_GAMEPAD_BUTTON_MAX => {
+            format!("< {} >", 1 + button - LEGACY_GAMEPAD_BUTTON_OFFSET)
+        }
+        _ => "invalid".to_string(),
+    }
 }
 
 fn letter_from_offset(offset: i32) -> Option<VirtualKeyCode> {
@@ -655,6 +818,18 @@ fn function_key(value: i32) -> Option<VirtualKeyCode> {
         9 => VirtualKeyCode::F10,
         10 => VirtualKeyCode::F11,
         11 => VirtualKeyCode::F12,
+        12 => VirtualKeyCode::F13,
+        13 => VirtualKeyCode::F14,
+        14 => VirtualKeyCode::F15,
+        15 => VirtualKeyCode::F16,
+        16 => VirtualKeyCode::F17,
+        17 => VirtualKeyCode::F18,
+        18 => VirtualKeyCode::F19,
+        19 => VirtualKeyCode::F20,
+        20 => VirtualKeyCode::F21,
+        21 => VirtualKeyCode::F22,
+        22 => VirtualKeyCode::F23,
+        23 => VirtualKeyCode::F24,
         _ => return None,
     })
 }
@@ -737,6 +912,18 @@ fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::F10 => 9,
         VirtualKeyCode::F11 => 10,
         VirtualKeyCode::F12 => 11,
+        VirtualKeyCode::F13 => 12,
+        VirtualKeyCode::F14 => 13,
+        VirtualKeyCode::F15 => 14,
+        VirtualKeyCode::F16 => 15,
+        VirtualKeyCode::F17 => 16,
+        VirtualKeyCode::F18 => 17,
+        VirtualKeyCode::F19 => 18,
+        VirtualKeyCode::F20 => 19,
+        VirtualKeyCode::F21 => 20,
+        VirtualKeyCode::F22 => 21,
+        VirtualKeyCode::F23 => 22,
+        VirtualKeyCode::F24 => 23,
         _ => return None,
     })
 }
@@ -744,12 +931,14 @@ fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
 #[cfg(target_os = "windows")]
 fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
-        value @ 0x70..=0x7b => function_key(value - 0x70),
+        value @ 0x70..=0x87 => function_key(value - 0x70),
         value @ 65..=90 => letter_from_offset(value - 65),
         value @ 48..=57 => digit_key(value - 48),
         value @ 96..=105 => numpad_key(value - 96),
         8 => Some(VirtualKeyCode::Back),
+        9 => Some(VirtualKeyCode::Tab),
         13 => Some(VirtualKeyCode::Return),
+        27 => Some(VirtualKeyCode::Escape),
         32 => Some(VirtualKeyCode::Space),
         33 => Some(VirtualKeyCode::PageUp),
         34 => Some(VirtualKeyCode::PageDown),
@@ -761,8 +950,11 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         40 => Some(VirtualKeyCode::Down),
         45 => Some(VirtualKeyCode::Insert),
         46 => Some(VirtualKeyCode::Delete),
+        106 => Some(VirtualKeyCode::NumpadMultiply),
         107 => Some(VirtualKeyCode::NumpadAdd),
+        109 => Some(VirtualKeyCode::NumpadSubtract),
         110 => Some(VirtualKeyCode::NumpadDecimal),
+        111 => Some(VirtualKeyCode::NumpadDivide),
         186 => Some(VirtualKeyCode::Semicolon),
         188 => Some(VirtualKeyCode::Comma),
         189 => Some(VirtualKeyCode::Minus),
@@ -781,7 +973,7 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
 #[cfg(target_os = "linux")]
 fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
-        value @ 0xffbe..=0xffc9 => function_key(value - 0xffbe),
+        value @ 0xffbe..=0xffd5 => function_key(value - 0xffbe),
         value @ 97..=122 => letter_from_offset(value - 97),
         value @ 65..=90 => letter_from_offset(value - 65),
         value @ 48..=57 => digit_key(value - 48),
@@ -803,7 +995,9 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         0xf6 => Some(VirtualKeyCode::Semicolon),
         0xfc => Some(VirtualKeyCode::LBracket),
         0xff08 => Some(VirtualKeyCode::Back),
+        0xff09 => Some(VirtualKeyCode::Tab),
         0xff0d => Some(VirtualKeyCode::Return),
+        0xff1b => Some(VirtualKeyCode::Escape),
         0xff50 => Some(VirtualKeyCode::Home),
         0xff51 => Some(VirtualKeyCode::Left),
         0xff52 => Some(VirtualKeyCode::Up),
@@ -826,8 +1020,11 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         0xff63 => Some(VirtualKeyCode::Insert),
         0xffff => Some(VirtualKeyCode::Delete),
         0xff8d => Some(VirtualKeyCode::NumpadEnter),
+        0xffaa => Some(VirtualKeyCode::NumpadMultiply),
         0xffab => Some(VirtualKeyCode::NumpadAdd),
+        0xffad => Some(VirtualKeyCode::NumpadSubtract),
         0xffae => Some(VirtualKeyCode::NumpadDecimal),
+        0xffaf => Some(VirtualKeyCode::NumpadDivide),
         _ => None,
     }
 }
@@ -836,11 +1033,14 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
 fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
         value @ 58..=69 => function_key(value - 58),
+        value @ 104..=115 => function_key(value - 104 + 12),
         value @ 4..=29 => letter_from_offset(value - 4),
         value @ 30..=38 => digit_key(value - 29),
         39 => Some(VirtualKeyCode::Key0),
         40 => Some(VirtualKeyCode::Return),
+        41 => Some(VirtualKeyCode::Escape),
         42 => Some(VirtualKeyCode::Back),
+        43 => Some(VirtualKeyCode::Tab),
         44 => Some(VirtualKeyCode::Space),
         45 => Some(VirtualKeyCode::Minus),
         46 => Some(VirtualKeyCode::Equals),
@@ -864,6 +1064,9 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
         80 => Some(VirtualKeyCode::Left),
         81 => Some(VirtualKeyCode::Down),
         82 => Some(VirtualKeyCode::Up),
+        84 => Some(VirtualKeyCode::NumpadDivide),
+        85 => Some(VirtualKeyCode::NumpadMultiply),
+        86 => Some(VirtualKeyCode::NumpadSubtract),
         87 => Some(VirtualKeyCode::NumpadAdd),
         88 => Some(VirtualKeyCode::NumpadEnter),
         value @ 89..=97 => numpad_key(value - 88),
@@ -889,7 +1092,9 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     }
     Some(match key {
         VirtualKeyCode::Back => 8,
-        VirtualKeyCode::Return => 13,
+        VirtualKeyCode::Tab => 9,
+        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => 13,
+        VirtualKeyCode::Escape => 27,
         VirtualKeyCode::Space => 32,
         VirtualKeyCode::PageUp => 33,
         VirtualKeyCode::PageDown => 34,
@@ -901,8 +1106,11 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Down => 40,
         VirtualKeyCode::Insert => 45,
         VirtualKeyCode::Delete => 46,
+        VirtualKeyCode::NumpadMultiply => 106,
         VirtualKeyCode::NumpadAdd => 107,
+        VirtualKeyCode::NumpadSubtract => 109,
         VirtualKeyCode::NumpadDecimal => 110,
+        VirtualKeyCode::NumpadDivide => 111,
         VirtualKeyCode::Semicolon => 186,
         VirtualKeyCode::Comma => 188,
         VirtualKeyCode::Minus => 189,
@@ -947,7 +1155,9 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::RBracket => 0x5d,
         VirtualKeyCode::Grave => 0x60,
         VirtualKeyCode::Back => 0xff08,
+        VirtualKeyCode::Tab => 0xff09,
         VirtualKeyCode::Return => 0xff0d,
+        VirtualKeyCode::Escape => 0xff1b,
         VirtualKeyCode::Home => 0xff50,
         VirtualKeyCode::Left => 0xff51,
         VirtualKeyCode::Up => 0xff52,
@@ -959,8 +1169,11 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Insert => 0xff63,
         VirtualKeyCode::Delete => 0xffff,
         VirtualKeyCode::NumpadEnter => 0xff8d,
+        VirtualKeyCode::NumpadMultiply => 0xffaa,
         VirtualKeyCode::NumpadAdd => 0xffab,
+        VirtualKeyCode::NumpadSubtract => 0xffad,
         VirtualKeyCode::NumpadDecimal => 0xffae,
+        VirtualKeyCode::NumpadDivide => 0xffaf,
         _ => return None,
     })
 }
@@ -968,7 +1181,11 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     if let Some(index) = function_key_index(key) {
-        return Some(58 + index);
+        return Some(if index < 12 {
+            58 + index
+        } else {
+            104 + index - 12
+        });
     }
     if let Some(offset) = letter_offset(key) {
         return Some(4 + offset);
@@ -981,7 +1198,9 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     }
     Some(match key {
         VirtualKeyCode::Return => 40,
+        VirtualKeyCode::Escape => 41,
         VirtualKeyCode::Back => 42,
+        VirtualKeyCode::Tab => 43,
         VirtualKeyCode::Space => 44,
         VirtualKeyCode::Minus => 45,
         VirtualKeyCode::Equals => 46,
@@ -1004,6 +1223,9 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         VirtualKeyCode::Left => 80,
         VirtualKeyCode::Down => 81,
         VirtualKeyCode::Up => 82,
+        VirtualKeyCode::NumpadDivide => 84,
+        VirtualKeyCode::NumpadMultiply => 85,
+        VirtualKeyCode::NumpadSubtract => 86,
         VirtualKeyCode::NumpadAdd => 87,
         VirtualKeyCode::NumpadEnter => 88,
         VirtualKeyCode::NumpadDecimal => 99,
@@ -1210,6 +1432,105 @@ mod tests {
             .control_candidates_for_button(0, 0, ElementState::Pressed)
             .next()
             .is_none());
+    }
+
+    #[test]
+    fn gamepad_raw_rebind_labels_and_writes_all_four_sets() {
+        let mut bindings = GamepadBindings::default();
+        let raw_set_three = legacy_gamepad_button_key(2, 5).expect("valid pad 3 button");
+        let raw_set_four = legacy_gamepad_button_key(3, 31).expect("valid pad 4 button");
+        assert!(bindings.rebind_raw(2, ControlBindingId::Dig, raw_set_three));
+        assert!(bindings.rebind_button(3, ControlBindingId::Special2, 3, 31));
+        assert!(!bindings.rebind_raw(4, ControlBindingId::Up, raw_set_three));
+
+        assert_eq!(
+            bindings.raw_key_for_set(2, ControlBindingId::Dig),
+            Some(raw_set_three)
+        );
+        assert_eq!(
+            bindings.key_label_for_set(2, ControlBindingId::Dig),
+            "< 6 >"
+        );
+        assert_eq!(
+            bindings.key_label_for_set(3, ControlBindingId::Special2),
+            "< 32 >"
+        );
+
+        let mut config = Config::new();
+        bindings.write_to_config(&mut config);
+        assert_eq!(
+            config.get_in(Some("Gamepad2"), "Button6"),
+            Some(raw_set_three.to_string().as_str())
+        );
+        assert_eq!(
+            config.get_in(Some("Gamepad3"), "Button12"),
+            Some(raw_set_four.to_string().as_str())
+        );
+        for gamepad in 0..GamepadBindings::SET_COUNT {
+            for control in 0..CONTROL_BINDING_COUNT {
+                assert!(config
+                    .get_in(
+                        Some(&format!("Gamepad{gamepad}")),
+                        &format!("Button{}", control + 1),
+                    )
+                    .is_some());
+            }
+        }
+
+        let loaded = GamepadBindings::from_config(&config);
+        assert_eq!(
+            loaded.raw_key_for_set(2, ControlBindingId::Dig),
+            Some(raw_set_three)
+        );
+        assert_eq!(
+            loaded.raw_key_for_set(3, ControlBindingId::Special2),
+            Some(raw_set_four)
+        );
+    }
+
+    #[test]
+    fn gamepad_reset_clears_every_button_and_axis_calibration_on_write() {
+        let mut config = Config::new();
+        let mut bindings = GamepadBindings::default();
+        for gamepad in 0..GamepadBindings::SET_COUNT {
+            let section = format!("Gamepad{gamepad}");
+            for (control, id) in ControlBindingId::ALL.into_iter().enumerate() {
+                let raw = legacy_gamepad_button_key(gamepad as u8, control as u8)
+                    .expect("all test buttons fit the legacy range");
+                assert!(bindings.rebind_raw(gamepad, id, raw));
+            }
+            for axis in 0..6 {
+                config.set_in(Some(&section), format!("Axis{axis}Min"), "17");
+                config.set_in(Some(&section), format!("Axis{axis}Max"), "23");
+                config.set_in(Some(&section), format!("Axis{axis}Calibrated"), "true");
+            }
+        }
+
+        bindings.reset_all();
+        bindings.write_to_config(&mut config);
+        for gamepad in 0..GamepadBindings::SET_COUNT {
+            let section = format!("Gamepad{gamepad}");
+            for control in 0..CONTROL_BINDING_COUNT {
+                assert_eq!(
+                    config.get_in(Some(&section), &format!("Button{}", control + 1)),
+                    Some("-1")
+                );
+            }
+            for axis in 0..6 {
+                assert_eq!(
+                    config.get_in(Some(&section), &format!("Axis{axis}Min")),
+                    Some("0")
+                );
+                assert_eq!(
+                    config.get_in(Some(&section), &format!("Axis{axis}Max")),
+                    Some("0")
+                );
+                assert_eq!(
+                    config.get_in(Some(&section), &format!("Axis{axis}Calibrated")),
+                    Some("false")
+                );
+            }
+        }
     }
 
     #[test]
@@ -1553,12 +1874,164 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_set_three_and_four_rebinds_round_trip_through_config() {
+        let mut bindings = KeyboardBindings::default_bindings();
+        assert!(bindings.rebind_for_set(2, ControlBindingId::Dig, VirtualKeyCode::F11));
+        assert!(bindings.rebind_for_set(3, ControlBindingId::Special2, VirtualKeyCode::Key9));
+        assert!(!bindings.rebind_for_set(4, ControlBindingId::Up, VirtualKeyCode::F12));
+
+        let mut config = Config::new();
+        bindings.write_to_config(&mut config);
+        assert_eq!(
+            config.get_in(Some("Controls"), "Kbd3Key6"),
+            Some(
+                encode_virtual_key_code(VirtualKeyCode::F11)
+                    .unwrap()
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            config.get_in(Some("Controls"), "Kbd4Key12"),
+            Some(
+                encode_virtual_key_code(VirtualKeyCode::Key9)
+                    .unwrap()
+                    .to_string()
+                    .as_str()
+            )
+        );
+        for set in 0..KeyboardBindings::SET_COUNT {
+            for control in 0..CONTROL_BINDING_COUNT {
+                assert!(config
+                    .get_in(
+                        Some("Controls"),
+                        &format!("Kbd{}Key{}", set + 1, control + 1),
+                    )
+                    .is_some());
+            }
+        }
+
+        let loaded = KeyboardBindings::from_config(&config).expect("all bindings persisted");
+        assert_eq!(
+            loaded.key_for_set(2, ControlBindingId::Dig),
+            Some(VirtualKeyCode::F11)
+        );
+        assert_eq!(
+            loaded.key_for_set(3, ControlBindingId::Special2),
+            Some(VirtualKeyCode::Key9)
+        );
+    }
+
+    #[test]
+    fn keyboard_reset_all_restores_every_control_in_all_four_sets() {
+        let defaults = KeyboardBindings::default_bindings();
+        let mut bindings = defaults.clone();
+        for set in 0..KeyboardBindings::SET_COUNT {
+            for id in ControlBindingId::ALL {
+                assert!(bindings.rebind_for_set(set, id, VirtualKeyCode::F12));
+            }
+        }
+
+        bindings.reset_all();
+        for set in 0..KeyboardBindings::SET_COUNT {
+            for id in ControlBindingId::ALL {
+                assert_eq!(bindings.key_for_set(set, id), defaults.key_for_set(set, id));
+            }
+        }
+    }
+
+    #[test]
     fn supported_key_detection_matches_encoder() {
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Q));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Space));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F3));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F12));
-        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F13));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F13));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F24));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Escape));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Tab));
+        assert!(KeyboardBindings::is_supported_key(
+            VirtualKeyCode::NumpadMultiply
+        ));
+        assert!(KeyboardBindings::is_supported_key(
+            VirtualKeyCode::NumpadSubtract
+        ));
+        assert!(KeyboardBindings::is_supported_key(
+            VirtualKeyCode::NumpadDivide
+        ));
+        assert!(KeyboardBindings::is_supported_key(
+            VirtualKeyCode::NumpadEnter
+        ));
+    }
+
+    #[test]
+    fn every_winit_function_key_round_trips_through_the_platform_config_codec() {
+        let function_keys = [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F2,
+            VirtualKeyCode::F3,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::F5,
+            VirtualKeyCode::F6,
+            VirtualKeyCode::F7,
+            VirtualKeyCode::F8,
+            VirtualKeyCode::F9,
+            VirtualKeyCode::F10,
+            VirtualKeyCode::F11,
+            VirtualKeyCode::F12,
+            VirtualKeyCode::F13,
+            VirtualKeyCode::F14,
+            VirtualKeyCode::F15,
+            VirtualKeyCode::F16,
+            VirtualKeyCode::F17,
+            VirtualKeyCode::F18,
+            VirtualKeyCode::F19,
+            VirtualKeyCode::F20,
+            VirtualKeyCode::F21,
+            VirtualKeyCode::F22,
+            VirtualKeyCode::F23,
+            VirtualKeyCode::F24,
+        ];
+        for key in function_keys {
+            let raw = encode_virtual_key_code(key)
+                .unwrap_or_else(|| panic!("{key:?} must have a config representation"));
+            assert_eq!(decode_platform_key_code(raw), Some(key), "raw key {raw}");
+        }
+    }
+
+    #[test]
+    fn common_capture_keys_round_trip_through_the_platform_config_codec() {
+        for key in [
+            VirtualKeyCode::Escape,
+            VirtualKeyCode::Tab,
+            VirtualKeyCode::NumpadMultiply,
+            VirtualKeyCode::NumpadSubtract,
+            VirtualKeyCode::NumpadDivide,
+        ] {
+            let raw = encode_virtual_key_code(key)
+                .unwrap_or_else(|| panic!("{key:?} must have a config representation"));
+            assert_eq!(decode_platform_key_code(raw), Some(key), "raw key {raw}");
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEnter)
+                .expect("numpad Enter must have a config representation");
+            assert_eq!(
+                decode_platform_key_code(raw),
+                Some(VirtualKeyCode::NumpadEnter)
+            );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Win32's virtual-key representation deliberately aliases both
+            // Enter keys to VK_RETURN; persistence therefore cannot retain
+            // their physical distinction.
+            let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEnter)
+                .expect("numpad Enter aliases VK_RETURN");
+            assert_eq!(raw, encode_virtual_key_code(VirtualKeyCode::Return).unwrap());
+            assert_eq!(decode_platform_key_code(raw), Some(VirtualKeyCode::Return));
+        }
     }
 }

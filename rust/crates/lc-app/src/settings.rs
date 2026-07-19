@@ -438,6 +438,17 @@ mod tests {
         assert_eq!(options.base_width, 915);
         assert_eq!(options.base_height, 573);
     }
+
+    #[test]
+    fn accepted_scale_retains_physical_size_and_recomputes_base_resolution() {
+        let mut options = DisplayOptions::default();
+        options.record_scale_percent(200, 1_280, 720);
+        assert_eq!(options.scale_percent(), 200);
+        assert!((options.scale - 2.0).abs() < f32::EPSILON);
+        assert_eq!((options.base_width, options.base_height), (640, 360));
+        assert_eq!(options.actual_size(), (1_280, 720));
+        assert!(options.dirty);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -498,6 +509,29 @@ impl DisplayOptions {
         let width = ((self.base_width as f32) * self.scale).max(min);
         let height = ((self.base_height as f32) * self.scale).max(min);
         (width as u32, height as u32)
+    }
+
+    pub const fn scale_percent(&self) -> i32 {
+        self.scale_percent
+    }
+
+    /// Commits an accepted application scale while retaining the current
+    /// physical window size. C++ recomputes ResolutionX/Y from the physical
+    /// extent at the new scale before saving the confirmed value.
+    pub fn record_scale_percent(
+        &mut self,
+        percent: i32,
+        physical_width: u32,
+        physical_height: u32,
+    ) {
+        let percent = percent.clamp(1, 10_000);
+        let scale = percent as f32 / 100.0;
+        if self.scale_percent != percent {
+            self.scale_percent = percent;
+            self.scale = scale;
+            self.dirty = true;
+        }
+        self.record_actual_size(physical_width, physical_height);
     }
 
     pub fn checked_loader_actual_size(&self) -> Result<(u32, u32), String> {

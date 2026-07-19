@@ -444,6 +444,19 @@ impl FramePresenter {
         self.scale
     }
 
+    /// Rebuilds the logical frame for a new application scale while keeping
+    /// the physical output size fixed. This is the presentation half of the
+    /// startup Options scale test: the host may call it temporarily and only
+    /// persist the value after the confirmation dialog returns Yes.
+    pub fn set_scale(&mut self, scale: f32) {
+        let scale = scale.max(f32::EPSILON);
+        if (self.scale - scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.scale = scale;
+        self.resize(self.physical.0, self.physical.1);
+    }
+
     /// Geometry shared by the filtered base and every ordered physical pass.
     pub fn presentation_geometry(&self) -> PresentationGeometry {
         PresentationGeometry::new(self.scale, self.logical_size(), self.physical)
@@ -726,6 +739,17 @@ mod tests {
     fn presenter_maps_positions_to_gui_space() {
         let presenter = FramePresenter::new(3.0, 6, 6);
         assert_eq!(presenter.position_to_gui(300.0, 150.0), (100.0, 50.0));
+    }
+
+    #[test]
+    fn presenter_scale_test_keeps_physical_size_and_rebuilds_logical_frame() {
+        let mut presenter = FramePresenter::new(1.0, 1_280, 720);
+        presenter.set_scale(2.0);
+        assert_eq!(presenter.physical_size(), (1_280, 720));
+        assert_eq!(presenter.logical_size(), (640, 360));
+        assert_eq!(presenter.scale(), 2.0);
+        presenter.set_scale(1.0);
+        assert_eq!(presenter.logical_size(), (1_280, 720));
     }
 
     #[test]

@@ -79,6 +79,10 @@ impl GamepadManager {
         output
     }
 
+    pub(crate) fn connected_count(&self) -> usize {
+        self.states.len()
+    }
+
     fn process_event(&mut self, event: Event, output: &mut Vec<GamepadEvent>) {
         let Some(slot) = GamepadSlot::from_gamepad_id(event.id) else {
             return;
