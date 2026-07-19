@@ -1372,6 +1372,26 @@ impl PlrSelController {
         }
     }
 
+    /// Returns the selected row and the screen-space point used by C++
+    /// `Element::DoContext` for the Menu/Apps key. Keyboard context menus are
+    /// anchored at the row's center and are available only while the list has
+    /// draw focus; the last pointer position is deliberately irrelevant.
+    pub fn keyboard_context_target(&self) -> Option<(usize, GuiPoint)> {
+        if self.focus != PlrSelControl::PlayerList {
+            return None;
+        }
+        let index = self.selected.filter(|index| *index < self.row_count())?;
+        let layout = self.layout();
+        Some((
+            index,
+            GuiPoint::new(
+                (layout.list_viewport.x + layout.item_width / 2) as f32,
+                (layout.list_viewport.y + index as i32 * layout.item_pitch - self.list_scroll_y
+                    + layout.item_height / 2) as f32,
+            ),
+        ))
+    }
+
     pub const fn focused_control(&self) -> PlrSelControl {
         self.focus
     }
@@ -1611,6 +1631,47 @@ impl PlrSelController {
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<PlrSelAction> {
         self.handle_key_down_with_tab_direction(key, false)
+    }
+
+    /// Mirrors `C4GUI::ListBox::CharIn`: one typed ASCII byte searches from
+    /// the row after the current selection, wrapping once, and selects the
+    /// next display name whose first byte matches case-insensitively. There
+    /// is no prefix buffer or timeout.
+    pub fn handle_character<'a>(
+        &mut self,
+        character: char,
+        row_names: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<PlrSelAction> {
+        if self.focus != PlrSelControl::PlayerList || !character.is_ascii() {
+            return Vec::new();
+        }
+        let names = row_names
+            .into_iter()
+            .take(self.row_count())
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            return Vec::new();
+        }
+
+        let selected = self.selected.filter(|index| *index < names.len());
+        let start = selected.map_or(0, |index| (index + 1) % names.len());
+        let candidates = if selected.is_some() {
+            names.len().saturating_sub(1)
+        } else {
+            names.len()
+        };
+        let input = character as u8;
+        for offset in 0..candidates {
+            let index = (start + offset) % names.len();
+            if names[index]
+                .as_bytes()
+                .first()
+                .is_some_and(|first| first.eq_ignore_ascii_case(&input))
+            {
+                return self.change_selection(Some(index));
+            }
+        }
+        Vec::new()
     }
 
     pub fn handle_key_down_with_tab_direction(
@@ -3465,6 +3526,60 @@ mod tests {
         assert_eq!(
             controller.handle_key_down(crate::KeyCode::Escape),
             vec![PlrSelAction::Back]
+        );
+    }
+
+    #[test]
+    fn l047_typeahead_cycles_matching_rows_and_requires_list_focus() {
+        let names = ["Thomas", "Ada", "tina", "Tori"];
+        let mut controller = PlrSelController::new(names.len());
+        controller.resize(1280, 720);
+
+        for (character, expected) in [('T', 2), ('T', 3), ('T', 0), ('t', 2)] {
+            assert_eq!(
+                controller.handle_character(character, names),
+                vec![PlrSelAction::SelectionChanged(Some(expected))]
+            );
+            assert_eq!(controller.selected_index(), Some(expected));
+        }
+
+        controller.set_selected_index(None);
+        assert_eq!(
+            controller.handle_character('t', names),
+            vec![PlrSelAction::SelectionChanged(Some(0))],
+            "an unselected list starts its search at the first row"
+        );
+        assert!(controller.handle_character('x', names).is_empty());
+        assert_eq!(controller.selected_index(), Some(0));
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
+        assert!(controller.handle_character('T', names).is_empty());
+        assert_eq!(controller.selected_index(), Some(0));
+        assert_eq!(controller.keyboard_context_target(), None);
+    }
+
+    #[test]
+    fn l047_keyboard_context_target_is_selected_row_center_not_pointer() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(4);
+        controller.resize(1280, 720);
+        controller.set_selected_index(Some(3));
+        controller.set_pointer_position(Some(GuiPoint::new(1.0, 2.0)));
+
+        assert_eq!(
+            controller.keyboard_context_target(),
+            Some((
+                3,
+                GuiPoint::new(
+                    (layout.list_viewport.x + layout.item_width / 2) as f32,
+                    (layout.list_viewport.y
+                        + 3 * layout.item_pitch
+                        + layout.item_height / 2) as f32,
+                ),
+            ))
         );
     }
 

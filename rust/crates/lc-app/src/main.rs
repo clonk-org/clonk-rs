@@ -20898,6 +20898,26 @@ impl GameApp {
             self.mark_menu_dirty();
             return Ok(());
         }
+        if self.startup_view == StartupView::PlayerSelection {
+            let actions = match self.startup_player_dialog.as_mut() {
+                Some(dialog) if dialog.is_crew_mode() => dialog.handle_character(
+                    character,
+                    self.startup_crew_models.iter().map(|crew| crew.name.as_str()),
+                ),
+                Some(dialog) => dialog.handle_character(
+                    character,
+                    self.startup_player_models
+                        .iter()
+                        .map(|player| player.name.as_str()),
+                ),
+                None => Vec::new(),
+            };
+            if !actions.is_empty() {
+                self.process_player_dialog_actions(actions)?;
+                self.mark_menu_dirty();
+            }
+            return Ok(());
+        }
         if self.startup_view != StartupView::NetworkGame {
             return Ok(());
         }
@@ -24604,6 +24624,11 @@ impl GameApp {
                         return Ok(());
                     }
                     if self.startup_view == StartupView::PlayerSelection && no_shortcut_modifiers {
+                        if key == VirtualKeyCode::Apps
+                            && self.open_startup_player_context_menu(true)?
+                        {
+                            return Ok(());
+                        }
                         let actions = self
                             .startup_player_dialog
                             .as_ref()
@@ -32504,7 +32529,7 @@ impl GameApp {
                             self.open_scenario_search_context_menu(false)?;
                         }
                         StartupView::PlayerSelection => {
-                            self.open_startup_player_context_menu()?;
+                            self.open_startup_player_context_menu(false)?;
                         }
                         StartupView::NetworkGame => {
                             let outcome = self
@@ -38830,20 +38855,34 @@ impl GameApp {
         }
     }
 
-    fn open_startup_player_context_menu(&mut self) -> Result<bool, EngineError> {
+    fn open_startup_player_context_menu(
+        &mut self,
+        keyboard_trigger: bool,
+    ) -> Result<bool, EngineError> {
         if self.mode != AppMode::Menu
             || self.startup_view != StartupView::PlayerSelection
             || !self.message_dialogs.is_empty()
             || self.game_over_dialog.is_some()
+            || self.startup_player_properties_dialog.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.definition_selector.is_some()
+            || self.context_menu.is_some()
         {
             return Ok(false);
         }
-        let Some((index, anchor, crew_mode)) = self.startup_player_dialog.as_ref().and_then(|dialog| {
-            let point = dialog.pointer_position()?;
-            dialog
-                .context_index_at(point)
-                .map(|index| (index, point, dialog.is_crew_mode()))
-        }) else {
+        let Some((index, anchor, crew_mode)) =
+            self.startup_player_dialog.as_ref().and_then(|dialog| {
+                if keyboard_trigger {
+                    let (index, anchor) = dialog.keyboard_context_target()?;
+                    Some((index, anchor, dialog.is_crew_mode()))
+                } else {
+                    let point = dialog.pointer_position()?;
+                    dialog
+                        .context_index_at(point)
+                        .map(|index| (index, point, dialog.is_crew_mode()))
+                }
+            })
+        else {
             return Ok(false);
         };
         self.guard_classic_global_gui_bootstrap()?;
@@ -38851,10 +38890,11 @@ impl GameApp {
             "C4GUI context menu",
             self.assets.context_menu_resources().map(|_| ()),
         )?;
-        if !self
-            .startup_player_dialog
-            .as_mut()
-            .is_some_and(|dialog| dialog.select_for_context(index))
+        if !keyboard_trigger
+            && !self
+                .startup_player_dialog
+                .as_mut()
+                .is_some_and(|dialog| dialog.select_for_context(index))
         {
             tracing::error!(index, "startup player context menu references a stale row");
             return Ok(false);
@@ -38905,7 +38945,13 @@ impl GameApp {
                 })
                 .collect()
         };
-        self.open_context_menu_at(entries, anchor)
+        let opened = self.open_context_menu_at(entries, anchor)?;
+        if keyboard_trigger && opened {
+            if let Some(menu) = self.context_menu.as_mut() {
+                menu.note_non_pointer_input();
+            }
+        }
+        Ok(opened)
     }
 
     fn open_startup_participants_context_menu(&mut self) -> Result<bool, EngineError> {
@@ -39853,7 +39899,8 @@ impl GameApp {
 
         for action in actions {
             match action {
-                PlrSelAction::SelectionChanged(_) | PlrSelAction::FocusChanged(_) => {}
+                PlrSelAction::SelectionChanged(Some(_)) => self.play_ui_sound("Command"),
+                PlrSelAction::SelectionChanged(None) | PlrSelAction::FocusChanged(_) => {}
                 PlrSelAction::Back => {
                     self.begin_startup_dialog_fade(StartupDialog::MainMenu);
                     self.show_main_menu();
@@ -84677,6 +84724,142 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn l047_player_typeahead_and_apps_route_through_selected_row() {
+        let player = |name: &str| lc_frontend::startup_plrsel::PlrSelPlayer {
+            name: name.to_string(),
+            activated: false,
+            big_icon: None,
+            portrait: None,
+            color_dw: 0xff,
+            score: 0,
+            rounds: 0,
+            rounds_won: 0,
+            rounds_lost: 0,
+            total_playing_time: 0,
+            comment: String::new(),
+        };
+        let mut app = new_classic_menu_app(640, 480);
+        app.startup_player_models = ["Thomas", "Ada", "tina", "Tori"]
+            .map(player)
+            .into_iter()
+            .collect();
+        app.open_player_selection_dialog();
+
+        for (character, expected) in [('T', 2), ('T', 3), ('t', 0)] {
+            app.handle_text_input(character).expect("route list character");
+            assert_eq!(
+                app.startup_player_dialog
+                    .as_ref()
+                    .expect("player dialog")
+                    .selected_index(),
+                Some(expected)
+            );
+        }
+        app.handle_text_input('T').expect("cycle to next T row");
+        let (selected, anchor) = app
+            .startup_player_dialog
+            .as_ref()
+            .expect("player dialog")
+            .keyboard_context_target()
+            .expect("focused selected row");
+        assert_eq!(selected, 2);
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player dialog")
+            .set_pointer_position(Some(GuiPoint::new(639.0, 479.0)));
+
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open selected-row context menu");
+        let popup = app.context_menu.as_ref().expect("keyboard context menu");
+        let panel = &popup.layout().panels[0];
+        assert_eq!(panel.rows.len(), 2);
+        assert_eq!(panel.selected, None);
+        assert_eq!((panel.bounds.x, panel.bounds.y), (anchor.x as i32, anchor.y as i32));
+        app.close_context_menu_silently();
+
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("move focus away from list");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release Tab");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("Apps outside list focus is inert");
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn l047_player_typeahead_stays_behind_rename_and_modal_dialogs() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.startup_player_models = ["Thomas", "tina"]
+            .map(|name| lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: name.to_string(),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0xff,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            })
+            .into_iter()
+            .collect();
+        app.open_player_selection_dialog();
+
+        app.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::StartupCrew(PendingCrewInputAction::Rename {
+                index: 0,
+            }),
+            controller: InputDialogController::new(
+                "Rename crew member:",
+                "Rename",
+                InputDialogIcon::None,
+            )
+            .with_input_text("Crew"),
+        });
+        app.handle_text_input('T').expect("type into rename dialog");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .selected_index(),
+            Some(0),
+            "the covered list must not type-ahead"
+        );
+        assert_ne!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("rename dialog")
+                .controller
+                .text(),
+            "Crew"
+        );
+        app.game_option_input_dialog = None;
+
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Covered",
+                "Modal",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("open modal dialog");
+        app.handle_text_input('T').expect("text is swallowed by modal");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("Apps is swallowed by modal");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .selected_index(),
+            Some(0)
+        );
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
     fn l034_about_shift_tab_reverses_buttons_and_license_tabs() {
         use lc_frontend::startup_about_dlg::AboutPage;
 
@@ -84873,7 +85056,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 (layout.list_client.y + layout.item_height / 2) as f32,
             )));
         assert!(app
-            .open_startup_player_context_menu()
+            .open_startup_player_context_menu(false)
             .expect("open crew context menu"));
         assert_eq!(
             app.context_menu
@@ -84949,7 +85132,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 (layout.list_client.y + layout.item_height / 2) as f32,
             )));
         assert!(app
-            .open_startup_player_context_menu()
+            .open_startup_player_context_menu(false)
             .expect("open exact player context"));
         assert!(app.context_menu.is_some());
         let before_models = app.startup_player_models.len();
@@ -96002,7 +96185,7 @@ ScenInfoArea=70,5,25,90
             .selected_index();
         let version_before = app.menu_render_version;
         let error = app
-            .open_startup_player_context_menu()
+            .open_startup_player_context_menu(false)
             .expect_err("missing process-global resource must fail typed");
         assert!(matches!(
             error,
