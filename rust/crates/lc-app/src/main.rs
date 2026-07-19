@@ -8468,6 +8468,7 @@ enum AppContextMenuCommand {
     LobbyKick(i32),
     LobbySheet(LobbySheet),
     NetworkJoinEdit(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
+    LobbyChat(LobbyChatContextCommand),
     ScenarioSearch(ScenselSearchContextCommand),
     InputDialog(InputDialogContextCommand),
 }
@@ -10089,6 +10090,9 @@ struct GameApp {
     board_back_scroll: i32,
     /// Process-global C4ChatInputDialog projection for ordinary game chat.
     running_chat: Option<RunningChatState>,
+    /// A paste may close its chat owner on key-down; retain the physical V
+    /// until release so the replacement screen cannot receive an orphaned up.
+    chat_paste_consumed_keys: HashSet<VirtualKeyCode>,
     message_input_history: VecDeque<String>,
     /// `C4Player::ShowStartup` for the local player: device hint + name
     /// until the first control com (src/C4Player.cpp:1376,1735).
@@ -18319,6 +18323,59 @@ fn lobby_chat_delete_selection(view: &mut LobbyChatEditView) -> bool {
     true
 }
 
+fn lobby_chat_context_entries(
+    view: &LobbyChatEditView,
+    clipboard_available: bool,
+) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
+    let labels = InputDialogContextLabels::default();
+    let entry =
+        |label: &str, tooltip: &str, command: LobbyChatContextCommand| {
+            ContextMenuEntry::new(label)
+                .with_tooltip(tooltip)
+                .with_icon(ContextMenuIcon::None)
+                .with_action(AppContextMenuCommand::LobbyChat(command))
+        };
+    let selection = lobby_chat_selection(view);
+    let mut entries = Vec::new();
+    if selection.is_some() {
+        entries.push(entry(
+            &labels.cut,
+            &labels.cut_tooltip,
+            LobbyChatContextCommand::Cut,
+        ));
+        entries.push(entry(
+            &labels.copy,
+            &labels.copy_tooltip,
+            LobbyChatContextCommand::Copy,
+        ));
+    }
+    if clipboard_available {
+        entries.push(entry(
+            &labels.paste,
+            &labels.paste_tooltip,
+            LobbyChatContextCommand::Paste,
+        ));
+    }
+    if selection.is_some() {
+        entries.push(entry(
+            &labels.clear,
+            &labels.clear_tooltip,
+            LobbyChatContextCommand::Clear,
+        ));
+    }
+    let whole_text_selected = selection
+        .as_ref()
+        .is_some_and(|range| range.start == 0 && range.end == view.text.len());
+    if !view.text.is_empty() && !whole_text_selected {
+        entries.push(entry(
+            &labels.select_all,
+            &labels.select_all_tooltip,
+            LobbyChatContextCommand::SelectAll,
+        ));
+    }
+    entries
+}
+
 fn lobby_chat_insert_text(view: &mut LobbyChatEditView, text: &str) {
     const CPP_EDIT_MAX_BYTES: usize = 254;
     lobby_chat_delete_selection(view);
@@ -18337,6 +18394,78 @@ fn lobby_chat_insert_text(view: &mut LobbyChatEditView, text: &str) {
     view.caret += sanitized.len();
     view.selection = None;
     view.cursor_visible = true;
+}
+
+fn lobby_chat_character_at(
+    view: &LobbyChatEditView,
+    control_x: i32,
+    font: &lc_graphics::clonk_font::ClonkFont,
+) -> usize {
+    let mut previous_width = 0;
+    for (index, character) in view.text.char_indices() {
+        let end = index + character.len_utf8();
+        let width = font.measure(&view.text[..end], false).0;
+        if width - (width - previous_width) / 2 >= control_x {
+            return index;
+        }
+        previous_width = width;
+    }
+    view.text.len()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LobbyChatPasteMode {
+    Lobby,
+    Running,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LobbyChatPasteOutcome {
+    close: bool,
+    completed_lines: usize,
+    stopped: bool,
+}
+
+fn lobby_chat_paste_text<E>(
+    view: &mut LobbyChatEditView,
+    clipboard: &str,
+    mode: LobbyChatPasteMode,
+    mut finish_input: impl FnMut(String) -> Result<bool, E>,
+) -> Result<LobbyChatPasteOutcome, E> {
+    let mut outcome = LobbyChatPasteOutcome::default();
+    let mut rest = clipboard;
+    while let Some(line_break) = rest.find(['\r', '\n']) {
+        if line_break == 0 {
+            rest = &rest[1..];
+            continue;
+        }
+        lobby_chat_insert_text(view, &rest[..line_break]);
+        rest = &rest[line_break + 1..];
+        let submission = view.text.clone();
+        match mode {
+            LobbyChatPasteMode::Lobby => *view = LobbyChatEditView::default(),
+            LobbyChatPasteMode::Running if !rest.is_empty() => {
+                view.caret = view.text.len();
+                view.selection = (!view.text.is_empty()).then_some((0, view.text.len()));
+                view.cursor_visible = true;
+            }
+            LobbyChatPasteMode::Running => {
+                outcome.close = true;
+            }
+        }
+        outcome.completed_lines += 1;
+        if !finish_input(submission)? {
+            outcome.stopped = true;
+            return Ok(outcome);
+        }
+        if outcome.close {
+            return Ok(outcome);
+        }
+    }
+    if !rest.is_empty() {
+        lobby_chat_insert_text(view, rest);
+    }
+    Ok(outcome)
 }
 
 fn lobby_chat_previous_boundary(text: &str, at: usize) -> usize {
@@ -19277,6 +19406,7 @@ impl GameApp {
             board_log_history: VecDeque::new(),
             board_back_scroll: -1,
             running_chat: None,
+            chat_paste_consumed_keys: HashSet::new(),
             message_input_history: VecDeque::new(),
             show_startup_hint: false,
             debug_hud: std::env::var("LC_APP_HUD_DEBUG")
@@ -23606,6 +23736,9 @@ impl GameApp {
             self.menu_frame_cache = None;
         }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
+        if state == ElementState::Released && self.chat_paste_consumed_keys.remove(&key) {
+            return Ok(());
+        }
         if self.handle_options_control_capture_key(key, state)? {
             return Ok(());
         }
@@ -23613,8 +23746,10 @@ impl GameApp {
         if self.running_chat.is_some() {
             let modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            let edit_paste = key == VirtualKeyCode::V && modifiers == ModifiersState::CTRL;
             if modifiers.ctrl()
                 && !(key == VirtualKeyCode::F9 && modifiers == ModifiersState::CTRL)
+                && !edit_paste
             {
                 self.handle_engine_key(key, state)?;
                 return Ok(());
@@ -24318,6 +24453,7 @@ impl GameApp {
         self.game_option_input_pointer_position = None;
         self.game_option_consumed_keys.clear();
         self.game_option_pointer_capture = false;
+        self.chat_paste_consumed_keys.clear();
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.keyboard_modifiers = ModifiersState::empty();
@@ -27745,7 +27881,10 @@ impl GameApp {
         let Some(chat) = self.running_chat.take() else {
             return;
         };
-        let text = chat.edit.text;
+        self.submit_running_chat_text(chat.edit.text);
+    }
+
+    fn submit_running_chat_text(&mut self, text: String) {
         self.store_message_input_history(&text);
         if self.process_control_message_local_command(&text) {
             return;
@@ -27788,6 +27927,29 @@ impl GameApp {
         }
     }
 
+    fn paste_running_chat_text(&mut self, text: &str) {
+        let Some(mut chat) = self.running_chat.take() else {
+            return;
+        };
+        let outcome = lobby_chat_paste_text(
+            &mut chat.edit,
+            text,
+            LobbyChatPasteMode::Running,
+            |submission| {
+                self.submit_running_chat_text(submission);
+                Ok::<bool, ()>(self.mode == AppMode::Running && self.running_chat.is_none())
+            },
+        )
+        .expect("running-chat paste callback is infallible");
+        if !outcome.close
+            && !outcome.stopped
+            && self.mode == AppMode::Running
+            && self.running_chat.is_none()
+        {
+            self.running_chat = Some(chat);
+        }
+    }
+
     fn handle_running_chat_key(
         &mut self,
         key: VirtualKeyCode,
@@ -27820,6 +27982,17 @@ impl GameApp {
             return false;
         }
         if state == ElementState::Released {
+            return true;
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if key == VirtualKeyCode::V && modifiers == ModifiersState::CTRL {
+            self.chat_paste_consumed_keys.insert(key);
+            if let Ok(text) =
+                arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+            {
+                self.paste_running_chat_text(&text);
+            }
             return true;
         }
         match key {
@@ -37449,6 +37622,11 @@ impl GameApp {
                     AppContextMenuCommand::NetworkJoinEdit(command) => {
                         self.apply_network_join_edit_context_command(command)?;
                     }
+                    AppContextMenuCommand::LobbyChat(command) => {
+                        self.process_classic_lobby_chat_request(
+                            LobbyChatRequest::ContextCommand(command),
+                        )?;
+                    }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
                     }
@@ -39664,6 +39842,43 @@ impl GameApp {
         Ok(())
     }
 
+    fn paste_network_lobby_chat_text(&mut self, text: &str) -> Result<(), EngineError> {
+        let (mut view, local_client_id) = {
+            let Some(lobby) = self.network_lobby.as_mut() else {
+                return Ok(());
+            };
+            (std::mem::take(&mut lobby.chat_edit), lobby.local_client_id)
+        };
+        let result = lobby_chat_paste_text(
+            &mut view,
+            text,
+            LobbyChatPasteMode::Lobby,
+            |submission| {
+                self.process_lobby_action(LobbyAction::SubmitMessage(submission))?;
+                Ok(self.startup_view == StartupView::NetworkLobby
+                    && self
+                        .network_lobby
+                        .as_ref()
+                        .is_some_and(|lobby| lobby.local_client_id == local_client_id))
+            },
+        );
+        if let Some(lobby) = self
+            .network_lobby
+            .as_mut()
+            .filter(|lobby| lobby.local_client_id == local_client_id)
+        {
+            lobby.chat_edit = view;
+            if result
+                .as_ref()
+                .is_ok_and(|outcome| outcome.completed_lines > 0)
+            {
+                lobby.chat_history_index = -1;
+            }
+        }
+        self.mark_menu_dirty();
+        result.map(|_| ())
+    }
+
     fn handle_network_lobby_chat_key(
         &mut self,
         key: VirtualKeyCode,
@@ -39711,6 +39926,15 @@ impl GameApp {
             return Ok(true);
         }
         if let Some(shortcut) = clipboard.flatten() {
+            if shortcut == LobbyChatClipboardShortcut::Paste {
+                self.chat_paste_consumed_keys.insert(key);
+                if let Ok(text) =
+                    arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+                {
+                    self.paste_network_lobby_chat_text(&text)?;
+                }
+                return Ok(true);
+            }
             let Some(lobby) = self.network_lobby.as_mut() else {
                 return Ok(true);
             };
@@ -39726,13 +39950,7 @@ impl GameApp {
                         }
                     }
                 }
-                LobbyChatClipboardShortcut::Paste => {
-                    if let Ok(text) =
-                        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
-                    {
-                        lobby_chat_insert_text(&mut lobby.chat_edit, &text);
-                    }
-                }
+                LobbyChatClipboardShortcut::Paste => unreachable!("paste handled above"),
                 LobbyChatClipboardShortcut::SelectAll => {
                     lobby.chat_edit.caret = lobby.chat_edit.text.len();
                     lobby.chat_edit.selection = (!lobby.chat_edit.text.is_empty())
@@ -40942,6 +41160,33 @@ impl GameApp {
         Ok(false)
     }
 
+    fn paste_classic_lobby_chat_text(&mut self, text: &str) -> Result<(), EngineError> {
+        let Some(mut view) = self
+            .classic_host_lobby
+            .as_ref()
+            .map(|lobby| lobby.controller.chat_edit_view().clone())
+        else {
+            return Ok(());
+        };
+        let result = lobby_chat_paste_text(
+            &mut view,
+            text,
+            LobbyChatPasteMode::Lobby,
+            |submission| {
+                self.process_classic_lobby_chat_request(LobbyChatRequest::Submit(submission))?;
+                Ok(self.classic_host_lobby_active())
+            },
+        );
+        if self.classic_host_lobby_active() {
+            let lobby = self
+                .classic_host_lobby
+                .as_mut()
+                .expect("active classic lobby has state");
+            lobby.controller.set_chat_edit_view(view);
+        }
+        result.map(|_| ())
+    }
+
     fn process_classic_lobby_chat_request(
         &mut self,
         request: LobbyChatRequest,
@@ -40983,6 +41228,14 @@ impl GameApp {
                 install_view(self, view);
             }
             LobbyChatRequest::Clipboard { shortcut } => {
+                if shortcut == LobbyChatClipboardShortcut::Paste {
+                    if let Ok(text) =
+                        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+                    {
+                        self.paste_classic_lobby_chat_text(&text)?;
+                    }
+                    return Ok(());
+                }
                 let mut view = current_view();
                 match shortcut {
                     LobbyChatClipboardShortcut::Copy | LobbyChatClipboardShortcut::Cut => {
@@ -40996,13 +41249,7 @@ impl GameApp {
                             }
                         }
                     }
-                    LobbyChatClipboardShortcut::Paste => {
-                        if let Ok(text) =
-                            arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
-                        {
-                            lobby_chat_insert_text(&mut view, &text);
-                        }
-                    }
+                    LobbyChatClipboardShortcut::Paste => unreachable!("paste handled above"),
                     LobbyChatClipboardShortcut::SelectAll => {
                         view.caret = view.text.len();
                         view.selection = (!view.text.is_empty()).then_some((0, view.caret));
@@ -41094,16 +41341,33 @@ impl GameApp {
                     }
                 }
             }
+            LobbyChatRequest::PointerMiddleDown(point) => {
+                let mut view = current_view();
+                let (layout, _) = self.classic_host_lobby_layouts()?;
+                if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
+                    let control_x = point.x.floor() as i32 - (layout.chat_edit.x + 4)
+                        + view.horizontal_scroll;
+                    view.caret = lobby_chat_character_at(&view, control_x, &fonts.text);
+                    view.selection = None;
+                    view.cursor_visible = true;
+                    install_view(self, view);
+                }
+                if let Some(text) = primary_clipboard_text() {
+                    self.paste_classic_lobby_chat_text(&text)?;
+                }
+            }
+            LobbyChatRequest::OpenContextMenu { anchor } => {
+                let entries =
+                    lobby_chat_context_entries(&current_view(), clipboard_text_available());
+                self.open_context_menu_at(entries, anchor)?;
+            }
             LobbyChatRequest::PointerDown(_)
             | LobbyChatRequest::PointerMove(_)
             | LobbyChatRequest::PointerUp(_)
             | LobbyChatRequest::PointerDoubleClick(_)
-            | LobbyChatRequest::PointerMiddleDown(_)
-            | LobbyChatRequest::TouchCancel
-            | LobbyChatRequest::OpenContextMenu { .. } => {
+            | LobbyChatRequest::TouchCancel => {
                 // The controller already owns focus/capture. Text mutation is
-                // handled by keyboard/clipboard actions above; retaining the
-                // request is safe until the recursive context menu is wired.
+                // handled by keyboard/clipboard actions above.
             }
             LobbyChatRequest::OpenExternalDialog => {
                 // The retained external-chat sheet is not implemented yet,
@@ -41168,10 +41432,15 @@ impl GameApp {
                     None
                 };
                 if let Some(shortcut) = shortcut {
-                    self.classic_host_lobby
+                    let actions = self
+                        .classic_host_lobby
                         .as_ref()
                         .map(|lobby| lobby.controller.chat_clipboard(shortcut))
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    if shortcut == LobbyChatClipboardShortcut::Paste && !actions.is_empty() {
+                        self.chat_paste_consumed_keys.insert(key);
+                    }
+                    actions
                 } else {
                     let edit_key = match key {
                         VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
@@ -76016,6 +76285,292 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn l037_paste_scanner_preserves_edit_rules_and_skips_empty_lines() {
+        let mut view = LobbyChatEditView {
+            text: "abZZcd".into(),
+            caret: 4,
+            selection: Some((2, 4)),
+            cursor_visible: true,
+            ..LobbyChatEditView::default()
+        };
+        let mut submissions = Vec::new();
+        let outcome = lobby_chat_paste_text(
+            &mut view,
+            "x|y",
+            LobbyChatPasteMode::Lobby,
+            |submission| {
+                submissions.push(submission);
+                Ok::<bool, ()>(true)
+            },
+        )
+        .expect("infallible paste callback");
+        assert_eq!(outcome.completed_lines, 0);
+        assert!(submissions.is_empty());
+        assert_eq!(view.text, "abx¦ycd");
+        assert_eq!(view.caret, 6);
+        assert_eq!(view.selection, None);
+
+        let mut view = LobbyChatEditView {
+            text: "draft".into(),
+            caret: 5,
+            cursor_visible: true,
+            ..LobbyChatEditView::default()
+        };
+        let mut submissions = Vec::new();
+        let outcome = lobby_chat_paste_text(
+            &mut view,
+            "\r\nmore",
+            LobbyChatPasteMode::Lobby,
+            |submission| {
+                submissions.push(submission);
+                Ok::<bool, ()>(true)
+            },
+        )
+        .expect("infallible paste callback");
+        assert_eq!(outcome.completed_lines, 0);
+        assert!(submissions.is_empty());
+        assert_eq!(view.text, "draftmore");
+
+        let mut view = LobbyChatEditView::default();
+        let oversized = format!("{}\ntrailing", "a".repeat(300));
+        let mut submissions = Vec::new();
+        let outcome = lobby_chat_paste_text(
+            &mut view,
+            &oversized,
+            LobbyChatPasteMode::Lobby,
+            |submission| {
+                submissions.push(submission);
+                Ok::<bool, ()>(true)
+            },
+        )
+        .expect("infallible paste callback");
+        assert_eq!(outcome.completed_lines, 1);
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(lc_script::c4_string_byte_len(&submissions[0]), 254);
+        assert_eq!(view.text, "trailing");
+        assert_eq!(view.caret, view.text.len());
+
+        let mut view = LobbyChatEditView::default();
+        let mut submissions = Vec::new();
+        let outcome = lobby_chat_paste_text(
+            &mut view,
+            "one\ntwo\nthree",
+            LobbyChatPasteMode::Lobby,
+            |submission| {
+                submissions.push(submission);
+                Ok::<bool, ()>(true)
+            },
+        )
+        .expect("infallible paste callback");
+        assert_eq!(outcome.completed_lines, 2);
+        assert_eq!(submissions, ["one", "two"]);
+        assert_eq!(view.text, "three");
+
+        let mut view = LobbyChatEditView::default();
+        let mut submissions = Vec::new();
+        let outcome = lobby_chat_paste_text(
+            &mut view,
+            "first\nnever-inserted",
+            LobbyChatPasteMode::Lobby,
+            |submission| {
+                submissions.push(submission);
+                Ok::<bool, ()>(false)
+            },
+        )
+        .expect("infallible paste callback");
+        assert!(outcome.stopped);
+        assert_eq!(submissions, ["first"]);
+        assert!(view.text.is_empty());
+    }
+
+    #[test]
+    fn l037_context_menu_matches_edit_predicates_and_order() {
+        let view = LobbyChatEditView {
+            text: "selected text".into(),
+            caret: 8,
+            selection: Some((0, 8)),
+            ..LobbyChatEditView::default()
+        };
+        let entries = lobby_chat_context_entries(&view, true);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Cut", "Copy", "Paste", "Clear", "Select all"]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                Some(AppContextMenuCommand::LobbyChat(
+                    LobbyChatContextCommand::Cut,
+                )),
+                Some(AppContextMenuCommand::LobbyChat(
+                    LobbyChatContextCommand::Copy,
+                )),
+                Some(AppContextMenuCommand::LobbyChat(
+                    LobbyChatContextCommand::Paste,
+                )),
+                Some(AppContextMenuCommand::LobbyChat(
+                    LobbyChatContextCommand::Clear,
+                )),
+                Some(AppContextMenuCommand::LobbyChat(
+                    LobbyChatContextCommand::SelectAll,
+                )),
+            ]
+        );
+
+        let whole = LobbyChatEditView {
+            text: "all".into(),
+            caret: 3,
+            selection: Some((0, 3)),
+            ..LobbyChatEditView::default()
+        };
+        let entries = lobby_chat_context_entries(&whole, false);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Cut", "Copy", "Clear"]
+        );
+
+        assert!(lobby_chat_context_entries(&LobbyChatEditView::default(), false).is_empty());
+    }
+
+    #[test]
+    fn l037_classic_context_menu_dispatches_to_the_live_edit() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        app.classic_host_lobby
+            .as_mut()
+            .expect("classic lobby")
+            .controller
+            .set_chat_edit_view(LobbyChatEditView {
+                text: "select me".into(),
+                caret: 9,
+                ..LobbyChatEditView::default()
+            });
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::OpenContextMenu {
+            anchor: GuiPoint::new(20.0, 20.0),
+        })
+        .expect("open chat context menu");
+        assert!(app.context_menu.is_some());
+        app.process_context_menu_outcome(ContextMenuOutcome {
+            captured: true,
+            pass_through: false,
+            focus_suppressed: true,
+            events: vec![
+                ContextMenuEvent::Closed,
+                ContextMenuEvent::Activated(AppContextMenuCommand::LobbyChat(
+                    LobbyChatContextCommand::SelectAll,
+                )),
+            ],
+        })
+        .expect("dispatch chat context command");
+        let view = app
+            .classic_host_lobby
+            .as_ref()
+            .expect("classic lobby remains")
+            .controller
+            .chat_edit_view();
+        assert_eq!(view.selection, Some((0, view.text.len())));
+    }
+
+    #[test]
+    fn l037_lobby_paste_submits_each_line_and_retains_the_tail() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+
+        app.paste_classic_lobby_chat_text("hello|there\nsecond\nworld")
+            .expect("paste classic lobby chat");
+        let submitted = commands.take_submitted_messages();
+        assert_eq!(submitted.len(), 2);
+        assert_eq!(submitted[0].message.as_bytes(), "hello¦there".as_bytes());
+        assert_eq!(submitted[1].message.as_bytes(), b"second");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("classic lobby remains")
+                .controller
+                .chat_edit_view()
+                .text,
+            "world"
+        );
+
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.paste_network_lobby_chat_text("one\r\ntwo\nthree")
+            .expect("paste generic lobby chat");
+        let submitted = commands.take_submitted_messages();
+        assert_eq!(submitted.len(), 2);
+        assert_eq!(submitted[0].message.as_bytes(), b"one");
+        assert_eq!(submitted[1].message.as_bytes(), b"two");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("generic lobby remains")
+                .chat_edit
+                .text,
+            "three"
+        );
+    }
+
+    #[test]
+    fn l037_running_paste_obeys_finish_result_and_crlf_more_flag() {
+        let mut app = new_running_sandbox_app();
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+
+        app.start_running_chat(RunningChatMode::All);
+        app.paste_running_chat_text("hello\nsecond\nworld");
+        let submitted = commands.take_submitted_messages();
+        assert_eq!(submitted.len(), 2);
+        assert_eq!(submitted[0].message.as_bytes(), b"hello");
+        assert_eq!(submitted[1].message.as_bytes(), b"second");
+        assert_eq!(
+            app.running_chat
+                .as_ref()
+                .expect("trailing fragment keeps chat open")
+                .edit
+                .text,
+            "world"
+        );
+
+        app.running_chat = None;
+        app.start_running_chat(RunningChatMode::All);
+        app.paste_running_chat_text("done\n");
+        let submitted = commands.take_submitted_messages();
+        assert_eq!(submitted.len(), 1);
+        assert_eq!(submitted[0].message.as_bytes(), b"done");
+        assert!(app.running_chat.is_none());
+
+        app.start_running_chat(RunningChatMode::All);
+        app.paste_running_chat_text("stay\r\n");
+        let submitted = commands.take_submitted_messages();
+        assert_eq!(submitted.len(), 1);
+        assert_eq!(submitted[0].message.as_bytes(), b"stay");
+        let chat = app
+            .running_chat
+            .as_ref()
+            .expect("CRLF reports more at the first delimiter");
+        assert_eq!(chat.edit.text, "stay");
+        assert_eq!(chat.edit.selection, Some((0, 4)));
+    }
+
+    #[test]
     fn classic_lobby_chat_edits_parses_and_submits_private_delivery_controls() {
         let mut app = new_menu_app(640, 480);
         install_test_classic_host_lobby(&mut app);
@@ -76227,8 +76782,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut app = new_menu_app_with_paths(640, 480, &paths);
         install_test_classic_host_lobby(&mut app);
 
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("Apps opens the classic chat context menu");
+        assert!(app.context_menu.is_some());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape closes the classic chat context menu");
+        assert!(app.context_menu.is_none());
+
         for (key, modifiers) in [
-            (VirtualKeyCode::Apps, ModifiersState::empty()),
             (VirtualKeyCode::A, ModifiersState::CTRL),
             (VirtualKeyCode::Left, ModifiersState::CTRL),
             (VirtualKeyCode::Delete, ModifiersState::empty()),
