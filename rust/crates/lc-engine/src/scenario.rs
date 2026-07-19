@@ -4515,6 +4515,14 @@ impl ScenarioValueStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_replay_film_for_test(replay: i32, film: i32) -> Self {
+        let mut core = LegacyScenarioCore::default();
+        core.head.replay = replay;
+        core.head.film = film;
+        Self::from_runtime_core(&core, false)
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_landscape_push_pull_for_test(enabled: bool) -> Self {
         let mut core = LegacyScenarioCore::default();
         core.game.realism.landscape_push_pull = i32::from(enabled);

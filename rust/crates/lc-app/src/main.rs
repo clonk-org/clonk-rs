@@ -2728,12 +2728,188 @@ fn parse_runtime_help_language_table_with_charset(
     Ok(table)
 }
 
-fn guard_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<()> {
+fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
+    let name = name.trim();
+    if name.len() == 1 {
+        return match name.as_bytes()[0].to_ascii_uppercase() {
+            b'0' => Some(VirtualKeyCode::Key0),
+            b'1' => Some(VirtualKeyCode::Key1),
+            b'2' => Some(VirtualKeyCode::Key2),
+            b'3' => Some(VirtualKeyCode::Key3),
+            b'4' => Some(VirtualKeyCode::Key4),
+            b'5' => Some(VirtualKeyCode::Key5),
+            b'6' => Some(VirtualKeyCode::Key6),
+            b'7' => Some(VirtualKeyCode::Key7),
+            b'8' => Some(VirtualKeyCode::Key8),
+            b'9' => Some(VirtualKeyCode::Key9),
+            b'A' => Some(VirtualKeyCode::A),
+            b'B' => Some(VirtualKeyCode::B),
+            b'C' => Some(VirtualKeyCode::C),
+            b'D' => Some(VirtualKeyCode::D),
+            b'E' => Some(VirtualKeyCode::E),
+            b'F' => Some(VirtualKeyCode::F),
+            b'G' => Some(VirtualKeyCode::G),
+            b'H' => Some(VirtualKeyCode::H),
+            b'I' => Some(VirtualKeyCode::I),
+            b'J' => Some(VirtualKeyCode::J),
+            b'K' => Some(VirtualKeyCode::K),
+            b'L' => Some(VirtualKeyCode::L),
+            b'M' => Some(VirtualKeyCode::M),
+            b'N' => Some(VirtualKeyCode::N),
+            b'O' => Some(VirtualKeyCode::O),
+            b'P' => Some(VirtualKeyCode::P),
+            b'Q' => Some(VirtualKeyCode::Q),
+            b'R' => Some(VirtualKeyCode::R),
+            b'S' => Some(VirtualKeyCode::S),
+            b'T' => Some(VirtualKeyCode::T),
+            b'U' => Some(VirtualKeyCode::U),
+            b'V' => Some(VirtualKeyCode::V),
+            b'W' => Some(VirtualKeyCode::W),
+            b'X' => Some(VirtualKeyCode::X),
+            b'Y' => Some(VirtualKeyCode::Y),
+            b'Z' => Some(VirtualKeyCode::Z),
+            _ => None,
+        };
+    }
+
+    let directional_key = if name.eq_ignore_ascii_case("Left") {
+        Some(VirtualKeyCode::Left)
+    } else if name.eq_ignore_ascii_case("Right") {
+        Some(VirtualKeyCode::Right)
+    } else if name.eq_ignore_ascii_case("Up") {
+        Some(VirtualKeyCode::Up)
+    } else if name.eq_ignore_ascii_case("Down") {
+        Some(VirtualKeyCode::Down)
+    } else {
+        None
+    };
+    if directional_key.is_some() {
+        return directional_key;
+    }
+
+    let lower_name = name.to_ascii_lowercase();
+    if let Some(number) = lower_name
+        .strip_prefix('f')
+        .filter(|number| !number.starts_with('0'))
+        .and_then(|number| number.parse::<u8>().ok())
+    {
+        return match number {
+            1 => Some(VirtualKeyCode::F1),
+            2 => Some(VirtualKeyCode::F2),
+            3 => Some(VirtualKeyCode::F3),
+            4 => Some(VirtualKeyCode::F4),
+            5 => Some(VirtualKeyCode::F5),
+            6 => Some(VirtualKeyCode::F6),
+            7 => Some(VirtualKeyCode::F7),
+            8 => Some(VirtualKeyCode::F8),
+            9 => Some(VirtualKeyCode::F9),
+            10 => Some(VirtualKeyCode::F10),
+            11 => Some(VirtualKeyCode::F11),
+            12 => Some(VirtualKeyCode::F12),
+            13 => Some(VirtualKeyCode::F13),
+            14 => Some(VirtualKeyCode::F14),
+            15 => Some(VirtualKeyCode::F15),
+            16 => Some(VirtualKeyCode::F16),
+            17 => Some(VirtualKeyCode::F17),
+            18 => Some(VirtualKeyCode::F18),
+            19 => Some(VirtualKeyCode::F19),
+            20 => Some(VirtualKeyCode::F20),
+            21 => Some(VirtualKeyCode::F21),
+            22 => Some(VirtualKeyCode::F22),
+            23 => Some(VirtualKeyCode::F23),
+            24 => Some(VirtualKeyCode::F24),
+            _ => None,
+        };
+    }
+
+    // Names outside this backend-independent subset are intentionally left
+    // to the full global key-registry port. C++ delegates them to mutually
+    // incompatible Win32/X11/SDL name parsers; guessing an alias here could
+    // activate a physical key that native treats as KEY_Default.
+    None
+}
+
+fn parse_runtime_key_chord(raw: &str) -> Result<Option<RuntimeKeyChord>> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("None") {
+        return Ok(None);
+    }
+    let mut sections = raw.split('+').map(str::trim).peekable();
+    let mut modifiers = ModifiersState::empty();
+    let mut key = None;
+    while let Some(section) = sections.next() {
+        if sections.peek().is_some() {
+            let modifier = if section.eq_ignore_ascii_case("Alt") {
+                ModifiersState::ALT
+            } else if section.eq_ignore_ascii_case("Ctrl") {
+                ModifiersState::CTRL
+            } else if section.eq_ignore_ascii_case("Shift") {
+                ModifiersState::SHIFT
+            } else {
+                anyhow::bail!("undefined NetObsNextPlayer key modifier `{section}`");
+            };
+            modifiers |= modifier;
+        } else {
+            key = runtime_key_name(section);
+            anyhow::ensure!(
+                key.is_some(),
+                "unsupported NetObsNextPlayer keyboard key `{section}`"
+            );
+        }
+    }
+    Ok(key.map(|key| RuntimeKeyChord { key, modifiers }))
+}
+
+fn parse_runtime_key_config(bytes: &[u8]) -> Result<RuntimeKeyConfig> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut in_keys = false;
+    let mut net_observer_seen = false;
+    let mut config = RuntimeKeyConfig::default();
+    for (line_index, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_keys = &line[1..line.len() - 1] == "Keys";
+            continue;
+        }
+        if !in_keys {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            anyhow::bail!(
+                "invalid Extra.c4g/KeyConfig.txt line {} in [Keys]",
+                line_index + 1
+            );
+        };
+        anyhow::ensure!(
+            name.trim() == "NetObsNextPlayer",
+            "Extra.c4g/KeyConfig.txt custom global-key remapping is not represented"
+        );
+        if net_observer_seen {
+            // StdCompilerINIRead retains the first value for a duplicate
+            // entry, including duplicates in a later [Keys] section.
+            continue;
+        }
+        net_observer_seen = true;
+        config.net_observer_next_player = value
+            .split(',')
+            .map(parse_runtime_key_chord)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+    }
+    Ok(config)
+}
+
+fn load_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<RuntimeKeyConfig> {
     let Some(paths) = paths else {
-        return Ok(());
+        return Ok(RuntimeKeyConfig::default());
     };
     let Some(extra_path) = mapped_classic_extra_group_path(paths)? else {
-        return Ok(());
+        return Ok(RuntimeKeyConfig::default());
     };
     let extra = Group::open(&extra_path)
         .with_context(|| format!("opening classic Extra.c4g at {}", extra_path.display()))?;
@@ -2745,11 +2921,17 @@ fn guard_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<()> {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.eq_ignore_ascii_case("KeyConfig.txt"))
     });
-    anyhow::ensure!(
-        key_config.is_none(),
-        "Extra.c4g/KeyConfig.txt custom global-key remapping is not represented"
-    );
-    Ok(())
+    let Some(key_config) = key_config else {
+        return Ok(RuntimeKeyConfig::default());
+    };
+    let bytes = extra
+        .read_file(&key_config.relative_path)
+        .with_context(|| format!("reading {}/KeyConfig.txt", extra_path.display()))?;
+    parse_runtime_key_config(&bytes)
+}
+
+fn guard_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<()> {
+    load_runtime_global_key_config(paths).map(|_| ())
 }
 
 fn read_runtime_help_language_file(group: &Group, filename: &str) -> Option<Vec<u8>> {
@@ -10173,15 +10355,19 @@ struct GameApp {
     /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
     /// Keep that ownership check separate from the process-global language
     /// table so a new round cannot reuse a stale accept/refusal.
-    runtime_key_config_cache: OnceLock<std::result::Result<(), String>>,
+    runtime_key_config_cache: OnceLock<std::result::Result<RuntimeKeyConfig, String>>,
     /// Process-start localization/encoding metadata needed by live flash
     /// producers. The active message itself is runtime-only, survives a
     /// GraphicsSystem resize, and is reset by Game::Default/new-game.
     runtime_flash_resources_cache: OnceLock<std::result::Result<RuntimeFlashResources, String>>,
     runtime_flash_message: Option<RuntimeFlashMessage>,
     /// Temporary player assigned to the existing primary viewport by replay
-    /// `SetFilmView`. The physical viewport identity remains unchanged.
+    /// `SetFilmView` or viewport cycling. The physical identity is unchanged.
     film_view_player: Option<i32>,
+    /// The temporary assignment belongs to the physical fullscreen observer
+    /// viewport and must disappear if that viewport is replaced by a local
+    /// player's physical viewport.
+    film_view_player_on_observer: bool,
     /// Singleton runtime `C4Network2ClientListDlg`, toggled by bare F4.
     runtime_client_list: Option<lc_frontend::runtime_client_list::RuntimeClientListDialog>,
     /// Both this dialog and game-over use C4GUI's default z=0. Preserve which
@@ -11308,6 +11494,25 @@ struct RuntimeFlashMessage {
     text: String,
     remaining_draws: u16,
     y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeKeyChord {
+    key: VirtualKeyCode,
+    modifiers: ModifiersState,
+}
+
+impl RuntimeKeyChord {
+    fn matches(self, key: VirtualKeyCode, modifiers: ModifiersState) -> bool {
+        let c4_modifiers =
+            modifiers & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        self.key == key && self.modifiers == c4_modifiers
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RuntimeKeyConfig {
+    net_observer_next_player: Vec<RuntimeKeyChord>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19698,6 +19903,7 @@ impl GameApp {
             runtime_flash_resources_cache,
             runtime_flash_message: None,
             film_view_player: None,
+            film_view_player_on_observer: false,
             runtime_client_list: None,
             runtime_client_list_above_game_over: false,
             scoreboard_dialog: None,
@@ -23099,22 +23305,21 @@ impl GameApp {
             .map_err(|detail| anyhow!(detail.clone()))
     }
 
-    fn runtime_key_config(&self) -> Result<()> {
+    fn runtime_key_config(&self) -> Result<&RuntimeKeyConfig> {
         self.runtime_key_config_cache
             .get_or_init(|| {
-                guard_runtime_global_key_config(self.app_paths.as_ref())
+                load_runtime_global_key_config(self.app_paths.as_ref())
                     .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
-            .map(|_| ())
             .map_err(|detail| anyhow!(detail.clone()))
     }
 
-    /// Extra.c4g/KeyConfig.txt can replace any process-global binding, not
-    /// merely the physical F1/F3 defaults. Until that priority registry is
-    /// parsed, reject every keyboard edge before any UI or control mutation.
+    /// Extra.c4g/KeyConfig.txt can replace any process-global binding. This
+    /// cache models NetObsNextPlayer; every other represented override still
+    /// rejects keyboard edges before any UI or control mutation.
     fn guard_runtime_key_dispatch(&self, key: VirtualKeyCode) -> Result<(), EngineError> {
-        self.runtime_key_config().map_err(|error| {
+        self.runtime_key_config().map(|_| ()).map_err(|error| {
             let boundary = match key {
                 VirtualKeyCode::F1 => ClassicParityBoundary::RuntimeHelpResources {
                     detail: error.to_string(),
@@ -24697,27 +24902,6 @@ impl GameApp {
         if self.handle_running_chat_key(key, state)? {
             return Ok(());
         }
-        if state == ElementState::Pressed {
-            match key {
-                VirtualKeyCode::F5 if matches!(self.mode, AppMode::Running) => {
-                    return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::RunningShortcut { key: "F5" },
-                    )));
-                }
-                VirtualKeyCode::F6 if matches!(self.mode, AppMode::Running) => {
-                    return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::RunningShortcut { key: "F6" },
-                    )));
-                }
-                VirtualKeyCode::F7 if matches!(self.mode, AppMode::Running) => {
-                    return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::RunningShortcut { key: "F7" },
-                    )));
-                }
-                _ => {}
-            }
-        }
-
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_key(key, state);
         }
@@ -25114,7 +25298,27 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                if !runtime_engine_dispatch_suppressed {
+                let viewport_scope_excludes_player_control =
+                    self.viewport_scope_excludes_player_control();
+                let unsupported_running_shortcut = if state == ElementState::Pressed {
+                    match key {
+                        VirtualKeyCode::F5 => Some("F5"),
+                        VirtualKeyCode::F6 => Some("F6"),
+                        VirtualKeyCode::F7 => Some("F7"),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if self.handle_viewport_player_cycle_key(key, state) {
+                    return Ok(());
+                }
+                if let Some(key) = unsupported_running_shortcut {
+                    return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                        ClassicParityBoundary::RunningShortcut { key },
+                    )));
+                }
+                if !runtime_engine_dispatch_suppressed && !viewport_scope_excludes_player_control {
                     self.handle_engine_key(key, state)?;
                 }
                 Ok(())
@@ -26796,9 +27000,16 @@ impl GameApp {
     /// viewport. An absent primary viewport stays absent, matching the C++
     /// function's successful no-op for an empty viewport list.
     fn sync_film_view_presentation(&mut self) {
+        if self.film_view_player_on_observer && !self.snapshot.hud.local_players.is_empty() {
+            // FullScreen::ViewportCheck closes the old physical NO_OWNER
+            // viewport when a local player's viewport replaces it.
+            self.film_view_player = None;
+            self.film_view_player_on_observer = false;
+        }
         let requests = self.engine.take_film_view_requests();
         for request in requests {
             self.film_view_player = Some(request.player);
+            self.film_view_player_on_observer = false;
             if request.player != OWNER_NONE {
                 // C4Viewport::Init(valid player, true) clears the process-
                 // global observer flash message.
@@ -26813,7 +27024,165 @@ impl GameApp {
             // removed. Never retain that stale numeric assignment in the
             // Rust projection; later viewport reconciliation starts clean.
             self.film_view_player = None;
+            self.film_view_player_on_observer = false;
         }
+    }
+
+    /// Rust creates the fullscreen physical observer viewport from the
+    /// absence of local player viewports. A temporary film target changes
+    /// only its displayed owner, not this classification.
+    fn primary_physical_viewport_is_no_owner(&self) -> bool {
+        self.snapshot.hud.local_players.is_empty()
+    }
+
+    /// GUI keyboard focus and the ownerless fullscreen menu replace the
+    /// FilmView/FreeView scope. Nonexclusive overlays (scoreboard, client
+    /// list, and player-owned menus) deliberately do not participate.
+    fn viewport_cycle_scope_available(&self) -> bool {
+        self.running_chat_controller().is_none()
+            && !self.top_message_dialog_is_exclusive_vote()
+            && self.game_over_dialog.is_none()
+            && !(self.primary_physical_viewport_is_no_owner() && self.ingame_menu.is_some())
+    }
+
+    fn viewport_scope_excludes_player_control(&self) -> bool {
+        self.engine.film_replay() || self.primary_physical_viewport_is_no_owner()
+    }
+
+    fn handle_viewport_player_cycle_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        if !self.viewport_cycle_scope_available() {
+            return false;
+        }
+        if self.engine.film_replay() {
+            return self.handle_film_view_key_for_mode(key, state, true);
+        }
+        if state != ElementState::Pressed || !self.primary_physical_viewport_is_no_owner() {
+            return false;
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers.is_empty()
+            && matches!(
+                key,
+                VirtualKeyCode::Left
+                    | VirtualKeyCode::Right
+                    | VirtualKeyCode::Up
+                    | VirtualKeyCode::Down
+            )
+        {
+            // The earlier same-priority FreeViewScroll callbacks consume bare
+            // arrows before a custom NetObsNextPlayer binding can run.
+            return false;
+        }
+        let binding_matches = self.runtime_key_config().is_ok_and(|config| {
+            config
+                .net_observer_next_player
+                .iter()
+                .any(|binding| binding.matches(key, self.keyboard_modifiers))
+        });
+        if !binding_matches {
+            return false;
+        }
+        self.cycle_primary_viewport_player(false);
+        // ViewportNextPlayer reports the valid physical viewport dispatch as
+        // handled even when an empty/one-player list leaves its owner intact.
+        true
+    }
+
+    fn handle_film_view_key_for_mode(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+        film_replay: bool,
+    ) -> bool {
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !film_replay
+            || key != VirtualKeyCode::Right
+            || !c4_modifiers.is_empty()
+            || state != ElementState::Pressed
+            || !self.viewport_cycle_scope_available()
+        {
+            return false;
+        }
+        self.cycle_primary_viewport_player(true);
+        true
+    }
+
+    fn primary_viewport_player(&self, film_replay: bool) -> i32 {
+        if let Some(player) = self.film_view_player {
+            return player;
+        }
+        let local_player = self
+            .snapshot
+            .hud
+            .local_players
+            .iter()
+            .filter_map(|owner| {
+                self.snapshot
+                    .players
+                    .iter()
+                    .find(|player| player.id == *owner && !player.viewports.is_empty())
+            })
+            .min_by_key(|player| classic_viewport_layout_order(player.control_set))
+            .map(|player| player.id);
+        if let Some(local_player) = local_player {
+            return local_player;
+        }
+        if film_replay {
+            // FullScreen::ViewportCheck creates/retargets a film viewport to
+            // Players.First before the first input edge.
+            return self
+                .snapshot
+                .players
+                .first()
+                .map_or(OWNER_NONE, |player| player.id);
+        }
+        // With no local viewport, Rust's fullscreen invariant supplies one
+        // physical NO_OWNER viewport even before the first render.
+        OWNER_NONE
+    }
+
+    /// C4Viewport::NextPlayer over the app-owned first physical viewport.
+    /// `wrap` is true for film replay and false for an assigned observer key.
+    fn cycle_primary_viewport_player(&mut self, wrap: bool) -> bool {
+        let current = self.primary_viewport_player(wrap);
+        let target = if let Some(index) = self
+            .snapshot
+            .players
+            .iter()
+            .position(|player| player.id == current)
+        {
+            self.snapshot
+                .players
+                .get(index + 1)
+                .map(|player| player.id)
+                .or_else(|| {
+                    if wrap {
+                        self.snapshot.players.first().map(|player| player.id)
+                    } else {
+                        Some(OWNER_NONE)
+                    }
+                })
+        } else {
+            self.snapshot.players.first().map(|player| player.id)
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        if target == current {
+            return false;
+        }
+        self.film_view_player = Some(target);
+        self.film_view_player_on_observer = !wrap && self.primary_physical_viewport_is_no_owner();
+        if target != OWNER_NONE {
+            self.runtime_flash_message = None;
+        }
+        true
     }
 
     fn submit_game_goal_rule_activation(
@@ -53423,6 +53792,7 @@ impl GameApp {
         self.runtime_help_visible = false;
         self.runtime_flash_message = None;
         self.film_view_player = None;
+        self.film_view_player_on_observer = false;
         self.runtime_client_list = None;
         self.runtime_client_list_above_game_over = false;
         self.scoreboard_dialog = None;
@@ -54636,6 +55006,7 @@ impl GameApp {
             }
         }
         self.film_view_player = None;
+        self.film_view_player_on_observer = false;
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
@@ -55011,6 +55382,7 @@ impl GameApp {
         self.loading_state = None;
         self.engine = Engine::new();
         self.film_view_player = None;
+        self.film_view_player_on_observer = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
@@ -55420,6 +55792,7 @@ impl GameApp {
         self.control_playback = None;
         self.engine = Engine::new();
         self.film_view_player = None;
+        self.film_view_player_on_observer = false;
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
@@ -56010,7 +56383,7 @@ impl GameApp {
         self.runtime_client_list_above_game_over = false;
         self.runtime_key_config_cache = OnceLock::new();
         let _ = self.runtime_key_config_cache.set(
-            guard_runtime_global_key_config(self.app_paths.as_ref())
+            load_runtime_global_key_config(self.app_paths.as_ref())
                 .map_err(|error| format!("{error:#}")),
         );
         self.scoreboard_dialog = None;
@@ -104555,6 +104928,320 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn l051_viewport_player_cycle_matches_film_and_observer_end_states() {
+        let mut app = new_running_sandbox_app();
+        let template = app
+            .snapshot
+            .players
+            .first()
+            .cloned()
+            .expect("sandbox player");
+        app.snapshot.players = [2, 5, 9]
+            .into_iter()
+            .map(|id| {
+                let mut player = template.clone();
+                player.id = id;
+                player.name = format!("Player {id}");
+                player
+            })
+            .collect();
+        app.snapshot.hud.local_players.clear();
+
+        let observer_flash = RuntimeFlashMessage {
+            text: "Observer controls".to_string(),
+            remaining_draws: 10,
+            y: 10,
+        };
+        app.runtime_flash_message = Some(observer_flash.clone());
+        app.film_view_player = Some(OWNER_NONE);
+        assert!(app.cycle_primary_viewport_player(true));
+        assert_eq!(app.film_view_player, Some(2));
+        assert!(
+            app.runtime_flash_message.is_none(),
+            "temporary Init to an owned player clears the observer flash"
+        );
+
+        app.film_view_player = Some(2);
+        assert!(app.cycle_primary_viewport_player(true));
+        assert_eq!(app.film_view_player, Some(5));
+
+        app.film_view_player = Some(9);
+        assert!(app.cycle_primary_viewport_player(true));
+        assert_eq!(app.film_view_player, Some(2), "film wraps to First");
+
+        app.runtime_flash_message = Some(observer_flash.clone());
+        app.film_view_player = Some(9);
+        assert!(app.cycle_primary_viewport_player(false));
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+        assert_eq!(
+            app.runtime_flash_message,
+            Some(observer_flash.clone()),
+            "temporary Init to NO_OWNER retains the observer flash"
+        );
+        assert!(app.cycle_primary_viewport_player(false));
+        assert_eq!(app.film_view_player, Some(2));
+
+        app.film_view_player = Some(77);
+        assert!(app.cycle_primary_viewport_player(false));
+        assert_eq!(
+            app.film_view_player,
+            Some(2),
+            "invalid player selects First"
+        );
+
+        app.snapshot.players.truncate(1);
+        app.runtime_flash_message = Some(observer_flash.clone());
+        app.film_view_player = Some(2);
+        assert!(!app.cycle_primary_viewport_player(true));
+        assert_eq!(app.runtime_flash_message, Some(observer_flash.clone()));
+
+        app.snapshot.players.clear();
+        app.film_view_player = Some(OWNER_NONE);
+        assert!(!app.cycle_primary_viewport_player(true));
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    }
+
+    #[test]
+    fn l051_bare_film_right_cycles_on_down_through_nonexclusive_overlays() {
+        let mut app = new_running_sandbox_app();
+        let template = app
+            .snapshot
+            .players
+            .first()
+            .cloned()
+            .expect("sandbox player");
+        app.snapshot.players = [2, 5]
+            .into_iter()
+            .map(|id| {
+                let mut player = template.clone();
+                player.id = id;
+                player
+            })
+            .collect();
+        app.snapshot.hud.local_players.clear();
+        app.film_view_player = None;
+
+        assert!(!app.handle_film_view_key_for_mode(
+            VirtualKeyCode::Right,
+            ElementState::Pressed,
+            false,
+        ));
+        assert_eq!(app.film_view_player, None);
+
+        assert!(app.handle_film_view_key_for_mode(
+            VirtualKeyCode::Right,
+            ElementState::Pressed,
+            true,
+        ));
+        assert_eq!(
+            app.film_view_player,
+            Some(5),
+            "ViewportCheck assigns Players.First before the first film key"
+        );
+        assert!(!app.handle_film_view_key_for_mode(
+            VirtualKeyCode::Right,
+            ElementState::Released,
+            true,
+        ));
+        assert_eq!(
+            app.film_view_player,
+            Some(5),
+            "C4KeyCB has no key-up callback"
+        );
+
+        app.keyboard_modifiers = ModifiersState::SHIFT;
+        assert!(!app.handle_film_view_key_for_mode(
+            VirtualKeyCode::Right,
+            ElementState::Pressed,
+            true,
+        ));
+        assert_eq!(app.film_view_player, Some(5));
+        app.keyboard_modifiers = ModifiersState::empty();
+
+        app.scoreboard_dialog = Some(app.scoreboard_request());
+        assert!(app.handle_film_view_key_for_mode(
+            VirtualKeyCode::Right,
+            ElementState::Pressed,
+            true,
+        ));
+        assert_eq!(
+            app.film_view_player,
+            Some(2),
+            "the nonexclusive scoreboard does not acquire GUI key focus"
+        );
+
+        app.start_running_chat(RunningChatMode::All);
+        assert!(!app.handle_film_view_key_for_mode(
+            VirtualKeyCode::Right,
+            ElementState::Pressed,
+            true,
+        ));
+        assert_eq!(
+            app.film_view_player,
+            Some(2),
+            "the exclusive chat owns GUI scope"
+        );
+    }
+
+    #[test]
+    fn l051_runtime_key_config_keeps_first_duplicate_and_rejects_noncanonical_f_keys() {
+        let parsed =
+            parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=F5\n[Keys]\nNetObsNextPlayer=F6\n")
+                .expect("duplicate observer keys follow classic first-value ownership");
+        assert_eq!(
+            parsed.net_observer_next_player,
+            vec![RuntimeKeyChord {
+                key: VirtualKeyCode::F5,
+                modifiers: ModifiersState::empty(),
+            }]
+        );
+
+        let error = parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=F01\n")
+            .expect_err("noncanonical SDL/X11 function-key names fail closed");
+        assert!(error.to_string().contains("F01"), "unexpected {error:#}");
+    }
+
+    #[test]
+    fn l051_assigned_observer_key_uses_production_dispatch_and_physical_gate() {
+        let parsed =
+            parse_runtime_key_config(b"[Keys]\nNetObsNextPlayer=Alt+N,Right,F5,F6,F7,None\n")
+                .expect("parse the represented global observer binding");
+        assert_eq!(
+            parsed.net_observer_next_player,
+            vec![
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::N,
+                    modifiers: ModifiersState::ALT,
+                },
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::Right,
+                    modifiers: ModifiersState::empty(),
+                },
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::F5,
+                    modifiers: ModifiersState::empty(),
+                },
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::F6,
+                    modifiers: ModifiersState::empty(),
+                },
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::F7,
+                    modifiers: ModifiersState::empty(),
+                },
+            ]
+        );
+
+        let mut app = new_running_sandbox_app();
+        let template = app
+            .snapshot
+            .players
+            .first()
+            .cloned()
+            .expect("sandbox player");
+        app.snapshot.players = [2, 5]
+            .into_iter()
+            .map(|id| {
+                let mut player = template.clone();
+                player.id = id;
+                player
+            })
+            .collect();
+        app.snapshot.hud.local_players.clear();
+        app.film_view_player = Some(OWNER_NONE);
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
+            .set(Ok(parsed.clone()))
+            .expect("install observer key registry");
+
+        app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+            .expect("a canonical directional binding loads without taking scroll priority");
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+
+        for key in [VirtualKeyCode::F5, VirtualKeyCode::F6, VirtualKeyCode::F7] {
+            app.film_view_player = Some(OWNER_NONE);
+            app.handle_key(key, ElementState::Pressed)
+                .expect("an assigned bare observer function key precedes the fallback boundary");
+            assert_eq!(app.film_view_player, Some(2));
+
+            app.film_view_player = Some(OWNER_NONE);
+            app.film_view_player_on_observer = false;
+            app.keyboard_modifiers = ModifiersState::CTRL;
+            let error = app
+                .handle_key(key, ElementState::Pressed)
+                .expect_err("the earlier generic debug chord retains priority");
+            assert!(
+                error.to_string().contains("timed flash producer"),
+                "unexpected {error}"
+            );
+            assert_eq!(app.film_view_player, Some(OWNER_NONE));
+            app.keyboard_modifiers = ModifiersState::empty();
+        }
+        app.film_view_player = Some(OWNER_NONE);
+
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("a modifier mismatch is inert");
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+        app.keyboard_modifiers = ModifiersState::ALT;
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("assigned observer key dispatches");
+        assert_eq!(app.film_view_player, Some(2));
+        app.handle_key(VirtualKeyCode::N, ElementState::Released)
+            .expect("observer release has no callback or player-control leak");
+        assert_eq!(app.film_view_player, Some(2));
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("assigned observer key repeats");
+        assert_eq!(app.film_view_player, Some(5));
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("observer sequence reaches NO_OWNER after the last player");
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+
+        app.ingame_menu.replace(
+            app.local_owner,
+            IngameMenuState::main_menu(&MainMenuConditions {
+                has_player: false,
+                player_count: 2,
+                ..MainMenuConditions::default()
+            }),
+        );
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("ownerless fullscreen menu replaces FreeView scope");
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+        app.ingame_menu.clear();
+
+        app.start_running_chat(RunningChatMode::All);
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("exclusive chat replaces FreeView scope");
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+        app.running_chat = None;
+        app.game_option_input_dialog = None;
+
+        app.handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("observer cycling resumes after exclusive UI closes");
+        assert_eq!(app.film_view_player, Some(2));
+        assert!(app.film_view_player_on_observer);
+        app.snapshot.hud.local_players = vec![2];
+        app.sync_film_view_presentation();
+        assert_eq!(
+            app.film_view_player, None,
+            "replacing the physical observer viewport drops its temporary target"
+        );
+        assert!(!app.film_view_player_on_observer);
+
+        let mut owned = new_running_sandbox_app();
+        owned.runtime_key_config_cache = OnceLock::new();
+        owned
+            .runtime_key_config_cache
+            .set(Ok(parsed))
+            .expect("install observer key registry");
+        owned.keyboard_modifiers = ModifiersState::ALT;
+        owned
+            .handle_key(VirtualKeyCode::N, ElementState::Pressed)
+            .expect("owned viewport ignores a FreeView-only binding");
+        assert_eq!(owned.film_view_player, None);
+    }
+
+    #[test]
     fn set_film_view_builtin_reaches_the_real_replay_viewport() {
         let mut app = new_running_sandbox_app();
         let local_owner = app.local_owner;
@@ -131555,7 +132242,7 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn runtime_f1_help_refuses_directory_and_packed_key_config_overrides() {
+    fn l051_runtime_key_config_loads_observer_binding_and_refuses_other_overrides() {
         let _lock = env_lock().lock();
         let install = tempdir().expect("runtime help install fixture");
         let user_data = tempdir().expect("runtime help user fixture");
@@ -131577,6 +132264,26 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("write fixture language config");
 
         fs::create_dir_all(&extra).expect("directory Extra.c4g");
+        fs::write(
+            extra.join("kEyCoNfIg.TxT"),
+            "[Keys]\nNetObsNextPlayer=Right,F5\n",
+        )
+        .expect("directory observer KeyConfig fixture");
+        let loaded = load_runtime_global_key_config(Some(&paths))
+            .expect("directory observer binding is represented");
+        assert_eq!(
+            loaded.net_observer_next_player,
+            vec![
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::Right,
+                    modifiers: ModifiersState::empty(),
+                },
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::F5,
+                    modifiers: ModifiersState::empty(),
+                },
+            ]
+        );
         fs::write(extra.join("kEyCoNfIg.TxT"), "[Keys]\nToggleShowHelp=F2\n")
             .expect("directory KeyConfig fixture");
         let error = guard_runtime_global_key_config(Some(&paths))
@@ -131584,6 +132291,30 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(error.to_string().contains("KeyConfig.txt"));
 
         fs::remove_dir_all(&extra).expect("replace directory Extra.c4g");
+        fs::write(
+            &extra,
+            packed_test_file_group(&[(
+                "KEYCONFIG.TXT",
+                false,
+                b"[Keys]\nNetObsNextPlayer=Right,F5\n",
+            )]),
+        )
+        .expect("packed observer Extra.c4g fixture");
+        let loaded = load_runtime_global_key_config(Some(&paths))
+            .expect("packed observer binding is represented");
+        assert_eq!(
+            loaded.net_observer_next_player,
+            vec![
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::Right,
+                    modifiers: ModifiersState::empty(),
+                },
+                RuntimeKeyChord {
+                    key: VirtualKeyCode::F5,
+                    modifiers: ModifiersState::empty(),
+                },
+            ]
+        );
         fs::write(
             &extra,
             packed_test_file_group(&[("KEYCONFIG.TXT", false, b"[Keys]\nToggleShowHelp=F2\n")]),

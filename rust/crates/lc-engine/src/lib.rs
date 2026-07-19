@@ -23119,6 +23119,13 @@ impl Engine {
         )
     }
 
+    /// Whether the current scenario selects C++'s film-view keyboard scope.
+    /// Both normal and cinematic films count; the raw replay flag remains
+    /// authoritative even after control playback reaches its end marker.
+    pub fn film_replay(&self) -> bool {
+        self.replay() && self.film()
+    }
+
     /// Execute one synchronized `CID_CustomCommand` packet. Player ownership
     /// is checked first, followed by the running/registration gates; accepted
     /// packets execute the currently registered template in global scope.
@@ -57036,6 +57043,23 @@ mod control_message_say_regression {
         assert_eq!(messages[0].target, Some(view));
         assert_eq!(messages[0].lines, vec!["<Speaker> action"]);
         assert_eq!(messages[0].color, 0xff00_00ff);
+    }
+
+    #[test]
+    fn l051_film_view_scope_requires_raw_replay_and_nonzero_film() {
+        let mut engine = Engine::new();
+        for (replay, film, expected) in [
+            (0, 0, false),
+            (1, 0, false),
+            (0, 1, false),
+            (1, 1, true),
+            (1, 2, true),
+        ] {
+            engine.set_scenario_values(
+                scenario::ScenarioValueStore::with_replay_film_for_test(replay, film),
+            );
+            assert_eq!(engine.film_replay(), expected, "Replay={replay}, Film={film}");
+        }
     }
 }
 
