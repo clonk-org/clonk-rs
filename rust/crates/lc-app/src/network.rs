@@ -1230,6 +1230,33 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_player_inputs(
+        &mut self,
+    ) -> (
+        Vec<(i32, ControlEvent, Tick)>,
+        Vec<(Tick, PlayerCommandControlData)>,
+        Vec<(Tick, PlayerSelectControlData)>,
+    ) {
+        let mut controls = Vec::new();
+        let mut commands = Vec::new();
+        let mut selections = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                NetworkCommand::SubmitLocal { owner, event, tick } => {
+                    controls.push((owner, event, tick));
+                }
+                NetworkCommand::SubmitPlayerCommand { tick, command } => {
+                    commands.push((tick, command));
+                }
+                NetworkCommand::SubmitPlayerSelect { tick, selection } => {
+                    selections.push((tick, selection));
+                }
+                command => panic!("unexpected player-input command: {command:?}"),
+            }
+        }
+        (controls, commands, selections)
+    }
+
     pub(crate) fn take_submitted_player_commands(
         &mut self,
     ) -> Vec<(Tick, PlayerCommandControlData)> {

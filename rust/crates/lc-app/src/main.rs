@@ -11895,6 +11895,18 @@ struct IngameMouseState {
     /// Once a drag first finds crew or carryables, C++ keeps that selection
     /// type for the rest of the frame's lifetime.
     selection_kind: IngameDragSelectionKind,
+    /// Value-copied `DownRegion`: its command, data, and target remain the
+    /// down-time payload even if the HUD changes before button-up.
+    down_region: Option<IngameViewportRegion>,
+    /// `UpdateTargetRegion` cancels an active landscape selection frame and
+    /// resets DownCursor so it cannot restart while the button stays down.
+    selection_cancelled_by_region: bool,
+    /// Region drag eligibility is fixed when the pointer first crosses the
+    /// drag threshold, matching C4MouseControl::DragNone.
+    region_drag_started: bool,
+    /// DragMoving refreshes this fully resolved cursor on later pointer
+    /// updates; button up consumes it without re-running DragMoving.
+    region_drag_cursor: Option<IngameRegionDragCursor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11906,8 +11918,27 @@ enum IngameDragSelectionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IngameViewportRegion {
-    Command,
+    Command(u8),
     Inventory(ObjectId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IngameRegionDragCursor {
+    Drop,
+    Throw,
+    Put(ObjectId),
+    Vehicle,
+    VehiclePut(ObjectId),
+}
+
+impl IngameViewportRegion {
+    fn control(self) -> (u8, i32) {
+        match self {
+            Self::Command(command) => (command, 0),
+            // COM_Contents (C4Constants.h:188); Data is the target number.
+            Self::Inventory(target) => (9, target.as_u64() as i32),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -12747,6 +12778,10 @@ impl IngameMouseState {
             moved: false,
             selection_frame,
             selection_kind: IngameDragSelectionKind::Unknown,
+            down_region: None,
+            selection_cancelled_by_region: false,
+            region_drag_started: false,
+            region_drag_cursor: None,
         }
     }
 
@@ -23658,6 +23693,9 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.keyboard_modifiers = ModifiersState::empty();
         self.pointer_left_unchecked();
+        self.mouse_state = None;
+        self.ingame_right_mouse_state = None;
+        self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         Ok(())
@@ -29365,6 +29403,10 @@ impl GameApp {
             point = GuiPoint::new(point.x.ceil(), point.y.ceil());
             self.running_pointer_position = Some(point);
             self.ingame_gui_pointer = Some(point);
+            if self.ingame_region_drag_active() {
+                self.update_ingame_pointer(point)?;
+                return Ok(());
+            }
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_position(Some(point));
@@ -29546,18 +29588,40 @@ impl GameApp {
                     self.suspend_ingame_pointer_for_gui();
                     return Ok(());
                 }
-                self.update_ingame_pointer(point)?;
-                let script_menu_target = match self.ingame_pointer {
-                    Some(pointer) => {
-                        self.script_menu_pointer_target_for_owner(pointer.owner, point)?
+                let script_menu_target = match self.local_controls.mouse_owner() {
+                    Some(owner) => {
+                        match self.script_menu_pointer_target_for_owner(owner, point) {
+                            Ok(target) => target,
+                            Err(error) => {
+                                // The pre-hit-test ordering keeps an active
+                                // drag from crossing its threshold behind the
+                                // menu. With no button gesture, retain native's
+                                // projected viewport pointer even when menu
+                                // resources fail before ownership resolves.
+                                if self.mouse_state.is_none()
+                                    && self.ingame_right_mouse_state.is_none()
+                                {
+                                    let _ = self.update_ingame_pointer(point);
+                                }
+                                return Err(error);
+                            }
+                        }
                     }
                     None => None,
                 };
-                if let Some(EngineScriptMenuPointerTarget::Item(index)) = script_menu_target {
-                    if self.select_script_menu_pointer_item(index)? {
-                        self.refresh_after_script_menu_pointer();
+                if let Some(target) = script_menu_target {
+                    if let EngineScriptMenuPointerTarget::Item(index) = target {
+                        if self.select_script_menu_pointer_item(index)? {
+                            self.refresh_after_script_menu_pointer();
+                        }
                     }
+                    // GUI hit-testing precedes MouseMoveToViewport. Do not mark
+                    // this gesture moved merely because the menu owns the event.
+                    self.ingame_pointer = None;
+                    self.ingame_edge_scroll = None;
+                    return Ok(());
                 }
+                self.update_ingame_pointer(point)?;
                 Ok(())
             }
             AppMode::Loading => Ok(()),
@@ -29611,6 +29675,14 @@ impl GameApp {
         )
     }
 
+    fn ingame_region_drag_active(&self) -> bool {
+        self.mouse_state
+            .is_some_and(|state| state.motion.region_drag_started)
+            || self
+                .ingame_right_mouse_state
+                .is_some_and(|state| state.motion.region_drag_started)
+    }
+
     fn update_ingame_pointer(&mut self, point: GuiPoint) -> Result<(), EngineError> {
         // GraphicsSystem::MouseMove applies ceil after dividing by the
         // presentation scale, before clamping into the assigned viewport.
@@ -29646,11 +29718,86 @@ impl GameApp {
                     pointer.screen.y as i32 - viewport.rect.y,
                 ),
             });
+            let over_region = self
+                .ingame_viewport_region(pointer.owner, pointer.screen)
+                .is_some();
+            let cancel_left_selection = over_region
+                && self
+                    .mouse_state
+                    .is_some_and(|state| {
+                        state.motion.moved && state.motion.selection_frame
+                    });
+            let cancel_right_selection = over_region
+                && self.ingame_right_mouse_state.is_some_and(|state| {
+                    state.motion.moved && state.motion.selection_frame
+                });
+            let refresh_left_region_drag = self
+                .mouse_state
+                .is_some_and(|state| state.motion.region_drag_started);
+            let refresh_right_region_drag = self
+                .ingame_right_mouse_state
+                .is_some_and(|state| state.motion.region_drag_started);
+            let mut left_region_drag = None;
             if let Some(state) = self.mouse_state.as_mut() {
+                let was_moved = state.motion.moved;
                 state.motion.update(pointer);
+                if !was_moved && state.motion.moved {
+                    left_region_drag = state.motion.down_region.and_then(|region| match region {
+                        IngameViewportRegion::Inventory(target) => Some(target),
+                        IngameViewportRegion::Command(_) => None,
+                    });
+                }
             }
+            let mut right_region_drag = None;
             if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                let was_moved = state.motion.moved;
                 state.motion.update(pointer);
+                if !was_moved && state.motion.moved {
+                    right_region_drag =
+                        state.motion.down_region.and_then(|region| match region {
+                            IngameViewportRegion::Inventory(target) => Some(target),
+                            IngameViewportRegion::Command(_) => None,
+                        });
+                }
+            }
+            if let Some(target) = left_region_drag {
+                let source = self.engine.mouse_region_drag_source(target);
+                if source.is_some() {
+                    self.ingame_dragged_objects =
+                        self.engine.mouse_region_drag_objects(target, false);
+                }
+                if let Some(state) = self.mouse_state.as_mut() {
+                    state.motion.region_drag_started = source.is_some();
+                }
+            }
+            if let Some(target) = right_region_drag {
+                let source = self.engine.mouse_region_drag_source(target);
+                if source.is_some() {
+                    self.ingame_dragged_objects =
+                        self.engine.mouse_region_drag_objects(target, true);
+                }
+                if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                    state.motion.region_drag_started = source.is_some();
+                }
+            }
+            if refresh_left_region_drag || refresh_right_region_drag {
+                let region_drag_cursor = self.current_ingame_region_drag_cursor(pointer);
+                if let Some(state) = self.mouse_state.as_mut() {
+                    if refresh_left_region_drag {
+                        state.motion.region_drag_cursor = region_drag_cursor;
+                    }
+                }
+                if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                    if refresh_right_region_drag {
+                        state.motion.region_drag_cursor = region_drag_cursor;
+                    }
+                }
+            }
+            if cancel_left_selection || cancel_right_selection {
+                self.cancel_ingame_selection_for_region(
+                    cancel_left_selection,
+                    cancel_right_selection,
+                );
             }
             self.ingame_pointer = Some(pointer);
             self.update_ingame_drag_selection_kinds();
@@ -29855,6 +30002,92 @@ impl GameApp {
         Ok(true)
     }
 
+    fn current_ingame_region_drag_cursor(
+        &self,
+        pointer: ViewportPointer,
+    ) -> Option<IngameRegionDragCursor> {
+        let object = self.ingame_dragged_objects.iter().find_map(|object| {
+            self.engine
+                .object_snapshot(*object)
+                .filter(|object| object.status != lc_engine::ObjectStatus::Deleted)
+        })?;
+        let put_target = self
+            .keyboard_modifiers
+            .ctrl()
+            .then(|| {
+                self.graphics.object_at_point_with_ocf(
+                    &self.snapshot,
+                    self.local_owner,
+                    pointer.screen,
+                    lc_engine::ocf::CONTAINER,
+                )
+            })
+            .flatten();
+        if object.ocf & lc_engine::ocf::CARRYABLE != 0 {
+            if let Some(target) = put_target {
+                return Some(IngameRegionDragCursor::Put(target));
+            }
+            return match self
+                .engine
+                .mouse_drag_carryable_command(self.local_owner, ingame_pointer_world_pixel(pointer))
+            {
+                Some(CommandId::Drop) => Some(IngameRegionDragCursor::Drop),
+                Some(CommandId::Throw) => Some(IngameRegionDragCursor::Throw),
+                _ => None,
+            };
+        }
+        Some(match put_target {
+            Some(target) => IngameRegionDragCursor::VehiclePut(target),
+            None => IngameRegionDragCursor::Vehicle,
+        })
+    }
+
+    fn refresh_ingame_region_drag_cursor_for_execute(&mut self) {
+        if self.engine.frame() % 5 != 0 {
+            return;
+        }
+        let refresh_left = self
+            .mouse_state
+            .is_some_and(|state| state.motion.region_drag_started);
+        let refresh_right = self
+            .ingame_right_mouse_state
+            .is_some_and(|state| state.motion.region_drag_started);
+        if !refresh_left && !refresh_right {
+            return;
+        }
+        let Some(pointer) = self.ingame_pointer else {
+            return;
+        };
+        let cursor = self.current_ingame_region_drag_cursor(pointer);
+        if refresh_left {
+            if let Some(state) = self.mouse_state.as_mut() {
+                state.motion.region_drag_cursor = cursor;
+            }
+        }
+        if refresh_right {
+            if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                state.motion.region_drag_cursor = cursor;
+            }
+        }
+    }
+
+    fn cancel_ingame_selection_for_region(&mut self, cancel_left: bool, cancel_right: bool) {
+        if cancel_left {
+            if let Some(state) = self.mouse_state.as_mut() {
+                state.motion.selection_frame = false;
+                state.motion.selection_kind = IngameDragSelectionKind::Unknown;
+                state.motion.selection_cancelled_by_region = true;
+            }
+        }
+        if cancel_right {
+            if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                state.motion.selection_frame = false;
+                state.motion.selection_kind = IngameDragSelectionKind::Unknown;
+                state.motion.selection_cancelled_by_region = true;
+            }
+        }
+    }
+
     fn ingame_menu_pointer_target(
         &self,
         point: GuiPoint,
@@ -30033,18 +30266,18 @@ impl GameApp {
         inventory.get(section).map(|item| item.object_id)
     }
 
-    fn ingame_command_region_at(&self, owner: i32, point: GuiPoint) -> bool {
+    fn ingame_command_region_at(&self, owner: i32, point: GuiPoint) -> Option<u8> {
         if !self.display_flags.show_commands
             || self.object_menu.is_some()
             || self.engine.cursor_object_menu(owner).is_some()
         {
-            return false;
+            return None;
         }
         let Some(pointer) = self.graphics.viewport_output_point_at(point) else {
-            return false;
+            return None;
         };
         if pointer.owner != owner {
-            return false;
+            return None;
         }
         let Some(cursor) = self
             .snapshot
@@ -30053,10 +30286,10 @@ impl GameApp {
             .find(|player| player.id == pointer.owner)
             .and_then(|player| player.cursor)
         else {
-            return false;
+            return None;
         };
         let Some(viewport) = self.graphics.viewport_rect(pointer.owner) else {
-            return false;
+            return None;
         };
         let context = AppCommandContext {
             engine: &self.engine,
@@ -30064,7 +30297,9 @@ impl GameApp {
             snapshot: &self.snapshot,
         };
         let commands = draw_commands::build_cursor_commands(&self.snapshot, cursor, &context);
-        lc_frontend::hud::command_region_index(viewport, point, &commands).is_some()
+        lc_frontend::hud::command_region_index(viewport, point, &commands)
+            .and_then(|index| commands.get(index))
+            .map(|command| command.com)
     }
 
     fn ingame_viewport_region(
@@ -30074,8 +30309,8 @@ impl GameApp {
     ) -> Option<IngameViewportRegion> {
         // DrawCommands registers after DrawIDList and C4RegionList::Add
         // prepends, so command pairs win the unlikely overlap.
-        if self.ingame_command_region_at(owner, point) {
-            return Some(IngameViewportRegion::Command);
+        if let Some(command) = self.ingame_command_region_at(owner, point) {
+            return Some(IngameViewportRegion::Command(command));
         }
         self.ingame_inventory_region_target(owner, point)
             .map(IngameViewportRegion::Inventory)
@@ -30085,11 +30320,26 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        let script_menu_target = match (self.ingame_pointer, self.ingame_gui_pointer) {
-            (Some(pointer), Some(gui_point)) => {
-                self.script_menu_pointer_target_for_owner(pointer.owner, gui_point)?
+        // C4GraphicsSystem bypasses GUI mouse handling only for an active
+        // moving/construct drag; ordinary releases over a menu stay GUI-owned.
+        let moving_drag = self.ingame_region_drag_active();
+        if moving_drag
+            && button_state == ElementState::Released
+            && self
+                .mouse_state
+                .is_some_and(|state| state.motion.region_drag_started)
+        {
+            return self.on_ingame_mouse_up();
+        }
+        let script_menu_target = if moving_drag {
+            None
+        } else {
+            match (self.local_controls.mouse_owner(), self.ingame_gui_pointer) {
+                (Some(owner), Some(gui_point)) => {
+                    self.script_menu_pointer_target_for_owner(owner, gui_point)?
+                }
+                _ => None,
             }
-            _ => None,
         };
         if let Some(target) = script_menu_target {
             self.cancel_ingame_mouse_gestures();
@@ -30194,6 +30444,9 @@ impl GameApp {
         if self.startup_network_transition_active() {
             return Ok(());
         }
+        if self.mode == AppMode::Running && self.ingame_region_drag_active() {
+            return self.handle_ingame_right_mouse_button(button_state);
+        }
         if button_state == ElementState::Pressed {
             // A context action closes on down. If its matching up was lost,
             // the next physical press starts a new gesture and invalidates
@@ -30288,16 +30541,22 @@ impl GameApp {
                 Ok(())
             }
             AppMode::Running => {
-                let scoreboard_hit = self
-                    .running_pointer_position
-                    .map(|point| self.scoreboard_pointer_target(point))
-                    .transpose()?
-                    .flatten()
-                    .is_some();
-                if scoreboard_hit || self.handle_ingame_menu_pointer_button(button_state, true)? {
-                    Ok(())
-                } else {
+                if self.ingame_region_drag_active() {
                     self.handle_ingame_right_mouse_button(button_state)
+                } else {
+                    let scoreboard_hit = self
+                        .running_pointer_position
+                        .map(|point| self.scoreboard_pointer_target(point))
+                        .transpose()?
+                        .flatten()
+                        .is_some();
+                    if scoreboard_hit
+                        || self.handle_ingame_menu_pointer_button(button_state, true)?
+                    {
+                        Ok(())
+                    } else {
+                        self.handle_ingame_right_mouse_button(button_state)
+                    }
                 }
             }
             AppMode::Loading => Ok(()),
@@ -30308,6 +30567,9 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
+            return Ok(());
+        }
+        if self.mode == AppMode::Running && self.ingame_region_drag_active() {
             return Ok(());
         }
         if button_state == ElementState::Pressed {
@@ -30385,27 +30647,38 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        let script_menu_target = match (self.ingame_pointer, self.ingame_gui_pointer) {
-            (Some(pointer), Some(gui_point)) => {
-                self.script_menu_pointer_target_for_owner(pointer.owner, gui_point)?
-            }
-            _ => None,
-        };
-        if let Some(target) = script_menu_target {
-            self.cancel_ingame_mouse_gestures();
-            if button_state == ElementState::Released {
-                if let EngineScriptMenuPointerTarget::Item(index) = target {
-                    if self.select_script_menu_pointer_item(index)? {
-                        let data = i32::try_from(index).unwrap_or(i32::MAX);
-                        self.dispatch_control_event(ControlEvent::RawPlayerControl {
-                            command: lc_engine::COM_MENU_ENTER_ALL,
-                            data,
-                        })?;
-                    }
+        let moving_drag = self.ingame_region_drag_active();
+        let captured_release = button_state == ElementState::Released
+            && self
+                .ingame_right_mouse_state
+                .is_some_and(|state| state.motion.region_drag_started);
+        let script_menu_target = if moving_drag {
+            None
+        } else {
+            match (self.local_controls.mouse_owner(), self.ingame_gui_pointer) {
+                (Some(owner), Some(gui_point)) => {
+                    self.script_menu_pointer_target_for_owner(owner, gui_point)?
                 }
-                self.refresh_after_script_menu_pointer();
+                _ => None,
             }
-            return Ok(());
+        };
+        if !captured_release {
+            if let Some(target) = script_menu_target {
+                self.cancel_ingame_mouse_gestures();
+                if button_state == ElementState::Released {
+                    if let EngineScriptMenuPointerTarget::Item(index) = target {
+                        if self.select_script_menu_pointer_item(index)? {
+                            let data = i32::try_from(index).unwrap_or(i32::MAX);
+                            self.dispatch_control_event(ControlEvent::RawPlayerControl {
+                                command: lc_engine::COM_MENU_ENTER_ALL,
+                                data,
+                            })?;
+                        }
+                    }
+                    self.refresh_after_script_menu_pointer();
+                }
+                return Ok(());
+            }
         }
         if !self.mouse_control {
             self.ingame_right_mouse_state = None;
@@ -30425,7 +30698,7 @@ impl GameApp {
             let region = self.ingame_viewport_region(self.local_owner, pointer.screen);
             let region_target = region.and_then(|region| match region {
                 IngameViewportRegion::Inventory(target) => Some(target),
-                IngameViewportRegion::Command => None,
+                IngameViewportRegion::Command(_) => None,
             });
             // UpdateCursorTarget's primary FindVisObject mask. RightUp later
             // refills with OCF_All for context, but DownTarget must ignore
@@ -30448,11 +30721,13 @@ impl GameApp {
                     primary_ocf,
                 )
             });
-            self.ingame_right_mouse_state = Some(IngameButtonMouseState::new(
+            let mut state = IngameButtonMouseState::new(
                 pointer,
                 down_target,
                 region.is_some(),
-            ));
+            );
+            state.motion.down_region = region;
+            self.ingame_right_mouse_state = Some(state);
             return Ok(());
         }
 
@@ -30462,8 +30737,32 @@ impl GameApp {
                 self.ingame_dragged_objects.clear();
                 return Ok(());
             }
-            if drag.motion.moved && self.finish_ingame_moved_drag(drag, true)? {
-                return Ok(());
+            if drag.motion.moved && !drag.motion.selection_cancelled_by_region {
+                if drag.motion.region_drag_started {
+                    let mut selected = std::mem::take(&mut self.ingame_dragged_objects);
+                    selected.retain(|object| {
+                        self.engine
+                            .object_snapshot(*object)
+                            .is_some_and(|object| object.status != lc_engine::ObjectStatus::Deleted)
+                    });
+                    if self
+                        .ingame_viewport_region(drag.motion.last.owner, drag.motion.last.screen)
+                        .is_some()
+                    {
+                        return self.finish_ingame_noop_drag(drag.motion, selected.len());
+                    }
+                    if selected.is_empty() {
+                        return Ok(());
+                    }
+                    let cursor = drag.motion.region_drag_cursor;
+                    return self.finish_ingame_region_drag(drag.motion, selected, cursor);
+                }
+                // L018 owns world-origin and landscape-frame moving drags.
+                // HUD-origin eligibility was latched at threshold above and
+                // must never be reclassified from the live release cursor.
+                if !drag.down_region && self.finish_ingame_moved_drag(drag, true)? {
+                    return Ok(());
+                }
             }
         }
 
@@ -30481,7 +30780,13 @@ impl GameApp {
             .ingame_viewport_region(self.local_owner, pointer.screen)
             .is_some()
         {
-            return Ok(());
+            return self.dispatch_control_event_for_local_player(
+                self.local_owner,
+                ControlEvent::RawPlayerControl {
+                    command: 0,
+                    data: 0,
+                },
+            );
         }
         let primary_target =
             self.ingame_primary_mouse_target(self.local_owner, pointer.screen);
@@ -30612,6 +30917,118 @@ impl GameApp {
             }
             None => Ok(false),
         }
+    }
+
+    fn finish_ingame_noop_drag(
+        &mut self,
+        motion: IngameMouseState,
+        selected: usize,
+    ) -> Result<(), EngineError> {
+        self.ingame_dragged_objects.clear();
+        if motion.last.owner != self.local_owner {
+            return Ok(());
+        }
+        let position = ingame_pointer_world_pixel(motion.last);
+        let shift_append = self.keyboard_modifiers.shift();
+        let mut add_mode = 1;
+        for _ in 0..selected {
+            self.submit_or_execute_player_command(PlayerCommandControlData {
+                player: self.local_owner,
+                command: 0,
+                x: position.x,
+                y: position.y,
+                target: 0,
+                target2: 0,
+                data: 0,
+                add_mode: add_mode | if shift_append { 4 } else { 0 },
+                by_client: -1,
+            })?;
+            add_mode = 4;
+        }
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
+        Ok(())
+    }
+
+    fn finish_ingame_region_drag(
+        &mut self,
+        motion: IngameMouseState,
+        selected: Vec<ObjectId>,
+        cursor: Option<IngameRegionDragCursor>,
+    ) -> Result<(), EngineError> {
+        if cursor.is_none() {
+            return self.finish_ingame_noop_drag(motion, selected.len());
+        }
+        self.ingame_dragged_objects.clear();
+        if motion.last.owner != self.local_owner {
+            return Ok(());
+        }
+        let position = ingame_pointer_world_pixel(motion.last);
+        let shift_append = self.keyboard_modifiers.shift();
+        let mut add_mode = 1;
+        for object in selected {
+            let (command, x, y, target, target2) = match cursor {
+                Some(IngameRegionDragCursor::Drop) => (
+                    CommandId::Drop as i32,
+                    position.x,
+                    position.y,
+                    object.as_u64() as i32,
+                    0,
+                ),
+                Some(IngameRegionDragCursor::Throw) => (
+                    CommandId::Throw as i32,
+                    position.x,
+                    position.y,
+                    object.as_u64() as i32,
+                    0,
+                ),
+                Some(IngameRegionDragCursor::Put(container)) => (
+                    CommandId::Put as i32,
+                    0,
+                    0,
+                    self.engine
+                        .object_snapshot(container)
+                        .filter(|target| target.status != lc_engine::ObjectStatus::Deleted)
+                        .map_or(0, |_| container.as_u64() as i32),
+                    object.as_u64() as i32,
+                ),
+                Some(IngameRegionDragCursor::Vehicle) => (
+                    CommandId::PushTo as i32,
+                    position.x,
+                    position.y,
+                    object.as_u64() as i32,
+                    0,
+                ),
+                Some(IngameRegionDragCursor::VehiclePut(container)) => (
+                    CommandId::PushTo as i32,
+                    position.x,
+                    position.y,
+                    object.as_u64() as i32,
+                    self.engine
+                        .object_snapshot(container)
+                        .filter(|target| target.status != lc_engine::ObjectStatus::Deleted)
+                        .map_or(0, |_| container.as_u64() as i32),
+                ),
+                None => unreachable!("no-command drag handled above"),
+            };
+            self.submit_or_execute_player_command(PlayerCommandControlData {
+                player: self.local_owner,
+                command,
+                x,
+                y,
+                target,
+                target2,
+                data: 0,
+                add_mode: add_mode | if shift_append { 4 } else { 0 },
+                by_client: -1,
+            })?;
+            add_mode = 4;
+        }
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
+        Ok(())
     }
 
     fn finish_ingame_carryable_drag(
@@ -30869,7 +31286,7 @@ impl GameApp {
         let region = self.ingame_viewport_region(pointer.owner, pointer.screen);
         let region_target = region.and_then(|region| match region {
             IngameViewportRegion::Inventory(target) => Some(target),
-            IngameViewportRegion::Command => None,
+            IngameViewportRegion::Command(_) => None,
         });
         let down_target = region_target.or_else(|| {
             region
@@ -30877,43 +31294,153 @@ impl GameApp {
                 .then(|| self.ingame_primary_mouse_target(pointer.owner, pointer.screen))
                 .flatten()
         });
-        self.mouse_state = Some(IngameButtonMouseState::new(
+        let mut state = IngameButtonMouseState::new(
             pointer,
             down_target,
             region.is_some(),
-        ));
+        );
+        state.motion.down_region = region;
+        self.mouse_state = Some(state);
+
+        if let Some(region) = region {
+            let (command, _) = region.control();
+            let control_style = self
+                .engine
+                .player(pointer.owner)
+                .is_some_and(|player| player.control_style());
+            if control_style && command & (lc_engine::COM_SINGLE | lc_engine::COM_DOUBLE) == 0 {
+                self.dispatch_ingame_region_control(pointer.owner, region, false)?;
+            }
+        }
         Ok(())
+    }
+
+    fn dispatch_ingame_region_control(
+        &mut self,
+        owner: i32,
+        region: IngameViewportRegion,
+        release: bool,
+    ) -> Result<(), EngineError> {
+        let (command, data) = region.control();
+        self.dispatch_control_event_for_local_player(
+            owner,
+            ControlEvent::RawPlayerControl {
+                command: if release {
+                    command + lc_engine::COM_RELEASE_OFFSET
+                } else {
+                    command
+                },
+                data,
+            },
+        )
     }
 
     fn on_ingame_mouse_up(&mut self) -> Result<(), EngineError> {
         let Some(drag) = self.mouse_state.take() else {
             return Ok(());
         };
-        if self.local_controls.mouse_owner() != Some(drag.motion.start.owner) {
+        let motion = drag.motion;
+        if self.local_controls.mouse_owner() != Some(motion.start.owner) {
             self.ingame_last_left_down = None;
             self.ingame_ignore_left_up = false;
             self.ingame_dragged_objects.clear();
             return Ok(());
         }
-        if drag.motion.moved {
+        if motion.moved {
             // A completed drag is not a click candidate for the platform's
             // next LeftDouble synthesis; an immediate object-frame-to-member
             // drag must begin a fresh gesture.
             self.ingame_last_left_down = None;
+        }
+        let current_is_region = self
+            .ingame_viewport_region(motion.last.owner, motion.last.screen)
+            .is_some();
+        if let Some(down_region) = motion.down_region {
+            if motion.moved
+                && motion.region_drag_started
+                && matches!(down_region, IngameViewportRegion::Inventory(_))
+            {
+                let mut selected = std::mem::take(&mut self.ingame_dragged_objects);
+                selected.retain(|object| {
+                    self.engine
+                        .object_snapshot(*object)
+                        .is_some_and(|object| object.status != lc_engine::ObjectStatus::Deleted)
+                });
+                if current_is_region {
+                    return self.finish_ingame_noop_drag(motion, selected.len());
+                }
+                if selected.is_empty() {
+                    return Ok(());
+                }
+                let cursor = motion.region_drag_cursor;
+                return self.finish_ingame_region_drag(motion, selected, cursor);
+            }
+
+            let (command, _) = down_region.control();
+            let control_style = self
+                .engine
+                .player(motion.start.owner)
+                .is_some_and(|player| player.control_style());
+            if control_style && command & (lc_engine::COM_SINGLE | lc_engine::COM_DOUBLE) == 0 {
+                return self.dispatch_ingame_region_control(
+                    motion.start.owner,
+                    down_region,
+                    true,
+                );
+            }
+            if current_is_region {
+                self.ingame_dragged_objects.clear();
+                return self.dispatch_ingame_region_control(
+                    motion.start.owner,
+                    down_region,
+                    false,
+                );
+            }
+            // Classic control evaluates the current cursor on button-up. A
+            // stored region payload released outside can therefore fall
+            // through to the world, unlike AutoStop's early release branch.
+            let result = self.handle_ingame_mouse_click(motion.last);
+            self.ingame_dragged_objects.clear();
+            return result;
+        }
+        if motion.selection_cancelled_by_region {
+            self.ingame_dragged_objects.clear();
+            return if current_is_region {
+                self.dispatch_control_event_for_local_player(
+                    motion.start.owner,
+                    ControlEvent::RawPlayerControl {
+                        command: 0,
+                        data: 0,
+                    },
+                )
+            } else {
+                self.handle_ingame_mouse_click(motion.last)
+            };
+        }
+        if current_is_region {
+            self.ingame_dragged_objects.clear();
+            return self.dispatch_control_event_for_local_player(
+                motion.start.owner,
+                ControlEvent::RawPlayerControl {
+                    command: 0,
+                    data: 0,
+                },
+            );
+        }
+        if motion.moved {
             if !self.finish_ingame_moved_drag(drag, false)? {
-                // A non-draggable DownCursor (for example Entrance) or an
-                // empty HUD region remains a consumed left drag. It must not
-                // collapse into a click or direction/COM_Throw controls.
+                // A non-draggable world DownCursor (for example Entrance) or
+                // an empty landscape frame remains a consumed drag.
                 self.ingame_dragged_objects.clear();
             }
             return Ok(());
-        } else {
-            // LeftUpDragNone clears C4MouseControl's local Selection after
-            // dispatching the click command. Clear first so an error cannot
-            // strand the local Selection lifecycle.
-            self.ingame_dragged_objects.clear();
-            self.handle_ingame_mouse_click(drag.motion.last)?;
         }
+
+        // LeftUpDragNone clears C4MouseControl's local Selection after
+        // dispatching the click command. Clear first so an error cannot
+        // strand the local Selection lifecycle.
+        self.ingame_dragged_objects.clear();
+        self.handle_ingame_mouse_click(motion.last)?;
         Ok(())
     }
 
@@ -30983,6 +31510,12 @@ impl GameApp {
         if pointer.owner != self.local_owner {
             return Ok(());
         }
+        if self
+            .ingame_viewport_region(pointer.owner, pointer.screen)
+            .is_some()
+        {
+            return Ok(());
+        }
         let Some(target) =
             self.graphics
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
@@ -31018,6 +31551,9 @@ impl GameApp {
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
+        }
+        if self.mode == AppMode::Running && self.ingame_region_drag_active() {
+            return self.handle_ingame_mouse_button(button_state);
         }
         if button_state == ElementState::Pressed {
             self.context_menu_pointer_capture = None;
@@ -31530,7 +32066,9 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
-                if self.handle_scoreboard_pointer_button(button_state)?
+                if self.ingame_region_drag_active() {
+                    self.handle_ingame_mouse_button(button_state)
+                } else if self.handle_scoreboard_pointer_button(button_state)?
                     || self.handle_ingame_menu_pointer_button(button_state, false)?
                 {
                     Ok(())
@@ -41992,6 +42530,7 @@ impl GameApp {
                 if player_view_scrolled {
                     self.snapshot = self.engine.snapshot();
                 }
+                self.refresh_ingame_region_drag_cursor_for_execute();
                 if let Some(network) = self.network.as_ref() {
                     network.refresh_current_frame(self.current_network_input_frame());
                 }
@@ -55496,12 +56035,7 @@ mod tests {
         assert_eq!(commands[0].ty, Some(release_world.y));
     }
 
-    #[test]
-    fn physical_right_drag_inventory_region_moves_all_same_id_items() {
-        // DrawIDList stores the first grouped item in the inventory region.
-        // A right drag expands that copied target to every same-ID object in
-        // forward Contents order, then emits Set followed by Append commands
-        // (C4ObjectList.cpp:343-372; C4MouseControl.cpp:942-961,1171-1227).
+    fn inventory_region_fixture() -> (GameApp, i32, ObjectId, ObjectId, ObjectId, GuiPoint) {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
         let crew = app
@@ -55546,6 +56080,855 @@ mod tests {
             region_target, second,
             "runtime same-ID cluster is newest-first"
         );
+        (app, owner, crew, first, second, region_point)
+    }
+
+    #[test]
+    fn hud_inventory_left_click_queues_exact_contents_only() {
+        let (mut app, owner, _crew, _first, target, region_point) =
+            inventory_region_fixture();
+        let click_point = GuiPoint::new(region_point.x, region_point.y - 14.0);
+        assert_eq!(
+            app.ingame_viewport_region(owner, click_point),
+            Some(IngameViewportRegion::Inventory(target))
+        );
+        let behind = app
+            .graphics
+            .viewport_point_at(click_point)
+            .map(ingame_pointer_world_pixel)
+            .expect("HUD point has a world position behind it");
+        let mut selectable = Definition::from_script("MHIT", "HUD overlap", "#strict\n")
+            .expect("selectable definition compiles");
+        selectable.set_category(lc_engine::CATEGORY_OBJECT | lc_engine::CATEGORY_MOUSE_SELECT);
+        selectable.set_collectible(true);
+        selectable.set_shape_rect(Some(lc_engine::DefinitionRect::new(-8, -8, 16, 16)));
+        app.engine
+            .register_definition(selectable)
+            .expect("register selectable overlap");
+        let cursor_layer = app
+            .engine
+            .crew_cursor(owner)
+            .and_then(|cursor| app.engine.object_snapshot(cursor))
+            .and_then(|cursor| cursor.layer);
+        let mut overlap_spawn = SpawnConfig::new("MHIT")
+            .with_position(behind)
+            .with_owner(owner);
+        if let Some(layer) = cursor_layer {
+            overlap_spawn = overlap_spawn.with_layer(layer);
+        }
+        let overlap = app
+            .engine
+            .spawn_object(overlap_spawn)
+            .expect("spawn selectable object behind HUD");
+        app.engine
+            .apply_object_update(overlap, ObjectUpdate::new().with_position(behind))
+            .expect("pin selectable object behind HUD");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render overlap behind HUD");
+        assert_eq!(
+            app.ingame_mouse_select_target(owner, click_point),
+            Some(overlap),
+            "fixture must catch a leaked selection; overlap={:?}, projected={:?}, behind={behind:?}, region={click_point:?}, raw_pick={:?}",
+            app.snapshot.object(overlap),
+            app.graphics.world_to_screen(owner, behind),
+            app.graphics.object_at_point(&app.snapshot, owner, click_point),
+        );
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(click_point.x),
+            f64::from(click_point.y),
+        ))
+        .expect("move onto inventory region");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("inventory left-down");
+        assert_eq!(
+            network_commands.take_submitted_player_inputs(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "classic control queues nothing until button-up"
+        );
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("inventory left-up");
+
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert_eq!(
+            controls,
+            vec![(
+                owner,
+                ControlEvent::RawPlayerControl {
+                    command: 9,
+                    data: target.as_u64() as i32,
+                },
+                tick,
+            )]
+        );
+        assert!(commands.is_empty(), "HUD click must not queue MoveTo");
+        assert!(selections.is_empty(), "HUD click must not select world crew");
+    }
+
+    #[test]
+    fn hud_inventory_autostop_queues_stored_press_and_release() {
+        let (mut app, owner, _crew, _first, target, region_point) =
+            inventory_region_fixture();
+        app.engine
+            .player_mut(owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local sandbox viewport");
+        let down = GuiPoint::new(
+            (viewport.x + lc_frontend::hud::SYMBOL_BORDER + 1) as f32,
+            region_point.y,
+        );
+        let outside = GuiPoint::new(down.x - 3.0, down.y);
+        assert_eq!(
+            app.ingame_viewport_region(owner, down),
+            Some(IngameViewportRegion::Inventory(target))
+        );
+        assert_eq!(app.ingame_viewport_region(owner, outside), None);
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(down.x),
+            f64::from(down.y),
+        ))
+        .expect("move onto inventory edge");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("AutoStop inventory left-down");
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert_eq!(
+            controls,
+            vec![(
+                owner,
+                ControlEvent::RawPlayerControl {
+                    command: 9,
+                    data: target.as_u64() as i32,
+                },
+                tick,
+            )]
+        );
+        assert!(commands.is_empty());
+        assert!(selections.is_empty());
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(outside.x),
+            f64::from(outside.y),
+        ))
+        .expect("move just outside the region");
+        assert!(
+            app.mouse_state.is_some_and(|state| !state.motion.moved),
+            "three pixels must remain Drag_None"
+        );
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("AutoStop inventory left-up");
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert_eq!(
+            controls,
+            vec![(
+                owner,
+                ControlEvent::RawPlayerControl {
+                    command: 25,
+                    data: target.as_u64() as i32,
+                },
+                tick,
+            )],
+            "COM_Contents+16 retains the down-time target number"
+        );
+        assert!(commands.is_empty());
+        assert!(selections.is_empty());
+    }
+
+    #[test]
+    fn inventory_region_drag_latches_entry_and_selection_at_threshold() {
+        let (mut app, owner, crew, _first, target, region_point) =
+            inventory_region_fixture();
+        let crew_position = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .position;
+        let landscape = app.engine.landscape().expect("sandbox landscape");
+        let drop_x = crew_position.x + 30;
+        let ground_y = (0..landscape.estimated_height())
+            .find(|y| landscape.is_solid_at(drop_x, *y))
+            .expect("sandbox ground");
+        let drop_world = Vector2::new(drop_x, ground_y - 1);
+        let (drop_x, drop_y) = app
+            .graphics
+            .world_to_screen(owner, drop_world)
+            .expect("drop point maps into viewport");
+        let drop_point = GuiPoint::new(drop_x, drop_y);
+        assert_eq!(
+            app.engine.mouse_drag_carryable_command(owner, drop_world),
+            Some(CommandId::Drop)
+        );
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("move onto inventory region");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("region left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(drop_point.x),
+            f64::from(drop_point.y),
+        ))
+        .expect("cross drag threshold");
+        assert!(app.mouse_state.is_some_and(|state| {
+            state.motion.region_drag_started && state.motion.region_drag_cursor.is_none()
+        }));
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("release before DragMoving update");
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert!(controls.is_empty());
+        assert_eq!(
+            commands,
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    player: owner,
+                    command: 0,
+                    x: drop_world.x,
+                    y: drop_world.y,
+                    target: 0,
+                    target2: 0,
+                    data: 0,
+                    add_mode: 1,
+                    by_client: 7,
+                },
+            )],
+            "the threshold event itself still runs DragNone, not DragMoving"
+        );
+        assert!(selections.is_empty());
+        app.network = None;
+        app.ingame_last_left_down = None;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("move onto inventory region");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("region left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(drop_point.x),
+            f64::from(drop_point.y),
+        ))
+        .expect("cross drag threshold");
+        assert!(app
+            .mouse_state
+            .is_some_and(|state| state.motion.region_drag_started));
+        assert_eq!(app.ingame_dragged_objects, vec![target]);
+        for _ in 0..5 {
+            app.update().expect("advance periodic mouse execution");
+        }
+        assert_eq!(
+            app.mouse_state
+                .and_then(|state| state.motion.region_drag_cursor),
+            Some(IngameRegionDragCursor::Drop),
+            "the Tick5 C4MouseControl::Execute equivalent refreshes a stationary drag"
+        );
+
+        let mut inert = Definition::from_script("MNOC", "No longer carryable", "#strict\n")
+            .expect("inert definition compiles");
+        inert.set_category(lc_engine::CATEGORY_OBJECT);
+        app.engine
+            .register_definition(inert)
+            .expect("register inert replacement");
+        app.engine
+            .apply_object_update(
+                target,
+                ObjectUpdate {
+                    change_def: Some("MNOC".to_string()),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("remove carryable definition after drag start");
+        assert_eq!(app.engine.mouse_region_drag_source(target), None);
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("finish latched region drag");
+
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert!(controls.is_empty());
+        assert_eq!(
+            commands,
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    player: owner,
+                    command: CommandId::Drop as i32,
+                    x: drop_world.x,
+                    y: drop_world.y,
+                    target: target.as_u64() as i32,
+                    target2: 0,
+                    data: 0,
+                    add_mode: 1,
+                    by_client: 7,
+                },
+            )]
+        );
+        assert!(selections.is_empty());
+    }
+
+    #[test]
+    fn inventory_region_left_drag_vehicle_queues_single_push_to() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let mut vehicle = Definition::from_script("MIVH", "Inventory vehicle", "#strict\n")
+            .expect("vehicle definition compiles");
+        vehicle.set_category(lc_engine::CATEGORY_VEHICLE);
+        vehicle.set_grab(1);
+        app.engine
+            .register_definition(vehicle)
+            .expect("register vehicle");
+        let vehicle = app
+            .engine
+            .spawn_object(SpawnConfig::new("MIVH").with_container(crew))
+            .expect("put vehicle in cursor contents");
+        let crew_position = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .position;
+        let destination = Vector2::new(crew_position.x + 40, crew_position.y);
+        let mut container = Definition::from_script("MIPC", "Put target", "#strict\n")
+            .expect("container definition compiles");
+        container.set_category(lc_engine::CATEGORY_OBJECT);
+        container.set_grab_put_get(lc_engine::GRAB_PUT_GET_PUT);
+        container.set_shape_rect(Some(lc_engine::DefinitionRect::new(-6, -6, 12, 12)));
+        app.engine
+            .register_definition(container)
+            .expect("register put target");
+        let put_target = app
+            .engine
+            .spawn_object(SpawnConfig::new("MIPC").with_position(destination))
+            .expect("spawn put target");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render vehicle inventory region");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local viewport");
+        let region_point = GuiPoint::new(
+            (viewport.x + lc_frontend::hud::SYMBOL_BORDER + 1) as f32,
+            (viewport.y + viewport.height as i32
+                - lc_frontend::hud::SYMBOL_BORDER
+                - lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
+        );
+        assert_eq!(
+            app.ingame_inventory_region_target(owner, region_point),
+            Some(vehicle)
+        );
+        assert_eq!(
+            app.engine.mouse_region_drag_source(vehicle),
+            Some(MouseDragSource::Vehicle)
+        );
+
+        let (x, y) = app
+            .graphics
+            .world_to_screen(owner, destination)
+            .expect("vehicle destination is visible");
+        let destination_point = GuiPoint::new(x, y);
+        let destination = app
+            .graphics
+            .viewport_point_at(destination_point)
+            .map(ingame_pointer_world_pixel)
+            .expect("destination maps to local viewport");
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("move onto vehicle region");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("vehicle region left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(destination_point.x),
+            f64::from(destination_point.y),
+        ))
+        .expect("cross vehicle drag threshold");
+        assert_eq!(app.ingame_dragged_objects, vec![vehicle]);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(destination_point.x),
+            f64::from(destination_point.y),
+        ))
+        .expect("resolve vehicle moving cursor");
+        assert_eq!(
+            app.mouse_state
+                .and_then(|state| state.motion.region_drag_cursor),
+            Some(IngameRegionDragCursor::Vehicle)
+        );
+        // Model the last DragMoving update having resolved Ctrl+container;
+        // ClearPointers may delete that stored target before button-up.
+        app.mouse_state
+            .as_mut()
+            .expect("moving drag remains active")
+            .motion
+            .region_drag_cursor = Some(IngameRegionDragCursor::VehiclePut(put_target));
+        app.engine
+            .apply_object_update(
+                put_target,
+                ObjectUpdate::new().with_status(lc_engine::ObjectStatus::Deleted),
+            )
+            .expect("delete the stored put target before release");
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("vehicle region left-up");
+
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert!(controls.is_empty());
+        assert_eq!(
+            commands,
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    player: owner,
+                    command: CommandId::PushTo as i32,
+                    x: destination.x,
+                    y: destination.y,
+                    target: vehicle.as_u64() as i32,
+                    target2: 0,
+                    data: 0,
+                    add_mode: 1,
+                    by_client: 7,
+                },
+            )]
+        );
+        assert!(selections.is_empty());
+    }
+
+    fn command_region_point(app: &GameApp, command: u8) -> GuiPoint {
+        let owner = app.local_owner;
+        let cursor = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .and_then(|player| player.cursor)
+            .expect("local cursor");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local viewport");
+        let context = AppCommandContext {
+            engine: &app.engine,
+            bindings: &app.bindings,
+            snapshot: &app.snapshot,
+        };
+        let icons = draw_commands::build_cursor_commands(&app.snapshot, cursor, &context);
+        let wanted = icons
+            .iter()
+            .position(|icon| icon.com == command)
+            .unwrap_or_else(|| panic!("command bar has no COM {command}"));
+        for y in viewport.y..viewport.y + viewport.height as i32 {
+            for x in viewport.x..viewport.x + viewport.width as i32 {
+                let point = GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5);
+                if lc_frontend::hud::command_region_index(viewport, point, &icons) == Some(wanted) {
+                    return point;
+                }
+            }
+        }
+        panic!("no visible region for COM {command}");
+    }
+
+    fn command_bar_fixture(control_style: bool) -> (GameApp, i32, [(u8, GuiPoint); 4]) {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        app.engine
+            .player_mut(owner)
+            .expect("local player")
+            .control
+            .control_style = control_style;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let container = Definition::from_script("MBAS", "Mouse base", "#strict\n")
+            .expect("base definition compiles");
+        app.engine
+            .register_definition(container)
+            .expect("register base");
+        let container = app
+            .engine
+            .spawn_object(SpawnConfig::new("MBAS"))
+            .expect("spawn base");
+        app.engine
+            .apply_object_update(container, ObjectUpdate::new().with_base(owner))
+            .expect("mark player base");
+        app.engine
+            .apply_object_update(cursor, ObjectUpdate::new().with_container(container))
+            .expect("contain cursor");
+        let mut item = Definition::from_script("MCBI", "Command item", "#strict\n")
+            .expect("item definition compiles");
+        item.set_category(lc_engine::CATEGORY_OBJECT);
+        item.set_collectible(true);
+        app.engine.register_definition(item).expect("register item");
+        app.engine
+            .spawn_object(SpawnConfig::new("MCBI").with_container(cursor))
+            .expect("give cursor an item");
+        app.engine.set_base_buy_enabled(true);
+        app.engine.set_base_sell_enabled(true);
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render command regions");
+
+        let points = [5_u8, 4, 3, 6].map(|command| {
+            let point = command_region_point(&app, command);
+            assert_eq!(app.ingame_command_region_at(owner, point), Some(command));
+            (command, point)
+        });
+        (app, owner, points)
+    }
+
+    #[test]
+    fn hud_command_bar_left_click_queues_exact_drawn_coms_only() {
+        let (mut app, owner, points) = command_bar_fixture(false);
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+
+        for (command, point) in points {
+            app.ingame_last_left_down = None;
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(point.x),
+                f64::from(point.y),
+            ))
+            .expect("move onto command region");
+            let tick = app.local_control_submission_tick();
+            app.handle_ingame_mouse_button(ElementState::Pressed)
+                .expect("command left-down");
+            assert_eq!(
+                network_commands.take_submitted_player_inputs(),
+                (Vec::new(), Vec::new(), Vec::new()),
+                "classic COM {command} waits for button-up"
+            );
+            app.handle_ingame_mouse_button(ElementState::Released)
+                .expect("command left-up");
+            let (controls, commands, selections) =
+                network_commands.take_submitted_player_inputs();
+            assert_eq!(
+                controls,
+                vec![(
+                    owner,
+                    ControlEvent::RawPlayerControl { command, data: 0 },
+                    tick,
+                )]
+            );
+            assert!(commands.is_empty(), "COM {command} leaked a world command");
+            assert!(selections.is_empty(), "COM {command} leaked world selection");
+        }
+    }
+
+    #[test]
+    fn hud_command_autostop_release_survives_menu_opened_by_press() {
+        let (mut app, owner, points) = command_bar_fixture(true);
+        let point = points
+            .iter()
+            .find_map(|(command, point)| (*command == 3).then_some(*point))
+            .expect("Buy COM_Up region");
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("move onto Buy region");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("AutoStop Buy left-down");
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert!(commands.is_empty());
+        assert!(selections.is_empty());
+        let [(queued_owner, event, tick)] = controls.as_slice() else {
+            panic!("expected one queued Buy press, got {controls:?}");
+        };
+        assert_eq!(*queued_owner, owner);
+        assert_eq!(
+            *event,
+            ControlEvent::RawPlayerControl {
+                command: 3,
+                data: 0,
+            }
+        );
+        app.apply_ready_controls(
+            *tick,
+            vec![NetworkControl::Player {
+                owner,
+                event: *event,
+            }],
+        )
+        .expect("execute queued Buy press");
+        assert!(
+            app.engine.cursor_object_menu(owner).is_some(),
+            "COM_Up must open the contained base Buy menu before button-up"
+        );
+        assert_eq!(
+            app.script_menu_pointer_target(point)
+                .expect("hit-test opened Buy menu"),
+            None,
+            "the command-bar release point remains outside the GUI-owned menu"
+        );
+
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("captured AutoStop Buy left-up");
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert_eq!(
+            controls,
+            vec![(
+                owner,
+                ControlEvent::RawPlayerControl {
+                    command: 19,
+                    data: 0,
+                },
+                *tick,
+            )]
+        );
+        assert!(commands.is_empty());
+        assert!(selections.is_empty());
+    }
+
+    #[test]
+    fn script_menu_owns_threshold_crossing_inventory_drag_move() {
+        let (mut app, owner, cursor, _first, _target, inventory_point) =
+            inventory_region_fixture();
+        install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
+        assert!(app
+            .ingame_inventory_region_target(owner, inventory_point)
+            .is_some());
+        assert_eq!(
+            app.script_menu_pointer_target(inventory_point)
+                .expect("hit-test inventory point"),
+            None,
+            "inventory down begins outside the open GUI menu"
+        );
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width() as i32, surface.height() as i32)
+        };
+        let menu_point = (0..height)
+            .flat_map(|y| (0..width).map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5)))
+            .find(|point| {
+                matches!(
+                    app.script_menu_pointer_target(*point),
+                    Ok(Some(EngineScriptMenuPointerTarget::Item(_)))
+                ) && ((point.x - inventory_point.x).abs() > 5.0
+                    || (point.y - inventory_point.y).abs() > 5.0)
+            })
+            .expect("open script menu has an item beyond the drag threshold");
+
+        app.ingame_last_left_down = None;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(inventory_point.x),
+            f64::from(inventory_point.y),
+        ))
+        .expect("move onto inventory region");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("inventory left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(menu_point.x),
+            f64::from(menu_point.y),
+        ))
+        .expect("move into GUI menu");
+        assert!(app.mouse_state.is_some_and(|state| {
+            !state.motion.moved
+                && !state.motion.region_drag_started
+                && state.motion.region_drag_cursor.is_none()
+        }));
+        assert!(app.ingame_dragged_objects.is_empty());
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("GUI-owned menu release");
+        assert!(app.mouse_state.is_none());
+    }
+
+    #[test]
+    fn threshold_region_entry_waits_to_cancel_and_focus_loss_clears_drag() {
+        let (mut app, owner, _cursor, _first, _target, region_point) =
+            inventory_region_fixture();
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local viewport");
+        let start = (viewport.y + 10..viewport.y + viewport.height as i32 - 48)
+            .step_by(4)
+            .flat_map(|y| {
+                (viewport.x + 10..viewport.x + viewport.width as i32 - 36)
+                    .step_by(4)
+                    .map(move |x| GuiPoint::new(x as f32, y as f32))
+            })
+            .find(|point| {
+                ((point.x - region_point.x).abs() > 5.0
+                    || (point.y - region_point.y).abs() > 5.0)
+                    && app
+                        .graphics
+                        .viewport_point_at(*point)
+                        .is_some_and(|pointer| pointer.owner == owner)
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, *point)
+                        .is_none()
+                    && app.ingame_viewport_region(owner, *point).is_none()
+            })
+            .expect("empty landscape start outside the HUD region");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x),
+            f64::from(start.y),
+        ))
+        .expect("move to landscape start");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("landscape left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("cross threshold directly into region");
+        assert!(app.mouse_state.is_some_and(|state| {
+            state.motion.moved
+                && state.motion.selection_frame
+                && !state.motion.selection_cancelled_by_region
+        }));
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x),
+            f64::from(start.y),
+        ))
+        .expect("leave region before a second region event");
+        assert!(app.mouse_state.is_some_and(|state| {
+            state.motion.selection_frame && !state.motion.selection_cancelled_by_region
+        }));
+
+        app.handle_focus_lost().expect("cancel focused mouse gesture");
+        assert!(app.mouse_state.is_none());
+        assert!(app.ingame_right_mouse_state.is_none());
+        assert!(app.ingame_dragged_objects.is_empty());
+        assert!(!app.ingame_region_drag_active());
+    }
+
+    #[test]
+    fn selection_drag_entering_hud_region_is_cancelled() {
+        let (mut app, owner, _crew, _first, _target, region_point) =
+            inventory_region_fixture();
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local viewport");
+        let (start, crossed) = (viewport.y + 12..viewport.y + viewport.height as i32 - 48)
+            .step_by(4)
+            .flat_map(|y| {
+                (viewport.x + 12..viewport.x + viewport.width as i32 - 36)
+                    .step_by(4)
+                    .map(move |x| {
+                        (
+                            GuiPoint::new(x as f32, y as f32),
+                            GuiPoint::new((x + 12) as f32, (y + 8) as f32),
+                        )
+                    })
+            })
+            .find(|(start, crossed)| {
+                [*start, *crossed].into_iter().all(|point| {
+                    app.graphics
+                        .viewport_point_at(point)
+                        .is_some_and(|pointer| pointer.owner == owner)
+                        && app
+                            .graphics
+                            .object_at_point(&app.snapshot, owner, point)
+                            .is_none()
+                        && app.ingame_viewport_region(owner, point).is_none()
+                })
+            })
+            .expect("empty landscape selection-frame points");
+        let (manager, _events, mut network_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x),
+            f64::from(start.y),
+        ))
+        .expect("move to frame start");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("landscape left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(crossed.x),
+            f64::from(crossed.y),
+        ))
+        .expect("cross drag threshold");
+        assert!(
+            app.mouse_state
+                .is_some_and(|state| state.motion.moved && state.motion.selection_frame)
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("enter inventory region");
+        assert!(app.ingame_selection_frame().is_none());
+        assert!(app.mouse_state.is_some_and(|state| {
+            !state.motion.selection_frame && state.motion.selection_cancelled_by_region
+        }));
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("release cancelled frame over region");
+        let (controls, commands, selections) =
+            network_commands.take_submitted_player_inputs();
+        assert_eq!(
+            controls,
+            vec![(
+                owner,
+                ControlEvent::RawPlayerControl {
+                    command: 0,
+                    data: 0,
+                },
+                app.local_control_submission_tick(),
+            )],
+            "C++ sends the default copied DownRegion after cancellation"
+        );
+        assert!(commands.is_empty());
+        assert!(selections.is_empty());
+    }
+
+    #[test]
+    fn physical_inventory_region_drags_left_one_right_all_same_id_items() {
+        // DrawIDList stores the first grouped item in the inventory region.
+        // A left drag keeps that single target; a right drag expands it to
+        // every same-ID object in forward Contents order, then emits Set and
+        // Append commands (C4ObjectList.cpp:343-372;
+        // C4MouseControl.cpp:942-961,1171-1227).
+        let (mut app, owner, crew, first, second, region_point) =
+            inventory_region_fixture();
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local sandbox viewport");
 
         let mut hidden_cursor_definition =
             Definition::from_script("HINV", "Hidden inventory cursor", "")
@@ -55645,6 +57028,37 @@ mod tests {
             f64::from(region_point.x),
             f64::from(region_point.y),
         ))
+        .expect("move onto inventory region for left drag");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("physical region left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(drop_pointer.0.x),
+            f64::from(drop_pointer.0.y),
+        ))
+        .expect("cross the left-drag threshold");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(drop_pointer.0.x),
+            f64::from(drop_pointer.0.y),
+        ))
+        .expect("resolve the left moving-drag cursor");
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("physical region left-up");
+        let left_commands = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(left_commands.len(), 1);
+        assert_eq!(left_commands[0].name, "Drop");
+        assert_eq!(left_commands[0].target, Some(second));
+        assert_eq!(left_commands[0].tx, Some(drop_pointer.1.x));
+        assert_eq!(left_commands[0].ty, Some(drop_pointer.1.y));
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
         .expect("move onto inventory region");
         app.handle_right_mouse_button(ElementState::Pressed)
             .expect("physical region right-down");
@@ -55652,7 +57066,12 @@ mod tests {
             f64::from(drop_pointer.0.x),
             f64::from(drop_pointer.0.y),
         ))
-        .expect("drag items to ground");
+        .expect("cross the right-drag threshold");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(drop_pointer.0.x),
+            f64::from(drop_pointer.0.y),
+        ))
+        .expect("resolve the right moving-drag cursor");
         app.handle_right_mouse_button(ElementState::Released)
             .expect("physical region right-up");
 
@@ -86933,9 +88352,11 @@ ScenInfoArea=70,5,25,90
             None,
             "the app-local owner does not own the assigned viewport's region"
         );
-        assert_eq!(
-            app.ingame_viewport_region(secondary, corner),
-            Some(IngameViewportRegion::Command),
+        assert!(
+            matches!(
+                app.ingame_viewport_region(secondary, corner),
+                Some(IngameViewportRegion::Command(_))
+            ),
             "the secondary cursor's Exit pair covers its bottom-right edge"
         );
         let before = app.engine.player(secondary).unwrap().viewports()[0].center;
@@ -87362,9 +88783,11 @@ ScenInfoArea=70,5,25,90
             (rect.x + rect.width as i32 - 1) as f32,
             (rect.y + rect.height as i32 - 1) as f32,
         );
-        assert_eq!(
-            app.ingame_viewport_region(owner, corner),
-            Some(IngameViewportRegion::Command),
+        assert!(
+            matches!(
+                app.ingame_viewport_region(owner, corner),
+                Some(IngameViewportRegion::Command(_))
+            ),
             "the contained cursor's Exit pair covers the bottom-right edge"
         );
 

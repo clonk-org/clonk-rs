@@ -3405,7 +3405,7 @@ impl Engine {
     pub fn mouse_region_drag_source(&self, target: ObjectId) -> Option<MouseDragSource> {
         let index = self.find_object_index(target)?;
         let object = &self.objects[index];
-        if !object.state.status.is_active() {
+        if object.state.status == crate::ObjectStatus::Deleted {
             return None;
         }
         if object.state.ocf & ocf::CARRYABLE != 0 {
@@ -3444,7 +3444,7 @@ impl Engine {
                 self.find_object_index(*candidate)
                     .is_some_and(|candidate_index| {
                         let candidate = &self.objects[candidate_index];
-                        candidate.state.status.is_active()
+                        candidate.state.status != crate::ObjectStatus::Deleted
                             && candidate.definition_id == object.definition_id
                     })
             })
@@ -17493,6 +17493,29 @@ protected func ControlContents(idTarget) { return(1); }
             engine.mouse_region_drag_objects(first, true),
             vec![third, second, first],
             "runtime stContents is newest-first inside the same-ID cluster"
+        );
+
+        engine
+            .apply_object_update(
+                first,
+                crate::ObjectUpdate::new().with_status(crate::ObjectStatus::Inactive),
+            )
+            .expect("deactivate copied region target");
+        engine
+            .apply_object_update(
+                second,
+                crate::ObjectUpdate::new().with_status(crate::ObjectStatus::Inactive),
+            )
+            .expect("deactivate same-ID group member");
+        assert_eq!(
+            engine.mouse_region_drag_source(first),
+            Some(crate::MouseDragSource::Carryable),
+            "inactive objects retain their C++ pointer and copied OCF"
+        );
+        assert_eq!(
+            engine.mouse_region_drag_objects(first, true),
+            vec![third, second, first],
+            "inactive same-ID contents remain in the pointer-backed group"
         );
     }
 
