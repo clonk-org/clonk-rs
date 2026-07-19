@@ -8,6 +8,7 @@ const MAX_WEALTH_ADJUSTMENT: i32 = 10_000;
 const MAX_SCORE: i32 = 100_000;
 const MIN_SCORE: i32 = -100_000;
 const PLAYER_VIEW_DELAY: i32 = 100;
+const VIEWPORT_SCROLL_BORDER: i32 = 40;
 
 pub const PLAYER_VIEW_MODE_CURSOR: i32 = 0;
 pub const PLAYER_VIEW_MODE_TARGET: i32 = 1;
@@ -24,6 +25,18 @@ fn resolved_view_object(
         PLAYER_VIEW_MODE_TARGET => view_target,
         PLAYER_VIEW_MODE_SCROLLING => None,
         _ => None,
+    }
+}
+
+fn bound_view_center(value: i32, lower: i32, upper: i32) -> i32 {
+    // C++ BoundBy evaluates the lower comparison first and deliberately does
+    // not normalize inverted bounds (C4Math.h:23).
+    if value < lower {
+        lower
+    } else if value > upper {
+        upper
+    } else {
+        value
     }
 }
 
@@ -1948,6 +1961,45 @@ impl Player {
         self.view_target = view_target;
     }
 
+    pub(crate) fn scroll_view(
+        &mut self,
+        delta: Vector2,
+        view_width: i32,
+        view_height: i32,
+        world_width: i32,
+        world_height: i32,
+        fullscreen: bool,
+    ) {
+        // C4Player::ScrollView enters scrolling mode through SetViewMode,
+        // which also clears a temporary target (C4Player.cpp:917-920,
+        // 1863-1869).
+        self.view_mode = PLAYER_VIEW_MODE_SCROLLING;
+        self.view_target = None;
+
+        let border = if fullscreen {
+            VIEWPORT_SCROLL_BORDER
+        } else {
+            0
+        };
+        let min_x = view_width / 2 - border;
+        let max_x = world_width + border - view_width / 2;
+        let min_y = view_height / 2 - border;
+        let max_y = world_height + border - view_height / 2;
+
+        for viewport in &mut self.viewports {
+            viewport.center.x = bound_view_center(
+                viewport.center.x.wrapping_add(delta.x),
+                min_x,
+                max_x,
+            );
+            viewport.center.y = bound_view_center(
+                viewport.center.y.wrapping_add(delta.y),
+                min_y,
+                max_y,
+            );
+        }
+    }
+
     pub(crate) fn reset_cursor_view(&mut self) {
         if self.view_cursor.is_none() && self.cursor.is_none() {
             return;
@@ -2837,6 +2889,45 @@ mod tests {
 
         player.clear_object_pointers(captain);
         assert_eq!(player.captain(), None);
+    }
+
+    #[test]
+    fn scroll_view_enters_scrolling_mode_clears_target_and_clamps_all_viewports() {
+        let mut player = Player::new(1, "Player");
+        player.set_view_target(Some(ObjectId::new(9)));
+        player.replace_viewports(vec![
+            PlayerViewport::new(Vector2::new(15, 995)),
+            PlayerViewport::new(Vector2::new(500, 500)),
+        ]);
+
+        player.scroll_view(Vector2::new(-10, 10), 100, 80, 1_000, 1_000, true);
+
+        let state = player.to_state();
+        assert_eq!(state.view_mode, PLAYER_VIEW_MODE_SCROLLING);
+        assert_eq!(state.view_target, None);
+        assert_eq!(state.viewports[0].center, Vector2::new(10, 1_000));
+        assert_eq!(state.viewports[1].center, Vector2::new(490, 510));
+
+        // The ordinary view update receives no resolved object while scrolling
+        // and therefore preserves both the mode and free-scroll centers.
+        player.update_view(None);
+        assert_eq!(player.to_state(), state);
+    }
+
+    #[test]
+    fn scroll_view_uses_windowed_bounds_and_cpp_inverted_bound_order() {
+        let mut player = Player::new(1, "Player");
+        player.replace_viewports(vec![PlayerViewport::new(Vector2::new(45, 965))]);
+        player.scroll_view(Vector2::new(-10, 10), 100, 80, 1_000, 1_000, false);
+        assert_eq!(player.viewports()[0].center, Vector2::new(50, 960));
+
+        player.replace_viewports(vec![PlayerViewport::new(Vector2::new(0, 0))]);
+        player.scroll_view(Vector2::new(0, 0), 100, 80, 20, 10, false);
+        assert_eq!(
+            player.viewports()[0].center,
+            Vector2::new(50, 40),
+            "C++ BoundBy returns the lower bound first when bounds invert"
+        );
     }
 
     #[test]

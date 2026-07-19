@@ -93,7 +93,7 @@ use lc_engine::{
     PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
     MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
     ShowCommandsRequestStore, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
-    TeamConfiguration, Vector2,
+    TeamConfiguration, Vector2, PLAYER_VIEW_MODE_SCROLLING,
     MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
     MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
 };
@@ -129,8 +129,8 @@ use lc_frontend::{
     GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
     InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction, MainMenuItem,
     MaterialRenderInfo, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
-    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
-    default_owner_color,
+    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportEdgeScroll, ViewportInput,
+    ViewportPointer, default_owner_color, viewport_edge_scroll, viewport_edge_scroll_at,
 };
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
@@ -5711,6 +5711,10 @@ fn main() -> Result<()> {
             Event::LoopDestroyed => {}
             _ => {}
         }
+        // C4MouseControl renders scrolling cursors from Cursor*.png and the
+        // platform cursor is hidden for that custom phase. Restore the OS
+        // cursor immediately when GUI ownership or an interior move wins.
+        window.set_cursor_visible(!app.ingame_edge_cursor_active());
         if matches!(
             *control_flow,
             ControlFlow::Exit | ControlFlow::ExitWithCode(_)
@@ -9411,6 +9415,23 @@ enum OptionsDisplayRequest {
     SetScale { percent: i32, persist: bool },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ActiveViewportEdgeScroll {
+    viewport_index: usize,
+    owner: i32,
+    observer: bool,
+    screen: GuiPoint,
+    edge: ViewportEdgeScroll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RetainedViewportMouse {
+    viewport_index: usize,
+    owner: i32,
+    observer: bool,
+    position: Vector2,
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -9660,6 +9681,14 @@ struct GameApp {
     /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
     ingame_gui_pointer: Option<GuiPoint>,
     ingame_pointer: Option<ViewportPointer>,
+    /// C4MouseControl::VpX/VpY and its physical viewport identity. These are
+    /// retained even away from an edge so the native Tick5 synthetic Move
+    /// can reevaluate regions and layout changes without a new OS event.
+    ingame_viewport_mouse: Option<RetainedViewportMouse>,
+    /// Retained C4MouseControl::Scrolling direction. Move applies it once;
+    /// every subsequently executed game tick applies it again until the
+    /// pointer leaves the exact clamped viewport border.
+    ingame_edge_scroll: Option<ActiveViewportEdgeScroll>,
     running_pointer_position: Option<GuiPoint>,
     mouse_state: Option<IngameMouseState>,
     ingame_right_mouse_state: Option<IngameRightMouseState>,
@@ -10813,10 +10842,7 @@ enum ScoreboardPointerTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicViewportBoundary {
-    ZeroObjects,
     LocalViewportUnavailable { owner: i32 },
-    LocalFocusUnavailable { owner: i32, slot: usize },
-    ObserverCameraUnavailable { declared_local_players: Vec<i32> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11082,29 +11108,12 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic C4ScoreboardDlg cannot render exact live data for {trigger:?} (rows={rows}, columns={columns}, show_count={show_count}); refusing partial scoreboard pixels"
             ),
-            Self::RunningViewport(ClassicViewportBoundary::ZeroObjects) => write!(
-                f,
-                "classic object-independent viewport camera is unavailable for a zero-object world; refusing both the solid navy empty-state fallback and an arbitrary first-object focus/selection"
-            ),
             Self::RunningViewport(ClassicViewportBoundary::LocalViewportUnavailable { owner }) => {
                 write!(
                     f,
                     "declared local player {owner} has no authoritative local viewport; refusing the solid navy fallback and an arbitrary first-object focus/selection"
                 )
             }
-            Self::RunningViewport(ClassicViewportBoundary::LocalFocusUnavailable {
-                owner,
-                slot,
-            }) => write!(
-                f,
-                "declared local player {owner} viewport slot {slot} has no live focus, cursor, or crew object; refusing the solid navy fallback and an arbitrary first-object focus/selection"
-            ),
-            Self::RunningViewport(ClassicViewportBoundary::ObserverCameraUnavailable {
-                declared_local_players,
-            }) => write!(
-                f,
-                "classic object-independent NO_OWNER observer camera is unavailable for declared local players {declared_local_players:?}; refusing the solid navy fallback and an arbitrary first-object focus/selection"
-            ),
             Self::AbortDialog => write!(
                 f,
                 "classic C4AbortGameDialog is unavailable; refusing menu-shaped approximation"
@@ -18666,6 +18675,8 @@ impl GameApp {
             auto_start_sandbox: false,
             ingame_gui_pointer: None,
             ingame_pointer: None,
+            ingame_viewport_mouse: None,
+            ingame_edge_scroll: None,
             running_pointer_position: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
@@ -24297,6 +24308,8 @@ impl GameApp {
                         self.engine
                             .set_player_mouse_control(player, control.mouse)?;
                         self.mouse_control = self.local_controls.mouse_owner().is_some();
+                        self.ingame_viewport_mouse = None;
+                        self.ingame_edge_scroll = None;
                     }
                 }
                 self.ingame_menu.replace(
@@ -28526,16 +28539,22 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
-        let point = gui_point_from_position(position);
+        let mut point = gui_point_from_position(position);
         if self.mode == AppMode::Running {
+            // C4GraphicsSystem::MouseMove quantizes the scale-adjusted point
+            // once before either C4GUI or MouseMoveToViewport sees it.
+            point = GuiPoint::new(point.x.ceil(), point.y.ceil());
             self.running_pointer_position = Some(point);
+            self.ingame_gui_pointer = Some(point);
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_position(Some(point));
         }
         if self.handle_message_dialog_pointer_move(point) {
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if let Some(layout) = self.network_start_wait_layout() {
@@ -28553,6 +28572,7 @@ impl GameApp {
                 .map(|pending| pending.controller.handle_pointer_move(point))
                 .unwrap_or_default();
             self.process_startup_player_properties_actions(actions);
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if self.definition_selector.is_some() {
@@ -28565,9 +28585,11 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.finish_definition_selector_input(actions)?;
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if self.handle_context_menu_pointer_move(point)? {
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if self.game_option_input_dialog.is_some() {
@@ -28586,14 +28608,17 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.finish_game_option_input_dialog_actions(actions)?;
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             let surface = self.graphics.surface();
             dialog.handle_pointer_move(point.x, point.y, surface.width(), surface.height());
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if self.classic_host_lobby_active() {
+            self.suspend_ingame_pointer_for_gui();
             return self.handle_classic_lobby_pointer_move(point);
         }
         match self.mode {
@@ -28681,24 +28706,24 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
-                self.ingame_gui_pointer = Some(point);
                 if self.scoreboard_close_pointer_capture
                     || self.scoreboard_pointer_target(point)?.is_some()
                 {
-                    if let Some(state) = self.mouse_state.as_mut() {
-                        state.moved = true;
-                    }
-                    self.ingame_pointer = None;
+                    self.suspend_ingame_pointer_for_gui();
                     return Ok(());
                 }
                 if self.handle_ingame_menu_pointer_move(point) {
-                    self.ingame_pointer = None;
+                    self.suspend_ingame_pointer_for_gui();
                     return Ok(());
                 }
-                self.update_ingame_pointer(point);
-                if let Some(EngineScriptMenuPointerTarget::Item(index)) =
-                    self.script_menu_pointer_target(point)?
-                {
+                self.update_ingame_pointer(point)?;
+                let script_menu_target = match self.ingame_pointer {
+                    Some(pointer) => {
+                        self.script_menu_pointer_target_for_owner(pointer.owner, point)?
+                    }
+                    None => None,
+                };
+                if let Some(EngineScriptMenuPointerTarget::Item(index)) = script_menu_target {
                     if self.select_script_menu_pointer_item(index)? {
                         self.refresh_after_script_menu_pointer();
                     }
@@ -28709,12 +28734,88 @@ impl GameApp {
         }
     }
 
-    fn update_ingame_pointer(&mut self, point: GuiPoint) {
-        let pointer = self
-            .local_controls
-            .mouse_owner()
-            .and_then(|owner| self.graphics.viewport_output_point_for_owner(owner, point));
-        if let Some(pointer) = pointer {
+    fn suspend_ingame_pointer_for_gui(&mut self) {
+        if self.mode != AppMode::Running {
+            return;
+        }
+        if let Some(state) = self.mouse_state.as_mut() {
+            state.moved = true;
+        }
+        if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+            state.motion.moved = true;
+        }
+        self.ingame_pointer = None;
+        self.ingame_edge_scroll = None;
+    }
+
+    fn ingame_edge_cursor_active(&self) -> bool {
+        let Some(scroll) = self.ingame_edge_scroll else {
+            return false;
+        };
+        let Some(gui_point) = self.ingame_gui_pointer else {
+            return false;
+        };
+        if self.mode != AppMode::Running
+            || !self.window_active
+            || !self.message_dialogs.is_empty()
+            || self.startup_player_properties_dialog.is_some()
+            || self.definition_selector.is_some()
+            || self.context_menu.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some()
+            || self.scoreboard_close_pointer_capture
+        {
+            return false;
+        }
+        if self.scoreboard_pointer_target(gui_point).ok().flatten().is_some()
+            || self.ingame_menu_pointer_target(gui_point).is_some()
+            || self
+                .ingame_viewport_region(scroll.owner, scroll.screen)
+                .is_some()
+        {
+            return false;
+        }
+        matches!(
+            self.script_menu_pointer_target_for_owner(scroll.owner, gui_point),
+            Ok(None)
+        )
+    }
+
+    fn update_ingame_pointer(&mut self, point: GuiPoint) -> Result<(), EngineError> {
+        // GraphicsSystem::MouseMove applies ceil after dividing by the
+        // presentation scale, before clamping into the assigned viewport.
+        // The event path has already divided by scale and normally quantized
+        // the running GUI point. Keep this seam idempotent for direct callers
+        // so a fractional outside position still reaches the exact inclusive
+        // border pixel (C4GraphicsSystem.cpp:445-484).
+        let point = GuiPoint::new(point.x.ceil(), point.y.ceil());
+        let projections = self.graphics.active_viewport_projections();
+        let mouse_owner = self.local_controls.mouse_owner();
+        let viewport = match mouse_owner {
+            Some(owner) => projections
+                .iter()
+                .find(|viewport| viewport.owner == owner)
+                .copied(),
+            None => projections
+                .iter()
+                .find(|viewport| viewport.is_no_owner_viewport)
+                .copied(),
+        };
+        let pointer = viewport.and_then(|viewport| {
+            self.graphics
+                .viewport_output_point_for_index(viewport.index, point)
+        });
+        if let (Some(pointer), Some(viewport)) = (pointer, viewport) {
+            let observer = mouse_owner.is_none() && viewport.is_no_owner_viewport;
+            self.ingame_viewport_mouse = Some(RetainedViewportMouse {
+                viewport_index: viewport.index,
+                owner: viewport.owner,
+                observer,
+                position: Vector2::new(
+                    pointer.screen.x as i32 - viewport.rect.x,
+                    pointer.screen.y as i32 - viewport.rect.y,
+                ),
+            });
             if let Some(state) = self.mouse_state.as_mut() {
                 state.update(pointer);
             }
@@ -28723,6 +28824,31 @@ impl GameApp {
             }
             self.ingame_pointer = Some(pointer);
             self.update_ingame_drag_selection_kinds();
+            // A fallible script-menu region lookup must never leave a prior
+            // border direction armed after this new pointer position.
+            self.ingame_edge_scroll = None;
+            let target_region = self
+                .ingame_viewport_region(pointer.owner, pointer.screen)
+                .is_some()
+                || self
+                    .script_menu_pointer_target_for_owner(pointer.owner, point)?
+                    .is_some();
+            self.ingame_edge_scroll = if target_region {
+                None
+            } else {
+                viewport_edge_scroll(viewport.rect, pointer.screen).map(|edge| {
+                    ActiveViewportEdgeScroll {
+                        viewport_index: viewport.index,
+                        owner: viewport.owner,
+                        observer,
+                        screen: pointer.screen,
+                        edge,
+                    }
+                })
+            };
+            if self.apply_ingame_edge_scroll()? {
+                self.snapshot = self.engine.snapshot();
+            }
         } else {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.moved = true;
@@ -28731,7 +28857,169 @@ impl GameApp {
                 state.motion.moved = true;
             }
             self.ingame_pointer = None;
+            self.ingame_viewport_mouse = None;
+            self.ingame_edge_scroll = None;
         }
+        Ok(())
+    }
+
+    /// Apply one C4MouseControl::UpdateScrolling step. Pointer movement calls
+    /// this immediately; the successful simulation path calls it once more
+    /// after every engine tick while the retained border state remains live.
+    /// The return value reports an engine mutation that needs a fresh app
+    /// snapshot; observer cameras are presentation-owned and return false.
+    fn apply_ingame_edge_scroll(&mut self) -> Result<bool, EngineError> {
+        if self.ingame_edge_scroll.is_none() {
+            return Ok(false);
+        }
+        let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
+            self.ingame_edge_scroll = None;
+            return Ok(false);
+        };
+        self.ingame_edge_scroll = Some(scroll);
+        self.perform_ingame_edge_scroll(scroll, viewport)
+    }
+
+    /// Native executes a synthetic Move on every Tick5 even when the previous
+    /// move was interior or suppressed by a viewport region. Reevaluate the
+    /// retained VpX/VpY so disappearing regions and resized layouts take
+    /// effect without a new platform motion event.
+    fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<bool, EngineError> {
+        let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
+            self.ingame_edge_scroll = None;
+            return Ok(false);
+        };
+        self.ingame_edge_scroll = Some(scroll);
+        self.perform_ingame_edge_scroll(scroll, viewport)
+    }
+
+    fn reevaluate_ingame_edge_scroll(
+        &mut self,
+    ) -> Result<Option<(ActiveViewportEdgeScroll, ActiveViewportProjection)>, EngineError> {
+        let Some(retained) = self.ingame_viewport_mouse else {
+            return Ok(None);
+        };
+        let Some(gui_point) = self.ingame_gui_pointer else {
+            return Ok(None);
+        };
+        let routing_still_active = if retained.observer {
+            self.local_controls.mouse_owner().is_none()
+        } else {
+            self.local_controls.mouse_owner() == Some(retained.owner)
+        };
+        if self.mode != AppMode::Running
+            || !self.window_active
+            || !routing_still_active
+            || !self.message_dialogs.is_empty()
+            || self.startup_player_properties_dialog.is_some()
+            || self.definition_selector.is_some()
+            || self.context_menu.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some()
+        {
+            return Ok(None);
+        }
+
+        let viewport = self
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| {
+                viewport.index == retained.viewport_index
+                    && if retained.observer {
+                        viewport.is_no_owner_viewport
+                    } else {
+                        viewport.owner == retained.owner
+                    }
+            });
+        let Some(viewport) = viewport else {
+            return Ok(None);
+        };
+        let width = i32::try_from(viewport.rect.width).unwrap_or(i32::MAX);
+        let height = i32::try_from(viewport.rect.height).unwrap_or(i32::MAX);
+        let screen = GuiPoint::new(
+            viewport.rect.x.saturating_add(retained.position.x) as f32,
+            viewport.rect.y.saturating_add(retained.position.y) as f32,
+        );
+        // C4MouseControl::Execute repeats Move(VpX, VpY), which refreshes the
+        // world-space pointer and drag motion from the camera's current
+        // position before applying the next direct scroll step.
+        let Some(pointer) = self
+            .graphics
+            .viewport_output_point_for_index(viewport.index, screen)
+        else {
+            return Ok(None);
+        };
+        if let Some(state) = self.mouse_state.as_mut() {
+            state.update(pointer);
+        }
+        if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+            state.motion.update(pointer);
+        }
+        self.ingame_pointer = Some(pointer);
+        self.update_ingame_drag_selection_kinds();
+        let Some(edge) = viewport_edge_scroll_at(
+            retained.position.x,
+            retained.position.y,
+            width,
+            height,
+        ) else {
+            return Ok(None);
+        };
+        let target_region = self.scoreboard_close_pointer_capture
+            || self.scoreboard_pointer_target(gui_point)?.is_some()
+            || self.ingame_menu_pointer_target(gui_point).is_some()
+            || self.ingame_viewport_region(viewport.owner, screen).is_some()
+            || self
+                .script_menu_pointer_target_for_owner(viewport.owner, gui_point)?
+                .is_some();
+        if target_region {
+            return Ok(None);
+        }
+
+        Ok(Some((
+            ActiveViewportEdgeScroll {
+                viewport_index: viewport.index,
+                owner: viewport.owner,
+                observer: retained.observer,
+                screen,
+                edge,
+            },
+            viewport,
+        )))
+    }
+
+    fn perform_ingame_edge_scroll(
+        &mut self,
+        scroll: ActiveViewportEdgeScroll,
+        viewport: ActiveViewportProjection,
+    ) -> Result<bool, EngineError> {
+        if scroll.observer {
+            for delta in scroll.edge.steps() {
+                if !self
+                    .graphics
+                    .scroll_observer_viewport(scroll.viewport_index, delta)
+                {
+                    self.ingame_edge_scroll = None;
+                    break;
+                }
+            }
+            return Ok(false);
+        }
+
+        for delta in scroll.edge.steps() {
+            self.engine.scroll_player_view(
+                scroll.owner,
+                delta,
+                viewport.logical_width,
+                viewport.logical_height,
+                // C4Application::isFullScreen distinguishes the game UI from
+                // console mode, not an OS fullscreen window. This app has no
+                // console mode, so every running viewport gets the 40px margin.
+                true,
+            )?;
+        }
+        Ok(true)
     }
 
     fn ingame_menu_pointer_target(
@@ -28887,9 +29175,9 @@ impl GameApp {
     /// cursor-inventory cell. These regions sit above the world pick layer
     /// and retain the group's first object as their Target
     /// (C4Viewport.cpp:911-917; C4ObjectList.cpp:343-372).
-    fn ingame_inventory_region_target(&self, point: GuiPoint) -> Option<ObjectId> {
+    fn ingame_inventory_region_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
         let pointer = self.graphics.viewport_output_point_at(point)?;
-        if pointer.owner != self.local_owner {
+        if pointer.owner != owner {
             return None;
         }
         let viewport = self.graphics.viewport_rect(pointer.owner)?;
@@ -28913,17 +29201,17 @@ impl GameApp {
         inventory.get(section).map(|item| item.object_id)
     }
 
-    fn ingame_command_region_at(&self, point: GuiPoint) -> bool {
+    fn ingame_command_region_at(&self, owner: i32, point: GuiPoint) -> bool {
         if !self.display_flags.show_commands
             || self.object_menu.is_some()
-            || self.engine.cursor_object_menu(self.local_owner).is_some()
+            || self.engine.cursor_object_menu(owner).is_some()
         {
             return false;
         }
         let Some(pointer) = self.graphics.viewport_output_point_at(point) else {
             return false;
         };
-        if pointer.owner != self.local_owner {
+        if pointer.owner != owner {
             return false;
         }
         let Some(cursor) = self
@@ -28947,13 +29235,17 @@ impl GameApp {
         lc_frontend::hud::command_region_index(viewport, point, &commands).is_some()
     }
 
-    fn ingame_viewport_region(&self, point: GuiPoint) -> Option<IngameViewportRegion> {
+    fn ingame_viewport_region(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<IngameViewportRegion> {
         // DrawCommands registers after DrawIDList and C4RegionList::Add
         // prepends, so command pairs win the unlikely overlap.
-        if self.ingame_command_region_at(point) {
+        if self.ingame_command_region_at(owner, point) {
             return Some(IngameViewportRegion::Command);
         }
-        self.ingame_inventory_region_target(point)
+        self.ingame_inventory_region_target(owner, point)
             .map(IngameViewportRegion::Inventory)
     }
 
@@ -28961,9 +29253,11 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        let script_menu_target = match self.ingame_pointer {
-            Some(pointer) => self.script_menu_pointer_target(pointer.screen)?,
-            None => None,
+        let script_menu_target = match (self.ingame_pointer, self.ingame_gui_pointer) {
+            (Some(pointer), Some(gui_point)) => {
+                self.script_menu_pointer_target_for_owner(pointer.owner, gui_point)?
+            }
+            _ => None,
         };
         if let Some(target) = script_menu_target {
             self.mouse_state = None;
@@ -29234,9 +29528,11 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        let script_menu_target = match self.ingame_pointer {
-            Some(pointer) => self.script_menu_pointer_target(pointer.screen)?,
-            None => None,
+        let script_menu_target = match (self.ingame_pointer, self.ingame_gui_pointer) {
+            (Some(pointer), Some(gui_point)) => {
+                self.script_menu_pointer_target_for_owner(pointer.owner, gui_point)?
+            }
+            _ => None,
         };
         if let Some(target) = script_menu_target {
             self.ingame_right_mouse_state = None;
@@ -29269,7 +29565,7 @@ impl GameApp {
                 self.ingame_right_mouse_state = None;
                 return Ok(());
             }
-            let region = self.ingame_viewport_region(pointer.screen);
+            let region = self.ingame_viewport_region(self.local_owner, pointer.screen);
             let region_target = region.and_then(|region| match region {
                 IngameViewportRegion::Inventory(target) => Some(target),
                 IngameViewportRegion::Command => None,
@@ -29314,7 +29610,7 @@ impl GameApp {
                 // so ButtonUpDragMoving emits only C4CMD_None and clears the
                 // local Selection (C4MouseControl.cpp:267,1171-1201).
                 if self
-                    .ingame_viewport_region(drag.motion.last.screen)
+                    .ingame_viewport_region(self.local_owner, drag.motion.last.screen)
                     .is_some()
                 {
                     self.ingame_dragged_objects.clear();
@@ -29398,7 +29694,10 @@ impl GameApp {
         // release cursor is a region. Inventory regions leave RightCom at
         // COM_None, so they consume the click without opening world context
         // or cycling crew (C4MouseControl.cpp:1230-1237).
-        if self.ingame_viewport_region(pointer.screen).is_some() {
+        if self
+            .ingame_viewport_region(self.local_owner, pointer.screen)
+            .is_some()
+        {
             return Ok(());
         }
         let primary_target =
@@ -29583,10 +29882,18 @@ impl GameApp {
         &self,
         point: GuiPoint,
     ) -> Result<Option<EngineScriptMenuPointerTarget>, EngineError> {
+        self.script_menu_pointer_target_for_owner(self.local_owner, point)
+    }
+
+    fn script_menu_pointer_target_for_owner(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Result<Option<EngineScriptMenuPointerTarget>, EngineError> {
         if !self.mouse_control {
             return Ok(None);
         }
-        let Some((target, menu)) = self.engine.cursor_object_menu(self.local_owner) else {
+        let Some((target, menu)) = self.engine.cursor_object_menu(owner) else {
             return Ok(None);
         };
         self.assets
@@ -29599,7 +29906,7 @@ impl GameApp {
         );
         let area = self
             .graphics
-            .viewport_rect(self.local_owner)
+            .viewport_rect(owner)
             .unwrap_or_else(|| {
                 let surface = self.graphics.surface();
                 Rect::new(0, 0, surface.width(), surface.height())
@@ -31056,6 +31363,8 @@ impl GameApp {
                 }
                 self.ingame_gui_pointer = None;
                 self.ingame_pointer = None;
+                self.ingame_viewport_mouse = None;
+                self.ingame_edge_scroll = None;
                 self.running_pointer_position = None;
                 self.scoreboard_close_pointer_capture = false;
             }
@@ -39976,6 +40285,19 @@ impl GameApp {
                     .engine
                     .tick()
                     .map_err(map_runtime_flash_producer_engine_error)?;
+                // Native MouseControl::Execute runs after Players/Script on
+                // every successfully executed game frame. Re-run the last
+                // clamped border move even when the OS emitted no new motion.
+                let player_view_scrolled = if self.ingame_edge_scroll.is_some() {
+                    self.apply_ingame_edge_scroll()?
+                } else if self.engine.frame() % 5 == 0 {
+                    self.refresh_ingame_edge_scroll_tick5()?
+                } else {
+                    false
+                };
+                if player_view_scrolled {
+                    self.snapshot = self.engine.snapshot();
+                }
                 if let Some(network) = self.network.as_ref() {
                     network.refresh_current_frame(self.current_network_input_frame());
                 }
@@ -42973,85 +43295,83 @@ impl GameApp {
         let frame_gamma = self
             .graphics
             .active_gamma_ramp(&self.snapshot.environment.gamma);
-        if let Some(_focus) = self.focus_snapshot.as_ref() {
-            let value_footer_player = self
-                .engine
-                .cursor_object_menu(self.local_owner)
-                .and_then(|(_, menu)| {
-                    (menu.extra == lc_engine::ObjectMenuExtra::Value)
-                        .then_some(menu.command_object)
-                        .flatten()
-                })
-                .and_then(|command_object| self.engine.object_controller(command_object))
-                .filter(|controller| self.engine.player(*controller).is_some());
-            if let Some(owner) = value_footer_player {
-                self.engine
-                    .arm_player_view_wealth(owner)
-                    .map_err(anyhow::Error::new)?;
-            }
-            let mut players = collect_player_overlays(
-                &self.engine,
-                &self.snapshot,
-                self.focus_id,
-                &self.bindings,
-            );
-            populate_crew_inventories(&self.engine, &self.snapshot, &mut players);
-            self.populate_crew_infos(&mut players);
-            self.populate_crew_portraits(&mut players);
-            // Command rows for the local player's real cursor
-            // (C4Viewport::DrawCursorInfo, src/C4Viewport.cpp:948-961),
-            // skipped while the cursor's menu is active
-            // (src/C4Object.cpp:2952).
-            if self.display_flags.show_commands
-                && self.object_menu.is_none()
-                && self.engine.cursor_object_menu(self.local_owner).is_none()
-            {
-                let cursor_id = self
+        let value_footer_player = self
+            .engine
+            .cursor_object_menu(self.local_owner)
+            .and_then(|(_, menu)| {
+                (menu.extra == lc_engine::ObjectMenuExtra::Value)
+                    .then_some(menu.command_object)
+                    .flatten()
+            })
+            .and_then(|command_object| self.engine.object_controller(command_object))
+            .filter(|controller| self.engine.player(*controller).is_some());
+        if let Some(owner) = value_footer_player {
+            self.engine
+                .arm_player_view_wealth(owner)
+                .map_err(anyhow::Error::new)?;
+        }
+        let mut players = collect_player_overlays(
+            &self.engine,
+            &self.snapshot,
+            self.focus_id,
+            &self.bindings,
+        );
+        populate_crew_inventories(&self.engine, &self.snapshot, &mut players);
+        self.populate_crew_infos(&mut players);
+        self.populate_crew_portraits(&mut players);
+        // Command rows for the local player's real cursor
+        // (C4Viewport::DrawCursorInfo, src/C4Viewport.cpp:948-961),
+        // skipped while the cursor's menu is active
+        // (src/C4Object.cpp:2952).
+        if self.display_flags.show_commands
+            && self.object_menu.is_none()
+            && self.engine.cursor_object_menu(self.local_owner).is_none()
+        {
+            let cursor_id = self
+                .snapshot
+                .players
+                .iter()
+                .find(|player| player.id == self.local_owner)
+                .and_then(|player| player.cursor);
+            if let Some(cursor_id) = cursor_id {
+                let flash_command = self
                     .snapshot
-                    .players
-                    .iter()
-                    .find(|player| player.id == self.local_owner)
-                    .and_then(|player| player.cursor);
-                if let Some(cursor_id) = cursor_id {
-                    let flash_command = self
-                        .snapshot
-                        .object(cursor_id)
-                        .and_then(|cursor| self.engine.player(cursor.owner))
-                        .map(|player| player.flash_command())
-                        .unwrap_or(0);
-                    let ctx = AppCommandContext {
-                        engine: &self.engine,
-                        bindings: &self.bindings,
-                        snapshot: &self.snapshot,
-                    };
-                    let commands =
-                        draw_commands::build_cursor_commands(&self.snapshot, cursor_id, &ctx);
-                    if let Some(overlay) = players
-                        .iter_mut()
-                        .find(|player| player.owner == self.local_owner)
-                    {
-                        overlay.commands = commands;
-                        // C4Object::DrawCommand looks up FlashCom through the
-                        // command-producing object's Owner, not Controller.
-                        overlay.flash_command = flash_command;
-                    }
+                    .object(cursor_id)
+                    .and_then(|cursor| self.engine.player(cursor.owner))
+                    .map(|player| player.flash_command())
+                    .unwrap_or(0);
+                let ctx = AppCommandContext {
+                    engine: &self.engine,
+                    bindings: &self.bindings,
+                    snapshot: &self.snapshot,
+                };
+                let commands =
+                    draw_commands::build_cursor_commands(&self.snapshot, cursor_id, &ctx);
+                if let Some(overlay) = players
+                    .iter_mut()
+                    .find(|player| player.owner == self.local_owner)
+                {
+                    overlay.commands = commands;
+                    // C4Object::DrawCommand looks up FlashCom through the
+                    // command-producing object's Owner, not Controller.
+                    overlay.flash_command = flash_command;
                 }
             }
-            let overlay = GraphicsOverlay {
-                frame_text: &self.frame_text,
-                status_text: &self.status_text,
-                debug_hud: self.debug_hud,
-                players,
-                game_time_seconds: self.game_time_seconds(),
-                message_board_line: self.message_board_line(),
-                // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
-                // from the Display menu (src/C4Config.cpp:448-450).
-                show_portraits: self.display_flags.portraits,
-                show_commands: self.display_flags.show_commands,
-                show_command_keys: self.display_flags.show_command_keys,
-            };
-            self.graphics.update_overlay(&overlay);
         }
+        let overlay = GraphicsOverlay {
+            frame_text: &self.frame_text,
+            status_text: &self.status_text,
+            debug_hud: self.debug_hud,
+            players,
+            game_time_seconds: self.game_time_seconds(),
+            message_board_line: self.message_board_line(),
+            // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
+            // from the Display menu (src/C4Config.cpp:448-450).
+            show_portraits: self.display_flags.portraits,
+            show_commands: self.display_flags.show_commands,
+            show_command_keys: self.display_flags.show_command_keys,
+        };
+        self.graphics.update_overlay(&overlay);
         if ordered_native {
             let pending_hud = self.graphics.render_frame_base(&self.snapshot, &viewports);
             let surface = self.graphics.surface_mut();
@@ -43374,7 +43694,9 @@ impl GameApp {
         // C4GUI owns the mouse and suppresses it via fMouseOwned, handled by
         // ingame_selection_frame above (src/C4Viewport.cpp:836-870;
         // src/C4MouseControl.cpp:317-430).
-        if let Some((selection, down_world, current_screen)) = self.ingame_selection_frame() {
+        let selection_frame_drawn = if let Some((selection, down_world, current_screen)) =
+            self.ingame_selection_frame()
+        {
             self.graphics.draw_mouse_selection_marks(
                 &self.snapshot,
                 self.local_owner,
@@ -43387,6 +43709,18 @@ impl GameApp {
                 current_screen,
                 Some(&frame_gamma),
             );
+            true
+        } else {
+            false
+        };
+        if !selection_frame_drawn && self.ingame_edge_cursor_active() {
+            if let Some(scroll) = self.ingame_edge_scroll {
+                self.graphics.draw_mouse_cursor(
+                    scroll.edge.cursor,
+                    scroll.screen,
+                    Some(&frame_gamma),
+                );
+            }
         }
         if ordered_native {
             self.next_pending_native_overlay();
@@ -44814,6 +45148,8 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_viewport_mouse = None;
+        self.ingame_edge_scroll = None;
         self.running_pointer_position = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -45881,6 +46217,8 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_viewport_mouse = None;
+        self.ingame_edge_scroll = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.ingame_dragged_objects.clear();
@@ -46228,6 +46566,8 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_viewport_mouse = None;
+        self.ingame_edge_scroll = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.ingame_dragged_objects.clear();
@@ -46636,6 +46976,8 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_viewport_mouse = None;
+        self.ingame_edge_scroll = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.ingame_dragged_objects.clear();
@@ -48467,10 +48809,6 @@ fn scaled_viewport_extent(logical_extent: u32, scale: f32) -> Option<u32> {
 fn collect_viewport_inputs<'a>(
     snapshot: &'a SimulationSnapshot,
 ) -> std::result::Result<Vec<ViewportInput<'a>>, ClassicViewportBoundary> {
-    if snapshot.objects.is_empty() {
-        return Err(ClassicViewportBoundary::ZeroObjects);
-    }
-
     let mut inputs = Vec::new();
 
     // C++ creates viewports from C4Player::LocalControl, not from the global
@@ -48489,27 +48827,39 @@ fn collect_viewport_inputs<'a>(
                 .focus
                 .and_then(|focus_id| snapshot.object(focus_id))
                 .or_else(|| state.cursor.and_then(|cursor| snapshot.object(cursor)))
-                .or_else(|| state.crew.first().and_then(|crew| snapshot.object(*crew)))
-                .ok_or(ClassicViewportBoundary::LocalFocusUnavailable {
-                    owner: *owner,
-                    slot,
-                })?;
+                .or_else(|| state.crew.first().and_then(|crew| snapshot.object(*crew)));
             let center = Vector2::new(viewport.center.x, viewport.center.y);
+            let input = object.map_or_else(
+                || ViewportInput::owned_without_focus(state.id, center, viewport.zoom),
+                |object| ViewportInput::new(state.id, center, viewport.zoom, object),
+            );
             inputs.push(
-                ViewportInput::new(state.id, center, viewport.zoom, object)
+                input
                     .with_offset(state.view_offset)
+                    .with_scrolling(state.view_mode == PLAYER_VIEW_MODE_SCROLLING)
                     .with_camera_identity(state.id, slot),
             );
         }
     }
 
     if inputs.is_empty() {
-        // Fullscreen C++ owns exactly one object-independent NO_OWNER observer
-        // viewport here (C4FullScreen.cpp:499-535). ViewportInput still
-        // requires an object, so fail closed instead of selecting one.
-        return Err(ClassicViewportBoundary::ObserverCameraUnavailable {
-            declared_local_players: snapshot.hud.local_players.clone(),
-        });
+        // Fullscreen C++ owns exactly one NO_OWNER observer viewport when no
+        // local player has a viewport (C4FullScreen.cpp:499-535). It is
+        // object-independent, including a landscape-only empty scenario.
+        let center = snapshot
+            .landscape
+            .as_ref()
+            .map(|landscape| {
+                Vector2::new(
+                    i32::try_from(landscape.width()).unwrap_or(i32::MAX) / 2,
+                    landscape.estimated_height() / 2,
+                )
+            })
+            .unwrap_or(Vector2::ZERO);
+        inputs.push(
+            ViewportInput::ownerless(center, 1.0)
+                .with_camera_identity(OWNER_NONE, 0),
+        );
     }
 
     Ok(inputs)
@@ -48547,8 +48897,9 @@ fn collect_viewport_inputs_with_film_view<'a>(
     if let Some(viewport) = viewport {
         primary.center = viewport.center;
     }
+    primary.set_scrolling(state.view_mode == PLAYER_VIEW_MODE_SCROLLING);
     if let Some(object) = object {
-        primary.focus = object;
+        primary.focus = Some(object);
     }
     Ok(inputs)
 }
@@ -52456,6 +52807,7 @@ mod tests {
         let viewport = ActiveViewportProjection {
             index: 0,
             owner: 1,
+            is_no_owner_viewport: false,
             rect: Rect::new(10, 20, 160, 100),
             content_rect: Rect::new(30, 40, 120, 60),
             target_x: 0,
@@ -52647,7 +52999,7 @@ mod tests {
                 - lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
         );
         let region_target = app
-            .ingame_inventory_region_target(region_point)
+            .ingame_inventory_region_target(owner, region_point)
             .expect("first inventory cell has a copied target");
         assert_eq!(
             region_target, second,
@@ -52679,7 +53031,7 @@ mod tests {
             "the hidden cursor would expose an inventory region without its mask"
         );
         assert_eq!(
-            app.ingame_inventory_region_target(region_point),
+            app.ingame_inventory_region_target(owner, region_point),
             None,
             "HH_Inventory creates no invisible clickable region for ViewCursor"
         );
@@ -55731,7 +56083,7 @@ mod tests {
         let first_bag_point = (viewport.y..viewport.y + viewport.height as i32)
             .flat_map(|y| {
                 (viewport.x..viewport.x + viewport.width as i32)
-                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+                    .map(move |x| GuiPoint::new(x as f32, y as f32))
             })
             .find(|point| {
                 app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(first_bag)
@@ -55740,7 +56092,7 @@ mod tests {
         let drop_pointer = (viewport.y..viewport.y + viewport.height as i32)
             .flat_map(|y| {
                 (viewport.x..viewport.x + viewport.width as i32)
-                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+                    .map(move |x| GuiPoint::new(x as f32, y as f32))
             })
             .find_map(|point| {
                 let pointer = app.graphics.viewport_point_at(point)?;
@@ -55896,7 +56248,7 @@ mod tests {
         let bag_point = (viewport.y..viewport.y + viewport.height as i32)
             .flat_map(|y| {
                 (viewport.x..viewport.x + viewport.width as i32)
-                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+                    .map(move |x| GuiPoint::new(x as f32, y as f32))
             })
             .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag))
             .expect("ALC_ has a visible C++ pick point");
@@ -56019,16 +56371,15 @@ mod tests {
             })
             .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag))
             .expect("the shipped bag has a visible C++ pick point");
-        let click_pointer = app
-            .graphics
-            .viewport_point_at(bag_point)
-            .expect("bag pick point maps into the local viewport");
-        let click_world = Vector2::new(click_pointer.world.x as i32, click_pointer.world.y as i32);
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(bag_point.x),
             f64::from(bag_point.y),
         ))
         .expect("move pointer over carryable bag");
+        let click_world = ingame_pointer_world_pixel(
+            app.ingame_pointer
+                .expect("C++-quantized bag point maps into the local viewport"),
+        );
         assert_eq!(
             app.graphics
                 .object_at_point(&app.snapshot, owner, bag_point),
@@ -56170,7 +56521,13 @@ mod tests {
         let initial_inputs = collect_viewport_inputs(&initial_snapshot)
             .expect("real Tutorial06 player has an authoritative viewport");
         assert_eq!(initial_inputs.len(), 1);
-        assert_eq!(initial_inputs[0].focus.id, rider);
+        assert_eq!(
+            initial_inputs[0]
+                .focus
+                .expect("player viewport focus")
+                .id,
+            rider
+        );
         assert_eq!(
             initial_inputs[0].center,
             app.snapshot.object(rider).expect("initial rider").position,
@@ -56233,7 +56590,10 @@ mod tests {
             let inputs = collect_viewport_inputs(&render_snapshot)
                 .expect("real Tutorial06 player keeps an authoritative viewport");
             assert_eq!(inputs.len(), 1, "one local viewport on frame {frame}");
-            assert_eq!(inputs[0].focus.id, rider);
+            assert_eq!(
+                inputs[0].focus.expect("player viewport focus").id,
+                rider
+            );
             assert_eq!(
                 inputs[0].center, rider_now.position,
                 "the app must present the rider's current frame position to C4Viewport on frame {frame}"
@@ -59009,6 +59369,7 @@ func Award()
         ActiveViewportProjection {
             index,
             owner,
+            is_no_owner_viewport: false,
             rect: Rect::new(0, 0, 200, 100),
             content_rect: Rect::new(0, 0, 200, 100),
             target_x: center.x - 100,
@@ -60372,6 +60733,7 @@ func Award()
         let viewports = [ActiveViewportProjection {
             index: 0,
             owner: app.local_owner,
+            is_no_owner_viewport: false,
             rect: Rect::new(0, 0, 320, 200),
             content_rect: Rect::new(0, 0, 320, 200),
             target_x: 0,
@@ -61133,6 +61495,7 @@ func Award()
         let viewport = ActiveViewportProjection {
             index: 0,
             owner: 1,
+            is_no_owner_viewport: false,
             rect: Rect::new(10, 20, 400, 200),
             content_rect: Rect::new(10, 20, 400, 200),
             target_x: 201,
@@ -61162,6 +61525,7 @@ func Award()
         let viewport = ActiveViewportProjection {
             index: 0,
             owner: 1,
+            is_no_owner_viewport: false,
             rect: Rect::new(10, 20, 800, 400),
             content_rect: Rect::new(30, 50, 760, 340),
             target_x: 123,
@@ -61220,6 +61584,7 @@ func Award()
         let viewport = ActiveViewportProjection {
             index: 0,
             owner: app.local_owner,
+            is_no_owner_viewport: false,
             rect: Rect::new(10, 20, 100, 100),
             // One logical border pixel at 0.4x rounds to zero output pixels.
             content_rect: Rect::new(10, 20, 100, 100),
@@ -83004,7 +83369,7 @@ ScenInfoArea=70,5,25,90
             .expect("secondary viewport");
         assert_ne!(primary_viewport, secondary_viewport);
 
-        let (physical_point, expected_pointer) = (primary_viewport.y
+        let (physical_point, _) = (primary_viewport.y
             ..primary_viewport.y + primary_viewport.height as i32)
             .flat_map(|y| {
                 (primary_viewport.x..primary_viewport.x + primary_viewport.width as i32)
@@ -83025,6 +83390,13 @@ ScenInfoArea=70,5,25,90
                 .then_some((point, projected))
             })
             .expect("primary viewport has a point clear of secondary crew after clamping");
+        let expected_pointer = app
+            .graphics
+            .viewport_output_point_for_owner(
+                secondary,
+                GuiPoint::new(physical_point.x.ceil(), physical_point.y.ceil()),
+            )
+            .expect("C++ ceil-quantized point projects through the assigned viewport");
         assert!(
             physical_point.x < secondary_viewport.x as f32
                 || physical_point.x
@@ -83081,6 +83453,801 @@ ScenInfoArea=70,5,25,90
                 .command_views(),
             primary_commands,
             "the physically hovered primary player must receive no command"
+        );
+    }
+
+    #[test]
+    fn assigned_secondary_mouse_uses_its_own_command_region_to_suppress_edge_pan() {
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(primary)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary runtime player");
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(primary_crew_state.position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary crew");
+        app.engine
+            .register_definition(
+                Definition::from_script("MSRG", "Secondary mouse region", "#strict\n")
+                    .expect("region fixture compiles"),
+            )
+            .expect("register region fixture");
+        let container = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new("MSRG").with_position(primary_crew_state.position),
+            )
+            .expect("spawn secondary cursor container");
+        app.engine
+            .apply_object_update(
+                secondary_crew,
+                ObjectUpdate::new().with_container(container),
+            )
+            .expect("put secondary cursor into fixture to expose Exit");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select secondary crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set secondary cursor");
+        app.engine
+            .replace_player_viewports(
+                secondary,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(secondary_crew))],
+            )
+            .expect("set secondary viewport away from scroll bounds");
+        app.engine.set_local_players([primary, secondary]);
+
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set, prefers_mouse) in
+            [(primary, 0, false), (secondary, 1, true)]
+        {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+        }
+        assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("establish both local viewports and command regions");
+        let viewport = app
+            .graphics
+            .viewport_rect(secondary)
+            .expect("secondary viewport");
+        let corner = GuiPoint::new(
+            (viewport.x + viewport.width as i32 - 1) as f32,
+            (viewport.y + viewport.height as i32 - 1) as f32,
+        );
+        assert_eq!(
+            app.ingame_viewport_region(primary, corner),
+            None,
+            "the app-local owner does not own the assigned viewport's region"
+        );
+        assert_eq!(
+            app.ingame_viewport_region(secondary, corner),
+            Some(IngameViewportRegion::Command),
+            "the secondary cursor's Exit pair covers its bottom-right edge"
+        );
+        let before = app.engine.player(secondary).unwrap().viewports()[0].center;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(corner.x),
+            f64::from(corner.y),
+        ))
+        .expect("move assigned secondary pointer onto its command region");
+
+        assert_eq!(
+            app.ingame_pointer.map(|pointer| pointer.owner),
+            Some(secondary)
+        );
+        assert!(app.ingame_edge_scroll.is_none());
+        assert_eq!(
+            app.engine.player(secondary).unwrap().viewports()[0].center,
+            before,
+            "the assigned viewport's own region suppresses its edge pan"
+        );
+    }
+
+    #[test]
+    fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
+        // UpdateScrolling applies one ten-pixel step during the physical Move,
+        // and MouseControl::Execute repeats it after every successful game
+        // frame while Scrolling remains set. An interior move clears only the
+        // repeat state: C4PVM_Scrolling stays frozen until an ordinary player
+        // command calls ResetCursorView (C4MouseControl.cpp:133-145,664-692;
+        // C4Player.cpp:926-928,1491-1521,1692-1715).
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish mouse viewport");
+        let rect = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("mouse owner viewport");
+        let left = GuiPoint::new(
+            rect.x as f32,
+            (rect.y + rect.height as i32 / 2) as f32,
+        );
+        assert!(app.ingame_viewport_region(owner, left).is_none());
+        assert!(
+            app.script_menu_pointer_target(left)
+                .expect("left edge target query")
+                .is_none()
+        );
+        let view_state = |app: &GameApp| {
+            let snapshot = app.engine.snapshot();
+            let player = snapshot
+                .players
+                .iter()
+                .find(|player| player.id == owner)
+                .expect("mouse owner remains");
+            (player.viewports[0].center, player.view_mode)
+        };
+        let (before, _) = view_state(&app);
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("move onto left viewport edge");
+        let left_edge = app
+            .ingame_edge_scroll
+            .expect("left edge retains continuous scrolling")
+            .edge;
+        assert_eq!(left_edge.delta, Vector2::new(-10, 0));
+        assert_eq!(left_edge.cursor, lc_frontend::MouseCursorPhase::Left);
+        assert_eq!(
+            view_state(&app),
+            (
+                Vector2::new(before.x - 10, before.y),
+                lc_engine::PLAYER_VIEW_MODE_SCROLLING,
+            )
+        );
+
+        app.update().expect("first continuous edge-scroll tick");
+        app.update().expect("second continuous edge-scroll tick");
+        assert_eq!(
+            view_state(&app).0,
+            Vector2::new(before.x - 30, before.y),
+            "no extra OS motion event is required for each ten-pixel step"
+        );
+
+        let interior = GuiPoint::new(
+            (rect.x + rect.width as i32 / 2) as f32,
+            (rect.y + rect.height as i32 / 2) as f32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(interior.x),
+            f64::from(interior.y),
+        ))
+        .expect("leave viewport edge");
+        assert!(app.ingame_edge_scroll.is_none());
+        let stopped = view_state(&app).0;
+        for _ in 0..6 {
+            app.update().expect("interior Tick5 refresh window");
+        }
+        assert_eq!(view_state(&app).0, stopped);
+        assert_eq!(
+            view_state(&app).1,
+            lc_engine::PLAYER_VIEW_MODE_SCROLLING,
+            "leaving the border stops pan but does not itself restore cursor mode"
+        );
+
+        app.engine
+            .player_in_com(owner, lc_engine::COM_RIGHT, 0)
+            .expect("ordinary player input resets the camera mode");
+        assert_eq!(
+            view_state(&app).1,
+            lc_engine::PLAYER_VIEW_MODE_CURSOR
+        );
+    }
+
+    #[test]
+    fn continuous_edge_execute_reprojects_world_pointer_before_scrolling_again() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        app.display_flags.show_commands = false;
+        app.graphics.set_scroll_smooth(1);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish mouse viewport");
+        let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let right = GuiPoint::new(
+            (rect.x + rect.width as i32 - 1) as f32,
+            (rect.y + rect.height as i32 / 2) as f32,
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(right.x),
+            f64::from(right.y),
+        ))
+        .expect("arm continuous right-edge scrolling");
+        let stale = app.ingame_pointer.expect("physical move projects pointer");
+        let after_move = app.engine.player(owner).unwrap().viewports()[0].center;
+
+        app.render(&mut frame)
+            .expect("render the camera position from the first scroll step");
+        let scroll = app
+            .ingame_edge_scroll
+            .expect("right edge remains armed after render");
+        let expected = app
+            .graphics
+            .viewport_output_point_for_index(scroll.viewport_index, scroll.screen)
+            .expect("retained viewport still projects the edge point");
+        assert_ne!(
+            expected.world, stale.world,
+            "the rendered camera movement must change the fixed screen point's world coordinate"
+        );
+        assert_eq!(
+            app.ingame_pointer,
+            Some(stale),
+            "rendering alone does not synthesize C4MouseControl::Move"
+        );
+
+        app.update()
+            .expect("continuous Execute reprojects before its next scroll step");
+
+        assert_eq!(app.ingame_pointer, Some(expected));
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(after_move.x + 10, after_move.y)
+        );
+    }
+
+    #[test]
+    fn gui_consumed_pointer_move_clears_edge_pan_and_prevents_later_ticks() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish mouse viewport");
+        let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let left = PhysicalPosition::new(
+            f64::from(rect.x),
+            f64::from(rect.y + rect.height as i32 / 2),
+        );
+
+        app.handle_cursor_moved(left)
+            .expect("arm continuous left-edge scrolling");
+        assert!(app.ingame_edge_scroll.is_some());
+        app.open_context_menu_at(
+            vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                "Remain open",
+            )],
+            GuiPoint::new(20.0, 20.0),
+        )
+        .expect("open retained running context menu");
+        assert!(
+            app.ingame_edge_scroll.is_some(),
+            "opening the popup alone does not synthesize a pointer move"
+        );
+        let row = app
+            .context_menu
+            .as_ref()
+            .expect("running context menu")
+            .layout()
+            .panels[0]
+            .rows[0]
+            .rect;
+        let stopped = app.engine.player(owner).unwrap().viewports()[0].center;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(row.x + 1),
+            f64::from(row.y + 1),
+        ))
+        .expect("route pointer movement into the context menu");
+        assert!(app.context_menu.is_some());
+        assert!(app.ingame_pointer.is_none());
+        assert!(app.ingame_edge_scroll.is_none());
+
+        for _ in 0..6 {
+            app.update().expect("running context-menu simulation tick");
+        }
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            stopped,
+            "neither continuous Execute nor Tick5 may revive a GUI-consumed edge move"
+        );
+        assert!(app.ingame_edge_scroll.is_none());
+    }
+
+    #[test]
+    fn continuous_execute_rechecks_retained_viewport_x_after_resize_without_reclamping() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.display_flags.show_commands = false;
+        app.render(&mut frame).expect("establish original viewport");
+        let original = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let right = PhysicalPosition::new(
+            f64::from(original.x + original.width as i32 - 1),
+            f64::from(original.y + original.height as i32 / 2),
+        );
+
+        app.handle_cursor_moved(right)
+            .expect("move onto the original right edge");
+        assert_eq!(
+            app.ingame_viewport_mouse
+                .expect("C4MouseControl VpX/VpY retained")
+                .position
+                .x,
+            original.width as i32 - 1
+        );
+        assert_eq!(
+            app.ingame_edge_scroll
+                .expect("original right edge remains armed")
+                .edge
+                .delta,
+            Vector2::new(10, 0)
+        );
+        let stopped = app.engine.player(owner).unwrap().viewports()[0].center;
+
+        app.resize(480, 200).expect("widen running viewport");
+        let mut wider_frame = vec![0_u8; 480 * 200 * 4];
+        app.render(&mut wider_frame)
+            .expect("establish widened viewport layout");
+        let wider = app.graphics.viewport_rect(owner).expect("wider viewport");
+        assert!(wider.width > original.width);
+        assert_eq!(
+            app.ingame_viewport_mouse
+                .expect("resize retains native VpX/VpY")
+                .position
+                .x,
+            original.width as i32 - 1
+        );
+        assert!(
+            original.width as i32 - 1 < wider.width as i32 - 1,
+            "the retained right edge is now an interior viewport coordinate"
+        );
+        assert!(
+            app.ingame_edge_scroll.is_some(),
+            "native Scrolling stays armed until the next Execute reevaluates VpX"
+        );
+
+        app.update()
+            .expect("next continuous Execute reevaluates resized VpX");
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            stopped,
+            "Execute must test retained VpX against the new width, not clamp it back to the edge"
+        );
+        assert!(app.ingame_edge_scroll.is_none());
+    }
+
+    #[test]
+    fn height_only_resize_retains_right_edge_continuous_pan() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        app.display_flags.show_commands = false;
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish original viewport");
+        let original = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let right = GuiPoint::new(
+            (original.x + original.width as i32 - 1) as f32,
+            (original.y + original.height as i32 / 2) as f32,
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(right.x),
+            f64::from(right.y),
+        ))
+        .expect("arm continuous right-edge scrolling");
+        let after_move = app.engine.player(owner).unwrap().viewports()[0].center;
+
+        app.resize(320, 240).expect("grow only the running height");
+        let mut taller_frame = vec![0_u8; 320 * 240 * 4];
+        app.render(&mut taller_frame)
+            .expect("establish height-only resized layout");
+        let taller = app.graphics.viewport_rect(owner).expect("taller viewport");
+        assert_eq!(taller.width, original.width);
+        assert!(taller.height > original.height);
+        assert_eq!(
+            app.ingame_viewport_mouse
+                .expect("resize retains native VpX/VpY")
+                .position
+                .x,
+            taller.width as i32 - 1
+        );
+
+        app.update()
+            .expect("continuous Execute keeps the retained right edge live");
+
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(after_move.x + 10, after_move.y)
+        );
+        let scroll = app
+            .ingame_edge_scroll
+            .expect("right edge remains armed after the height-only resize");
+        assert_eq!(scroll.edge.delta, Vector2::new(10, 0));
+        assert_eq!(scroll.edge.cursor, lc_frontend::MouseCursorPhase::Right);
+    }
+
+    #[test]
+    fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
+        let mut app = new_running_sandbox_app();
+        while app.engine.frame() % 5 != 4 {
+            app.update().expect("align the next simulation frame to Tick5");
+        }
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let focus_position = app
+            .engine
+            .object_snapshot(focus)
+            .expect("sandbox cursor remains live")
+            .position;
+        app.engine
+            .register_definition(
+                Definition::from_script("MREG", "Mouse region fixture", "#strict\n")
+                    .expect("region fixture compiles"),
+            )
+            .expect("register region fixture");
+        let container = app
+            .engine
+            .spawn_object(SpawnConfig::new("MREG").with_position(focus_position))
+            .expect("spawn cursor container");
+        app.engine
+            .apply_object_update(focus, ObjectUpdate::new().with_container(container))
+            .expect("put cursor into fixture to expose the Exit command region");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("establish command region and viewport");
+        let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let left = GuiPoint::new(
+            rect.x as f32,
+            (rect.y + rect.height as i32 / 2) as f32,
+        );
+        let corner = GuiPoint::new(
+            (rect.x + rect.width as i32 - 1) as f32,
+            (rect.y + rect.height as i32 - 1) as f32,
+        );
+        assert_eq!(
+            app.ingame_viewport_region(owner, corner),
+            Some(IngameViewportRegion::Command),
+            "the contained cursor's Exit pair covers the bottom-right edge"
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("enter scrolling mode before the suppressing region move");
+        assert!(app.ingame_edge_scroll.is_some());
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(corner.x),
+            f64::from(corner.y),
+        ))
+        .expect("move retained VpX/VpY onto the command region");
+        assert!(app.ingame_edge_scroll.is_none());
+        let before_tick5 = app.engine.player(owner).unwrap().viewports()[0].center;
+
+        app.display_flags.show_commands = false;
+        assert!(app.ingame_viewport_region(owner, corner).is_none());
+        app.update()
+            .expect("Tick5 reevaluates the retained corner after region removal");
+        assert_eq!(app.engine.frame() % 5, 0);
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(before_tick5.x + 10, before_tick5.y + 10)
+        );
+        let resumed = app
+            .ingame_edge_scroll
+            .expect("disappearing region exposes the retained corner");
+        assert_eq!(resumed.edge.delta, Vector2::new(10, 10));
+        assert_eq!(
+            resumed.edge.cursor,
+            lc_frontend::MouseCursorPhase::DownRight
+        );
+    }
+
+    #[test]
+    fn mouse_viewport_corner_pans_both_axes_and_uses_diagonal_cursor() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish mouse viewport");
+        let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let corner = GuiPoint::new(rect.x as f32, rect.y as f32);
+        assert!(app.ingame_viewport_region(owner, corner).is_none());
+        assert!(
+            app.script_menu_pointer_target(corner)
+                .expect("corner target query")
+                .is_none()
+        );
+        let before = app.engine.player(owner).unwrap().viewports()[0].center;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(corner.x),
+            f64::from(corner.y),
+        ))
+        .expect("move onto upper-left corner");
+
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(before.x - 10, before.y - 10)
+        );
+        let corner_edge = app
+            .ingame_edge_scroll
+            .expect("corner retains edge state")
+            .edge;
+        assert_eq!(corner_edge.delta, Vector2::new(-10, -10));
+        assert_eq!(
+            corner_edge.cursor,
+            lc_frontend::MouseCursorPhase::UpLeft
+        );
+    }
+
+    #[test]
+    fn fullscreen_mouse_edge_pan_uses_the_forty_pixel_overflow_bound() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish mouse viewport");
+        let projection = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.owner == owner)
+            .expect("owner projection");
+        let minimum_x = projection.logical_width / 2 - 40;
+        let y = 180;
+        app.engine
+            .set_player_viewport(
+                owner,
+                0,
+                lc_engine::PlayerViewport::new(Vector2::new(minimum_x + 5, y))
+                    .with_focus(Some(focus)),
+            )
+            .expect("place camera just inside fullscreen overflow bound");
+        app.snapshot = app.engine.snapshot();
+        app.render(&mut frame).expect("render positioned camera");
+        let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let left = GuiPoint::new(
+            rect.x as f32,
+            (rect.y + rect.height as i32 / 2) as f32,
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("scroll into fullscreen overflow bound");
+
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(minimum_x, y),
+            "the remaining five pixels clamp instead of applying all ten"
+        );
+    }
+
+    #[test]
+    fn ownerless_viewport_edge_scrolls_passive_camera_without_player_mutation() {
+        // IsPassive still runs UpdateScrolling, but ScrollView has no pPlayer
+        // and writes C4Viewport::ViewX/Y directly. Build that exact active
+        // viewport without changing the sandbox engine's player records
+        // (C4MouseControl.cpp:244-257,1328-1345).
+        let mut app = new_running_sandbox_app();
+        let engine_viewports = app
+            .engine
+            .player(app.local_owner)
+            .expect("sandbox player")
+            .viewports()
+            .to_vec();
+        app.local_controls = LocalControlRegistry::default();
+        let snapshot = app.snapshot.clone();
+        let focus = snapshot.objects.first().expect("sandbox focus object");
+        app.graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                OWNER_NONE,
+                Vector2::new(1024, 180),
+                1.0,
+                focus,
+            )],
+        );
+        let before = app.graphics.active_viewport_projections()[0];
+        assert_eq!(before.owner, OWNER_NONE);
+        let left = GuiPoint::new(
+            before.rect.x as f32,
+            (before.rect.y + before.rect.height as i32 / 2) as f32,
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("move passive pointer onto left edge");
+
+        let after_move = app.graphics.active_viewport_projections()[0];
+        assert_eq!(after_move.content_origin_x, before.content_origin_x - 10.0);
+        assert_eq!(after_move.content_origin_y, before.content_origin_y);
+        assert_eq!(
+            app.ingame_edge_scroll
+                .expect("passive edge state remains live")
+                .edge
+                .cursor,
+            lc_frontend::MouseCursorPhase::Left
+        );
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("sandbox player remains")
+                .viewports(),
+            engine_viewports.as_slice(),
+            "ownerless ScrollView must not mutate an unrelated player"
+        );
+
+        app.update().expect("passive continuous edge-scroll tick");
+        let after_tick = app.graphics.active_viewport_projections()[0];
+        assert_eq!(after_tick.content_origin_x, before.content_origin_x - 20.0);
+    }
+
+    #[test]
+    fn film_assigned_no_owner_viewport_edge_scrolls_observer_not_player() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place film target away from every scroll bound");
+        app.engine.set_local_players([]);
+        app.local_controls = LocalControlRegistry::default();
+        app.mouse_control = false;
+        app.snapshot = app.engine.snapshot();
+        app.display_flags.show_commands = false;
+        app.film_view_player = Some(owner);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("render the film-assigned physical observer viewport");
+        let before = app.graphics.active_viewport_projections()[0];
+        assert_eq!(before.owner, owner);
+        assert!(before.is_no_owner_viewport);
+        app.engine
+            .scroll_player_view(
+                owner,
+                Vector2::ZERO,
+                before.logical_width,
+                before.logical_height,
+                true,
+            )
+            .expect("freeze the unrelated film target in free-scrolling mode");
+        let player_viewports = app.engine.player(owner).unwrap().viewports().to_vec();
+        let left = GuiPoint::new(
+            before.rect.x as f32,
+            (before.rect.y + before.rect.height as i32 / 2) as f32,
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("move passive film pointer onto the left edge");
+
+        let after_move = app.graphics.active_viewport_projections()[0];
+        assert_eq!(after_move.target_x, before.target_x - 10);
+        assert!(
+            app.ingame_edge_scroll
+                .expect("classified observer edge remains live")
+                .observer
+        );
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports(),
+            player_viewports.as_slice(),
+            "temporary film assignment must not turn observer scrolling into player scrolling"
+        );
+
+        // SetFilmView changes the viewport's displayed Player but preserves
+        // fIsNoOwnerViewport. MouseControl remains assigned to NO_OWNER, so
+        // its retained VpX/VpY must continue through that owner change.
+        app.film_view_player = Some(OWNER_NONE);
+        app.render(&mut frame)
+            .expect("retarget the same physical observer viewport");
+        let retargeted = app.graphics.active_viewport_projections()[0];
+        assert_eq!(retargeted.owner, OWNER_NONE);
+        assert!(retargeted.is_no_owner_viewport);
+
+        app.update()
+            .expect("classified observer continues scrolling after retarget");
+
+        let after_tick = app.graphics.active_viewport_projections()[0];
+        assert_eq!(after_tick.target_x, retargeted.target_x - 10);
+        let scroll = app
+            .ingame_edge_scroll
+            .expect("retarget preserves the retained observer edge state");
+        assert!(scroll.observer);
+        assert_eq!(scroll.owner, OWNER_NONE);
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports(),
+            player_viewports.as_slice()
         );
     }
 
@@ -83595,7 +84762,7 @@ ScenInfoArea=70,5,25,90
                     viewport.owner,
                     viewport.center,
                     viewport.zoom,
-                    viewport.focus.id,
+                    viewport.focus.expect("local viewport focus").id,
                 ))
                 .collect::<Vec<_>>(),
             vec![
@@ -83626,6 +84793,7 @@ ScenInfoArea=70,5,25,90
             collect_viewport_inputs(&snapshot)
                 .expect("live cursor supersedes a deleted slot focus")[0]
                 .focus
+                .expect("cursor focus")
                 .id,
             focus
         );
@@ -83636,6 +84804,7 @@ ScenInfoArea=70,5,25,90
             collect_viewport_inputs(&snapshot)
                 .expect("first crew member supplies the local slot focus")[0]
                 .focus
+                .expect("crew focus")
                 .id,
             focus
         );
@@ -83728,7 +84897,10 @@ ScenInfoArea=70,5,25,90
             Vector2::new(17, 19),
             "temporary Init preserves the physical viewport offset"
         );
-        assert_eq!(film[0].focus.id, film_focus);
+        assert_eq!(
+            film[0].focus.expect("film viewport focus").id,
+            film_focus
+        );
         assert_eq!(
             film[0].zoom, ordinary[0].zoom,
             "temporary Init preserves the physical viewport zoom"
@@ -83736,11 +84908,25 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             film[1..]
                 .iter()
-                .map(|viewport| (viewport.owner, viewport.center, viewport.zoom, viewport.focus.id))
+                .map(|viewport| {
+                    (
+                        viewport.owner,
+                        viewport.center,
+                        viewport.zoom,
+                        viewport.focus.expect("local viewport focus").id,
+                    )
+                })
                 .collect::<Vec<_>>(),
             ordinary[1..]
                 .iter()
-                .map(|viewport| (viewport.owner, viewport.center, viewport.zoom, viewport.focus.id))
+                .map(|viewport| {
+                    (
+                        viewport.owner,
+                        viewport.center,
+                        viewport.zoom,
+                        viewport.focus.expect("local viewport focus").id,
+                    )
+                })
                 .collect::<Vec<_>>(),
             "only the first physical viewport is retargeted"
         );
@@ -83750,7 +84936,7 @@ ScenInfoArea=70,5,25,90
         assert_eq!(ownerless[0].owner, OWNER_NONE);
         assert_eq!(ownerless[0].center, ordinary[0].center);
         assert_eq!(ownerless[0].zoom, ordinary[0].zoom);
-        assert_eq!(ownerless[0].focus.id, ordinary[0].focus.id);
+        assert_eq!(ownerless[0].focus, ordinary[0].focus);
         assert_eq!(ownerless.len(), ordinary.len());
 
         let mut no_target_focus = snapshot.clone();
@@ -83771,7 +84957,7 @@ ScenInfoArea=70,5,25,90
         .expect("a valid player does not require a focus object");
         assert_eq!(unfocused[0].owner, film_player.id);
         assert_eq!(unfocused[0].center, Vector2::new(700, 800));
-        assert_eq!(unfocused[0].focus.id, ordinary[0].focus.id);
+        assert_eq!(unfocused[0].focus, ordinary[0].focus);
 
         let mut no_target_viewport = no_target_focus;
         no_target_viewport
@@ -83901,11 +85087,56 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn zero_object_viewport_fails_before_any_pixels() {
+    fn zero_object_observer_uses_anchor_free_ownerless_viewport() {
         let mut app = new_running_sandbox_app();
         app.snapshot.objects.clear();
+        app.snapshot.hud.local_players.clear();
+        app.focus_id = None;
+        app.focus_snapshot = None;
 
-        assert_running_viewport_boundary(&mut app, ClassicViewportBoundary::ZeroObjects);
+        let inputs = collect_viewport_inputs(&app.snapshot)
+            .expect("zero-object observer viewport is object-independent");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].owner, OWNER_NONE);
+        assert!(inputs[0].focus.is_none());
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render_running(&mut frame, false)
+            .expect("zero-object observer renders without a synthetic focus anchor");
+        assert!(app.graphics.active_viewport_projections()[0].is_no_owner_viewport);
+    }
+
+    #[test]
+    fn focusless_scrolling_player_uses_anchor_free_owned_viewport() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == owner)
+            .expect("sandbox player remains declared");
+        player.view_mode = PLAYER_VIEW_MODE_SCROLLING;
+        player.cursor = None;
+        player.view_cursor = None;
+        player.crew.clear();
+        player.viewports[0].focus = None;
+        app.snapshot.objects.clear();
+        app.focus_id = None;
+        app.focus_snapshot = None;
+
+        let inputs = collect_viewport_inputs(&app.snapshot)
+            .expect("scrolling camera center remains valid without a live object");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].owner, owner);
+        assert!(inputs[0].focus.is_none());
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render_running(&mut frame, false)
+            .expect("focusless scrolling player viewport renders");
+        let projection = app.graphics.active_viewport_projections()[0];
+        assert_eq!(projection.owner, owner);
+        assert!(!projection.is_no_owner_viewport);
     }
 
     #[test]
@@ -83939,7 +85170,7 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn invalid_local_focus_reports_owner_and_exact_slot_before_any_pixels() {
+    fn focusless_owned_slot_renders_in_normal_cursor_mode() {
         let mut app = new_running_sandbox_app();
         let local_owner = app.local_owner;
         let invalid_focus = ObjectId::new(u64::MAX);
@@ -83973,27 +85204,29 @@ ScenInfoArea=70,5,25,90
                 .with_zoom(1.25),
         );
 
-        // Slot zero is valid. Slot one has no live slot focus, cursor or first
-        // crew object and must not be silently dropped.
-        assert_running_viewport_boundary(
-            &mut app,
-            ClassicViewportBoundary::LocalFocusUnavailable {
-                owner: local_owner,
-                slot: 1,
-            },
-        );
+        let inputs = collect_viewport_inputs(&app.snapshot)
+            .expect("owned viewport centers do not require a live cursor object");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].focus.map(|focus| focus.id), Some(valid_focus));
+        assert!(inputs[1].focus.is_none());
+        assert_eq!(inputs[1].owner, local_owner);
+        assert_eq!(inputs[1].center, Vector2::new(900, 700));
+        assert_eq!(inputs[1].zoom, 1.25);
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render_running(&mut frame, false)
+            .expect("focusless normal-mode viewport renders from its persisted center");
+        assert_eq!(app.graphics.active_viewport_projections().len(), 2);
     }
 
     #[test]
-    fn observer_and_game_over_cannot_bypass_object_independent_camera_boundary() {
+    fn observer_and_game_over_use_the_ownerless_fullscreen_camera() {
         let mut observer = new_running_sandbox_app();
         observer.snapshot.hud.local_players.clear();
-        assert_running_viewport_boundary(
-            &mut observer,
-            ClassicViewportBoundary::ObserverCameraUnavailable {
-                declared_local_players: Vec::new(),
-            },
-        );
+        let observer_inputs = collect_viewport_inputs(&observer.snapshot)
+            .expect("ownerless fullscreen viewport is available");
+        assert_eq!(observer_inputs.len(), 1);
+        assert_eq!(observer_inputs[0].owner, OWNER_NONE);
 
         let mut game_over_observer = new_running_sandbox_app();
         game_over_observer
@@ -84006,12 +85239,10 @@ ScenInfoArea=70,5,25,90
         game_over_observer.status_text.clear();
         game_over_observer.snapshot.hud.local_players.clear();
         assert!(game_over_observer.game_over_dialog.is_some());
-        assert_running_viewport_boundary(
-            &mut game_over_observer,
-            ClassicViewportBoundary::ObserverCameraUnavailable {
-                declared_local_players: Vec::new(),
-            },
-        );
+        let game_over_inputs = collect_viewport_inputs(&game_over_observer.snapshot)
+            .expect("game-over observer keeps the ownerless viewport");
+        assert_eq!(game_over_inputs.len(), 1);
+        assert_eq!(game_over_inputs[0].owner, OWNER_NONE);
     }
 
     #[test]
@@ -108996,19 +110227,11 @@ func ControlDig() { dig_count = 1; return(1); }
         observer
             .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
             .expect("Generic F3 reaches ownerless observer state");
-        let flash_before = observer.runtime_flash_message.clone();
         let mut frame = vec![0x7a; 320 * 200 * 4];
-        let error = observer
+        observer
             .render(&mut frame)
-            .expect_err("observer camera gap must fail before pixels");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::RunningViewport(
-                ClassicViewportBoundary::ObserverCameraUnavailable { .. }
-            ))
-        ));
-        assert!(frame.iter().all(|byte| *byte == 0x7a));
-        assert_eq!(observer.runtime_flash_message, flash_before);
+            .expect("ownerless observer viewport renders");
+        assert!(frame.iter().any(|byte| *byte != 0x7a));
     }
 
     #[test]

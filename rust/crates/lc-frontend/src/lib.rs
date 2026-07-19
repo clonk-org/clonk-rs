@@ -1647,6 +1647,202 @@ pub struct ViewportPointer {
     pub screen: GuiPoint,
 }
 
+/// The eight C4MouseControl viewport-scroll cursor cells. The numeric atlas
+/// phases are fixed by `C4MC_Cursor_Up` through `C4MC_Cursor_DownRight`
+/// (src/C4MouseControl.cpp:51-58).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MouseCursorPhase {
+    Up,
+    Down,
+    Left,
+    Right,
+    UpLeft,
+    UpRight,
+    DownLeft,
+    DownRight,
+}
+
+impl MouseCursorPhase {
+    pub const fn atlas_phase(self) -> i32 {
+        match self {
+            Self::Up => 10,
+            Self::Down => 11,
+            Self::Left => 12,
+            Self::Right => 13,
+            Self::UpLeft => 14,
+            Self::UpRight => 15,
+            Self::DownLeft => 16,
+            Self::DownRight => 17,
+        }
+    }
+
+    fn hotspot(self, cell: i32) -> (i32, i32) {
+        let center = cell / 2;
+        match self {
+            Self::Up => (center, 0),
+            Self::Down => (center, cell),
+            Self::Left => (0, center),
+            Self::Right => (cell, center),
+            Self::UpLeft => (0, 0),
+            Self::UpRight => (cell, 0),
+            Self::DownLeft => (0, cell),
+            Self::DownRight => (cell, cell),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewportEdgeScroll {
+    pub delta: Vector2,
+    pub cursor: MouseCursorPhase,
+    edge_mask: u8,
+}
+
+impl ViewportEdgeScroll {
+    /// Yield the native independent `ScrollView` calls in left, up, right,
+    /// down order. Applying bounds after every item matters when opposite
+    /// edges coincide, such as a one-pixel viewport.
+    pub fn steps(self) -> ViewportEdgeScrollSteps {
+        ViewportEdgeScrollSteps {
+            edge_mask: self.edge_mask,
+            next_edge: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ViewportEdgeScrollSteps {
+    edge_mask: u8,
+    next_edge: u8,
+}
+
+impl Iterator for ViewportEdgeScrollSteps {
+    type Item = Vector2;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        const STEPS: [Vector2; 4] = [
+            Vector2 { x: -10, y: 0 },
+            Vector2 { x: 0, y: -10 },
+            Vector2 { x: 10, y: 0 },
+            Vector2 { x: 0, y: 10 },
+        ];
+        while usize::from(self.next_edge) < STEPS.len() {
+            let edge = self.next_edge;
+            self.next_edge += 1;
+            if self.edge_mask & (1 << edge) != 0 {
+                return Some(STEPS[usize::from(edge)]);
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let consumed = if self.next_edge >= 4 {
+            u8::MAX
+        } else {
+            (1 << self.next_edge) - 1
+        };
+        let remaining = (self.edge_mask & !consumed).count_ones() as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for ViewportEdgeScrollSteps {
+    fn len(&self) -> usize {
+        self.size_hint().0
+    }
+}
+
+/// Resolve an already-stored C4MouseControl viewport coordinate without
+/// clamping it to the current dimensions. This is the `Execute` repeat path:
+/// a viewport resize can make the old `VpX`/`VpY` cease to be an edge.
+pub fn viewport_edge_scroll_at(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Option<ViewportEdgeScroll> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    let max_x = width - 1;
+    let max_y = height - 1;
+    let left = x == 0;
+    let top = y == 0;
+    let right = x == max_x;
+    let bottom = y == max_y;
+    let edge_mask = u8::from(left)
+        | (u8::from(top) << 1)
+        | (u8::from(right) << 2)
+        | (u8::from(bottom) << 3);
+
+    // UpdateScrolling executes all four independent axis checks in this
+    // order. Preserve that behavior even for degenerate one-pixel extents.
+    let mut delta = Vector2::ZERO;
+    let mut cursor = None;
+    if left {
+        delta.x = delta.x.saturating_sub(10);
+        cursor = Some(MouseCursorPhase::Left);
+    }
+    if top {
+        delta.y = delta.y.saturating_sub(10);
+        cursor = Some(MouseCursorPhase::Up);
+    }
+    if right {
+        delta.x = delta.x.saturating_add(10);
+        cursor = Some(MouseCursorPhase::Right);
+    }
+    if bottom {
+        delta.y = delta.y.saturating_add(10);
+        cursor = Some(MouseCursorPhase::Down);
+    }
+
+    // The four exact-corner checks then overwrite the single-axis cursor.
+    if left && top {
+        cursor = Some(MouseCursorPhase::UpLeft);
+    }
+    if right && top {
+        cursor = Some(MouseCursorPhase::UpRight);
+    }
+    if left && bottom {
+        cursor = Some(MouseCursorPhase::DownLeft);
+    }
+    if right && bottom {
+        cursor = Some(MouseCursorPhase::DownRight);
+    }
+
+    cursor.map(|cursor| ViewportEdgeScroll {
+        delta,
+        cursor,
+        edge_mask,
+    })
+}
+
+/// Resolve C4MouseControl's exact one-pixel viewport edge zones. Input is
+/// first rounded upward and clamped to the inclusive viewport output bounds,
+/// matching `C4GraphicsSystem::MouseMoveToViewport` at fractional scales.
+pub fn viewport_edge_scroll(
+    viewport: SurfaceRect,
+    pointer: GuiPoint,
+) -> Option<ViewportEdgeScroll> {
+    if viewport.width == 0 || viewport.height == 0 {
+        return None;
+    }
+
+    let width = i32::try_from(viewport.width).unwrap_or(i32::MAX);
+    let height = i32::try_from(viewport.height).unwrap_or(i32::MAX);
+    let max_x = width - 1;
+    let max_y = height - 1;
+    let x = (pointer.x.ceil() as i32)
+        .saturating_sub(viewport.x)
+        .clamp(0, max_x);
+    let y = (pointer.y.ceil() as i32)
+        .saturating_sub(viewport.y)
+        .clamp(0, max_y);
+    viewport_edge_scroll_at(x, y, width, height)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SourceRect {
     x: i32,
@@ -1771,13 +1967,18 @@ impl CameraState {
         world_width: i32,
         world_height: i32,
         scroll_border: i32,
+        scrolling: bool,
         scroll_smooth: i32,
     ) -> (i32, i32) {
         // SetOutputSize keeps the previous visible center. It adjusts the
         // integer ViewX/Y but deliberately does not rewrite dViewX/Y.
         self.resize_output(view_width, view_height);
 
-        let scroll_range = (view_width / 10).min(view_height / 10);
+        let scroll_range = if scrolling {
+            0
+        } else {
+            (view_width / 10).min(view_height / 10)
+        };
         let target_x = classic_camera_target_axis(
             self.view_x,
             center_x,
@@ -1785,6 +1986,7 @@ impl CameraState {
             world_width,
             scroll_range,
             scroll_border,
+            scrolling,
         );
         let target_y = classic_camera_target_axis(
             self.view_y,
@@ -1793,6 +1995,7 @@ impl CameraState {
             world_height,
             scroll_range,
             scroll_border,
+            scrolling,
         );
         let divisor = scroll_smooth.clamp(1, 50);
 
@@ -1868,12 +2071,15 @@ fn classic_camera_target_axis(
     world_extent: i32,
     scroll_range: i32,
     scroll_border: i32,
+    scrolling: bool,
 ) -> i32 {
-    let mut extra_bound = 0;
-    if center < scroll_border {
-        extra_bound = (scroll_border - center).min(scroll_border);
-    } else if center >= world_extent - scroll_border {
-        extra_bound = (center - world_extent).min(0) + scroll_border;
+    let mut extra_bound = if scrolling { scroll_border } else { 0 };
+    if !scrolling {
+        if center < scroll_border {
+            extra_bound = (scroll_border - center).min(scroll_border);
+        } else if center >= world_extent - scroll_border {
+            extra_bound = (center - world_extent).min(0) + scroll_border;
+        }
     }
     extra_bound = extra_bound.max((view_extent - world_extent) / 2 + 1);
 
@@ -2119,7 +2325,9 @@ pub struct ViewportInput<'a> {
     pub center: Vector2,
     pub offset: Vector2,
     pub zoom: f32,
-    pub focus: &'a ObjectSnapshot,
+    /// Object anchor used for player selection presentation. Native
+    /// `NO_OWNER` observer viewports do not require one.
+    pub focus: Option<&'a ObjectSnapshot>,
     /// Stable physical viewport identity. `SetFilmView` changes the player
     /// assigned to a viewport without replacing that viewport or resetting
     /// its smoothing state.
@@ -2127,6 +2335,9 @@ pub struct ViewportInput<'a> {
     /// C4Viewport::fIsNoOwnerViewport is independent from its temporary
     /// Player assignment. Film view switches preserve this classification.
     is_no_owner_viewport: bool,
+    /// `C4PVM_Scrolling` removes the normal camera dead zone and enables the
+    /// fixed fullscreen scroll border in C4Viewport::AdjustPosition.
+    scrolling: bool,
 }
 
 impl<'a> ViewportInput<'a> {
@@ -2136,9 +2347,42 @@ impl<'a> ViewportInput<'a> {
             center,
             offset: Vector2::ZERO,
             zoom,
-            focus,
+            focus: Some(focus),
             camera_identity: None,
             is_no_owner_viewport: owner == OWNER_NONE,
+            scrolling: false,
+        }
+    }
+
+    /// Construct C4FullScreen's object-independent `NO_OWNER` observer
+    /// viewport. Its camera is centered and clamped from landscape geometry;
+    /// no live object is required merely to anchor rendering.
+    pub fn ownerless(center: Vector2, zoom: f32) -> Self {
+        Self {
+            owner: OWNER_NONE,
+            center,
+            offset: Vector2::ZERO,
+            zoom,
+            focus: None,
+            camera_identity: None,
+            is_no_owner_viewport: true,
+            scrolling: false,
+        }
+    }
+
+    /// Construct a player-owned physical viewport whose view center exists
+    /// independently of a live cursor/crew object. This is required while a
+    /// focusless player remains in `C4PVM_Scrolling`.
+    pub fn owned_without_focus(owner: i32, center: Vector2, zoom: f32) -> Self {
+        Self {
+            owner,
+            center,
+            offset: Vector2::ZERO,
+            zoom,
+            focus: None,
+            camera_identity: None,
+            is_no_owner_viewport: false,
+            scrolling: false,
         }
     }
 
@@ -2154,15 +2398,25 @@ impl<'a> ViewportInput<'a> {
         self
     }
 
+    pub fn with_scrolling(mut self, scrolling: bool) -> Self {
+        self.scrolling = scrolling;
+        self
+    }
+
+    pub fn set_scrolling(&mut self, scrolling: bool) {
+        self.scrolling = scrolling;
+    }
+
     pub fn from_focus(focus: &'a ObjectSnapshot) -> Self {
         Self {
             owner: focus.owner,
             center: Vector2::new(focus.position.x, focus.position.y),
             offset: Vector2::ZERO,
             zoom: 1.0,
-            focus,
+            focus: Some(focus),
             camera_identity: None,
             is_no_owner_viewport: focus.owner == OWNER_NONE,
+            scrolling: false,
         }
     }
 }
@@ -2170,16 +2424,20 @@ impl<'a> ViewportInput<'a> {
 #[derive(Debug, Clone)]
 struct ActiveViewport {
     owner: i32,
-    focus: ObjectId,
+    focus: Option<ObjectId>,
     rect: SurfaceRect,
     content_rect: SurfaceRect,
     target_x: i32,
     target_y: i32,
     logical_width: i32,
     logical_height: i32,
+    world_width: i32,
+    world_height: i32,
     viewport_x: f32,
     viewport_y: f32,
     zoom: f32,
+    camera_key: CameraKey,
+    is_no_owner_viewport: bool,
 }
 
 /// Immutable projection data for one exact active viewport record.
@@ -2191,6 +2449,9 @@ struct ActiveViewport {
 pub struct ActiveViewportProjection {
     pub index: usize,
     pub owner: i32,
+    /// Physical `C4Viewport::fIsNoOwnerViewport` classification. Temporary
+    /// film-view player assignment does not change it.
+    pub is_no_owner_viewport: bool,
     pub rect: SurfaceRect,
     pub content_rect: SurfaceRect,
     pub target_x: i32,
@@ -2688,6 +2949,7 @@ impl GraphicsSystem {
             .map(|(index, viewport)| ActiveViewportProjection {
                 index,
                 owner: viewport.owner,
+                is_no_owner_viewport: viewport.is_no_owner_viewport,
                 rect: viewport.rect,
                 content_rect: viewport.content_rect,
                 target_x: viewport.target_x,
@@ -2699,6 +2961,125 @@ impl GraphicsSystem {
                 zoom: viewport.zoom,
             })
             .collect()
+    }
+
+    /// Apply one direct C4MouseControl scroll step to an unassigned
+    /// fullscreen observer viewport. Temporary film-view player assignment
+    /// does not change this physical classification. Returns false when no
+    /// classified observer camera state exists; a clamped scroll returns true.
+    pub fn scroll_observer_viewport(&mut self, index: usize, delta: Vector2) -> bool {
+        let Some(viewport) = self.active_viewports.get(index) else {
+            return false;
+        };
+        if !viewport.is_no_owner_viewport {
+            return false;
+        }
+        let key = viewport.camera_key;
+        let view_width = viewport.logical_width;
+        let view_height = viewport.logical_height;
+        let world_width = viewport.world_width;
+        let world_height = viewport.world_height;
+        let Some(state) = self.camera_states.get_mut(&key) else {
+            return false;
+        };
+
+        state.view_x = state.view_x.saturating_add(delta.x);
+        state.view_y = state.view_y.saturating_add(delta.y);
+        let (view_x, view_y) = state.no_owner_position(
+            view_width,
+            view_height,
+            world_width,
+            world_height,
+        );
+
+        // C4Viewport::UpdateViewPosition changes the live projection in the
+        // same call. Keep pointer routing and another edge tick observable
+        // without waiting for the next world render.
+        let viewport = &mut self.active_viewports[index];
+        let border_left = (-view_x).max(0).min(view_width);
+        let border_top = (-view_y).max(0).min(view_height);
+        let border_right = (view_width - world_width + view_x)
+            .max(0)
+            .min(view_width - border_left);
+        let border_bottom = (view_height - world_height + view_y)
+            .max(0)
+            .min(view_height - border_top);
+        let offset_x =
+            scaled_camera_border(border_left, viewport.zoom, viewport.rect.width) as i32;
+        let offset_y =
+            scaled_camera_border(border_top, viewport.zoom, viewport.rect.height) as i32;
+        let right_pixels = scaled_camera_border(border_right, viewport.zoom, viewport.rect.width);
+        let bottom_pixels = scaled_camera_border(border_bottom, viewport.zoom, viewport.rect.height);
+        let content_width = viewport
+            .rect
+            .width
+            .saturating_sub(offset_x as u32)
+            .saturating_sub(right_pixels)
+            .max(1);
+        let content_height = viewport
+            .rect
+            .height
+            .saturating_sub(offset_y as u32)
+            .saturating_sub(bottom_pixels)
+            .max(1);
+        viewport.target_x = view_x;
+        viewport.target_y = view_y;
+        viewport.content_rect = SurfaceRect::new(
+            viewport.rect.x + offset_x,
+            viewport.rect.y + offset_y,
+            content_width,
+            content_height,
+        );
+        viewport.viewport_x = (view_x + border_left) as f32;
+        viewport.viewport_y = (view_y + border_top) as f32;
+        true
+    }
+
+    /// Draw one of C4MouseControl's directional scroll cursors from the
+    /// resolution-selected 40-cell cursor sheet. `screen` is an absolute
+    /// logical output point; the native hotspot and inverse presentation
+    /// scale are applied here.
+    pub fn draw_mouse_cursor(
+        &mut self,
+        phase: MouseCursorPhase,
+        screen: GuiPoint,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some(image) = self.cursor_atlas.image_for_scaled_resolution(
+            self.logical_resolution_width,
+            self.presentation_scale,
+        ) else {
+            return false;
+        };
+        let cell = image.height() as i32;
+        let source = SourceRect::new(phase.atlas_phase().saturating_mul(cell), 0, cell, cell);
+        if !Self::source_within_image(&image, &source) {
+            return false;
+        }
+
+        let scale = self.presentation_scale;
+        let inverse_scale = scale.recip();
+        let (offset_x, offset_y) = phase.hotspot(cell);
+        let destination = GuiRect::from_origin_size(
+            GuiPoint::new(
+                ((screen.x * scale).trunc() - offset_x as f32) * inverse_scale,
+                ((screen.y * scale).trunc() - offset_y as f32) * inverse_scale,
+            ),
+            GuiSize::new(cell as f32 * inverse_scale, cell as f32 * inverse_scale),
+        );
+        draw_image_region(
+            &mut self.surface,
+            &destination,
+            &image,
+            None,
+            &source,
+            false,
+            None,
+            SpriteBlitState::normal(),
+            gamma,
+            None,
+        );
+        true
     }
 
     pub fn world_to_screen(&self, owner: i32, position: Vector2) -> Option<(f32, f32)> {
@@ -2895,10 +3276,22 @@ impl GraphicsSystem {
         owner: i32,
         point: GuiPoint,
     ) -> Option<ViewportPointer> {
-        let viewport = self
+        let index = self
             .active_viewports
             .iter()
-            .find(|viewport| viewport.owner == owner)?;
+            .position(|viewport| viewport.owner == owner)?;
+        self.viewport_output_point_for_index(index, point)
+    }
+
+    /// Projects a physical point through one exact active viewport record.
+    /// This preserves physical viewport identity when owners repeat or a
+    /// no-owner viewport is temporarily assigned to a film-view player.
+    pub fn viewport_output_point_for_index(
+        &self,
+        index: usize,
+        point: GuiPoint,
+    ) -> Option<ViewportPointer> {
+        let viewport = self.active_viewports.get(index)?;
         let rect = viewport.rect;
         if rect.width == 0 || rect.height == 0 {
             return None;
@@ -3232,7 +3625,7 @@ impl GraphicsSystem {
             sky.settings.parallax_x = 10;
             sky.settings.parallax_y = 10;
         }
-        let focus = capture.object(active.focus)?;
+        let focus = active.focus.and_then(|focus| capture.object(focus));
         let camera_key = CameraKey {
             owner: OWNER_NONE,
             slot: usize::MAX,
@@ -3246,7 +3639,8 @@ impl GraphicsSystem {
             camera_identity: Some(camera_key),
             // C++ changes Player on the existing viewport without changing
             // its fIsNoOwnerViewport classification.
-            is_no_owner_viewport: false,
+            is_no_owner_viewport: active.is_no_owner_viewport,
+            scrolling: false,
         };
         let owner_colors = Self::collect_owner_colors(&capture);
 
@@ -3454,6 +3848,7 @@ impl GraphicsSystem {
                 } else {
                     VIEWPORT_SCROLL_BORDER
                 },
+                input.scrolling,
                 self.scroll_smooth,
             );
             if input.is_no_owner_viewport {
@@ -3616,16 +4011,18 @@ impl GraphicsSystem {
         // NeedEnergy bolts are emitted inside each object's base pass so
         // background/foreground category layering matches C4Object::Draw.
         if input.owner != OWNER_NONE {
-            let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
-            self.draw_selection_marks(
-                snapshot,
-                &highlight_ids,
-                input.owner,
-                origin_x,
-                origin_y,
-                zoom,
-                gamma,
-            );
+            if let Some(focus) = input.focus {
+                let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, focus.id);
+                self.draw_selection_marks(
+                    snapshot,
+                    &highlight_ids,
+                    input.owner,
+                    origin_x,
+                    origin_y,
+                    zoom,
+                    gamma,
+                );
+            }
             self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
         } else {
             // C4Game::DrawCursors(NO_OWNER) emits every player's active
@@ -3706,7 +4103,7 @@ impl GraphicsSystem {
 
         self.active_viewports.push(ActiveViewport {
             owner: input.owner,
-            focus: input.focus.id,
+            focus: input.focus.map(|focus| focus.id),
             rect,
             content_rect: SurfaceRect::new(
                 rect.x + offset_x,
@@ -3718,9 +4115,13 @@ impl GraphicsSystem {
             target_y: view_y,
             logical_width: view_width,
             logical_height: view_height,
+            world_width,
+            world_height,
             viewport_x: origin_x,
             viewport_y: origin_y,
             zoom,
+            camera_key: key,
+            is_no_owner_viewport: input.is_no_owner_viewport,
         });
     }
 
@@ -7539,7 +7940,7 @@ impl GraphicsSystem {
         }
 
         for viewport in &self.active_viewports {
-            if let Some(object) = snapshot.object(viewport.focus) {
+            if let Some(object) = viewport.focus.and_then(|focus| snapshot.object(focus)) {
                 if let Some(rect) = self.object_screen_rect_for_viewport(object, viewport) {
                     if let Some(snap) = self.surface.snapshot_region(rect) {
                         let label =
@@ -16143,6 +16544,231 @@ mod tests {
     }
 
     #[test]
+    fn viewport_edge_scroll_uses_inclusive_clamped_pixel_zones() {
+        let viewport = SurfaceRect::new(10, 20, 100, 50);
+        assert_eq!(
+            viewport_edge_scroll(viewport, GuiPoint::new(10.0, 45.0)),
+            Some(ViewportEdgeScroll {
+                delta: Vector2::new(-10, 0),
+                cursor: MouseCursorPhase::Left,
+                edge_mask: 0b0001,
+            })
+        );
+        assert_eq!(
+            viewport_edge_scroll(viewport, GuiPoint::new(108.1, 68.1)),
+            Some(ViewportEdgeScroll {
+                delta: Vector2::new(10, 10),
+                cursor: MouseCursorPhase::DownRight,
+                edge_mask: 0b1100,
+            }),
+            "ceil before subtraction reaches the inclusive right/bottom pixel"
+        );
+        assert_eq!(
+            viewport_edge_scroll(viewport, GuiPoint::new(-100.0, -100.0)),
+            Some(ViewportEdgeScroll {
+                delta: Vector2::new(-10, -10),
+                cursor: MouseCursorPhase::UpLeft,
+                edge_mask: 0b0011,
+            }),
+            "points outside the owning viewport are clamped like C4MouseControl"
+        );
+        assert_eq!(
+            viewport_edge_scroll(viewport, GuiPoint::new(11.0, 21.0)),
+            None
+        );
+
+        let degenerate = viewport_edge_scroll(
+            SurfaceRect::new(0, 0, 1, 1),
+            GuiPoint::new(0.0, 0.0),
+        )
+        .expect("one-pixel viewport is all four edges");
+        assert_eq!(degenerate.delta, Vector2::ZERO);
+        assert_eq!(degenerate.cursor, MouseCursorPhase::DownRight);
+        assert_eq!(
+            degenerate.steps().collect::<Vec<_>>(),
+            vec![
+                Vector2::new(-10, 0),
+                Vector2::new(0, -10),
+                Vector2::new(10, 0),
+                Vector2::new(0, 10),
+            ],
+            "all four native ScrollView calls survive the zero net delta"
+        );
+    }
+
+    #[test]
+    fn retained_viewport_coordinate_is_not_reclamped_after_resize() {
+        assert_eq!(
+            viewport_edge_scroll_at(99, 25, 100, 50),
+            Some(ViewportEdgeScroll {
+                delta: Vector2::new(10, 0),
+                cursor: MouseCursorPhase::Right,
+                edge_mask: 0b0100,
+            })
+        );
+        assert_eq!(
+            viewport_edge_scroll_at(99, 25, 120, 50),
+            None,
+            "the old right pixel becomes interior when the viewport grows"
+        );
+        assert_eq!(
+            viewport_edge_scroll_at(119, 25, 120, 50),
+            Some(ViewportEdgeScroll {
+                delta: Vector2::new(10, 0),
+                cursor: MouseCursorPhase::Right,
+                edge_mask: 0b0100,
+            })
+        );
+    }
+
+    #[test]
+    fn scrolling_camera_has_no_dead_zone_and_uses_fixed_border() {
+        let mut following = initialized_camera(100, 100, 100, 80);
+        assert_eq!(
+            following
+                .update(155, 140, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, false, 1)
+                .0,
+            100,
+            "normal following retains the eight-pixel dead zone"
+        );
+
+        let mut scrolling = initialized_camera(100, 100, 100, 80);
+        assert_eq!(
+            scrolling
+                .update(155, 140, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, true, 1)
+                .0,
+            105,
+            "C4PVM_Scrolling targets the player center exactly"
+        );
+
+        let mut edge = CameraState::new(500, 500, 100, 80);
+        assert_eq!(
+            edge.update(40, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, true, 1)
+                .0,
+            -10,
+            "scrolling mode keeps the full 40px fullscreen extra bound"
+        );
+    }
+
+    #[test]
+    fn observer_scroll_uses_physical_classification_across_film_assignment() {
+        let snapshot = camera_world_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Observer scroll",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                OWNER_NONE,
+                Vector2::new(500, 500),
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+        let key = graphics.active_viewports[0].camera_key;
+        let before = graphics.camera_states[&key];
+        let before_projection = graphics.active_viewport_projections()[0];
+        assert!(before_projection.is_no_owner_viewport);
+        assert!(graphics.scroll_observer_viewport(0, Vector2::new(-10, 10)));
+        let after = graphics.camera_states[&key];
+        let after_projection = graphics.active_viewport_projections()[0];
+        assert_eq!(after.view_x, before.view_x - 10);
+        assert_eq!(after.view_y, before.view_y + 10);
+        assert_eq!(after_projection.target_x, before_projection.target_x - 10);
+        assert_eq!(after_projection.target_y, before_projection.target_y + 10);
+        assert_eq!(
+            after_projection.content_origin_x,
+            before_projection.content_origin_x - 10.0
+        );
+        assert_eq!(
+            after_projection.content_origin_y,
+            before_projection.content_origin_y + 10.0
+        );
+
+        graphics.camera_states.get_mut(&key).unwrap().view_x = 0;
+        assert!(graphics.scroll_observer_viewport(0, Vector2::new(-10, 0)));
+        assert_eq!(graphics.camera_states[&key].view_x, 0);
+
+        graphics.active_viewports[0].owner = 0;
+        assert!(graphics.scroll_observer_viewport(0, Vector2::new(10, 0)));
+        let film_projection = graphics.active_viewport_projections()[0];
+        assert_eq!(film_projection.owner, 0);
+        assert!(film_projection.is_no_owner_viewport);
+
+        graphics.active_viewports[0].is_no_owner_viewport = false;
+        assert!(!graphics.scroll_observer_viewport(0, Vector2::new(10, 0)));
+        assert!(!graphics.scroll_observer_viewport(99, Vector2::new(10, 0)));
+    }
+
+    #[test]
+    fn ownerless_viewport_renders_without_an_object_anchor() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects.clear();
+        snapshot.render_order.clear();
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Anchor-free observer",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let input = ViewportInput::ownerless(Vector2::new(128, 75), 1.0)
+            .with_camera_identity(OWNER_NONE, 0);
+        assert!(input.focus.is_none());
+
+        graphics.render_frame(&snapshot, &[input]);
+
+        let projection = graphics.active_viewport_projections();
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0].owner, OWNER_NONE);
+        assert!(projection[0].is_no_owner_viewport);
+        assert!(graphics.active_viewports[0].focus.is_none());
+        let capture = graphics
+            .render_full_landscape(&snapshot)
+            .expect("focusless observer still supports full-map capture");
+        assert_eq!((capture.width(), capture.height()), (256, 120));
+    }
+
+    #[test]
+    fn owned_focusless_scrolling_viewport_renders_without_live_objects() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects.clear();
+        snapshot.render_order.clear();
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Focusless player scroll",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let input = ViewportInput::owned_without_focus(0, Vector2::new(128, 60), 1.0)
+            .with_scrolling(true)
+            .with_camera_identity(0, 0);
+        assert!(input.focus.is_none());
+
+        graphics.render_frame(&snapshot, &[input]);
+
+        let projection = graphics.active_viewport_projections();
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0].owner, 0);
+        assert!(!projection[0].is_no_owner_viewport);
+        assert!(graphics.active_viewports[0].focus.is_none());
+    }
+
+    #[test]
     fn camera_smoothing_uses_cpp_fixed_divisor_four_sequence() {
         // C4Viewport.cpp:1203-1206 retains the 16.16 residue and projects
         // each graphics pass with fixtoi. A 0 -> 100 target therefore does
@@ -16152,7 +16778,7 @@ mod tests {
         for _ in 0..3 {
             visible.push(
                 camera
-                    .update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 4)
+                    .update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 4)
                     .0,
             );
         }
@@ -16166,7 +16792,7 @@ mod tests {
         for _ in 0..3 {
             one_pixel_visible.push(
                 one_pixel
-                    .update(51, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 4)
+                    .update(51, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 4)
                     .0,
             );
         }
@@ -16174,7 +16800,7 @@ mod tests {
 
         let mut jump = initialized_camera(0, 0, 100, 1);
         assert_eq!(
-            jump.update(450, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 4)
+            jump.update(450, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 4)
                 .0,
             100,
             "a 400px target delta is quartered rather than snapped"
@@ -16185,7 +16811,7 @@ mod tests {
     fn camera_scroll_smooth_is_clamped_like_cpp_config() {
         let mut zero = initialized_camera(0, 0, 100, 1);
         assert_eq!(
-            zero.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 0)
+            zero.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 0)
                 .0,
             100,
             "ScrollSmooth=0 clamps to divisor one"
@@ -16193,7 +16819,7 @@ mod tests {
 
         let mut huge = initialized_camera(0, 0, 100, 1);
         assert_eq!(
-            huge.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, 500)
+            huge.update(150, 0, 100, 1, 1_000, 1, VIEWPORT_SCROLL_BORDER, false, 500)
                 .0,
             2,
             "ScrollSmooth values above 50 clamp to divisor 50"
@@ -16209,14 +16835,14 @@ mod tests {
         let mut camera = initialized_camera(450, 460, 100, 80);
         assert_eq!(
             camera
-                .update(508, 500, 100, 80, 1_000, 1_000, VIEWPORT_SCROLL_BORDER, 4)
+                .update(508, 500, 100, 80, 1_000, 1_000, VIEWPORT_SCROLL_BORDER, false, 4)
                 .0,
             450
         );
         let repeated = (0..3)
             .map(|_| {
                 camera
-                    .update(509, 500, 100, 80, 1_000, 1_000, VIEWPORT_SCROLL_BORDER, 4)
+                    .update(509, 500, 100, 80, 1_000, 1_000, VIEWPORT_SCROLL_BORDER, false, 4)
                     .0
             })
             .collect::<Vec<_>>();
@@ -16236,6 +16862,7 @@ mod tests {
                     500,
                     500,
                     VIEWPORT_SCROLL_BORDER,
+                    false,
                     DEFAULT_SCROLL_SMOOTH,
                 )
                 .0
@@ -16249,13 +16876,13 @@ mod tests {
         let mut camera = CameraState::new(500, 500, 100, 80);
         assert_eq!(
             camera
-                .update(0, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, 4)
+                .update(0, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, false, 4)
                 .0,
             -40
         );
         assert_eq!(
             camera
-                .update(100, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, 4)
+                .update(100, 250, 100, 80, 500, 500, VIEWPORT_SCROLL_BORDER, false, 4)
                 .0,
             42
         );
@@ -18507,6 +19134,69 @@ mod tests {
                 .is_none(),
             "C++ does not substitute a nearby loaded cursor sheet"
         );
+    }
+
+    #[test]
+    fn directional_mouse_cursor_uses_native_cells_and_hotspots() {
+        let cell = 4u32;
+        let mut pixels = Vec::with_capacity((40 * cell * cell * 4) as usize);
+        for _y in 0..cell {
+            for x in 0..40 * cell {
+                let phase = (x / cell) as u8;
+                pixels.extend_from_slice(&[phase, phase.wrapping_add(40), 200, 255]);
+            }
+        }
+        let mut entries = vec![None; 8];
+        entries[7] = Some(ImageData::new(40 * cell, cell, pixels));
+        let mut graphics = GraphicsSystem::new(
+            24,
+            24,
+            24,
+            "Mouse scroll cursor",
+            test_font(),
+            empty_sprites(),
+            Arc::new(CursorAtlas::new(entries)),
+            empty_hud_graphics(),
+        );
+
+        let cases = [
+            (MouseCursorPhase::Up, (8, 10)),
+            (MouseCursorPhase::Down, (8, 6)),
+            (MouseCursorPhase::Left, (10, 8)),
+            (MouseCursorPhase::Right, (6, 8)),
+            (MouseCursorPhase::UpLeft, (10, 10)),
+            (MouseCursorPhase::UpRight, (6, 10)),
+            (MouseCursorPhase::DownLeft, (10, 6)),
+            (MouseCursorPhase::DownRight, (6, 6)),
+        ];
+        for (phase, expected_origin) in cases {
+            graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+            assert!(graphics.draw_mouse_cursor(
+                phase,
+                GuiPoint::new(10.0, 10.0),
+                None,
+            ));
+            let expected = Color::opaque(
+                phase.atlas_phase() as u8,
+                phase.atlas_phase() as u8 + 40,
+                200,
+            );
+            let points = (0..24)
+                .flat_map(|y| (0..24).map(move |x| (x, y)))
+                .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(expected))
+                .collect::<Vec<_>>();
+            assert_eq!(points.len(), 16, "phase {phase:?} source cell");
+            assert_eq!(
+                points.iter().map(|point| point.0).min(),
+                Some(expected_origin.0),
+                "phase {phase:?} x hotspot"
+            );
+            assert_eq!(
+                points.iter().map(|point| point.1).min(),
+                Some(expected_origin.1),
+                "phase {phase:?} y hotspot"
+            );
+        }
     }
 
     #[test]

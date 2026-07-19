@@ -21595,6 +21595,32 @@ impl Engine {
         Ok(())
     }
 
+    /// Apply one `C4Player::ScrollView` camera step. Pointer-edge detection
+    /// and the native ten-pixel cadence remain owned by the application.
+    pub fn scroll_player_view(
+        &mut self,
+        id: i32,
+        delta: Vector2,
+        view_width: i32,
+        view_height: i32,
+        fullscreen: bool,
+    ) -> Result<(), EngineError> {
+        let (world_width, world_height) = self
+            .landscape
+            .as_ref()
+            .map(|landscape| (landscape.width() as i32, landscape.estimated_height()))
+            .unwrap_or((0, 0));
+        self.player_mut(id)?.scroll_view(
+            delta,
+            view_width,
+            view_height,
+            world_width,
+            world_height,
+            fullscreen,
+        );
+        Ok(())
+    }
+
     pub fn set_player_viewport(
         &mut self,
         id: i32,
@@ -56718,6 +56744,43 @@ mod control_message_say_regression {
         assert_eq!(messages[0].target, Some(view));
         assert_eq!(messages[0].lines, vec!["<Speaker> action"]);
         assert_eq!(messages[0].color, 0xff00_00ff);
+    }
+}
+
+#[cfg(test)]
+mod player_view_scroll_regression {
+    use super::*;
+
+    #[test]
+    fn engine_scroll_player_view_uses_landscape_dimensions() {
+        let mut engine = Engine::new();
+        engine.set_landscape(Landscape::flat(1_000, 1_000));
+        engine
+            .register_player(PlayerConfig::new(7, "Player"))
+            .expect("player registers");
+        engine
+            .replace_player_viewports(
+                7,
+                vec![PlayerViewport::new(Vector2::new(15, 995))],
+            )
+            .expect("viewport installs");
+
+        engine
+            .scroll_player_view(7, Vector2::new(-10, 10), 100, 80, true)
+            .expect("player view scrolls");
+
+        let state = engine.player(7).expect("player remains").to_state();
+        assert_eq!(state.view_mode, PLAYER_VIEW_MODE_SCROLLING);
+        assert_eq!(state.viewports[0].center, Vector2::new(10, 1_000));
+    }
+
+    #[test]
+    fn engine_scroll_player_view_rejects_an_unknown_player() {
+        let mut engine = Engine::new();
+        let error = engine
+            .scroll_player_view(42, Vector2::new(10, 0), 100, 80, false)
+            .expect_err("unknown player is rejected");
+        assert!(matches!(error, EngineError::UnknownPlayer(42)));
     }
 }
 
