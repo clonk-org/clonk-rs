@@ -32092,10 +32092,13 @@ impl GameApp {
                         Ok(())
                     }
                     StartupView::About => {
+                        let left_down = self.primary_pointer_left_down;
                         let actions = self
                             .startup_about_dialog
                             .as_mut()
-                            .map(|dialog| dialog.handle_pointer_move(point))
+                            .map(|dialog| {
+                                dialog.handle_pointer_move_with_left_down(point, left_down)
+                            })
                             .unwrap_or_default();
                         self.process_about_dialog_actions(actions)
                     }
@@ -42962,6 +42965,10 @@ impl GameApp {
                 }
                 AboutDlgAction::PageChanged(_) => {}
                 AboutDlgAction::LicenseChanged(_) => self.play_ui_sound("Command"),
+                AboutDlgAction::GuiSound(sound) => self.play_ui_sound(match sound {
+                    lc_frontend::startup_about_dlg::AboutDlgSound::ArrowHit => "ArrowHit",
+                    lc_frontend::startup_about_dlg::AboutDlgSound::Command => "Command",
+                }),
             }
         }
         Ok(())
@@ -51594,6 +51601,15 @@ impl GameApp {
                 {
                     // Book-scrollbar arrows repeat once per presentation.
                     self.plrsel_last_click = None;
+                    self.mark_menu_dirty();
+                }
+                if self.startup_view == StartupView::About
+                    && self
+                        .startup_about_dialog
+                        .as_mut()
+                        .is_some_and(|dialog| dialog.tick_scrollbar())
+                {
+                    // About TextWindow arrows repeat from ScrollBar::DrawElement.
                     self.mark_menu_dirty();
                 }
                 if self.startup_view == StartupView::Options {
@@ -89877,6 +89893,74 @@ public func Grant(password) { return GainMissionAccess(password); }
             .startup_about_dialog
             .as_ref()
             .is_some_and(|dialog| dialog.license_scroll_offset() > 0));
+    }
+
+    #[test]
+    fn l056_about_scrollbar_sounds_and_repeat_run_through_production_paths() {
+        let mut app = new_real_classic_menu_app(320, 240);
+        enter_about_licenses(&mut app);
+        app.ui_sound_log.clear();
+
+        let layout = lc_frontend::startup_about_dlg::about_layout(320, 240);
+        let text = layout.licenses.text;
+        let bar = lc_frontend::classic_gui::IntRect {
+            x: text.x + text.w - 5 - 16,
+            y: text.y + 8,
+            w: 16,
+            h: text.h - 16,
+        };
+        let track = PhysicalPosition::new(
+            f64::from(bar.x + 8),
+            f64::from(bar.y + bar.h / 2),
+        );
+        app.handle_cursor_moved(track).expect("hover license track");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start license track drag");
+        assert_eq!(app.ui_sound_log, vec!["Command"]);
+        assert!(app
+            .startup_about_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.license_scroll_offset() > 0));
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release license track drag");
+
+        app.ui_sound_log.clear();
+        let bottom_arrow = PhysicalPosition::new(
+            f64::from(bar.x + 8),
+            f64::from(bar.y + bar.h - 1),
+        );
+        app.handle_cursor_moved(bottom_arrow)
+            .expect("hover license bottom arrow");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold license bottom arrow");
+        assert_eq!(app.ui_sound_log, vec!["ArrowHit"]);
+        let before_frame = app
+            .startup_about_dialog
+            .as_ref()
+            .unwrap()
+            .license_scroll_offset();
+        let mut frame = vec![0_u8; 320 * 240 * 4];
+        app.render(&mut frame)
+            .expect("present one held-arrow frame");
+        let after_frame = app
+            .startup_about_dialog
+            .as_ref()
+            .unwrap()
+            .license_scroll_offset();
+        assert!(after_frame > before_frame);
+
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release license bottom arrow");
+        assert_eq!(app.ui_sound_log, vec!["ArrowHit", "ArrowHit"]);
+        app.render(&mut frame)
+            .expect("present after arrow release");
+        assert_eq!(
+            app.startup_about_dialog
+                .as_ref()
+                .unwrap()
+                .license_scroll_offset(),
+            after_frame
+        );
     }
 
     #[test]
