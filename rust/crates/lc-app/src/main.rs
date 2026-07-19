@@ -10906,7 +10906,6 @@ impl fmt::Display for ClassicStartupBootstrapIssue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicStartupAction {
-    AboutCheckForUpdates,
     OptionsProgramFocus(lc_frontend::startup_options_dlg::OptionsProgramFocusTarget),
     NetworkRefresh,
     PlayerCrew { index: usize },
@@ -37950,16 +37949,29 @@ impl GameApp {
         for action in actions {
             match action {
                 AboutDlgAction::Back => self.show_main_menu(),
-                AboutDlgAction::CheckForUpdates => {
-                    return Err(classic_startup_action_error(
-                        ClassicStartupAction::AboutCheckForUpdates,
-                    ));
-                }
+                AboutDlgAction::CheckForUpdates => self.open_launcher_update_dialog()?,
                 AboutDlgAction::PageChanged(_) => self.play_ui_sound("Click"),
                 AboutDlgAction::LicenseChanged(_) => self.play_ui_sound("Command"),
             }
         }
         Ok(())
+    }
+
+    /// Update discovery and installation are owned by the launcher/package
+    /// manager in the Rust build. Consequently the incoming, manual and
+    /// automatic `C4StartupMainDlg::OnShown` paths (cpp:258-276) are
+    /// intentionally not repeated in-process; the visible About action
+    /// provides the hand-off.
+    fn open_launcher_update_dialog(&mut self) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Updates for this build are managed outside the game. Use your launcher or package manager to check for updates.",
+                "Updates",
+                // C++ C4UpdateDlg uses Ico_Ex_Update (GUIIcons2 phase 14).
+                lc_frontend::message_dialog::MessageDialogIcon::Extended(14),
+            ),
+            MessageDialogContinuation::None,
+        )
     }
 
     fn start_network_game_now(&mut self) -> Result<(), EngineError> {
@@ -78450,20 +78462,55 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn unsupported_startup_actions_fail_before_status_or_domain_mutation() {
+    fn about_update_action_opens_launcher_handoff_and_retains_about() {
         let mut app = new_classic_menu_app(640, 480);
 
         app.open_about_dialog();
-        let error = app
-            .process_about_dialog_actions(vec![
-                lc_frontend::startup_about_dlg::AboutDlgAction::CheckForUpdates,
-            ])
-            .expect_err("update flow is not ported");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::AboutCheckForUpdates),
+        app.process_about_dialog_actions(vec![
+            lc_frontend::startup_about_dlg::AboutDlgAction::CheckForUpdates,
+        ])
+        .expect("launcher-owned update checks must not be a fatal parity boundary");
+        assert_eq!(app.startup_view, StartupView::About);
+        assert!(app.startup_about_dialog.is_some());
+        let handoff = app.message_dialogs.last().expect("visible update result");
+        assert_eq!(handoff.state.caption(), "Updates");
+        assert!(handoff.state.message().contains("launcher or package manager"));
+        assert_eq!(
+            handoff.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Extended(14)
         );
-        assert!(app.status_text.is_empty());
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss launcher hand-off");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::About);
+
+        for key in [VirtualKeyCode::Return, VirtualKeyCode::Space] {
+            let mut app = new_classic_menu_app(640, 480);
+            app.open_about_dialog();
+            for _ in 0..2 {
+                app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                    .expect("advance About focus");
+                app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                    .expect("release About focus key");
+            }
+            app.handle_key(key, ElementState::Pressed)
+                .expect("press focused update button");
+            assert!(app.message_dialogs.is_empty());
+            app.handle_key(key, ElementState::Released)
+                .expect("activate focused update button");
+            assert_eq!(app.message_dialogs.len(), 1);
+            assert_eq!(app.startup_view, StartupView::About);
+            app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+                .expect("dismiss focused-key launcher hand-off");
+            assert!(app.message_dialogs.is_empty());
+            assert_eq!(app.startup_view, StartupView::About);
+        }
+    }
+
+    #[test]
+    fn unsupported_startup_actions_fail_before_status_or_domain_mutation() {
+        let mut app = new_classic_menu_app(640, 480);
 
         app.open_network_game_dialog();
         let network_status = app.status_text.clone();
@@ -85992,14 +86039,18 @@ ScenInfoArea=70,5,25,90
             .expect("move over Update");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press Update");
-        let error = app
-            .handle_mouse_button(ElementState::Released)
-            .expect_err("release Update");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupAction(ClassicStartupAction::AboutCheckForUpdates),
-        );
-        assert!(app.status_text.is_empty());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("show launcher update hand-off");
+        assert_eq!(app.startup_view, StartupView::About);
+        let handoff = app.message_dialogs.last().expect("visible update result");
+        assert_eq!(handoff.state.caption(), "Updates");
+        assert!(handoff.state.message().contains("launcher or package manager"));
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press update hand-off OK");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("dismiss update hand-off");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::About);
 
         app.handle_cursor_moved(about_back_point)
             .expect("move over About Back");
