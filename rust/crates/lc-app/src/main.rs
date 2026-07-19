@@ -57032,7 +57032,7 @@ impl GameApp {
                 .cursor_object_menu(script_menu_owner)
                 .map(|(target, menu)| (target, menu.clone()));
             if let Some((_, menu)) = script_menu.as_mut() {
-                resolve_engine_script_menu_footer(&self.engine, &self.snapshot, menu);
+                resolve_engine_script_menu_footer(&mut self.engine, menu)?;
             }
             let initial_script_menu_location = script_menu
                 .as_ref()

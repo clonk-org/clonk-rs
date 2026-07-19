@@ -27181,6 +27181,67 @@ impl Engine {
             .map(|definition| definition.value())
     }
 
+    /// `C4Def::GetValue`: run the definition's `CalcDefValue(base, player)`
+    /// override and the optional base object's `CalcBuyValue(definition,
+    /// value)` adjustment. Unlike [`Self::definition_value`], this executes
+    /// script callbacks and folds their host-side effects.
+    pub fn calculated_definition_value(
+        &mut self,
+        definition_id: &str,
+        base: Option<ObjectId>,
+        player: i32,
+    ) -> Result<Option<i32>, EngineError> {
+        let Some(definition) = self.definitions.get(definition_id) else {
+            return Ok(None);
+        };
+        let base_has_override = base
+            .and_then(|base| self.find_object_index(base))
+            .and_then(|index| self.definitions.get(&self.objects[index].definition_id))
+            .is_some_and(|definition| definition.has_function("CalcBuyValue"));
+        if !definition.has_function("CalcDefValue") && !base_has_override {
+            return Ok(Some(definition.value()));
+        }
+
+        let world = self.host_world_context();
+        let (value, _args, batch, audio_state, rng, script_error) =
+            ScenarioScript::execute_value_for_script(
+                definition_id,
+                Some(DefinitionId::from(definition_id)),
+                "GetValue",
+                &[],
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+                || {
+                    compat::calculated_definition_value(definition_id, base, player)
+                        .map(|value| {
+                            (
+                                value.map(Value::Int).unwrap_or(Value::Nil),
+                                Vec::new(),
+                            )
+                        })
+                        .map_err(Into::into)
+                },
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            return match error {
+                EngineError::Script { .. } => Ok(Some(0)),
+                other => Err(other),
+            };
+        }
+        Ok(Some(
+            value.and_then(|value| value.as_c4_int()).unwrap_or(0),
+        ))
+    }
+
     pub fn definition_mass(&self, definition_id: &str) -> Option<i32> {
         self.definitions
             .get(definition_id)

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use lc_engine::{
-    CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, OWNER_NONE,
-    ObjectId, ObjectMenuExtra, ObjectMenuSymbol, SimulationSnapshot,
+    CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, EngineError,
+    OWNER_NONE, ObjectId, ObjectMenuExtra, ObjectMenuSymbol, SimulationSnapshot,
 };
 use lc_frontend::{
     CommandImage, CommandOverlayIcon, GuiPoint, default_owner_color,
@@ -1145,10 +1145,9 @@ fn draw_magic_value_footer(
 /// the app's per-frame presentation clone; engine-owned menu state remains
 /// untouched.
 pub(crate) fn resolve_engine_script_menu_footer(
-    engine: &Engine,
-    snapshot: &SimulationSnapshot,
+    engine: &mut Engine,
     menu: &mut lc_engine::ObjectMenuState,
-) {
+) -> Result<(), EngineError> {
     let needs_value = matches!(
         menu.extra,
         ObjectMenuExtra::Value
@@ -1163,7 +1162,8 @@ pub(crate) fn resolve_engine_script_menu_footer(
             .and_then(|selection| menu.items.get_mut(selection))
         {
             if item.value.is_none() {
-                item.value = engine.definition_value(&item.item_id);
+                item.value =
+                    engine.calculated_definition_value(&item.item_id, None, OWNER_NONE)?;
             }
         }
     }
@@ -1173,9 +1173,10 @@ pub(crate) fn resolve_engine_script_menu_footer(
     ) {
         menu.extra_data = u64::try_from(menu.extra_data)
             .ok()
-            .and_then(|number| snapshot.object(ObjectId::new(number)))
+            .and_then(|number| engine.object_snapshot(ObjectId::new(number)))
             .map_or(0, |object| object.magic_energy / 1_000);
     }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -6574,6 +6575,76 @@ mod tests {
     }
 
     #[test]
+    fn menu_value_footer_runs_shipped_tendon_calc_def_value() {
+        // C4Menu::DrawElement asks C4Def::GetValue(nil, NO_OWNER) for an
+        // item without fOwnValue. Western's TEND is the shipped distinguishing
+        // case: DefCore Value=2, while CalcDefValue returns 4.
+        let repository = repository_root();
+        let group = Group::open(
+            repository.join("content/Western.c4d/Items.c4d/Materials.c4d/Tendon.c4d"),
+        )
+        .expect("shipped Tendon definition opens");
+        let resource = lc_resources::ResourceDefinition::load(&group)
+            .expect("shipped Tendon definition loads");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_resource(&resource).expect("Tendon script compiles"),
+            )
+            .expect("Tendon definition registers");
+        assert_eq!(engine.definition_value("TEND"), Some(2));
+
+        let mut menu = engine_script_menu_fixture(0, 1);
+        menu.extra = ObjectMenuExtra::Value;
+        menu.selection = 0;
+        menu.items[0].item_id = "TEND".to_string();
+        menu.items[0].value = None;
+        resolve_engine_script_menu_footer(&mut engine, &mut menu)
+            .expect("Tendon footer value resolves");
+        assert_eq!(menu.items[0].value, Some(4));
+
+        let mut own_value_menu = menu.clone();
+        own_value_menu.items[0].value = Some(2);
+        resolve_engine_script_menu_footer(&mut engine, &mut own_value_menu)
+            .expect("explicit menu value remains valid");
+        assert_eq!(
+            own_value_menu.items[0].value,
+            Some(2),
+            "C4MenuItem::fOwnValue suppresses definition-price recomputation"
+        );
+
+        let render = |menu: &lc_engine::ObjectMenuState| {
+            let font = lc_graphics::BitmapFont::new();
+            let hud_font = HudFont::Fallback(&font);
+            let area = Rect::new(0, 0, 320, 200);
+            let mut surface = Surface::new(320, 200, PixelFormat::Rgba8888);
+            render_engine_script_menu(
+                &mut surface,
+                area,
+                &hud_font,
+                &font,
+                None,
+                menu,
+                &IngameMenuGraphics::default(),
+                None,
+                &[None],
+                &[],
+                false,
+                0,
+            );
+            surface.pixels().to_vec()
+        };
+        let calculated_pixels = render(&menu);
+        let mut raw_value_menu = menu.clone();
+        raw_value_menu.items[0].value = Some(2);
+        assert_ne!(
+            calculated_pixels,
+            render(&raw_value_menu),
+            "the painted CalcDefValue result must differ from raw DefCore Value=2"
+        );
+    }
+
+    #[test]
     fn engine_magic_menu_draws_cpp_spell_cost_and_available_energy_footer() {
         // C4MN_Extra_MagicValue draws Magic.png followed by the selected
         // spell's `value/available` pair. Alchemy uses the components-only
@@ -6671,7 +6742,8 @@ mod tests {
         engine
             .apply_object_update(object, ObjectUpdate::new().with_magic_energy(30_000))
             .expect("set initial live mana");
-        resolve_engine_script_menu_footer(&engine, &engine.snapshot(), &mut live_menu);
+        resolve_engine_script_menu_footer(&mut engine, &mut live_menu)
+            .expect("static spell value resolves");
         assert_eq!(live_menu.items[0].value, Some(10));
         assert_eq!(live_menu.extra_data, 30);
 
@@ -6679,7 +6751,8 @@ mod tests {
         engine
             .apply_object_update(object, ObjectUpdate::new().with_magic_energy(20_000))
             .expect("spend live mana");
-        resolve_engine_script_menu_footer(&engine, &engine.snapshot(), &mut live_menu);
+        resolve_engine_script_menu_footer(&mut engine, &mut live_menu)
+            .expect("live spell value resolves");
         assert_eq!(live_menu.extra_data, 20, "live footer updates every frame");
     }
 
