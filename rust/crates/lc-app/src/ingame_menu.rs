@@ -64,6 +64,7 @@ pub const ICO_GAME_RUNNING: u8 = 30;
 pub const ICO_EXIT: u8 = 33;
 pub const ICO_CLOSE: u8 = 34;
 pub const ICO_SURRENDER: u8 = 45;
+pub const ICO_STAR: u8 = 48;
 pub const ICO_DISCONNECT: u8 = 49;
 pub const ICO_VIEW: u8 = 50;
 
@@ -109,6 +110,21 @@ pub enum DisplayToggle {
     WhiteChat,
 }
 
+/// Target selected by `C4MN_Observer`'s `Observe:*` commands
+/// (C4MainMenu.cpp:235-273,920-945).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObserverTarget {
+    Free,
+    Player(i32),
+}
+
+/// One visible runtime player row in the observer target menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObserverPlayerEntry {
+    pub id: i32,
+    pub name: String,
+}
+
 /// Menu commands, mirroring the strings dispatched by
 /// `C4MainMenu::MenuCommand` (C4MainMenu.cpp:734-948).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +152,8 @@ pub enum MenuAction {
     ActivateSurrender,
     /// "ActivateMenu:Observer" (C4MainMenu.cpp:758).
     ActivateObserver,
+    /// "Observe:Free" / "Observe:<player>" (C4MainMenu.cpp:920-945).
+    Observe(ObserverTarget),
     /// "ActivateMenu:TeamSel" (C4MainMenu.cpp:756).
     ActivateTeamSelection,
     /// "ActivateMenu:Client" (C4MainMenu.cpp:752).
@@ -181,6 +199,7 @@ pub enum MenuAction {
 pub enum MenuPage {
     Main,
     Hostility,
+    Observer,
     TeamSelection,
     Goals,
     Rules,
@@ -732,6 +751,46 @@ impl IngameMenuState {
         }
     }
 
+    /// `C4MainMenu::ActivateObserver` and the `C4MN_Observer` refill
+    /// (C4MainMenu.cpp:235-273,950-961): Free first, then each visible
+    /// runtime player in player-list order. The page is non-permanent, so
+    /// Enter closes it before dispatching the selected `Observe:*` action.
+    pub fn observer_menu(
+        players: &[ObserverPlayerEntry],
+        current_target: ObserverTarget,
+    ) -> Self {
+        let mut items = Vec::with_capacity(players.len() + 1);
+        items.push(MenuItem::new(
+            "free view",
+            MenuSymbol::GuiIcon(ICO_STAR),
+            MenuAction::Observe(ObserverTarget::Free),
+            Some("Freely scroll around the map."),
+        ));
+        items.extend(players.iter().map(|player| {
+            MenuItem::new(
+                player.name.clone(),
+                MenuSymbol::PlayerColor,
+                MenuAction::Observe(ObserverTarget::Player(player.id)),
+                Some(&format!("Follow view of player {}.", player.name)),
+            )
+        }));
+        let mut menu = Self::new(
+            MenuPage::Observer,
+            "View",
+            MenuSymbol::GuiIcon(ICO_VIEW),
+            items,
+            false,
+            Some(MenuAction::ActivateMain),
+        );
+        let selection = menu
+            .items
+            .iter()
+            .position(|item| item.action == MenuAction::Observe(current_target))
+            .unwrap_or(0);
+        menu.set_selection(selection);
+        menu
+    }
+
     /// `C4MainMenu::ActivateOptions` (C4MainMenu.cpp:553-580).
     pub fn options_menu(flags: &OptionFlags, selection: usize) -> Self {
         let mut items = vec![
@@ -1031,6 +1090,17 @@ impl IngameMenuState {
 
     pub fn selection(&self) -> usize {
         self.selection
+    }
+
+    /// The highlighted `Observe:*` target when this is the observer page.
+    pub fn selected_observer_target(&self) -> Option<ObserverTarget> {
+        if self.page != MenuPage::Observer {
+            return None;
+        }
+        match self.items.get(self.selection).map(|item| &item.action) {
+            Some(MenuAction::Observe(target)) => Some(*target),
+            _ => None,
+        }
     }
 
     pub fn is_permanent(&self) -> bool {

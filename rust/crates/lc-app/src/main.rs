@@ -64,7 +64,7 @@ use gamepad::{
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, HostilityEntry, IngameMenuGraphics, IngameMenuPointerTarget,
     IngameMenuState, MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags,
-    SaveSlotState, TeamSelectionEntry, UpperBoardMode,
+    ObserverPlayerEntry, ObserverTarget, SaveSlotState, TeamSelectionEntry, UpperBoardMode,
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use lc_app::{
@@ -11590,7 +11590,6 @@ enum ClassicStartupAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicIngameMenuChild {
     TeamSelection,
-    Observer,
     NewPlayer,
     HostDisconnect,
     NetworkSurrender,
@@ -27261,11 +27260,22 @@ impl GameApp {
         if !self.ingame_menu_belongs_to(owner) {
             return Ok(false);
         }
-        let Some(menu) = self.ingame_menu.get_mut(owner) else {
-            return Ok(menu_command);
+        let (outcome, preview_target) = {
+            let Some(menu) = self.ingame_menu.get_mut(owner) else {
+                return Ok(menu_command);
+            };
+            let previous_target = menu.selected_observer_target();
+            let outcome = menu.handle_command(command, kind);
+            let selected_target = menu.selected_observer_target();
+            let preview_target = (selected_target != previous_target)
+                .then_some(selected_target)
+                .flatten();
+            (outcome, preview_target)
         };
-
-        if let Some(outcome) = menu.handle_command(command, kind) {
+        if let Some(target) = preview_target {
+            let _ = self.apply_observer_target(target);
+        }
+        if let Some(outcome) = outcome {
             self.execute_ingame_menu_outcome_for_player(owner, outcome)?;
         }
         Ok(true)
@@ -27703,9 +27713,23 @@ impl GameApp {
                 ));
             }
             MenuAction::ActivateObserver => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::Observer,
-                ));
+                let Some(current_player) = self.observer_viewport_player() else {
+                    return Ok(());
+                };
+                let players = self.observer_player_entries();
+                let menu = IngameMenuState::observer_menu(
+                    &players,
+                    if current_player == OWNER_NONE {
+                        ObserverTarget::Free
+                    } else {
+                        ObserverTarget::Player(current_player)
+                    },
+                );
+                let selected = menu
+                    .selected_observer_target()
+                    .unwrap_or(ObserverTarget::Free);
+                self.ingame_menu.replace(OWNER_NONE, Some(menu));
+                let _ = self.apply_observer_target(selected);
             }
             MenuAction::ActivateTeamSelection => {
                 return Err(classic_ingame_menu_child_error(
@@ -27899,6 +27923,9 @@ impl GameApp {
                     self.execute_init_scenario_player_control(player, team)?;
                 }
             }
+            MenuAction::Observe(target) => {
+                let _ = self.apply_observer_target(target);
+            }
             MenuAction::NoOp => {}
         }
         Ok(())
@@ -27928,6 +27955,26 @@ impl GameApp {
             .map(|player| NewPlayerEntry {
                 file: player.path.to_string_lossy().into_owned(),
                 name: c4_presentation_text(&player.player_file.name),
+            })
+            .collect()
+    }
+
+    /// `C4MN_Observer` rows use live `C4PlayerList` order and omit only
+    /// players whose linked `C4PlayerInfo` has `PIF_Invisible`.
+    fn observer_player_entries(&self) -> Vec<ObserverPlayerEntry> {
+        self.engine
+            .players()
+            .filter(|player| {
+                !self
+                    .control_player_infos
+                    .get(player.player_info_id())
+                    .is_some_and(|info| {
+                        info.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE != 0
+                    })
+            })
+            .map(|player| ObserverPlayerEntry {
+                id: player.id(),
+                name: c4_presentation_text(player.name()),
             })
             .collect()
     }
@@ -34092,14 +34139,19 @@ impl GameApp {
         let Some((player, target)) = self.ingame_menu_pointer_target(point) else {
             return false;
         };
+        let mut preview_target = None;
         if let IngameMenuPointerTarget::Item(index) = target {
             if let Some(menu) = self.ingame_menu.get_mut(player) {
                 // C4MenuItem::MouseEnter directly selects the hovered item
                 // (C4Menu.cpp:239-244; C4MainMenu.cpp:299-303).
                 if menu.selection() != index {
                     menu.set_selection(index);
+                    preview_target = menu.selected_observer_target();
                 }
             }
+        }
+        if let Some(target) = preview_target {
+            let _ = self.apply_observer_target(target);
         }
         true
     }
@@ -49113,35 +49165,69 @@ impl GameApp {
         true
     }
 
-    /// `FnSetFilmView`: mutate the first physical viewport in place and keep
-    /// both its stable camera identity and `fIsNoOwnerViewport` bit.
-    fn set_physical_film_view(&mut self, player: i32) -> bool {
-        let preserved_zoom = self.physical_viewports.first().and_then(|primary| {
-            primary
+    fn observer_viewport_index(&self) -> Option<usize> {
+        self.physical_viewports
+            .iter()
+            .position(|viewport| viewport.is_no_owner_viewport)
+    }
+
+    fn observer_viewport_player(&self) -> Option<i32> {
+        self.observer_viewport_index()
+            .map(|index| self.physical_viewports[index].displayed_player)
+    }
+
+    /// Shared `pVP->Init(target, true)` path for observer selection previews
+    /// and Enter. The durable `fIsNoOwnerViewport` identity is retained while
+    /// its temporary displayed player changes.
+    fn apply_observer_target(&mut self, target: ObserverTarget) -> bool {
+        let player = match target {
+            ObserverTarget::Free => OWNER_NONE,
+            ObserverTarget::Player(player) if self.engine.player(player).is_some() => player,
+            ObserverTarget::Player(_) => return false,
+        };
+        let Some(index) = self.observer_viewport_index() else {
+            return false;
+        };
+        self.set_physical_view_target(index, player)
+    }
+
+    /// Temporary `C4Viewport::Init`: mutate one physical viewport in place
+    /// while retaining its stable camera identity and ownerless bit.
+    fn set_physical_view_target(&mut self, index: usize, player: i32) -> bool {
+        let preserved_zoom = self.physical_viewports.get(index).and_then(|viewport| {
+            viewport
                 .uses_live_player_presentation
-                .then(|| self.engine.player(primary.camera_identity_owner))
+                .then(|| self.engine.player(viewport.camera_identity_owner))
                 .flatten()
                 .map(|source| {
                     source
                         .viewports()
                         .first()
-                        .map_or(primary.preserved_zoom, |viewport| viewport.zoom)
+                        .map_or(viewport.preserved_zoom, |viewport| viewport.zoom)
                 })
         });
-        let Some(primary) = self.physical_viewports.first_mut() else {
+        let Some(viewport) = self.physical_viewports.get_mut(index) else {
             return false;
         };
         if let Some(zoom) = preserved_zoom {
-            primary.preserved_zoom = zoom;
+            viewport.preserved_zoom = zoom;
         }
-        primary.displayed_player = player;
-        primary.uses_live_player_presentation = false;
-        self.film_view_player = Some(player);
+        viewport.displayed_player = player;
+        viewport.uses_live_player_presentation = false;
+        if index == 0 {
+            self.film_view_player = Some(player);
+        }
         self.physical_viewports_authoritative = true;
         if player != OWNER_NONE {
             self.runtime_flash_message = None;
         }
         true
+    }
+
+    /// `FnSetFilmView`: mutate the first physical viewport in place and keep
+    /// both its stable camera identity and `fIsNoOwnerViewport` bit.
+    fn set_physical_film_view(&mut self, player: i32) -> bool {
+        self.set_physical_view_target(0, player)
     }
 
     /// Fold process-local replay requests at the same app seam as viewport
@@ -98078,7 +98164,6 @@ ScenInfoArea=70,5,25,90
             .expect("start explicit test sandbox");
         let unsupported = [
             (MenuAction::ActivateTeamSelection, "TeamSelection"),
-            (MenuAction::ActivateObserver, "Observer"),
             (MenuAction::ActivateHostDisconnect, "HostDisconnect"),
         ];
         for (action, label) in unsupported {
@@ -113631,6 +113716,156 @@ ScenInfoArea=70,5,25,90
         assert!(app.set_physical_film_view(OWNER_NONE));
         assert!(!app.cycle_primary_viewport_player(true));
         assert_eq!(app.film_view_player, Some(OWNER_NONE));
+    }
+
+    #[test]
+    fn observer_menu_lists_players_and_live_previews_selection() {
+        let mut app = new_state_only_running_sandbox_app();
+        let first = app.local_owner;
+        let first_info = app
+            .engine
+            .player(first)
+            .expect("sandbox player")
+            .player_info_id();
+        let second = first + 1;
+        let hidden = first + 2;
+        let second_info = first_info + 10;
+        let hidden_info = first_info + 20;
+        app.engine
+            .register_player(
+                PlayerConfig::new(second, "Second visible")
+                    .with_player_info_id(second_info),
+            )
+            .expect("register second visible observer target");
+        app.engine
+            .register_player(
+                PlayerConfig::new(hidden, "Hidden target").with_player_info_id(hidden_info),
+            )
+            .expect("register invisible observer target");
+        let info = |id, name: &[u8], flags| lc_engine::ControlPlayerInfoEntry {
+            id,
+            name: LegacyCString::from_bytes(name.to_vec()).expect("valid player-info name"),
+            flags,
+            ..lc_engine::ControlPlayerInfoEntry::default()
+        };
+        app.control_player_infos.replace_snapshot(
+            hidden_info,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![
+                    info(first_info, b"Player", 0),
+                    info(second_info, b"Second visible", 0),
+                    info(
+                        hidden_info,
+                        b"Hidden target",
+                        lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                    ),
+                ],
+                ..lc_engine::PlayerInfoControlData::default()
+            }],
+        );
+
+        app.clear_physical_viewport_states();
+        let observer = app.ownerless_physical_viewport_state();
+        let physical_identity = observer.physical_identity;
+        app.physical_viewports.push(observer);
+        app.physical_viewports_authoritative = true;
+        assert!(app.set_physical_film_view(first));
+
+        let open_observer_menu = |app: &mut GameApp| {
+            app.ingame_menu.replace(
+                OWNER_NONE,
+                IngameMenuState::main_menu(&MainMenuConditions {
+                    has_player: false,
+                    player_count: 3,
+                    ..MainMenuConditions::default()
+                }),
+            );
+            assert!(
+                app.handle_menu_command(
+                    OWNER_NONE,
+                    ControlCommand::MenuEnter,
+                    CommandKind::Press,
+                )
+                .expect("open observer target page")
+            );
+        };
+        open_observer_menu(&mut app);
+
+        let menu = app.ingame_menu.get(OWNER_NONE).expect("observer menu");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::Observer);
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| (item.caption.as_str(), item.action.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("free view", MenuAction::Observe(ObserverTarget::Free)),
+                (
+                    "Player",
+                    MenuAction::Observe(ObserverTarget::Player(first)),
+                ),
+                (
+                    "Second visible",
+                    MenuAction::Observe(ObserverTarget::Player(second)),
+                ),
+            ]
+        );
+        assert_eq!(menu.selection(), 1, "current followed player is selected");
+        assert!(menu.items().iter().all(|item| item.caption != "Hidden target"));
+
+        assert!(
+            app.handle_menu_command(
+                OWNER_NONE,
+                ControlCommand::MenuDown,
+                CommandKind::Press,
+            )
+            .expect("moving selection previews the next player")
+        );
+        assert_eq!(app.physical_viewports[0].displayed_player, second);
+        assert_eq!(app.film_view_player, Some(second));
+        assert!(app.set_physical_film_view(first));
+        assert_eq!(
+            app.ingame_menu
+                .get(OWNER_NONE)
+                .map(IngameMenuState::selection),
+            Some(2),
+            "camera perturbation does not change the highlighted row"
+        );
+        assert!(
+            app.handle_menu_command(
+                OWNER_NONE,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
+            .expect("Enter dispatches the highlighted player target")
+        );
+        assert!(!app.ingame_menu.contains(OWNER_NONE));
+        assert_eq!(app.physical_viewports[0].displayed_player, second);
+
+        open_observer_menu(&mut app);
+        assert!(
+            app.handle_menu_command(
+                OWNER_NONE,
+                ControlCommand::MenuDown,
+                CommandKind::Press,
+            )
+            .expect("last player wraps to free view")
+        );
+        assert_eq!(app.physical_viewports[0].displayed_player, OWNER_NONE);
+        assert!(app.set_physical_film_view(first));
+        assert!(
+            app.handle_menu_command(
+                OWNER_NONE,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
+            .expect("Enter dispatches free view through the same path")
+        );
+        assert_eq!(app.physical_viewports[0].displayed_player, OWNER_NONE);
+        assert_eq!(app.film_view_player, Some(OWNER_NONE));
+        assert_eq!(app.physical_viewports[0].physical_identity, physical_identity);
+        assert!(app.physical_viewports[0].is_no_owner_viewport);
     }
 
     #[test]
@@ -141130,6 +141365,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 IngameMenuState::main_menu(&MainMenuConditions::default())
                     .expect("default player main menu"),
                 IngameMenuState::hostility_menu(&[]),
+                IngameMenuState::observer_menu(&[], ObserverTarget::Free),
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
@@ -141160,20 +141396,21 @@ func ControlDig() { dig_count = 1; return(1); }
         let default_pages = every_player_menu_page();
         let rebound_pages = every_player_menu_page();
         let sound_pages = every_player_menu_page();
-        assert_eq!(default_pages.len(), 13);
+        assert_eq!(default_pages.len(), 14);
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
             ingame_menu::MenuPage::Hostility => 1,
-            ingame_menu::MenuPage::Goals => 2,
-            ingame_menu::MenuPage::Rules => 3,
-            ingame_menu::MenuPage::NewPlayer => 4,
-            ingame_menu::MenuPage::Savegame => 5,
-            ingame_menu::MenuPage::Options => 6,
-            ingame_menu::MenuPage::Display => 7,
-            ingame_menu::MenuPage::Surrender => 8,
-            ingame_menu::MenuPage::ClientDisconnect => 9,
-            ingame_menu::MenuPage::AbortConfirm => 10,
-            ingame_menu::MenuPage::TeamSelection => 11,
+            ingame_menu::MenuPage::Observer => 2,
+            ingame_menu::MenuPage::TeamSelection => 3,
+            ingame_menu::MenuPage::Goals => 4,
+            ingame_menu::MenuPage::Rules => 5,
+            ingame_menu::MenuPage::NewPlayer => 6,
+            ingame_menu::MenuPage::Savegame => 7,
+            ingame_menu::MenuPage::Options => 8,
+            ingame_menu::MenuPage::Display => 9,
+            ingame_menu::MenuPage::Surrender => 10,
+            ingame_menu::MenuPage::ClientDisconnect => 11,
+            ingame_menu::MenuPage::AbortConfirm => 12,
         };
         let test_music_bytes = silent_pcm_wav(10);
         let load_test_music = |app: &GameApp| {
@@ -141207,7 +141444,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .control
             .control_style = true;
         let mut sound_app = new_lightweight_running_sandbox_app();
-        let mut covered = [false; 12];
+        let mut covered = [false; 13];
         for ((default_menu, rebound_menu), sound_menu) in default_pages
             .into_iter()
             .zip(rebound_pages)
@@ -142691,6 +142928,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 IngameMenuState::main_menu(&MainMenuConditions::default())
                     .expect("default player main menu"),
                 IngameMenuState::hostility_menu(&[]),
+                IngameMenuState::observer_menu(&[], ObserverTarget::Free),
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
@@ -142722,22 +142960,23 @@ func ControlDig() { dig_count = 1; return(1); }
         let rebound_pages = every_player_menu_page();
         assert_eq!(
             default_pages.len(),
-            13,
-            "twelve MenuPage roots plus both AbortConfirm button variants"
+            14,
+            "thirteen MenuPage roots plus both AbortConfirm button variants"
         );
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
             ingame_menu::MenuPage::Hostility => 1,
-            ingame_menu::MenuPage::TeamSelection => 2,
-            ingame_menu::MenuPage::Goals => 3,
-            ingame_menu::MenuPage::Rules => 4,
-            ingame_menu::MenuPage::NewPlayer => 5,
-            ingame_menu::MenuPage::Savegame => 6,
-            ingame_menu::MenuPage::Options => 7,
-            ingame_menu::MenuPage::Display => 8,
-            ingame_menu::MenuPage::Surrender => 9,
-            ingame_menu::MenuPage::ClientDisconnect => 10,
-            ingame_menu::MenuPage::AbortConfirm => 11,
+            ingame_menu::MenuPage::Observer => 2,
+            ingame_menu::MenuPage::TeamSelection => 3,
+            ingame_menu::MenuPage::Goals => 4,
+            ingame_menu::MenuPage::Rules => 5,
+            ingame_menu::MenuPage::NewPlayer => 6,
+            ingame_menu::MenuPage::Savegame => 7,
+            ingame_menu::MenuPage::Options => 8,
+            ingame_menu::MenuPage::Display => 9,
+            ingame_menu::MenuPage::Surrender => 10,
+            ingame_menu::MenuPage::ClientDisconnect => 11,
+            ingame_menu::MenuPage::AbortConfirm => 12,
         };
         let mut default_app = new_running_sandbox_app();
         let mut rebound_app = new_running_sandbox_app();
@@ -142750,7 +142989,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("local player")
             .control
             .control_style = true;
-        let mut covered_pages = [false; 12];
+        let mut covered_pages = [false; 13];
 
         for (default_menu, rebound_menu) in default_pages.into_iter().zip(rebound_pages) {
             let page = default_menu.page();
