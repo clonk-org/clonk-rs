@@ -59,6 +59,9 @@ const MAX_TOOLTIP_WDT: i32 = 500;
 
 /// `C4GUI::Icons` indices into GUIIcons.png (C4Gui.h:670-731), 40x40 cells
 /// (C4Gui.cpp:1094-1095), 6 per row (C4GuiLabels.cpp:441-450).
+pub const ICO_HOST: u8 = 4;
+pub const ICO_CLIENT: u8 = 5;
+pub const ICO_OBSERVER_CLIENT: u8 = 8;
 pub const ICO_TEAM: u8 = 19;
 pub const ICO_GAME_RUNNING: u8 = 30;
 pub const ICO_EXIT: u8 = 33;
@@ -160,6 +163,8 @@ pub enum MenuAction {
     ActivateClientDisconnect,
     /// "ActivateMenu:Host" (C4MainMenu.cpp:751).
     ActivateHostDisconnect,
+    /// "Host:Kick:<id>" (C4MainMenu.cpp:805-819).
+    KickClient(i32),
     /// "Abort" -> `FullScreen.ShowAbortDlg()` (C4MainMenu.cpp:785-789).
     Abort,
     /// "Surrender" -> queues `CID_SurrenderPlayer` (C4MainMenu.cpp:791-795).
@@ -209,6 +214,7 @@ pub enum MenuPage {
     Display,
     Surrender,
     ClientDisconnect,
+    HostDisconnect,
     AbortConfirm,
 }
 
@@ -432,6 +438,15 @@ pub struct HostilityEntry {
 pub struct TeamSelectionEntry {
     pub id: i32,
     pub caption: String,
+}
+
+/// One ordered `Game.Network.Clients` row displayed by
+/// `C4MainMenu::ActivateHost` (C4MainMenu.cpp:502-518).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostDisconnectClientEntry {
+    pub client_id: i32,
+    pub caption: String,
+    pub activated: bool,
 }
 
 /// The active in-game menu: one `C4MainMenu` page (C4Menu state per
@@ -960,6 +975,38 @@ impl IngameMenuState {
                 MenuItem::new("No", MenuSymbol::OkCancel(1, 0), MenuAction::NoOp, None),
             ],
             false,
+            Some(MenuAction::ActivateMain),
+        )
+    }
+
+    /// `C4MainMenu::ActivateHost` (C4MainMenu.cpp:502-518). Every registered
+    /// client is selectable, including host ID zero (whose command is a
+    /// deliberate no-op), and the permanent page stays open after commands.
+    pub fn host_disconnect_menu(clients: &[HostDisconnectClientEntry]) -> Self {
+        let items = clients
+            .iter()
+            .map(|client| {
+                let icon = if client.client_id == 0 {
+                    ICO_HOST
+                } else if client.activated {
+                    ICO_CLIENT
+                } else {
+                    ICO_OBSERVER_CLIENT
+                };
+                MenuItem::new(
+                    client.caption.clone(),
+                    MenuSymbol::GuiIcon(icon),
+                    MenuAction::KickClient(client.client_id),
+                    None,
+                )
+            })
+            .collect();
+        Self::new(
+            MenuPage::HostDisconnect,
+            "Disconnect client",
+            MenuSymbol::GuiIcon(ICO_DISCONNECT),
+            items,
+            true,
             Some(MenuAction::ActivateMain),
         )
     }

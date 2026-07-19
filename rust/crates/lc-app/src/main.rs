@@ -62,9 +62,10 @@ use gamepad::{
     LegacyGamepadButton, SourcedGamepadEvent,
 };
 use ingame_menu::{
-    DisplayFlags, GoalRuleEntry, HostilityEntry, IngameMenuGraphics, IngameMenuPointerTarget,
-    IngameMenuState, MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags,
-    ObserverPlayerEntry, ObserverTarget, SaveSlotState, TeamSelectionEntry, UpperBoardMode,
+    DisplayFlags, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry, IngameMenuGraphics,
+    IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction, MenuOutcome,
+    NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
+    TeamSelectionEntry, UpperBoardMode,
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use lc_app::{
@@ -11591,7 +11592,6 @@ enum ClassicStartupAction {
 enum ClassicIngameMenuChild {
     TeamSelection,
     NewPlayer,
-    HostDisconnect,
     NetworkSurrender,
     ClientDisconnect,
     GoalInfo(String),
@@ -27590,6 +27590,49 @@ impl GameApp {
         self.apply_ingame_menu_action_for_player(self.local_owner, action)
     }
 
+    /// `C4MainMenu::MenuCommand("Host:Kick:<id>")` (C4MainMenu.cpp:805-819).
+    /// Host ID zero and disabled networking are no-ops. League clients with
+    /// a live player are voted out without closing the permanent page; all
+    /// other nonzero IDs take the direct remove path and close it.
+    fn kick_ingame_menu_client(
+        &mut self,
+        player: i32,
+        client_id: i32,
+    ) -> Result<(), EngineError> {
+        if client_id == 0 || self.network.is_none() {
+            return Ok(());
+        }
+        if self.network_is_league && self.runtime_client_has_players(client_id) {
+            self.submit_own_league_vote(
+                LeagueVoteSubject {
+                    vote_type: lc_engine::VOTE_TYPE_KICK,
+                    data: client_id,
+                },
+                true,
+            );
+            return Ok(());
+        }
+        if self.control_clients.contains(client_id) {
+            let reason = self.runtime_resource_string("IDS_MSG_KICKBYMENU");
+            let remove = lc_engine::ClientRemoveControlData {
+                client_id,
+                reason: lc_engine::LegacyCString::from_bytes(lc_script::c4_string_bytes(
+                    &reason,
+                ))
+                .unwrap_or_default(),
+                by_client: 0,
+            };
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_client_remove(remove))
+            {
+                tracing::error!(%client_id, %error, "failed to submit host-menu kick");
+            }
+        }
+        self.close_ingame_menu_by_user_for_player(player)
+    }
+
     fn apply_ingame_menu_action_for_player(
         &mut self,
         player: i32,
@@ -27708,9 +27751,27 @@ impl GameApp {
                 }
             }
             MenuAction::ActivateHostDisconnect => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::HostDisconnect,
-                ));
+                let clients = self
+                    .control_clients
+                    .snapshot()
+                    .into_iter()
+                    .map(|client| HostDisconnectClientEntry {
+                        client_id: client.client_id,
+                        caption: format!(
+                            "{} ({})",
+                            legacy_presentation_text(client.name.as_bytes()),
+                            legacy_presentation_text(client.nick.as_bytes())
+                        ),
+                        activated: client.activated,
+                    })
+                    .collect::<Vec<_>>();
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::host_disconnect_menu(&clients)),
+                );
+            }
+            MenuAction::KickClient(client_id) => {
+                self.kick_ingame_menu_client(player, client_id)?;
             }
             MenuAction::ActivateObserver => {
                 let Some(current_player) = self.observer_viewport_player() else {
@@ -96973,11 +97034,19 @@ public func Grant(password) { return GainMissionAccess(password); }
                 IngameMenuState::client_disconnect_menu(),
             ),
             (
+                "C4MainMenu::HostDisconnect",
+                IngameMenuState::host_disconnect_menu(&[HostDisconnectClientEntry {
+                    client_id: 0,
+                    caption: "Host (Host)".to_string(),
+                    activated: true,
+                }]),
+            ),
+            (
                 "C4AbortGameDialog",
                 IngameMenuState::abort_confirm_menu(true),
             ),
         ];
-        assert_eq!(pages.len(), 10, "MenuPage exhaustiveness changed");
+        assert_eq!(pages.len(), 11, "MenuPage exhaustiveness changed");
         for (label, page) in pages {
             let mut app = new_running_sandbox_app();
             app.ingame_menu.replace(app.local_owner, Some(page));
@@ -98158,13 +98227,139 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
+        let mut direct = new_running_sandbox_app();
+        let (_events, mut direct_commands) =
+            install_running_network_stub(&mut direct, 0, 40, 4);
+        let mut observer = message_client(9, b"Spectator");
+        observer.activated = false;
+        observer.observer = true;
+        direct.control_clients.replace_snapshot([
+            observer,
+            message_client(7, b"Remote"),
+            message_client(0, b"Host"),
+        ]);
+
+        direct
+            .apply_ingame_menu_action(MenuAction::ActivateHostDisconnect)
+            .expect("open host disconnect page");
+        let owner = direct.local_owner;
+        let menu = direct
+            .ingame_menu
+            .get(owner)
+            .expect("host disconnect page is visible");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::HostDisconnect);
+        assert_eq!(menu.caption(), "Disconnect client");
+        assert!(menu.is_permanent());
+        assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| {
+                    let icon = match &item.symbol {
+                        ingame_menu::MenuSymbol::GuiIcon(icon) => *icon,
+                        other => panic!("unexpected host-client row symbol: {other:?}"),
+                    };
+                    (item.caption.clone(), icon, item.action.clone())
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Host (Host)".to_string(),
+                    ingame_menu::ICO_HOST,
+                    MenuAction::KickClient(0),
+                ),
+                (
+                    "Remote (Remote)".to_string(),
+                    ingame_menu::ICO_CLIENT,
+                    MenuAction::KickClient(7),
+                ),
+                (
+                    "Spectator (Spectator)".to_string(),
+                    ingame_menu::ICO_OBSERVER_CLIENT,
+                    MenuAction::KickClient(9),
+                ),
+            ]
+        );
+
+        direct
+            .handle_menu_command_failsafe(owner, ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("host row is a no-op");
+        assert!(direct.ingame_menu.get(owner).is_some());
+        assert!(direct_commands.take_submitted_votes().is_empty());
+        assert!(direct_commands.take_submitted_client_removes().is_empty());
+
+        direct
+            .ingame_menu
+            .get_mut(owner)
+            .expect("page remains open")
+            .set_selection(1);
+        direct
+            .handle_menu_command_failsafe(owner, ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("direct host-menu kick");
+        assert_eq!(
+            direct_commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: lc_engine::LegacyCString::from_bytes(b"kicked from host menu".to_vec())
+                    .expect("fixture reason"),
+                by_client: 0,
+            }]
+        );
+        assert!(direct_commands.take_submitted_votes().is_empty());
+        assert!(direct.ingame_menu.get(owner).is_none());
+
+        let mut league = new_running_sandbox_app();
+        let (_events, mut league_commands) =
+            install_running_network_stub(&mut league, 0, 40, 4);
+        league.network_is_league = true;
+        league
+            .control_clients
+            .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        league
+            .engine
+            .register_player(PlayerConfig::new(17, "Remote Player"))
+            .expect("register remote runtime player");
+        league
+            .engine
+            .player_mut(17)
+            .expect("remote player exists")
+            .set_at_client(lc_engine::PlayerAtClient::new(7));
+        league
+            .apply_ingame_menu_action(MenuAction::ActivateHostDisconnect)
+            .expect("open league host disconnect page");
+        let owner = league.local_owner;
+        league
+            .ingame_menu
+            .get_mut(owner)
+            .expect("league page is visible")
+            .set_selection(1);
+        league
+            .handle_menu_command_failsafe(owner, ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("league host-menu kick vote");
+        assert_eq!(
+            league_commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            }]
+        );
+        assert!(league_commands.take_submitted_client_removes().is_empty());
+        assert_eq!(
+            league.ingame_menu.get(owner).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::HostDisconnect)
+        );
+    }
+
+    #[test]
     fn unsupported_ingame_children_fail_without_status_or_substitute_pages() {
         let mut app = new_menu_app(320, 200);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
         let unsupported = [
             (MenuAction::ActivateTeamSelection, "TeamSelection"),
-            (MenuAction::ActivateHostDisconnect, "HostDisconnect"),
         ];
         for (action, label) in unsupported {
             app.ingame_menu.clear();
@@ -141389,6 +141584,11 @@ func ControlDig() { dig_count = 1; return(1); }
                 IngameMenuState::display_menu(&DisplayFlags::default(), 0),
                 IngameMenuState::surrender_menu(),
                 IngameMenuState::client_disconnect_menu(),
+                IngameMenuState::host_disconnect_menu(&[HostDisconnectClientEntry {
+                    client_id: 0,
+                    caption: "Host (Host)".to_string(),
+                    activated: true,
+                }]),
                 IngameMenuState::abort_confirm_menu(true),
                 IngameMenuState::abort_confirm_menu(false),
             ]
@@ -141396,7 +141596,7 @@ func ControlDig() { dig_count = 1; return(1); }
         let default_pages = every_player_menu_page();
         let rebound_pages = every_player_menu_page();
         let sound_pages = every_player_menu_page();
-        assert_eq!(default_pages.len(), 14);
+        assert_eq!(default_pages.len(), 15);
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
             ingame_menu::MenuPage::Hostility => 1,
@@ -141410,7 +141610,8 @@ func ControlDig() { dig_count = 1; return(1); }
             ingame_menu::MenuPage::Display => 9,
             ingame_menu::MenuPage::Surrender => 10,
             ingame_menu::MenuPage::ClientDisconnect => 11,
-            ingame_menu::MenuPage::AbortConfirm => 12,
+            ingame_menu::MenuPage::HostDisconnect => 12,
+            ingame_menu::MenuPage::AbortConfirm => 13,
         };
         let test_music_bytes = silent_pcm_wav(10);
         let load_test_music = |app: &GameApp| {
@@ -141444,7 +141645,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .control
             .control_style = true;
         let mut sound_app = new_lightweight_running_sandbox_app();
-        let mut covered = [false; 13];
+        let mut covered = [false; 14];
         for ((default_menu, rebound_menu), sound_menu) in default_pages
             .into_iter()
             .zip(rebound_pages)
@@ -142952,6 +143153,11 @@ func ControlDig() { dig_count = 1; return(1); }
                 IngameMenuState::display_menu(&DisplayFlags::default(), 0),
                 IngameMenuState::surrender_menu(),
                 IngameMenuState::client_disconnect_menu(),
+                IngameMenuState::host_disconnect_menu(&[HostDisconnectClientEntry {
+                    client_id: 0,
+                    caption: "Host (Host)".to_string(),
+                    activated: true,
+                }]),
                 IngameMenuState::abort_confirm_menu(true),
                 IngameMenuState::abort_confirm_menu(false),
             ]
@@ -142960,8 +143166,8 @@ func ControlDig() { dig_count = 1; return(1); }
         let rebound_pages = every_player_menu_page();
         assert_eq!(
             default_pages.len(),
-            14,
-            "thirteen MenuPage roots plus both AbortConfirm button variants"
+            15,
+            "fourteen MenuPage roots plus both AbortConfirm button variants"
         );
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
@@ -142976,7 +143182,8 @@ func ControlDig() { dig_count = 1; return(1); }
             ingame_menu::MenuPage::Display => 9,
             ingame_menu::MenuPage::Surrender => 10,
             ingame_menu::MenuPage::ClientDisconnect => 11,
-            ingame_menu::MenuPage::AbortConfirm => 12,
+            ingame_menu::MenuPage::HostDisconnect => 12,
+            ingame_menu::MenuPage::AbortConfirm => 13,
         };
         let mut default_app = new_running_sandbox_app();
         let mut rebound_app = new_running_sandbox_app();
@@ -142989,7 +143196,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("local player")
             .control
             .control_style = true;
-        let mut covered_pages = [false; 13];
+        let mut covered_pages = [false; 14];
 
         for (default_menu, rebound_menu) in default_pages.into_iter().zip(rebound_pages) {
             let page = default_menu.page();
