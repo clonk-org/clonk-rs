@@ -89,7 +89,7 @@ use lc_engine::{
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, JoinPlayerConfig, Landscape, MaterialSet,
     LegacyCString, MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind,
     MissionAccessStore,
-    MouseDragSource,
+    MouseDragSource, MouseWorldCursor,
     MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
     MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
@@ -10316,6 +10316,8 @@ struct GameApp {
     /// every subsequently executed game tick applies it again until the
     /// pointer leaves the exact clamped viewport border.
     ingame_edge_scroll: Option<ActiveViewportEdgeScroll>,
+    /// Presentation-only C4MouseControl caption timing and placement.
+    ingame_mouse_caption: IngameMouseCaptionState,
     running_pointer_position: Option<GuiPoint>,
     /// Physical primary-button state (`CMouse::LDown`), independent of any
     /// control that installed itself as `pDragElement`.
@@ -12440,6 +12442,7 @@ enum StartupDialog {
 }
 
 const STARTUP_DIALOG_FADE_STEPS: u8 = 10;
+const INGAME_MOUSE_CAPTION_DELAY: u8 = 10;
 
 struct StartupDialogFade {
     outgoing: Option<StartupDialog>,
@@ -12514,6 +12517,71 @@ struct IngameMouseState {
 struct IngameMouseHelpCaption {
     text: String,
     keep_moves: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IngameMouseCursorKind {
+    Region,
+    Help,
+    Crosshair,
+    Dig,
+    DigMaterial,
+    Enter,
+    Grab,
+    Ungrab,
+    Carryable,
+    DigObject,
+    Chop,
+    Build,
+    Select,
+    Attack,
+    JumpLeft,
+    JumpRight,
+    Scrolling(lc_frontend::MouseCursorPhase),
+    Drop,
+    Throw,
+    Put,
+    Vehicle,
+    VehiclePut,
+    Construct,
+    Nothing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IngameMouseCaption {
+    text: String,
+    viewport_index: usize,
+    position: Vector2,
+    caption_bottom_y: Option<i32>,
+}
+
+#[derive(Clone, Debug)]
+struct IngameMouseCaptionState {
+    cursor: IngameMouseCursorKind,
+    time_on_target: u8,
+    keep_caption: usize,
+    caption: Option<IngameMouseCaption>,
+}
+
+impl Default for IngameMouseCaptionState {
+    fn default() -> Self {
+        Self {
+            cursor: IngameMouseCursorKind::Region,
+            time_on_target: 0,
+            keep_caption: 0,
+            caption: None,
+        }
+    }
+}
+
+impl IngameMouseCaptionState {
+    fn begin_move(&mut self) {
+        if self.keep_caption != 0 {
+            self.keep_caption -= 1;
+        } else {
+            self.caption = None;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19901,6 +19969,7 @@ impl GameApp {
             ingame_mouse_init_centered: false,
             ingame_viewport_mouse: None,
             ingame_edge_scroll: None,
+            ingame_mouse_caption: IngameMouseCaptionState::default(),
             running_pointer_position: None,
             primary_pointer_left_down: false,
             ingame_menu_close_pointer_capture: None,
@@ -21953,11 +22022,9 @@ impl GameApp {
         }
         if self.mode == AppMode::Running {
             self.initialize_ingame_mouse_for_wheel();
-            self.advance_ingame_mouse_help_caption();
+            self.advance_ingame_mouse_caption_lifetime();
             if !self.mouse_control {
-                if let Some(pointer) = self.ingame_pointer {
-                    self.refresh_ingame_mouse_help_region_caption(pointer);
-                }
+                self.restore_ingame_mouse_region_caption();
                 return Ok(());
             }
             let Some(owner) = self.local_controls.mouse_owner() else {
@@ -32076,6 +32143,7 @@ impl GameApp {
                     // this gesture moved merely because the menu owns the event.
                     self.ingame_pointer = None;
                     self.ingame_edge_scroll = None;
+                    self.ingame_mouse_caption = IngameMouseCaptionState::default();
                     return Ok(());
                 }
                 self.update_ingame_pointer(point)?;
@@ -32097,6 +32165,7 @@ impl GameApp {
         }
         self.ingame_pointer = None;
         self.ingame_edge_scroll = None;
+        self.ingame_mouse_caption = IngameMouseCaptionState::default();
     }
 
     fn ingame_edge_cursor_active(&self) -> bool {
@@ -32176,6 +32245,14 @@ impl GameApp {
                 })
     }
 
+    fn ingame_selection_drag_active(&self) -> bool {
+        self.mouse_state
+            .is_some_and(|state| state.motion.moved && state.motion.selection_frame)
+            || self
+                .ingame_right_mouse_state
+                .is_some_and(|state| state.motion.moved && state.motion.selection_frame)
+    }
+
     fn active_ingame_mouse_viewport(&self) -> Option<ActiveViewportProjection> {
         let projections = self.graphics.active_viewport_projections();
         match self.local_controls.mouse_owner() {
@@ -32208,6 +32285,7 @@ impl GameApp {
         self.ingame_edge_scroll = None;
         self.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
+        self.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.cancel_ingame_mouse_gestures();
     }
 
@@ -32455,7 +32533,9 @@ impl GameApp {
     }
 
     fn update_ingame_pointer(&mut self, point: GuiPoint) -> Result<(), EngineError> {
-        self.advance_ingame_mouse_help_caption();
+        self.advance_ingame_mouse_caption_lifetime();
+        let moving_drag_before_move = self.ingame_moving_drag_active();
+        let selection_drag_before_move = self.ingame_selection_drag_active();
         // GraphicsSystem::MouseMove applies ceil after dividing by the
         // presentation scale, before clamping into the assigned viewport.
         // The event path has already divided by scale and normally quantized
@@ -32644,6 +32724,11 @@ impl GameApp {
             if self.apply_ingame_edge_scroll()? {
                 self.snapshot = self.engine.snapshot();
             }
+            self.advance_ingame_mouse_caption(
+                pointer,
+                moving_drag_before_move,
+                selection_drag_before_move,
+            );
         } else {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.motion.moved = true;
@@ -32654,6 +32739,7 @@ impl GameApp {
             self.ingame_pointer = None;
             self.ingame_viewport_mouse = None;
             self.ingame_edge_scroll = None;
+            self.ingame_mouse_caption = IngameMouseCaptionState::default();
         }
         Ok(())
     }
@@ -32680,7 +32766,6 @@ impl GameApp {
     /// retained VpX/VpY so disappearing regions and resized layouts take
     /// effect without a new platform motion event.
     fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<bool, EngineError> {
-        self.advance_ingame_mouse_help_caption();
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
             self.ingame_edge_scroll = None;
             return Ok(false);
@@ -33152,6 +33237,7 @@ impl GameApp {
     }
 
     fn set_ingame_mouse_help_caption(&mut self, target: ObjectId, keep: bool) {
+        self.ingame_mouse_caption.caption = None;
         let Some(text) = self.engine.object_help_caption(target) else {
             return;
         };
@@ -33172,6 +33258,11 @@ impl GameApp {
             Some(_) => self.ingame_mouse_help_caption = None,
             None => {}
         }
+    }
+
+    fn advance_ingame_mouse_caption_lifetime(&mut self) {
+        self.advance_ingame_mouse_help_caption();
+        self.ingame_mouse_caption.begin_move();
     }
 
     fn refresh_ingame_mouse_help_region_caption(&mut self, pointer: ViewportPointer) {
@@ -33215,7 +33306,11 @@ impl GameApp {
     /// cursor-inventory cell. These regions sit above the world pick layer
     /// and retain the group's first object as their Target
     /// (C4Viewport.cpp:911-917; C4ObjectList.cpp:343-372).
-    fn ingame_inventory_region_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
+    fn ingame_inventory_region_hit(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<(ObjectId, Rect)> {
         let pointer = self.graphics.viewport_output_point_at(point)?;
         if pointer.owner != owner {
             return None;
@@ -33238,10 +33333,22 @@ impl GameApp {
         }
         let inventory = collect_crew_inventory(&self.engine, &self.snapshot, cursor);
         let section = lc_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
-        inventory.get(section).map(|item| item.object_id)
+        let region = lc_frontend::hud::inventory_region_rect(viewport, section, inventory.len())?;
+        inventory
+            .get(section)
+            .map(|item| (item.object_id, region))
     }
 
-    fn ingame_command_region_at(&self, owner: i32, point: GuiPoint) -> Option<u8> {
+    fn ingame_inventory_region_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
+        self.ingame_inventory_region_hit(owner, point)
+            .map(|(target, _)| target)
+    }
+
+    fn ingame_command_region_hit(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<(u8, String, Rect)> {
         if !self.display_flags.show_commands
             || self.object_menu.is_some()
             || self.engine.cursor_object_menu(owner).is_some()
@@ -33270,11 +33377,18 @@ impl GameApp {
             engine: &self.engine,
             bindings: &self.bindings,
             snapshot: &self.snapshot,
+            resources: &self.startup_tooltip_resources,
         };
         let commands = draw_commands::build_cursor_commands(&self.snapshot, cursor, &context);
-        lc_frontend::hud::command_region_index(viewport, point, &commands)
-            .and_then(|index| commands.get(index))
-            .map(|command| command.com)
+        let (index, rect) = lc_frontend::hud::command_region_hit(viewport, point, &commands)?;
+        commands
+            .get(index)
+            .map(|command| (command.com, command.caption.clone(), rect))
+    }
+
+    fn ingame_command_region_at(&self, owner: i32, point: GuiPoint) -> Option<u8> {
+        self.ingame_command_region_hit(owner, point)
+            .map(|(command, _, _)| command)
     }
 
     fn ingame_viewport_region(
@@ -33315,11 +33429,429 @@ impl GameApp {
             .map(IngameViewportRegion::Inventory)
     }
 
+    fn ingame_object_caption_name(&self, object: ObjectId) -> Option<String> {
+        let snapshot = self.snapshot.object(object)?;
+        let name = snapshot
+            .custom_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.engine
+                    .crew_object_info(object)
+                    .map(|info| info.name.clone())
+            })
+            .or_else(|| {
+                self.engine
+                    .definition_name(&snapshot.definition_id)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| snapshot.definition_id.clone());
+        Some(c4_presentation_text(&name))
+    }
+
+    fn localized_ingame_mouse_caption(
+        &self,
+        key: &str,
+        fallback: &str,
+        arguments: &[&str],
+        double_click: bool,
+    ) -> String {
+        let template = self
+            .startup_tooltip_resources
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string());
+        let mut caption = format_resource_string(template, arguments);
+        if double_click {
+            caption.push('|');
+            caption.push_str(
+                self.startup_tooltip_resources
+                    .get("IDS_CON_DOUBLECLICK")
+                    .map(String::as_str)
+                    .unwrap_or("(Double click)"),
+            );
+        }
+        caption
+    }
+
+    fn ingame_mouse_cursor_kind(cursor: MouseWorldCursor) -> IngameMouseCursorKind {
+        match cursor {
+            MouseWorldCursor::Crosshair => IngameMouseCursorKind::Crosshair,
+            MouseWorldCursor::Dig { material: false } => IngameMouseCursorKind::Dig,
+            MouseWorldCursor::Dig { material: true } => IngameMouseCursorKind::DigMaterial,
+            MouseWorldCursor::Enter(_) => IngameMouseCursorKind::Enter,
+            MouseWorldCursor::Grab(_) => IngameMouseCursorKind::Grab,
+            MouseWorldCursor::Ungrab(_) => IngameMouseCursorKind::Ungrab,
+            MouseWorldCursor::Carryable(_) => IngameMouseCursorKind::Carryable,
+            MouseWorldCursor::DigObject(_) => IngameMouseCursorKind::DigObject,
+            MouseWorldCursor::Chop(_) => IngameMouseCursorKind::Chop,
+            MouseWorldCursor::Build(_) => IngameMouseCursorKind::Build,
+            MouseWorldCursor::Select(_) => IngameMouseCursorKind::Select,
+            MouseWorldCursor::Attack(_) => IngameMouseCursorKind::Attack,
+            MouseWorldCursor::JumpLeft => IngameMouseCursorKind::JumpLeft,
+            MouseWorldCursor::JumpRight => IngameMouseCursorKind::JumpRight,
+        }
+    }
+
+    fn ingame_world_cursor_caption(
+        &self,
+        cursor: MouseWorldCursor,
+        point: Vector2,
+    ) -> Option<String> {
+        let target_caption =
+            |key: &str, fallback: &str, target: ObjectId, double_click: bool| {
+                let name = self.ingame_object_caption_name(target)?;
+                Some(self.localized_ingame_mouse_caption(
+                    key,
+                    fallback,
+                    &[name.as_str()],
+                    double_click,
+                ))
+            };
+        match cursor {
+            MouseWorldCursor::Select(target) => {
+                target_caption("IDS_CON_SELECT", "Select %s.", target, false)
+            }
+            MouseWorldCursor::JumpLeft | MouseWorldCursor::JumpRight => Some(
+                self.localized_ingame_mouse_caption("IDS_CON_JUMP", "Jump.", &[], false),
+            ),
+            MouseWorldCursor::Grab(target) => {
+                target_caption("IDS_CON_GRAB", "Grab %s.", target, true)
+            }
+            MouseWorldCursor::Ungrab(target) => {
+                target_caption("IDS_CON_UNGRAB", "Let go of %s.", target, true)
+            }
+            MouseWorldCursor::Build(target) => {
+                target_caption("IDS_CON_BUILD", "Build %s.", target, true)
+            }
+            MouseWorldCursor::Chop(target) => {
+                target_caption("IDS_CON_CHOP", "Chop %s.", target, true)
+            }
+            MouseWorldCursor::Carryable(target) => {
+                target_caption("IDS_CON_COLLECT", "Collect %s.", target, true)
+            }
+            MouseWorldCursor::DigObject(target) => {
+                target_caption("IDS_CON_DIGOUT", "Dig out %s.", target, true)
+            }
+            MouseWorldCursor::Enter(target) => {
+                target_caption("IDS_CON_ENTER", "Enter %s.", target, true)
+            }
+            MouseWorldCursor::Attack(target) => {
+                target_caption("IDS_CON_ATTACK", "Attack %s.", target, true)
+            }
+            MouseWorldCursor::Dig { material: true } => {
+                let material = self
+                    .snapshot
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.material_at(point.x, point.y))?;
+                let material = self.engine.materials().get_by_id(material)?;
+                let name = material
+                    .dig_to_object_name()
+                    .and_then(|definition| self.engine.definition_name(definition))
+                    .map(c4_presentation_text)
+                    .unwrap_or_default();
+                Some(self.localized_ingame_mouse_caption(
+                    "IDS_CON_DIGOUT",
+                    "Dig out %s.",
+                    &[name.as_str()],
+                    true,
+                ))
+            }
+            MouseWorldCursor::Crosshair | MouseWorldCursor::Dig { material: false } => None,
+        }
+    }
+
+    fn active_ingame_moving_drag(&self) -> Option<(MouseDragSource, Vec<ObjectId>)> {
+        let state = self
+            .mouse_state
+            .as_ref()
+            .filter(|state| {
+                state.motion.region_drag_started || state.motion.world_drag_started
+            })
+            .or_else(|| {
+                self.ingame_right_mouse_state.as_ref().filter(|state| {
+                    state.motion.region_drag_started || state.motion.world_drag_started
+                })
+        })?;
+        let target = state.down_target?;
+        let mut selected = if state.motion.region_drag_started {
+            self.ingame_dragged_objects.clone()
+        } else if self.ingame_dragged_objects.contains(&target) {
+            self.ingame_dragged_objects.clone()
+        } else {
+            vec![target]
+        };
+        selected.retain(|object| {
+            self.snapshot
+                .object(*object)
+                .is_some_and(|object| object.status != lc_engine::ObjectStatus::Deleted)
+        });
+        let first = self.snapshot.object(*selected.first()?)?;
+        let source = if first.ocf & lc_engine::ocf::CARRYABLE != 0 {
+            MouseDragSource::Carryable
+        } else {
+            MouseDragSource::Vehicle
+        };
+        Some((source, selected))
+    }
+
+    fn ingame_moving_drag_caption(
+        &self,
+        pointer: ViewportPointer,
+    ) -> Option<(IngameMouseCursorKind, Option<String>)> {
+        let (source, selected) = self.active_ingame_moving_drag()?;
+        if self.ingame_pointer_fog_blocked(pointer) {
+            return Some((IngameMouseCursorKind::Nothing, None));
+        }
+        let target = self
+            .keyboard_modifiers
+            .ctrl()
+            .then(|| {
+                self.graphics.object_at_point_with_ocf(
+                    &self.snapshot,
+                    pointer.owner,
+                    pointer.screen,
+                    lc_engine::ocf::CONTAINER,
+                )
+            })
+            .flatten();
+        let Some(target) = target else {
+            let kind = match source {
+                MouseDragSource::Carryable => match self.engine.mouse_drag_carryable_command(
+                    pointer.owner,
+                    ingame_pointer_world_pixel(pointer),
+                ) {
+                    Some(CommandId::Drop) => IngameMouseCursorKind::Drop,
+                    Some(CommandId::Throw) => IngameMouseCursorKind::Throw,
+                    _ => IngameMouseCursorKind::Carryable,
+                },
+                MouseDragSource::Vehicle => IngameMouseCursorKind::Vehicle,
+            };
+            return Some((kind, None));
+        };
+        let target_name = self.ingame_object_caption_name(target)?;
+        let selected_name = if selected.len() > 1 {
+            let noun = match source {
+                MouseDragSource::Carryable => self
+                    .startup_tooltip_resources
+                    .get("IDS_CON_ITEMS")
+                    .map(String::as_str)
+                    .unwrap_or("items"),
+                MouseDragSource::Vehicle => self
+                    .startup_tooltip_resources
+                    .get("IDS_CON_VEHICLES")
+                    .map(String::as_str)
+                    .unwrap_or("Vehicles"),
+            };
+            format!("{} {noun}", selected.len())
+        } else {
+            self.ingame_object_caption_name(selected[0])?
+        };
+        let (kind, key, fallback) = match source {
+            MouseDragSource::Carryable => {
+                (IngameMouseCursorKind::Put, "IDS_CON_PUT", "Drop %s in %s")
+            }
+            MouseDragSource::Vehicle => (
+                IngameMouseCursorKind::VehiclePut,
+                "IDS_CON_VEHICLEPUT",
+                "Push %s into %s.",
+            ),
+        };
+        Some((
+            kind,
+            Some(self.localized_ingame_mouse_caption(
+                key,
+                fallback,
+                &[selected_name.as_str(), target_name.as_str()],
+                false,
+            )),
+        ))
+    }
+
+    fn set_ingame_mouse_caption(&mut self, text: String, caption_bottom_y: Option<i32>) {
+        self.ingame_mouse_help_caption = None;
+        let Some(retained) = self.ingame_viewport_mouse else {
+            return;
+        };
+        let viewport_y = self
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|viewport| viewport.index == retained.viewport_index)
+            .map(|viewport| viewport.rect.y);
+        let Some(viewport_y) = viewport_y else {
+            return;
+        };
+        self.ingame_mouse_caption.caption = Some(IngameMouseCaption {
+            text,
+            viewport_index: retained.viewport_index,
+            position: retained.position,
+            caption_bottom_y: caption_bottom_y.map(|bottom| bottom - viewport_y),
+        });
+    }
+
+    fn restore_ingame_mouse_region_caption(&mut self) -> bool {
+        let Some(pointer) = self.ingame_pointer else {
+            return false;
+        };
+        let Some(region) = self.ingame_viewport_region(pointer.owner, pointer.screen) else {
+            return false;
+        };
+        self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Region;
+        match region {
+            IngameViewportRegion::ViewportButton(button) => {
+                let viewport = self
+                    .graphics
+                    .active_viewport_projections()
+                    .into_iter()
+                    .rev()
+                    .find(|viewport| {
+                        viewport.owner == pointer.owner
+                            && viewport.contains_output_point((
+                                pointer.screen.x,
+                                pointer.screen.y,
+                            ))
+                    });
+                if let Some(viewport) = viewport {
+                    let (key, fallback) = match button {
+                        lc_frontend::hud::ViewportButton::Help => ("IDS_CON_HELP", "Help"),
+                        lc_frontend::hud::ViewportButton::PlayerMenu => {
+                            ("IDS_CON_PLAYERMENU", "Player menu")
+                        }
+                        lc_frontend::hud::ViewportButton::Chat => ("IDS_DLG_CHAT", "Chat"),
+                    };
+                    let caption =
+                        self.localized_ingame_mouse_caption(key, fallback, &[], false);
+                    let rect = lc_frontend::hud::viewport_button_rect(viewport.rect, button);
+                    self.set_ingame_mouse_caption(caption, Some(rect.y));
+                }
+            }
+            IngameViewportRegion::Command(_) => {
+                if let Some((_, caption, rect)) =
+                    self.ingame_command_region_hit(pointer.owner, pointer.screen)
+                {
+                    self.set_ingame_mouse_caption(caption, Some(rect.y));
+                }
+            }
+            IngameViewportRegion::Inventory(target) if self.ingame_mouse_help => {
+                self.set_ingame_mouse_help_caption(target, false);
+            }
+            IngameViewportRegion::Inventory(target) => {
+                if let (Some(name), Some((_, rect))) = (
+                    self.ingame_object_caption_name(target),
+                    self.ingame_inventory_region_hit(pointer.owner, pointer.screen),
+                ) {
+                    self.set_ingame_mouse_caption(name, Some(rect.y));
+                }
+            }
+        }
+        true
+    }
+
+    fn advance_ingame_time_on_target(&mut self, kind: IngameMouseCursorKind) -> bool {
+        let state = &mut self.ingame_mouse_caption;
+        if state.cursor == kind {
+            state.time_on_target = state.time_on_target.saturating_add(1);
+            state.time_on_target >= INGAME_MOUSE_CAPTION_DELAY && state.keep_caption == 0
+        } else {
+            state.cursor = kind;
+            state.time_on_target = 0;
+            false
+        }
+    }
+
+    fn advance_ingame_mouse_caption(
+        &mut self,
+        pointer: ViewportPointer,
+        moving_drag_before_move: bool,
+        selection_drag_before_move: bool,
+    ) {
+        let over_region = self.restore_ingame_mouse_region_caption();
+
+        if moving_drag_before_move && self.ingame_moving_drag_active() {
+            if let Some((kind, caption)) = self.ingame_moving_drag_caption(pointer) {
+                self.ingame_mouse_caption.cursor = kind;
+                if let Some(caption) = caption {
+                    self.set_ingame_mouse_caption(caption, None);
+                }
+            }
+            return;
+        }
+
+        if self.ingame_construction_drag_active() {
+            self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Construct;
+            return;
+        }
+
+        if over_region {
+            return;
+        }
+
+        if let Some(scroll) = self.ingame_edge_scroll {
+            self.ingame_mouse_caption.cursor =
+                IngameMouseCursorKind::Scrolling(scroll.edge.cursor);
+            return;
+        }
+
+        if selection_drag_before_move && self.ingame_selection_drag_active() {
+            return;
+        }
+
+        if self.ingame_mouse_help {
+            let show_caption =
+                self.advance_ingame_time_on_target(IngameMouseCursorKind::Help);
+            if show_caption && self.ingame_mouse_help_caption.is_none() {
+                let caption = self.localized_ingame_mouse_caption(
+                    "IDS_CON_HELP",
+                    "Help",
+                    &[],
+                    false,
+                );
+                self.set_ingame_mouse_caption(caption, None);
+            }
+            return;
+        }
+
+        if !self.mouse_control {
+            self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Nothing;
+            return;
+        }
+        let point = ingame_pointer_world_pixel(pointer);
+        let target = self.ingame_primary_mouse_target(pointer.owner, pointer.screen);
+        let cursor = self.engine.mouse_world_cursor(
+            pointer.owner,
+            target,
+            point,
+            self.keyboard_modifiers.ctrl(),
+        );
+        if self.ingame_pointer_fog_blocked(pointer)
+            && target.is_none()
+            && !matches!(
+                cursor,
+                MouseWorldCursor::JumpLeft | MouseWorldCursor::JumpRight
+            )
+        {
+            self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Nothing;
+            return;
+        }
+        let kind = Self::ingame_mouse_cursor_kind(cursor);
+        let show_caption = self.advance_ingame_time_on_target(kind);
+        if show_caption {
+            if let Some(caption) = self.ingame_world_cursor_caption(cursor, point) {
+                self.set_ingame_mouse_caption(caption, None);
+            }
+        }
+    }
+
     fn handle_ingame_mouse_button(
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        self.advance_ingame_mouse_caption_lifetime();
         if self.ingame_construction_drag_active() {
+            self.restore_ingame_mouse_region_caption();
             if button_state == ElementState::Released {
                 self.finish_construction_menu_drag()?;
             }
@@ -33334,6 +33866,7 @@ impl GameApp {
         // moving/construct drag; ordinary releases over a menu stay GUI-owned.
         let moving_drag = self.ingame_moving_drag_active();
         if moving_drag && button_state == ElementState::Released {
+            self.restore_ingame_mouse_region_caption();
             return self.on_ingame_mouse_up();
         }
         let script_menu_target = if moving_drag || self.ingame_mouse_help {
@@ -33393,6 +33926,7 @@ impl GameApp {
             self.cancel_ingame_mouse_gestures();
             return Ok(());
         }
+        self.restore_ingame_mouse_region_caption();
         match button_state {
             ElementState::Pressed => {
                 let now = Instant::now();
@@ -33414,7 +33948,6 @@ impl GameApp {
             }
             ElementState::Released => {
                 if std::mem::take(&mut self.ingame_ignore_left_up) {
-                    self.advance_ingame_mouse_help_caption();
                     if let Some(pointer) = self.ingame_pointer {
                         self.refresh_ingame_mouse_help_region_caption(pointer);
                     }
@@ -33729,10 +34262,9 @@ impl GameApp {
             return self.handle_classic_lobby_middle_button(button_state);
         }
         if self.mode == AppMode::Running {
-            self.initialize_ingame_mouse_center()?;
-            self.advance_ingame_mouse_help_caption();
-            if let Some(pointer) = self.ingame_pointer {
-                self.refresh_ingame_mouse_help_region_caption(pointer);
+            if !self.initialize_ingame_mouse_center()? {
+                self.advance_ingame_mouse_caption_lifetime();
+                self.restore_ingame_mouse_region_caption();
             }
         }
         Ok(())
@@ -33742,13 +34274,14 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        self.advance_ingame_mouse_caption_lifetime();
         if self.ingame_construction_drag_active() {
+            self.restore_ingame_mouse_region_caption();
             if button_state == ElementState::Released {
                 self.finish_construction_menu_drag()?;
             }
             return Ok(());
         }
-        self.advance_ingame_mouse_help_caption();
         if self.ingame_mouse_help && button_state == ElementState::Released {
             self.ingame_right_mouse_state = None;
             self.ingame_mouse_help = false;
@@ -33798,6 +34331,8 @@ impl GameApp {
             self.ingame_dragged_objects.clear();
             return Ok(());
         }
+
+        self.restore_ingame_mouse_region_caption();
 
         if button_state == ElementState::Pressed {
             let Some(pointer) = self.ingame_pointer else {
@@ -34391,7 +34926,6 @@ impl GameApp {
     }
 
     fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
-        self.advance_ingame_mouse_help_caption();
         let Some(pointer) = self.ingame_pointer else {
             self.mouse_state = None;
             return Ok(());
@@ -34500,7 +35034,6 @@ impl GameApp {
     }
 
     fn on_ingame_mouse_up(&mut self) -> Result<(), EngineError> {
-        self.advance_ingame_mouse_help_caption();
         if let Some(pointer) = self.ingame_pointer {
             self.refresh_ingame_mouse_help_region_caption(pointer);
         }
@@ -34700,7 +35233,6 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
-        self.advance_ingame_mouse_help_caption();
         if let Some(pointer) = self.ingame_pointer {
             self.refresh_ingame_mouse_help_region_caption(pointer);
         }
@@ -36187,6 +36719,7 @@ impl GameApp {
                 self.ingame_pointer = None;
                 self.ingame_viewport_mouse = None;
                 self.ingame_edge_scroll = None;
+                self.ingame_mouse_caption = IngameMouseCaptionState::default();
                 self.running_pointer_position = None;
                 self.scoreboard_close_pointer_capture = false;
             }
@@ -47779,13 +48312,19 @@ impl GameApp {
                 // Native MouseControl::Execute runs after Players/Script on
                 // every successfully executed game frame. Re-run the last
                 // clamped border move even when the OS emitted no new motion.
+                let moving_drag_before_move = self.ingame_moving_drag_active();
+                let selection_drag_before_move = self.ingame_selection_drag_active();
+                let mut repeated_mouse_move = false;
                 let player_view_scrolled = if self.ingame_edge_scroll.is_some() {
-                    self.advance_ingame_mouse_help_caption();
+                    repeated_mouse_move = true;
+                    self.advance_ingame_mouse_caption_lifetime();
                     self.apply_ingame_edge_scroll()?
                 } else if self.engine.frame() % 5 == 0 {
                     if self.initialize_ingame_mouse_center()? {
                         false
                     } else {
+                        repeated_mouse_move = true;
+                        self.advance_ingame_mouse_caption_lifetime();
                         self.refresh_ingame_edge_scroll_tick5()?
                     }
                 } else {
@@ -47793,6 +48332,15 @@ impl GameApp {
                 };
                 if player_view_scrolled {
                     self.snapshot = self.engine.snapshot();
+                }
+                if repeated_mouse_move {
+                    if let Some(pointer) = self.ingame_pointer {
+                        self.advance_ingame_mouse_caption(
+                            pointer,
+                            moving_drag_before_move,
+                            selection_drag_before_move,
+                        );
+                    }
                 }
                 self.refresh_ingame_region_drag_cursor_for_execute();
                 // DragConstruct refreshes its ConstructionCheck phase during
@@ -52094,6 +52642,7 @@ impl GameApp {
                     engine: &self.engine,
                     bindings: &self.bindings,
                     snapshot: &self.snapshot,
+                    resources: &self.startup_tooltip_resources,
                 };
                 let commands =
                     draw_commands::build_cursor_commands(&self.snapshot, cursor_id, &ctx);
@@ -52503,7 +53052,8 @@ impl GameApp {
         // C4Viewport draws this local control layer after menus and game
         // messages. Classic Chat is the intentionally unsupported external
         // IRC client, so its conditional row is inactive in this port.
-        if !(self.engine.film() && self.engine.replay()) {
+        let mouse_control_overlay_visible = !(self.engine.film() && self.engine.replay());
+        if mouse_control_overlay_visible {
             let mouse_viewport_index = self
                 .active_ingame_mouse_viewport()
                 .map(|viewport| viewport.index);
@@ -52616,8 +53166,7 @@ impl GameApp {
             } else {
                 false
             };
-        let help_cursor = self
-            .ingame_help_cursor_active()
+        let help_cursor = (mouse_control_overlay_visible && self.ingame_help_cursor_active())
             .then(|| self.ingame_pointer.map(|pointer| pointer.screen))
             .flatten();
         if !construction_cursor_drawn
@@ -52640,15 +53189,18 @@ impl GameApp {
                 }
             }
         }
-        let help_caption = self
-            .ingame_mouse_help_caption
-            .as_ref()
-            .zip(self.ingame_pointer)
-            .and_then(|(caption, pointer)| {
-                self.graphics
-                    .viewport_rect(pointer.owner)
-                    .map(|facet| (caption.text.clone(), pointer.screen, facet))
-            });
+        let help_caption = mouse_control_overlay_visible
+            .then(|| {
+                self.ingame_mouse_help_caption
+                    .as_ref()
+                    .zip(self.ingame_pointer)
+                    .and_then(|(caption, pointer)| {
+                        self.graphics
+                            .viewport_rect(pointer.owner)
+                            .map(|facet| (caption.text.clone(), pointer.screen, facet))
+                    })
+            })
+            .flatten();
         if let (Some((caption, pointer, facet)), Some(font)) =
             (help_caption, self.assets.global_tooltip_font.clone())
         {
@@ -52661,6 +53213,37 @@ impl GameApp {
                 pointer.x as i32,
                 pointer.y as i32,
                 &caption,
+                Some(&frame_gamma),
+            );
+        } else if let Some((caption, viewport)) = mouse_control_overlay_visible
+            .then(|| {
+                self.ingame_mouse_caption.caption.clone().and_then(|caption| {
+                    self.graphics
+                        .active_viewport_projections()
+                        .into_iter()
+                        .find(|viewport| viewport.index == caption.viewport_index)
+                        .map(|viewport| (caption, viewport.rect))
+                })
+            })
+            .flatten()
+        {
+            let fonts = self.assets.clonk_fonts.clone();
+            let fallback = self.assets.font_arc();
+            let font =
+                lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+            let pointer = GuiPoint::new(
+                viewport.x.saturating_add(caption.position.x) as f32,
+                viewport.y.saturating_add(caption.position.y) as f32,
+            );
+            lc_frontend::hud::draw_mouse_caption(
+                self.graphics.surface_mut(),
+                &font,
+                viewport,
+                pointer,
+                caption
+                    .caption_bottom_y
+                    .map(|bottom| viewport.y.saturating_add(bottom)),
+                &caption.text,
                 Some(&frame_gamma),
             );
         }
@@ -54126,6 +54709,7 @@ impl GameApp {
         self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
+        self.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.running_pointer_position = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -55325,6 +55909,7 @@ impl GameApp {
         self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
+        self.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -55715,6 +56300,7 @@ impl GameApp {
         self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
+        self.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -56129,6 +56715,7 @@ impl GameApp {
         self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
+        self.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -56625,6 +57212,7 @@ impl GameApp {
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
         self.ingame_mouse_help = false;
         self.ingame_mouse_help_caption = None;
+        self.ingame_mouse_caption = IngameMouseCaptionState::default();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -58100,6 +58688,7 @@ struct AppCommandContext<'a> {
     engine: &'a Engine,
     bindings: &'a KeyboardBindings,
     snapshot: &'a SimulationSnapshot,
+    resources: &'a HashMap<String, String>,
 }
 
 impl draw_commands::CommandContext for AppCommandContext<'_> {
@@ -58154,6 +58743,41 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
             }
         }
         None
+    }
+
+    fn control_description(&self, definition_id: &str, function: &str) -> Option<String> {
+        self.engine
+            .definition_control_description(definition_id, function)
+            .map(|description| c4_presentation_text(&description))
+    }
+
+    fn object_name(&self, object: &ObjectSnapshot) -> String {
+        let name = object
+            .custom_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.engine
+                    .crew_object_info(object.id)
+                    .map(|info| info.name.clone())
+            })
+            .or_else(|| {
+                self.engine
+                    .definition_name(&object.definition_id)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| object.definition_id.clone());
+        c4_presentation_text(&name)
+    }
+
+    fn localized_caption(&self, key: &str, fallback: &str, arguments: &[&str]) -> String {
+        let template = self
+            .resources
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| fallback.to_owned());
+        format_resource_string(template, arguments)
     }
 
     fn def_shape(&self, definition_id: &str) -> Option<lc_engine::DefinitionRect> {
@@ -63059,6 +63683,85 @@ mod tests {
     }
 
     #[test]
+    fn l054_fog_keeps_ignore_fow_target_and_jump_captions() {
+        let mut app = new_running_sandbox_app();
+        let (owner, _cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 0);
+        let target = spawn_mouse_fog_target(
+            &mut app,
+            "M54F",
+            Vector2::new(cursor_position.x + 100, cursor_position.y),
+            layer,
+            lc_engine::CATEGORY_OBJECT | lc_engine::CATEGORY_MOUSE_SELECT | C4D_IGNORE_FOW,
+        );
+        render_mouse_test_app(&mut app);
+
+        let target_point = mouse_test_object_point(&app, owner, target);
+        let target_point = GuiPoint::new(target_point.x.ceil(), target_point.y.ceil());
+        let target_pointer = app
+            .graphics
+            .viewport_point_at(target_point)
+            .expect("IgnoreFoW caption point maps into viewport");
+        assert!(app.ingame_pointer_fog_blocked(target_pointer));
+        assert_eq!(app.ingame_primary_mouse_target(owner, target_point), Some(target));
+        let target_cursor = app.engine.mouse_world_cursor(
+            owner,
+            Some(target),
+            ingame_pointer_world_pixel(target_pointer),
+            false,
+        );
+        assert_eq!(target_cursor, MouseWorldCursor::Select(target));
+
+        let move_stably = |app: &mut GameApp, point: GuiPoint| {
+            for _ in 0..=INGAME_MOUSE_CAPTION_DELAY {
+                app.handle_cursor_moved(PhysicalPosition::new(
+                    f64::from(point.x),
+                    f64::from(point.y),
+                ))
+                .expect("route stable fog-covered hover move");
+            }
+        };
+        let expected = app
+            .ingame_world_cursor_caption(target_cursor, ingame_pointer_world_pixel(target_pointer))
+            .expect("Select has a caption");
+        move_stably(&mut app, target_point);
+        assert_eq!(
+            app.ingame_mouse_caption.caption.as_ref().map(|caption| &caption.text),
+            Some(&expected),
+            "C4D_IgnoreFoW keeps its world cursor caption in fog"
+        );
+
+        let jump = Vector2::new(cursor_position.x + 8, cursor_position.y - 15);
+        let (jump_x, jump_y) = app
+            .graphics
+            .world_to_screen(owner, jump)
+            .expect("jump zone maps into viewport");
+        let jump_point = GuiPoint::new(jump_x.ceil(), jump_y.ceil());
+        let jump_pointer = app
+            .graphics
+            .viewport_point_at(jump_point)
+            .expect("jump caption point maps into viewport");
+        let jump = ingame_pointer_world_pixel(jump_pointer);
+        assert!(app.ingame_pointer_fog_blocked(jump_pointer));
+        let jump_cursor = app.engine.mouse_world_cursor(
+            owner,
+            app.ingame_primary_mouse_target(owner, jump_point),
+            jump,
+            false,
+        );
+        assert_eq!(jump_cursor, MouseWorldCursor::JumpRight);
+
+        let expected = app
+            .ingame_world_cursor_caption(jump_cursor, jump)
+            .expect("Jump has a caption");
+        move_stably(&mut app, jump_point);
+        assert_eq!(
+            app.ingame_mouse_caption.caption.as_ref().map(|caption| &caption.text),
+            Some(&expected),
+            "jump captions remain available when the endpoint is fog-covered"
+        );
+    }
+
+    #[test]
     fn mouse_fog_turns_moving_object_release_into_noop_command() {
         let mut app = new_running_sandbox_app();
         let (owner, _cursor, cursor_position, layer) = configure_mouse_fog(&mut app, 60);
@@ -64228,6 +64931,450 @@ mod tests {
     }
 
     #[test]
+    fn l054_mouse_hover_caption_waits_ten_stable_moves_and_clears_on_miss() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app
+            .engine
+            .crew_cursor(owner)
+            .expect("sandbox has a cursor crew member");
+        let crew = app
+            .engine
+            .object_snapshot(crew)
+            .expect("cursor crew member remains live");
+        let mut vehicle = Definition::from_script(
+            "MHOV",
+            "Hover wagon",
+            "#strict\n",
+        )
+        .expect("hover vehicle definition compiles");
+        vehicle.set_category(lc_engine::CATEGORY_VEHICLE);
+        vehicle.set_grab(1);
+        vehicle.set_shape_rect(Some(lc_engine::DefinitionRect::new(-5, -5, 10, 10)));
+        app.engine
+            .register_definition(vehicle)
+            .expect("register hover vehicle definition");
+        let mut spawn = SpawnConfig::new("MHOV")
+            .with_position(Vector2::new(crew.position.x - 60, crew.position.y));
+        if let Some(layer) = crew.layer {
+            spawn = spawn.with_layer(layer);
+        }
+        let target = app
+            .engine
+            .spawn_object(spawn)
+            .expect("spawn hover vehicle");
+        render_mouse_test_app(&mut app);
+        let target_point = mouse_test_object_point(&app, owner, target);
+        let pointer = app
+            .graphics
+            .viewport_point_at(target_point)
+            .expect("hover vehicle point maps into its viewport");
+        let world = ingame_pointer_world_pixel(pointer);
+        assert_eq!(
+            app.engine
+                .mouse_world_cursor(owner, Some(target), world, false),
+            MouseWorldCursor::Grab(target)
+        );
+
+        let move_to = |app: &mut GameApp, point: GuiPoint| {
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(point.x),
+                f64::from(point.y),
+            ))
+            .expect("route physical hover move");
+        };
+        move_to(&mut app, target_point);
+        assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Grab);
+        assert_eq!(app.ingame_mouse_caption.time_on_target, 0);
+        assert!(app.ingame_mouse_caption.caption.is_none());
+        for _ in 1..INGAME_MOUSE_CAPTION_DELAY {
+            move_to(&mut app, target_point);
+        }
+        assert_eq!(
+            app.ingame_mouse_caption.time_on_target,
+            INGAME_MOUSE_CAPTION_DELAY - 1
+        );
+        assert!(app.ingame_mouse_caption.caption.is_none());
+
+        move_to(&mut app, target_point);
+        let expected = app
+            .ingame_world_cursor_caption(MouseWorldCursor::Grab(target), world)
+            .expect("Grab has a localized caption");
+        let caption = app
+            .ingame_mouse_caption
+            .caption
+            .as_ref()
+            .expect("tenth stable Grab move shows the caption");
+        assert_eq!(caption.text, expected);
+        assert!(caption.text.contains('|'));
+
+        let (miss, _) = mouse_test_empty_point(&app, owner, target_point, None);
+        move_to(&mut app, miss);
+        assert!(
+            app.ingame_mouse_caption.caption.is_none(),
+            "the next unmatched native Move clears a non-kept caption"
+        );
+    }
+
+    #[test]
+    fn l054_inventory_hover_caption_is_immediate_and_anchored_to_region_top() {
+        let (mut app, owner, _crew, _first, target, region_point) =
+            inventory_region_fixture();
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("inventory test has a local viewport");
+        let (_, region) = app
+            .ingame_inventory_region_hit(owner, region_point)
+            .expect("inventory point retains its region geometry");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("move over inventory region");
+        let caption = app
+            .ingame_mouse_caption
+            .caption
+            .as_ref()
+            .expect("inventory region installs its caption immediately");
+        assert_eq!(caption.text, app.ingame_object_caption_name(target).unwrap());
+        assert_eq!(caption.caption_bottom_y, Some(region.y - viewport.y));
+        assert_eq!(
+            app.ingame_mouse_caption.cursor,
+            IngameMouseCursorKind::Region
+        );
+
+        let (miss, _) = mouse_test_empty_point(&app, owner, region_point, None);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(miss.x),
+            f64::from(miss.y),
+        ))
+        .expect("move away from inventory region");
+        assert!(app.ingame_mouse_caption.caption.is_none());
+    }
+
+    #[test]
+    fn l054_ctrl_region_drags_show_put_and_vehicle_put_captions() {
+        for vehicle_drag in [false, true] {
+            let mut app = new_running_sandbox_app();
+            let owner = app.local_owner;
+            let crew = app
+                .engine
+                .crew_cursor(owner)
+                .expect("sandbox has a cursor crew member");
+            let crew_state = app
+                .engine
+                .object_snapshot(crew)
+                .expect("cursor crew member remains live");
+            let mut dragged = Definition::from_script(
+                "M54D",
+                if vehicle_drag {
+                    "Caption wagon"
+                } else {
+                    "Caption item"
+                },
+                "#strict\n",
+            )
+            .expect("dragged definition compiles");
+            if vehicle_drag {
+                dragged.set_category(lc_engine::CATEGORY_VEHICLE);
+                dragged.set_grab(1);
+            } else {
+                dragged.set_category(lc_engine::CATEGORY_OBJECT);
+                dragged.set_collectible(true);
+            }
+            app.engine
+                .register_definition(dragged)
+                .expect("register dragged definition");
+            let dragged = app
+                .engine
+                .spawn_object(SpawnConfig::new("M54D").with_container(crew))
+                .expect("put dragged object in cursor inventory");
+
+            let mut container =
+                Definition::from_script("M54C", "Caption container", "#strict\n")
+                    .expect("container definition compiles");
+            container.set_category(lc_engine::CATEGORY_STRUCTURE);
+            container.set_grab_put_get(lc_engine::GRAB_PUT_GET_PUT);
+            container.set_shape_rect(Some(lc_engine::DefinitionRect::new(-6, -6, 12, 12)));
+            app.engine
+                .register_definition(container)
+                .expect("register caption container");
+            let mut container_spawn = SpawnConfig::new("M54C").with_position(Vector2::new(
+                crew_state.position.x + 60,
+                crew_state.position.y,
+            ));
+            if let Some(layer) = crew_state.layer {
+                container_spawn = container_spawn.with_layer(layer);
+            }
+            let container = app
+                .engine
+                .spawn_object(container_spawn)
+                .expect("spawn caption container");
+            while app.engine.frame() % 5 != 4 {
+                app.update().expect("align the next update to native Tick5");
+            }
+            render_mouse_test_app(&mut app);
+
+            let viewport = app
+                .graphics
+                .viewport_rect(owner)
+                .expect("caption drag has a local viewport");
+            let inventory_point = GuiPoint::new(
+                (viewport.x
+                    + lc_frontend::hud::SYMBOL_BORDER
+                    + lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
+                (viewport.y + viewport.height as i32
+                    - lc_frontend::hud::SYMBOL_BORDER
+                    - lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
+            );
+            assert_eq!(
+                app.ingame_inventory_region_target(owner, inventory_point),
+                Some(dragged)
+            );
+            let container_point = mouse_test_object_point(&app, owner, container);
+            assert_eq!(
+                app.graphics.object_at_point_with_ocf(
+                    &app.snapshot,
+                    owner,
+                    container_point,
+                    lc_engine::ocf::CONTAINER,
+                ),
+                Some(container)
+            );
+
+            let (key, template, expected_kind, expected_cursor) = if vehicle_drag {
+                (
+                    "IDS_CON_VEHICLEPUT",
+                    "VEHICLE <%s> INTO <%s>",
+                    IngameMouseCursorKind::VehiclePut,
+                    IngameRegionDragCursor::VehiclePut(container),
+                )
+            } else {
+                (
+                    "IDS_CON_PUT",
+                    "ITEM <%s> INTO <%s>",
+                    IngameMouseCursorKind::Put,
+                    IngameRegionDragCursor::Put(container),
+                )
+            };
+            app.startup_tooltip_resources
+                .insert(key.to_string(), template.to_string());
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(inventory_point.x),
+                f64::from(inventory_point.y),
+            ))
+            .expect("move onto dragged inventory object");
+            app.handle_ingame_mouse_button(ElementState::Pressed)
+                .expect("press inventory object");
+            app.handle_modifiers_changed(ModifiersState::CTRL)
+                .expect("hold Control for put targeting");
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(container_point.x),
+                f64::from(container_point.y),
+            ))
+            .expect("cross moving-drag threshold over container");
+            assert!(
+                app.ingame_mouse_caption.caption.is_none(),
+                "DragNone starts the moving drag but does not run DragMoving yet"
+            );
+            app.update()
+                .expect("run the stationary native Tick5 DragMoving update");
+
+            assert_eq!(app.ingame_mouse_caption.cursor, expected_kind);
+            assert_eq!(
+                app.mouse_state
+                    .and_then(|state| state.motion.region_drag_cursor),
+                Some(expected_cursor)
+            );
+            let caption = app
+                .ingame_mouse_caption
+                .caption
+                .as_ref()
+                .expect("Control drag installs a put caption");
+            let expected_subject = if vehicle_drag {
+                "Caption wagon"
+            } else {
+                "Caption item"
+            };
+            assert_eq!(
+                caption.text,
+                template
+                    .replacen("%s", expected_subject, 1)
+                    .replacen("%s", "Caption container", 1)
+            );
+            assert_eq!(caption.caption_bottom_y, None);
+        }
+    }
+
+    #[test]
+    fn l054_group_put_caption_uses_remaining_live_selection() {
+        let (mut app, owner, crew, _first, _second, region_point) =
+            inventory_region_fixture();
+        let newest = app
+            .engine
+            .spawn_object(SpawnConfig::new("MITM").with_container(crew))
+            .expect("add a third grouped inventory item");
+        let crew_state = app
+            .engine
+            .object_snapshot(crew)
+            .expect("cursor remains live");
+        let mut container = Definition::from_script("M54G", "Group container", "#strict\n")
+            .expect("group container compiles");
+        container.set_category(lc_engine::CATEGORY_STRUCTURE);
+        container.set_grab_put_get(lc_engine::GRAB_PUT_GET_PUT);
+        container.set_shape_rect(Some(lc_engine::DefinitionRect::new(-6, -6, 12, 12)));
+        app.engine
+            .register_definition(container)
+            .expect("register group container");
+        let mut spawn = SpawnConfig::new("M54G")
+            .with_position(Vector2::new(crew_state.position.x + 60, crew_state.position.y));
+        if let Some(layer) = crew_state.layer {
+            spawn = spawn.with_layer(layer);
+        }
+        let target = app.engine.spawn_object(spawn).expect("spawn group container");
+        render_mouse_test_app(&mut app);
+        assert_eq!(
+            app.ingame_inventory_region_target(owner, region_point),
+            Some(newest)
+        );
+        let target_point = mouse_test_object_point(&app, owner, target);
+        app.startup_tooltip_resources
+            .insert("IDS_CON_ITEMS".to_owned(), "widgets".to_owned());
+        app.startup_tooltip_resources.insert(
+            "IDS_CON_PUT".to_owned(),
+            "PUT <%s> INTO <%s>".to_owned(),
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("hover grouped inventory region");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("start all-of-ID drag");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold Control for put targeting");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("cross grouped moving-drag threshold");
+        assert_eq!(app.ingame_dragged_objects.len(), 3);
+
+        app.engine
+            .apply_object_update(
+                newest,
+                ObjectUpdate::new().with_status(lc_engine::ObjectStatus::Deleted),
+            )
+            .expect("delete the original down target");
+        app.snapshot = app.engine.snapshot();
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("refresh DragMoving after deletion");
+
+        assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Put);
+        assert_eq!(
+            app.ingame_mouse_caption
+                .caption
+                .as_ref()
+                .expect("remaining grouped selection has a caption")
+                .text,
+            "PUT <2 widgets> INTO <Group container>"
+        );
+    }
+
+    #[test]
+    fn l054_world_origin_put_caption_uses_dragged_object_name() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let crew_state = app
+            .engine
+            .object_snapshot(crew)
+            .expect("cursor remains live");
+        let mut item = Definition::from_script("M54W", "World parcel", "#strict\n")
+            .expect("world parcel compiles");
+        item.set_category(lc_engine::CATEGORY_OBJECT);
+        item.set_collectible(true);
+        item.set_shape_rect(Some(lc_engine::DefinitionRect::new(-5, -5, 10, 10)));
+        app.engine
+            .register_definition(item)
+            .expect("register world parcel");
+        let mut item_spawn = SpawnConfig::new("M54W")
+            .with_position(Vector2::new(crew_state.position.x - 60, crew_state.position.y));
+        if let Some(layer) = crew_state.layer {
+            item_spawn = item_spawn.with_layer(layer);
+        }
+        let item = app
+            .engine
+            .spawn_object(item_spawn)
+            .expect("spawn world parcel");
+
+        let mut container = Definition::from_script("M54T", "World bin", "#strict\n")
+            .expect("world bin compiles");
+        container.set_category(lc_engine::CATEGORY_STRUCTURE);
+        container.set_grab_put_get(lc_engine::GRAB_PUT_GET_PUT);
+        container.set_shape_rect(Some(lc_engine::DefinitionRect::new(-6, -6, 12, 12)));
+        app.engine
+            .register_definition(container)
+            .expect("register world bin");
+        let mut target_spawn = SpawnConfig::new("M54T")
+            .with_position(Vector2::new(crew_state.position.x + 60, crew_state.position.y));
+        if let Some(layer) = crew_state.layer {
+            target_spawn = target_spawn.with_layer(layer);
+        }
+        let target = app
+            .engine
+            .spawn_object(target_spawn)
+            .expect("spawn world bin");
+        render_mouse_test_app(&mut app);
+        let item_point = mouse_test_object_point(&app, owner, item);
+        let target_point = mouse_test_object_point(&app, owner, target);
+        app.startup_tooltip_resources.insert(
+            "IDS_CON_PUT".to_owned(),
+            "PUT <%s> INTO <%s>".to_owned(),
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(item_point.x),
+            f64::from(item_point.y),
+        ))
+        .expect("hover world parcel");
+        app.handle_ingame_mouse_button(ElementState::Pressed)
+            .expect("press world parcel");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold Control for put targeting");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("cross world moving-drag threshold");
+        assert!(
+            app.ingame_mouse_caption.caption.is_none(),
+            "the threshold move only enters DragMoving"
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("run DragMoving over world bin");
+
+        assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Put);
+        assert_eq!(
+            app.ingame_mouse_caption
+                .caption
+                .as_ref()
+                .expect("world-origin put has a caption")
+                .text,
+            "PUT <World parcel> INTO <World bin>"
+        );
+    }
+
+    #[test]
     fn hud_inventory_left_click_queues_exact_contents_only() {
         let (mut app, owner, _crew, _first, target, region_point) =
             inventory_region_fixture();
@@ -64688,6 +65835,7 @@ mod tests {
             engine: &app.engine,
             bindings: &app.bindings,
             snapshot: &app.snapshot,
+            resources: &app.startup_tooltip_resources,
         };
         let icons = draw_commands::build_cursor_commands(&app.snapshot, cursor, &context);
         let wanted = icons
@@ -65095,6 +66243,127 @@ mod tests {
             (command, point)
         });
         (app, owner, points)
+    }
+
+    #[test]
+    fn l054_command_region_caption_is_immediate_and_anchored_to_region_top() {
+        let (mut app, owner, points) = command_bar_fixture(false);
+        let point = points
+            .iter()
+            .find_map(|(command, point)| (*command == 6).then_some(*point))
+            .expect("fixture exposes the Sell command");
+        let (_, expected_caption, region) = app
+            .ingame_command_region_hit(owner, point)
+            .expect("command has a paired C4Region");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("hover command region");
+
+        let caption = app
+            .ingame_mouse_caption
+            .caption
+            .as_ref()
+            .expect("command region caption appears immediately");
+        let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+        assert_eq!(caption.text, expected_caption);
+        assert_eq!(caption.text, "Sell");
+        assert_eq!(caption.caption_bottom_y, Some(region.y - viewport.y));
+        assert_eq!(
+            app.ingame_mouse_caption.cursor,
+            IngameMouseCursorKind::Region
+        );
+    }
+
+    #[test]
+    fn l054_help_regions_share_one_native_caption_slot() {
+        let (mut app, owner, _crew, _first, target, inventory_point) =
+            inventory_region_fixture();
+        app.ingame_mouse_help = true;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(inventory_point.x),
+            f64::from(inventory_point.y),
+        ))
+        .expect("hover inventory while Help is active");
+        assert_eq!(
+            app.ingame_mouse_help_caption
+                .as_ref()
+                .map(|caption| caption.text.as_str()),
+            app.engine.object_help_caption(target).as_deref(),
+            "a target-bearing region uses the Help tooltip caption"
+        );
+        assert!(
+            app.ingame_mouse_caption.caption.is_none(),
+            "the red object-name caption cannot coexist with the Help tooltip"
+        );
+
+        let help_button =
+            viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::Help);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(help_button.x),
+            f64::from(help_button.y),
+        ))
+        .expect("move Help onto the targetless Help button region");
+        assert!(
+            app.ingame_mouse_help_caption.is_none(),
+            "a targetless region replaces the prior Help tooltip"
+        );
+        let caption = app
+            .ingame_mouse_caption
+            .caption
+            .as_ref()
+            .expect("the viewport button keeps its ordinary red region caption");
+        let expected =
+            app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
+        let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+        let button_rect = lc_frontend::hud::viewport_button_rect(
+            viewport,
+            lc_frontend::hud::ViewportButton::Help,
+        );
+        assert_eq!(caption.text, expected);
+        assert_eq!(caption.caption_bottom_y, Some(button_rect.y - viewport.y));
+        assert_eq!(
+            app.ingame_mouse_caption.cursor,
+            IngameMouseCursorKind::Region
+        );
+    }
+
+    #[test]
+    fn l054_help_cursor_gets_the_delayed_red_help_caption() {
+        let mut app = new_running_sandbox_app();
+        let (_target, point) =
+            install_mouse_help_target(&mut app, "M54H", "Help hover target", None);
+        app.ingame_mouse_help = true;
+        let move_to_target = |app: &mut GameApp| {
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(point.x),
+                f64::from(point.y),
+            ))
+            .expect("route stable Help hover move");
+        };
+
+        move_to_target(&mut app);
+        assert_eq!(app.ingame_mouse_caption.cursor, IngameMouseCursorKind::Help);
+        assert_eq!(app.ingame_mouse_caption.time_on_target, 0);
+        for _ in 1..INGAME_MOUSE_CAPTION_DELAY {
+            move_to_target(&mut app);
+        }
+        assert!(app.ingame_mouse_caption.caption.is_none());
+
+        move_to_target(&mut app);
+        assert!(app.ingame_mouse_help_caption.is_none());
+        let expected =
+            app.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
+        assert_eq!(
+            app.ingame_mouse_caption
+                .caption
+                .as_ref()
+                .map(|caption| caption.text.as_str()),
+            Some(expected.as_str())
+        );
     }
 
     #[test]

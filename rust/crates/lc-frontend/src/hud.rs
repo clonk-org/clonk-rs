@@ -43,6 +43,8 @@ const MOUSE_SOURCE: (u32, u32, u32, u32) = (198, 100, 32, 32);
 const GAMEPAD_CELL_WIDTH: u32 = 80;
 /// White HUD text (`CStdDDraw::DEFAULT_MESSAGE_COLOR`, src/StdDDraw2.h:361).
 const MESSAGE_COLOR: Color = Color::opaque(255, 255, 255);
+/// `0xfaFF0000`, the red caption color passed by C4MouseControl::Draw.
+pub const MOUSE_CAPTION_COLOR: Color = Color::new(255, 0, 0, 0xfa);
 /// FontRegular is the 14px main font (`C4Fonts.cpp:280-288`); the fallback
 /// TextFont path draws at the same pixel size.
 const FALLBACK_FONT_SIZE: f32 = 14.0;
@@ -93,6 +95,28 @@ impl HudFont<'_> {
             HudFont::Fallback(font) => {
                 let plain = strip_font_markup(text);
                 font.measure_text(&plain, FALLBACK_FONT_SIZE).width.ceil() as i32
+            }
+        }
+    }
+
+    /// Markup-aware `CStdFont::GetTextExtent(..., true)` including pipe line
+    /// breaks, as used by C4MouseControl captions.
+    pub fn text_extent_markup(&self, text: &str) -> (i32, i32) {
+        match self {
+            HudFont::Clonk(font) => font.measure(text, true),
+            HudFont::Fallback(font) => {
+                let (width, lines) = text.split('|').fold(
+                    (0_i32, 0_i32),
+                    |(width, lines), line| {
+                        let plain = strip_font_markup(line);
+                        let line_width = font
+                            .measure_text(&plain, FALLBACK_FONT_SIZE)
+                            .width
+                            .ceil() as i32;
+                        (width.max(line_width), lines + 1)
+                    },
+                );
+                (width, self.line_height().saturating_mul(lines.max(1)))
             }
         }
     }
@@ -992,6 +1016,122 @@ pub fn inventory_region_index(
     (section < item_count).then_some(section)
 }
 
+/// Global output rectangle of one grouped cursor-inventory C4Region.
+pub fn inventory_region_rect(
+    viewport: SurfaceRect,
+    section: usize,
+    item_count: usize,
+) -> Option<SurfaceRect> {
+    if section >= item_count {
+        return None;
+    }
+    Some(SurfaceRect::new(
+        viewport.x + SYMBOL_BORDER + i32::try_from(section).ok()?.saturating_mul(SYMBOL_SIZE),
+        viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE,
+        SYMBOL_SIZE as u32,
+        SYMBOL_SIZE as u32,
+    ))
+}
+
+/// Measure C4MouseControl's red caption and apply its viewport-local clamp.
+/// `caption_bottom_y` is the global Y of a hovered region's top edge.
+pub fn mouse_caption_rect(
+    font: &HudFont<'_>,
+    viewport: SurfaceRect,
+    pointer: lc_gui::Point,
+    caption_bottom_y: Option<i32>,
+    text: &str,
+) -> Option<SurfaceRect> {
+    if text.is_empty() {
+        return None;
+    }
+    let (width, height) = font.text_extent_markup(text);
+    let width = width.max(1);
+    let height = height.max(1);
+    let viewport_right = viewport.x.saturating_add(viewport.width as i32);
+    let minimum_center = viewport.x.saturating_add(width / 2).saturating_add(1);
+    let maximum_center = viewport_right.saturating_sub(width / 2).saturating_sub(1);
+    let pointer_x = pointer.x.floor() as i32;
+    let center_x = if pointer_x < minimum_center {
+        minimum_center
+    } else if pointer_x > maximum_center {
+        maximum_center
+    } else {
+        pointer_x
+    };
+    let requested_y = caption_bottom_y
+        .map(|bottom| bottom.saturating_sub(height).saturating_sub(1))
+        .unwrap_or_else(|| (pointer.y.floor() as i32).saturating_add(13));
+    let y = requested_y.min(
+        viewport
+            .y
+            .saturating_add(viewport.height as i32)
+            .saturating_sub(height),
+    );
+    Some(SurfaceRect::new(
+        center_x.saturating_sub(width / 2),
+        y,
+        width as u32,
+        height as u32,
+    ))
+}
+
+/// Draw C4MouseControl's non-help caption in FontRegular. Pipes delimit the
+/// native two-line hover hints.
+pub fn draw_mouse_caption(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    viewport: SurfaceRect,
+    pointer: lc_gui::Point,
+    caption_bottom_y: Option<i32>,
+    text: &str,
+    gamma: Option<&GammaRamp>,
+) -> Option<SurfaceRect> {
+    let rect = mouse_caption_rect(font, viewport, pointer, caption_bottom_y, text)?;
+    let center_x = rect.x.saturating_add(rect.width as i32 / 2);
+    let previous_clip = surface.clip();
+    let caption_clip = previous_clip.map_or(viewport, |clip| {
+        clip.intersection(viewport)
+            .unwrap_or_else(|| SurfaceRect::new(viewport.x, viewport.y, 0, 0))
+    });
+    surface.set_clip(caption_clip);
+    match font {
+        HudFont::Clonk(_) => font.draw_markup_with_gamma(
+            surface,
+            center_x,
+            rect.y,
+            text,
+            MOUSE_CAPTION_COLOR,
+            TextAlign::Center,
+            gamma,
+        ),
+        HudFont::Fallback(_) => {
+            let line_height = font.line_height().max(1);
+            for (index, line) in text.split('|').enumerate() {
+                font.draw_markup_with_gamma(
+                    surface,
+                    center_x,
+                    rect.y.saturating_add(
+                        i32::try_from(index)
+                            .unwrap_or(i32::MAX)
+                            .saturating_mul(line_height),
+                    ),
+                    line,
+                    MOUSE_CAPTION_COLOR,
+                    TextAlign::Center,
+                    gamma,
+                );
+            }
+        }
+    }
+    if let Some(clip) = previous_clip {
+        surface.set_clip(clip);
+    } else {
+        surface.clear_clip();
+    }
+    Some(rect)
+}
+
 /// One contextual command entry of the C4Viewport::DrawCursorInfo command
 /// rows (src/C4Viewport.cpp:947-962): a C4Object::DrawCommand pair — key
 /// cell (fctKey cap + fctCommand symbol + key name) and image cell
@@ -1007,6 +1147,8 @@ pub struct CommandIcon {
     /// Secondary (right side) area — self activation & specials
     /// (src/C4Object.cpp:3083-3098); bottom area otherwise.
     pub side: bool,
+    /// C4Region caption installed over the paired key/image cells.
+    pub caption: String,
     pub image: CommandImage,
 }
 
@@ -1532,11 +1674,11 @@ pub fn draw_commands(
 /// C4Object::DrawCommand. Later-drawn icons win if malformed data overlaps,
 /// matching C4RegionList::Add's prepend order (C4Object.cpp:4033-4092;
 /// C4Region.cpp:49-57,87-94).
-pub fn command_region_index(
+pub fn command_region_hit(
     viewport: SurfaceRect,
     point: lc_gui::Point,
     icons: &[CommandIcon],
-) -> Option<usize> {
+) -> Option<(usize, SurfaceRect)> {
     if viewport.height as i32 <= SYMBOL_SIZE {
         return None;
     }
@@ -1583,10 +1725,18 @@ pub fn command_region_index(
             && py >= pair.y
             && py < pair.y + pair.height as i32
         {
-            found = Some(index);
+            found = Some((index, pair));
         }
     }
     found
+}
+
+pub fn command_region_index(
+    viewport: SurfaceRect,
+    point: lc_gui::Point,
+    icons: &[CommandIcon],
+) -> Option<usize> {
+    command_region_hit(viewport, point, icons).map(|(index, _)| index)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2147,6 +2297,34 @@ mod tests {
         ) {
             if origin_x >= 0.0 && origin_y >= 0.0 {
                 let _ = surface.set_pixel(origin_x as u32, origin_y as u32, color);
+            }
+        }
+    }
+
+    struct FixedWidthMarkerFont;
+
+    impl TextFont for FixedWidthMarkerFont {
+        fn measure_text(&self, text: &str, _font_size: f32) -> FontMetrics {
+            FontMetrics {
+                width: (text.chars().count() * 4) as f32,
+                height: 6.0,
+                lines: 1,
+            }
+        }
+
+        fn draw_text(
+            &self,
+            surface: &mut Surface,
+            origin_x: f32,
+            origin_y: f32,
+            text: &str,
+            _font_size: f32,
+            color: Color,
+        ) {
+            if origin_x >= 0.0 && origin_y >= 0.0 {
+                for x in 0..text.chars().count() * 4 {
+                    let _ = surface.set_pixel(origin_x as u32 + x as u32, origin_y as u32, color);
+                }
             }
         }
     }
@@ -2725,6 +2903,7 @@ mod tests {
             com: 5, // COM_Throw
             key_label: String::new(),
             side: false,
+            caption: String::new(),
             image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
         }];
         draw_commands(
@@ -2759,6 +2938,15 @@ mod tests {
             "the key cell's first pixel belongs to the paired C4Region"
         );
         assert_eq!(
+            command_region_hit(
+                SurfaceRect::new(0, 0, 200, 100),
+                lc_gui::Point::new(154.0, 77.0),
+                &icons,
+            ),
+            Some((0, SurfaceRect::new(154, 77, 46, 23))),
+            "the hit exposes the exact pair geometry used by CaptionBottomY"
+        );
+        assert_eq!(
             command_region_index(
                 SurfaceRect::new(0, 0, 200, 100),
                 lc_gui::Point::new(199.0, 99.0),
@@ -2791,6 +2979,7 @@ mod tests {
             com: 5,
             key_label: String::new(),
             side: false,
+            caption: String::new(),
             image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
         }];
         let render = |frame| {
@@ -2849,6 +3038,7 @@ mod tests {
             com: 4 | 128, // COM_Down_D
             key_label: String::new(),
             side: false,
+            caption: String::new(),
             image: CommandImage::Picture(None),
         }];
         draw_commands(
@@ -2884,6 +3074,7 @@ mod tests {
             com: 7, // COM_Special
             key_label: String::new(),
             side: true,
+            caption: String::new(),
             image: CommandImage::Picture(Some(solid_image(8, 8, color))),
         };
         let icons = vec![icon([200, 20, 20, 255]), icon([20, 20, 200, 255])];
@@ -2928,6 +3119,7 @@ mod tests {
             com: 5,
             key_label: String::new(),
             side: false,
+            caption: String::new(),
             image: CommandImage::Picture(Some(solid_image(8, 8, [200, 20, 20, 255]))),
         }];
         draw_commands(
@@ -2975,6 +3167,7 @@ mod tests {
             com: 5,
             key_label: String::new(),
             side: false,
+            caption: String::new(),
             image: CommandImage::Composite {
                 picture: Some(solid_image(8, 8, [200, 20, 20, 255])),
                 icon: CommandOverlayIcon::Hand(1),
@@ -3697,6 +3890,81 @@ mod tests {
                 2,
             ),
             None
+        );
+        assert_eq!(
+            inventory_region_rect(viewport, 1, 2),
+            Some(SurfaceRect::new(50, top, 35, 35))
+        );
+        assert_eq!(inventory_region_rect(viewport, 2, 2), None);
+    }
+
+    #[test]
+    fn mouse_caption_clamps_red_multiline_text_and_honors_region_bottom() {
+        let mut target = surface(120, 100);
+        let previous_clip = SurfaceRect::new(0, 0, 100, 90);
+        target.set_clip(previous_clip);
+        let font = HudFont::Fallback(&FixedWidthMarkerFont);
+        let viewport = SurfaceRect::new(10, 20, 80, 70);
+        let text = "Grab Wagon.|(Double click)";
+        let rect = draw_mouse_caption(
+            &mut target,
+            &font,
+            viewport,
+            lc_gui::Point::new(10.0, 40.0),
+            Some(80),
+            text,
+            None,
+        )
+        .expect("nonempty caption draws");
+
+        assert_eq!(rect.x, viewport.x + 1, "left edge is clamped inside");
+        assert!(
+            rect.x + rect.width as i32 <= viewport.x + viewport.width as i32 - 1,
+            "right edge remains inside the viewport"
+        );
+        assert_eq!(
+            rect.y + rect.height as i32,
+            79,
+            "CaptionBottomY leaves the native one-pixel gap"
+        );
+        assert_eq!(
+            target.get_pixel(
+                (rect.x + rect.width as i32 / 2 - font.text_width("Grab Wagon.") / 2) as u32,
+                rect.y as u32,
+            ),
+            Some(MOUSE_CAPTION_COLOR),
+            "the first centered line uses 0xfaFF0000"
+        );
+        assert_eq!(
+            target.clip(),
+            Some(previous_clip),
+            "caption drawing restores its caller's clip"
+        );
+
+        let oversized = draw_mouse_caption(
+            &mut target,
+            &font,
+            viewport,
+            lc_gui::Point::new(50.0, 40.0),
+            None,
+            "This caption is wider than the viewport",
+            None,
+        )
+        .expect("oversized caption still draws with native geometry");
+        assert_eq!(
+            oversized.x,
+            viewport.x + 1,
+            "BoundBy chooses its left bound even when that exceeds the right bound"
+        );
+        assert_eq!(
+            target.get_pixel((viewport.x + viewport.width as i32 - 1) as u32, 53),
+            Some(MOUSE_CAPTION_COLOR),
+            "caption reaches the last pixel inside its viewport clip"
+        );
+        assert_eq!(
+            target.get_pixel((viewport.x + viewport.width as i32) as u32, 53),
+            Some(Color::opaque(0, 0, 0)),
+            "caption pixels cannot leak into an adjacent viewport"
         );
     }
 

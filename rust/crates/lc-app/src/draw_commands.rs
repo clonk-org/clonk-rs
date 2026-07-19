@@ -5,14 +5,13 @@
 //! The icon LIST order is the C++ draw-call order: bottom icons fill the
 //! bottom bar right-to-left, side icons stack the side strip bottom-to-top.
 //!
-//! Known residuals vs C++ (annotations are not modeled by lc-script):
-//! function `Method=` descriptors default to C4AUL_ControlMethod_All
+//! Known residual vs C++: function `Method=` descriptors default to
+//! C4AUL_ControlMethod_All
 //! (C4AulParse.cpp:366), so the Classic/JumpAndRun split reduces to
-//! defined-or-not (no base-content def sets Method=); `Image=`/`Desc`
-//! descriptors fall back to the object's own picture (C4Object.cpp:4040).
+//! defined-or-not (no base-content def sets Method=).
 
 use lc_engine::{
-    CommandDirection, DefinitionRect, FULL_CON, ObjectId, ObjectSnapshot, SimulationSnapshot, ocf,
+    ocf, CommandDirection, DefinitionRect, ObjectId, ObjectSnapshot, SimulationSnapshot, FULL_CON,
 };
 use lc_frontend::{CommandIcon, CommandImage, CommandOverlayIcon, ImageData};
 use lc_graphics::Color;
@@ -219,6 +218,31 @@ pub trait CommandContext {
         let _ = (definition_id, function);
         None
     }
+    /// `GetControlDesc`'s first descriptor segment. `Some("")` is distinct
+    /// from no descriptor and suppresses the receiver-name fallback.
+    fn control_description(&self, definition_id: &str, function: &str) -> Option<String> {
+        let _ = (definition_id, function);
+        None
+    }
+    /// Effective `C4Object::GetName()` presentation text.
+    fn object_name(&self, object: &ObjectSnapshot) -> String {
+        object
+            .custom_name
+            .clone()
+            .unwrap_or_else(|| object.definition_id.clone())
+    }
+    /// `LoadResStr` plus its sequential `%s` substitutions.
+    fn localized_caption(&self, key: &str, fallback: &str, arguments: &[&str]) -> String {
+        let _ = key;
+        let mut caption = fallback.to_owned();
+        for argument in arguments {
+            let Some(index) = caption.find("%s") else {
+                break;
+            };
+            caption.replace_range(index..index + 2, argument);
+        }
+        caption
+    }
     /// `Def->GrabPutGet` (src/C4Def.cpp:364-373).
     fn def_grab_put_get(&self, definition_id: &str) -> i32;
     /// The def Shape rect for the AtObject enclose test.
@@ -352,17 +376,24 @@ pub fn build_cursor_commands(
     let mut contained_right_override = false;
     let mut contents_activation_override = false;
 
-    let bottom = |com: u8, image: CommandImage| CommandIcon {
+    let bottom = |com: u8, caption: String, image: CommandImage| CommandIcon {
         com,
         key_label: ctx.key_label(owner, com2control(com)),
         side: false,
+        caption,
         image,
     };
-    let side = |com: u8, image: CommandImage| CommandIcon {
+    let side = |com: u8, caption: String, image: CommandImage| CommandIcon {
         com,
         key_label: ctx.key_label(owner, com2control(com)),
         side: true,
+        caption,
         image,
+    };
+
+    let scripted_caption = |receiver: &ObjectSnapshot, function: &str| {
+        ctx.control_description(&receiver.definition_id, function)
+            .unwrap_or_else(|| ctx.object_name(receiver))
     };
 
     // DrawCommand's default image chain (src/C4Object.cpp:4022-4068): the
@@ -399,8 +430,10 @@ pub fn build_cursor_commands(
             } else {
                 COM_DOWN | COM_DOUBLE
             };
+            let site_name = ctx.object_name(site);
             icons.push(bottom(
                 com,
+                ctx.localized_caption("IDS_CON_BUILD", "Build %s.", &[site_name.as_str()]),
                 CommandImage::Composite {
                     picture: ctx.def_picture(&site.definition_id),
                     icon: CommandOverlayIcon::Build,
@@ -417,11 +450,17 @@ pub fn build_cursor_commands(
                 let function = format!("Control{}", com_name(com));
                 if draw_command_query(snapshot, ctx, controller, &target.definition_id, &function) {
                     let image = function_image(&target.definition_id, &target.contents, &function);
-                    icons.push(bottom(com, image));
+                    icons.push(bottom(com, scripted_caption(target, &function), image));
                 } else if com == COM_DOWN | COM_DOUBLE {
                     // Let go (src/C4Object.cpp:2976-2979).
+                    let target_name = ctx.object_name(target);
                     icons.push(bottom(
                         com,
+                        ctx.localized_caption(
+                            "IDS_CON_UNGRAB",
+                            "Let go of %s.",
+                            &[target_name.as_str()],
+                        ),
                         CommandImage::Composite {
                             picture: ctx.def_picture(&target.definition_id),
                             icon: CommandOverlayIcon::Hand(6),
@@ -433,8 +472,15 @@ pub fn build_cursor_commands(
                         .filter(|_| grab_put_get & C4D_GRAB_PUT != 0)
                     {
                         // Put (src/C4Object.cpp:2983-2988).
+                        let thing_name = ctx.object_name(thing);
+                        let target_name = ctx.object_name(target);
                         icons.push(bottom(
                             com,
+                            ctx.localized_caption(
+                                "IDS_CON_PUT",
+                                "Drop %s in %s",
+                                &[thing_name.as_str(), target_name.as_str()],
+                            ),
                             CommandImage::Composite {
                                 picture: ctx.def_picture(&thing.definition_id),
                                 icon: CommandOverlayIcon::Hand(0),
@@ -444,8 +490,14 @@ pub fn build_cursor_commands(
                         && grab_put_get & C4D_GRAB_GET != 0
                     {
                         // Get (src/C4Object.cpp:2990-2995).
+                        let target_name = ctx.object_name(target);
                         icons.push(bottom(
                             com,
+                            ctx.localized_caption(
+                                "IDS_CON_GET",
+                                "Take object from %s.",
+                                &[target_name.as_str()],
+                            ),
                             CommandImage::Composite {
                                 picture: ctx.def_picture(&target.definition_id),
                                 icon: CommandOverlayIcon::Hand(1),
@@ -471,7 +523,7 @@ pub fn build_cursor_commands(
             ) {
                 let image =
                     function_image(&container.definition_id, &container.contents, &function);
-                icons.push(bottom(com, image));
+                icons.push(bottom(com, scripted_caption(container, &function), image));
                 match com2control(com) {
                     7 => contained_down_override = true,  // CON_Down
                     6 => contained_left_override = true,  // CON_Left
@@ -482,13 +534,18 @@ pub fn build_cursor_commands(
         }
         // Contained exit (src/C4Object.cpp:3013-3018).
         if !contained_down_override {
-            icons.push(bottom(COM_DOWN, CommandImage::Exit));
+            icons.push(bottom(
+                COM_DOWN,
+                ctx.localized_caption("IDS_CON_EXIT", "Exit building", &[]),
+                CommandImage::Exit,
+            ));
         }
         // Contained base commands (src/C4Object.cpp:3020-3034).
         if let Some(base) = ctx.base_owner(container) {
             if ctx.base_sell_enabled() {
                 icons.push(bottom(
                     COM_DIG,
+                    ctx.localized_caption("IDS_CON_SELL", "Sell", &[]),
                     CommandImage::SellMenu {
                         owner_color: ctx.owner_color(base),
                     },
@@ -497,6 +554,7 @@ pub fn build_cursor_commands(
             if ctx.base_buy_enabled() {
                 icons.push(bottom(
                     COM_UP,
+                    ctx.localized_caption("IDS_CON_BUY", "Buy", &[]),
                     CommandImage::BuyMenu {
                         owner_color: ctx.owner_color(base),
                     },
@@ -508,8 +566,14 @@ pub fn build_cursor_commands(
         if n_contents > 0 {
             if !contained_right_override {
                 // Direct get ("Take2").
+                let container_name = ctx.object_name(container);
                 icons.push(bottom(
                     COM_RIGHT,
+                    ctx.localized_caption(
+                        "IDS_CON_GET",
+                        "Take object from %s.",
+                        &[container_name.as_str()],
+                    ),
                     CommandImage::Composite {
                         picture: ctx.def_picture(&container.definition_id),
                         icon: CommandOverlayIcon::Hand(1),
@@ -518,8 +582,14 @@ pub fn build_cursor_commands(
             }
             if !contained_left_override {
                 // Get ("Take").
+                let container_name = ctx.object_name(container);
                 icons.push(bottom(
                     COM_LEFT,
+                    ctx.localized_caption(
+                        "IDS_CON_ACTIVATEFROM",
+                        "Activate object in %s",
+                        &[container_name.as_str()],
+                    ),
                     CommandImage::Composite {
                         picture: ctx.def_picture(&container.definition_id),
                         icon: CommandOverlayIcon::Hand(0),
@@ -529,16 +599,29 @@ pub fn build_cursor_commands(
         }
         // Contained put & activate (src/C4Object.cpp:3055-3068).
         if let Some(thing) = first_contents(snapshot, &cursor.contents) {
+            let thing_name = ctx.object_name(thing);
+            let container_name = ctx.object_name(container);
             icons.push(bottom(
                 COM_THROW,
+                ctx.localized_caption(
+                    "IDS_CON_PUT",
+                    "Drop %s in %s",
+                    &[thing_name.as_str(), container_name.as_str()],
+                ),
                 CommandImage::Composite {
                     picture: ctx.def_picture(&thing.definition_id),
                     icon: CommandOverlayIcon::Hand(0),
                 },
             ));
         } else if n_contents > 0 {
+            let container_name = ctx.object_name(container);
             icons.push(bottom(
                 COM_THROW,
+                ctx.localized_caption(
+                    "IDS_CON_ACTIVATEFROM",
+                    "Activate object in %s",
+                    &[container_name.as_str()],
+                ),
                 CommandImage::Composite {
                     picture: ctx.def_picture(&container.definition_id),
                     icon: CommandOverlayIcon::Hand(0),
@@ -554,7 +637,11 @@ pub fn build_cursor_commands(
             if let Some(thing) = first_contents(snapshot, &cursor.contents) {
                 if draw_command_query(snapshot, ctx, controller, &thing.definition_id, "Activate") {
                     let image = function_image(&thing.definition_id, &thing.contents, "Activate");
-                    icons.push(bottom(COM_DIG | COM_DOUBLE, image));
+                    icons.push(bottom(
+                        COM_DIG | COM_DOUBLE,
+                        scripted_caption(thing, "Activate"),
+                        image,
+                    ));
                     contents_activation_override = true;
                 }
             }
@@ -567,7 +654,11 @@ pub fn build_cursor_commands(
             && draw_command_query(snapshot, ctx, controller, &cursor.definition_id, "Activate")
         {
             let image = function_image(&cursor.definition_id, &cursor.contents, "Activate");
-            icons.push(side(COM_DIG | COM_DOUBLE, image));
+            icons.push(side(
+                COM_DIG | COM_DOUBLE,
+                scripted_caption(cursor, "Activate"),
+                image,
+            ));
         }
     }
 
@@ -579,7 +670,7 @@ pub fn build_cursor_commands(
         let function = format!("Control{}", com_name(com));
         if draw_command_query(snapshot, ctx, controller, &cursor.definition_id, &function) {
             let image = function_image(&cursor.definition_id, &cursor.contents, &function);
-            icons.push(side(com, image));
+            icons.push(side(com, scripted_caption(cursor, &function), image));
         }
     }
 

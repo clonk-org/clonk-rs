@@ -104,6 +104,7 @@ pub use control_execution::{
     PrepareJoinPlayerError, RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError,
     TeamColorUpdateError,
 };
+pub use direct_com::MouseWorldCursor;
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;
 pub use landscape::{
@@ -26866,6 +26867,24 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .is_some_and(|definition| definition.has_function(function))
+    }
+
+    /// The first caption segment returned by `C4ScriptHost::GetControlDesc`.
+    /// A nonempty raw descriptor may intentionally begin with `|`, yielding
+    /// an empty caption rather than falling back to the receiver's name.
+    pub fn definition_control_description(
+        &self,
+        definition_id: &str,
+        function: &str,
+    ) -> Option<String> {
+        let definition = self.definitions.get(definition_id)?;
+        let resolution = definition.script.resolve_function(function, false)?;
+        let description = resolution
+            .function
+            .description
+            .as_deref()
+            .filter(|description| !description.is_empty())?;
+        Some(description.split('|').next().unwrap_or_default().to_owned())
     }
 
     /// The definition's raw script source — presentation-side descriptor
@@ -59500,6 +59519,36 @@ mod missing_include_regression {
                 "the later definition must skip its edge back to the DFS root"
             );
         }
+    }
+
+    #[test]
+    fn control_description_uses_effective_function_and_preserves_empty_first_segment() {
+        let mut engine = Engine::new();
+        register(
+            &mut engine,
+            "CDPA",
+            "public func ControlSpecial() { [Parent caption|Image=CDPA] return 1; }",
+        );
+        register(
+            &mut engine,
+            "CDCH",
+            "#include CDPA\npublic func ControlUp() { [|Image=CDCH] return 1; }\npublic func ControlDown() { return 1; }",
+        );
+        engine.resolve_includes().expect("control descriptions link");
+
+        assert_eq!(
+            engine.definition_control_description("CDCH", "ControlSpecial"),
+            Some("Parent caption".to_owned())
+        );
+        assert_eq!(
+            engine.definition_control_description("CDCH", "ControlUp"),
+            Some(String::new()),
+            "a raw descriptor beginning with a separator suppresses name fallback"
+        );
+        assert_eq!(
+            engine.definition_control_description("CDCH", "ControlDown"),
+            None
+        );
     }
 
     #[test]

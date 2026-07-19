@@ -46,18 +46,20 @@ enum PlayerObjectCommandMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MouseWorldCursor {
+pub enum MouseWorldCursor {
     Crosshair,
     Dig { material: bool },
     Enter(ObjectId),
     Grab(ObjectId),
     Ungrab(ObjectId),
     Carryable(ObjectId),
+    DigObject(ObjectId),
     Chop(ObjectId),
     Build(ObjectId),
     Select(ObjectId),
     Attack(ObjectId),
-    Jump,
+    JumpLeft,
+    JumpRight,
 }
 
 const C4P_COMMAND_SET: i32 = 1;
@@ -3340,7 +3342,7 @@ impl Engine {
     /// crosshair; each later matching object cursor then overrides the
     /// previous one, and the nearby jump cursor is evaluated last
     /// (C4MouseControl.cpp:451-538).
-    fn mouse_world_cursor(
+    pub fn mouse_world_cursor(
         &self,
         owner: i32,
         target: Option<ObjectId>,
@@ -3391,7 +3393,11 @@ impl Engine {
                 };
             }
             if target_ocf & ocf::CARRYABLE != 0 {
-                cursor = MouseWorldCursor::Carryable(target);
+                cursor = if target_ocf & ocf::IN_SOLID != 0 {
+                    MouseWorldCursor::DigObject(target)
+                } else {
+                    MouseWorldCursor::Carryable(target)
+                };
             }
             if target_ocf & ocf::CHOP != 0 {
                 let width = object
@@ -3426,11 +3432,7 @@ impl Engine {
             }
         }
 
-        if self.mouse_jump_zone(owner, point) {
-            MouseWorldCursor::Jump
-        } else {
-            cursor
-        }
+        self.mouse_jump_cursor(owner, point).unwrap_or(cursor)
     }
 
     /// Build the exact `C4ControlPlayerCommand` produced by a world
@@ -3468,7 +3470,7 @@ impl Engine {
                 MouseWorldCursor::Enter(target) => {
                     (CommandId::Enter, point.x, point.y, target.as_u64() as i32, 0)
                 }
-                MouseWorldCursor::Carryable(target) => {
+                MouseWorldCursor::Carryable(target) | MouseWorldCursor::DigObject(target) => {
                     (CommandId::Get, 0, 0, target.as_u64() as i32, 0)
                 }
                 MouseWorldCursor::Dig { material } => {
@@ -3476,7 +3478,8 @@ impl Engine {
                 }
                 MouseWorldCursor::Crosshair
                 | MouseWorldCursor::Select(_)
-                | MouseWorldCursor::Jump => return None,
+                | MouseWorldCursor::JumpLeft
+                | MouseWorldCursor::JumpRight => return None,
             };
 
         Some(PlayerCommandControlData {
@@ -3496,23 +3499,36 @@ impl Engine {
     /// Whether `point` selects the nearby jump cursor for the player's cursor
     /// object. UpdateCursorTarget evaluates this after every object cursor, so
     /// it also overrides Select (C4MouseControl.cpp:522-534).
-    pub fn mouse_jump_zone(&self, owner: i32, point: Vector2) -> bool {
+    fn mouse_jump_cursor(&self, owner: i32, point: Vector2) -> Option<MouseWorldCursor> {
         if !self.players.contains_key(&owner) {
-            return false;
+            return None;
         }
         self.crew_cursor(owner)
             .and_then(|cursor| self.find_object_index(cursor))
-            .is_some_and(|cursor_index| {
+            .and_then(|cursor_index| {
                 let cursor = &self.objects[cursor_index];
                 if cursor.state.container.is_some()
                     || self.object_procedure(cursor_index) != ActionProcedure::Walk
                 {
-                    return false;
+                    return None;
                 }
                 let dx = point.x - cursor.state.position.x;
                 let dy = point.y - cursor.state.position.y;
-                (-25..=-10).contains(&dy) && ((-15..=-1).contains(&dx) || (1..=15).contains(&dx))
+                if !(-25..=-10).contains(&dy) {
+                    return None;
+                }
+                if (-15..=-1).contains(&dx) {
+                    Some(MouseWorldCursor::JumpLeft)
+                } else if (1..=15).contains(&dx) {
+                    Some(MouseWorldCursor::JumpRight)
+                } else {
+                    None
+                }
             })
+    }
+
+    pub fn mouse_jump_zone(&self, owner: i32, point: Vector2) -> bool {
+        self.mouse_jump_cursor(owner, point).is_some()
     }
 
     /// Classify the down cursor which may start a world-object moving drag.
@@ -3535,7 +3551,9 @@ impl Engine {
         }
         let grab = self.definitions.get(&object.definition_id)?.grab();
         match self.mouse_world_cursor(owner, Some(target), point, false) {
-            MouseWorldCursor::Carryable(_) => Some(MouseDragSource::Carryable),
+            MouseWorldCursor::Carryable(_) | MouseWorldCursor::DigObject(_) => {
+                Some(MouseDragSource::Carryable)
+            }
             MouseWorldCursor::Grab(_) | MouseWorldCursor::Ungrab(_) if grab == 1 => {
                 Some(MouseDragSource::Vehicle)
             }
@@ -18368,6 +18386,14 @@ protected func ControlContents(idTarget) { return(1); }
         assert!(
             engine.mouse_jump_zone(1, Vector2::new(108, 85)),
             "+8/-15 is inside the classic jump zone"
+        );
+        assert_eq!(
+            engine.mouse_world_cursor(1, None, Vector2::new(92, 85), false),
+            MouseWorldCursor::JumpLeft
+        );
+        assert_eq!(
+            engine.mouse_world_cursor(1, None, Vector2::new(108, 85), false),
+            MouseWorldCursor::JumpRight
         );
         for dx in [-15, -1, 1, 15] {
             for dy in [-25, -10] {
