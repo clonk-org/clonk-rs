@@ -34554,16 +34554,38 @@ impl GameApp {
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
                 .filter(|target| self.ingame_fog_allows_target(pointer, *target))
         });
-        if let Some(target) = context_target {
-            if let Some(select_target) = primary_target
-                .filter(|target| self.ingame_mouse_selectable_object(self.local_owner, *target))
+        // RightUpDragNone makes one exact-object exclusion pass for the
+        // windmill wing. Do not loop: another WWNG behind it is the target.
+        let context_target = match context_target {
+            Some(target)
+                if self
+                    .snapshot
+                    .object(target)
+                    .is_some_and(|object| object.definition_id == "WWNG") =>
             {
-                self.submit_or_execute_player_select(PlayerSelectControlData {
-                    player: self.local_owner,
-                    objects: vec![select_target.as_u64() as i32],
-                    by_client: -1,
-                })?;
+                // C++ does not re-run its fog gate after the excluded pick.
+                self.graphics
+                    .object_at_point_excluding(
+                        &self.snapshot,
+                        self.local_owner,
+                        pointer.screen,
+                        target,
+                    )
             }
+            target => target,
+        };
+        // A Select cursor queues its selection before the secondary context
+        // lookup, even when that lookup falls through to select-next.
+        if let Some(select_target) = primary_target
+            .filter(|target| self.ingame_mouse_selectable_object(self.local_owner, *target))
+        {
+            self.submit_or_execute_player_select(PlayerSelectControlData {
+                player: self.local_owner,
+                objects: vec![select_target.as_u64() as i32],
+                by_client: -1,
+            })?;
+        }
+        if let Some(target) = context_target {
             self.show_startup_hint = false;
             let add_mode = 2 | if self.keyboard_modifiers.shift() { 4 } else { 0 };
             let (x, y) = self
@@ -63873,10 +63895,213 @@ mod tests {
             .expect("physical left-up");
     }
 
+    fn physical_right_click(app: &mut GameApp, point: GuiPoint) {
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("move to right-click point");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("physical right-down");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("physical right-up");
+    }
+
     fn install_mouse_network_capture(app: &mut GameApp) -> network::TestNetworkCommands {
         let (manager, _events, commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         commands
+    }
+
+    fn install_l067_context_stack(
+        app: &mut GameApp,
+        definitions_back_to_front: &[&str],
+        selectable_windwing: bool,
+    ) -> (Vec<ObjectId>, GuiPoint) {
+        let owner = app.local_owner;
+        let cursor = app
+            .engine
+            .crew_cursor(owner)
+            .and_then(|cursor| app.engine.object_snapshot(cursor))
+            .expect("L067 sandbox cursor remains live");
+        let position = Vector2::new(cursor.position.x - 60, cursor.position.y);
+        let layer = cursor.layer;
+        let mut registered = Vec::new();
+        for definition_id in definitions_back_to_front {
+            if registered.contains(definition_id) {
+                continue;
+            }
+            let mut definition = Definition::from_script(
+                *definition_id,
+                *definition_id,
+                "#strict\n",
+            )
+            .expect("L067 context definition compiles");
+            definition.set_shape_rect(Some(lc_engine::DefinitionRect::new(-5, -5, 10, 10)));
+            match *definition_id {
+                "WWNG" => {
+                    // The shipped WindWing is a rotate-only vehicle, so the
+                    // ordinary interaction mask misses it and right-up's
+                    // OCF_All fallback supplies the context target.
+                    definition.set_category(
+                        lc_engine::CATEGORY_VEHICLE
+                            | if selectable_windwing {
+                                lc_engine::CATEGORY_MOUSE_SELECT
+                            } else {
+                                0
+                            },
+                    );
+                    definition.set_rotateable(1);
+                    if selectable_windwing {
+                        definition.set_grab(1);
+                    }
+                }
+                "M67C" => {
+                    // A closed container remains a context object without
+                    // OCF_Container masking the WWNG in the primary search.
+                    definition.set_category(lc_engine::CATEGORY_STRUCTURE);
+                    definition.set_closed_container(1);
+                }
+                unexpected => panic!("unexpected L067 definition {unexpected}"),
+            }
+            app.engine
+                .register_definition(definition)
+                .expect("register L067 context definition");
+            registered.push(*definition_id);
+        }
+
+        let objects = definitions_back_to_front
+            .iter()
+            .map(|definition_id| {
+                let spawn = layer
+                    .map(|layer| {
+                        SpawnConfig::new(*definition_id)
+                            .with_position(position)
+                            .with_layer(layer)
+                    })
+                    .unwrap_or_else(|| {
+                        SpawnConfig::new(*definition_id).with_position(position)
+                    });
+                app.engine
+                    .spawn_object(spawn)
+                    .expect("spawn L067 context object")
+            })
+            .collect::<Vec<_>>();
+        render_mouse_test_app(app);
+        let front = *objects.last().expect("L067 stack is nonempty");
+        let point = mouse_test_object_point(app, owner, front);
+        assert_eq!(
+            app.ingame_primary_mouse_target(owner, point),
+            selectable_windwing.then_some(front)
+        );
+        assert_eq!(
+            app.graphics.object_at_point(&app.snapshot, owner, point),
+            Some(front)
+        );
+        assert_eq!(app.ingame_viewport_region(owner, point), None);
+        (objects, point)
+    }
+
+    #[test]
+    fn l067_right_click_wwng_targets_the_closed_container_behind_it() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let (objects, point) =
+            install_l067_context_stack(&mut app, &["M67C", "WWNG"], false);
+        let [container, _windwing] = objects.as_slice() else {
+            panic!("expected container and windwing, got {objects:?}");
+        };
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        physical_right_click(&mut app, point);
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(selections.is_empty());
+        let [(_, context)] = player_commands.as_slice() else {
+            panic!("expected one Context command, got {player_commands:?}");
+        };
+        assert_eq!(context.player, owner);
+        assert_eq!(context.command, CommandId::Context as i32);
+        assert_eq!(context.target, 0);
+        assert_eq!(context.target2, container.as_u64() as i32);
+        assert_eq!(context.add_mode, 2);
+    }
+
+    #[test]
+    fn l067_right_click_lone_wwng_falls_through_to_select_next() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let (_objects, point) = install_l067_context_stack(&mut app, &["WWNG"], false);
+        let expected_next = app
+            .engine
+            .player_mouse_select_next_object(owner)
+            .expect("sandbox has a next crew selection");
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        physical_right_click(&mut app, point);
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(
+            player_commands.is_empty(),
+            "a lone WWNG must not receive Context: {player_commands:?}"
+        );
+        let [(_, selection)] = selections.as_slice() else {
+            panic!("expected one select-next packet, got {selections:?}");
+        };
+        assert_eq!(selection.player, owner);
+        assert_eq!(selection.objects, vec![expected_next.as_u64() as i32]);
+    }
+
+    #[test]
+    fn l067_right_click_excludes_only_the_front_wwng() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let (objects, point) =
+            install_l067_context_stack(&mut app, &["WWNG", "WWNG"], false);
+        let [rear_windwing, _front_windwing] = objects.as_slice() else {
+            panic!("expected two windwings, got {objects:?}");
+        };
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        physical_right_click(&mut app, point);
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(selections.is_empty());
+        let [(_, context)] = player_commands.as_slice() else {
+            panic!("expected one Context command, got {player_commands:?}");
+        };
+        assert_eq!(context.player, owner);
+        assert_eq!(context.command, CommandId::Context as i32);
+        assert_eq!(context.target2, rear_windwing.as_u64() as i32);
+    }
+
+    #[test]
+    fn l067_selectable_wwng_selects_before_falling_through_to_select_next() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let (objects, point) = install_l067_context_stack(&mut app, &["WWNG"], true);
+        let [windwing] = objects.as_slice() else {
+            panic!("expected one selectable windwing, got {objects:?}");
+        };
+        let expected_next = app
+            .engine
+            .player_mouse_select_next_object(owner)
+            .expect("sandbox has a next crew selection");
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        physical_right_click(&mut app, point);
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(player_commands.is_empty());
+        let [(_, selected), (_, cycled)] = selections.as_slice() else {
+            panic!("expected Select followed by select-next, got {selections:?}");
+        };
+        assert_eq!(selected.objects, vec![windwing.as_u64() as i32]);
+        assert_eq!(cycled.objects, vec![expected_next.as_u64() as i32]);
     }
 
     fn install_mouse_help_target(

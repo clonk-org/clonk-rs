@@ -3612,6 +3612,24 @@ impl GraphicsSystem {
         self.object_at_point_with_ocf(snapshot, owner, point, u32::MAX)
     }
 
+    /// Returns the frontmost world object other than `excluded`, matching
+    /// `C4Game::FindVisObject`'s single `pExclude` pointer.
+    pub fn object_at_point_excluding(
+        &self,
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        point: GuiPoint,
+        excluded: ObjectId,
+    ) -> Option<ObjectId> {
+        self.object_at_point_with_ocf_excluding(
+            snapshot,
+            owner,
+            point,
+            u32::MAX,
+            Some(excluded),
+        )
+    }
+
     /// The OCF-filtered form of [`Self::object_at_point`], matching the mask
     /// passed to `C4Game::FindVisObject` by `C4MouseControl::GetTargetObject`.
     /// A nonmatching front object does not hide a matching object behind it
@@ -3622,6 +3640,17 @@ impl GraphicsSystem {
         owner: i32,
         point: GuiPoint,
         ocf: u32,
+    ) -> Option<ObjectId> {
+        self.object_at_point_with_ocf_excluding(snapshot, owner, point, ocf, None)
+    }
+
+    fn object_at_point_with_ocf_excluding(
+        &self,
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        point: GuiPoint,
+        ocf: u32,
+        excluded: Option<ObjectId>,
     ) -> Option<ObjectId> {
         let viewport = self.viewport_for_point(point)?;
         if viewport.owner != owner {
@@ -3668,7 +3697,8 @@ impl GraphicsSystem {
         let cursor_layer = cursor_object.map(|cursor| cursor.layer);
 
         back_to_front.into_iter().rev().find_map(|object| {
-            if object.status != ObjectStatus::Normal
+            if excluded == Some(object.id)
+                || object.status != ObjectStatus::Normal
                 || object.container.is_some()
                 || object.ocf & ocf == 0
                 || object.category & CATEGORY_MOUSE_IGNORE_FLAG != 0
@@ -15785,6 +15815,11 @@ mod tests {
         let point = GuiPoint::new(screen_x, screen_y);
 
         assert_eq!(graphics.object_at_point(&snapshot, 1, point), Some(front_id));
+        assert_eq!(
+            graphics.object_at_point_excluding(&snapshot, 1, point, front_id),
+            Some(back_id),
+            "FindVisObject skips only the exact excluded object"
+        );
 
         snapshot.objects[1].visibility = lc_engine::VIS_NONE;
         assert_eq!(
