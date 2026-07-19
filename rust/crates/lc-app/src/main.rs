@@ -9465,6 +9465,7 @@ fn initial_network_team_assignment(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StartupPlayerPropertiesOrigin {
+    MainMenuFirstPlayer,
     SelectionNew,
     SelectionEdit {
         path: PathBuf,
@@ -17826,6 +17827,50 @@ fn startup_participant_reference_is_valid(paths: &AppPaths, reference: &str) -> 
     }
 }
 
+fn is_visible_startup_player_file_name(name: &str) -> bool {
+    !name.starts_with('.')
+        && Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("c4p"))
+}
+
+fn startup_player_file_exists(paths: &AppPaths) -> io::Result<bool> {
+    let config = match Config::load(paths.config_file()) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    let mut first_error = None;
+    for search_path in startup_player_search_paths(paths, &config) {
+        let entries = match fs::read_dir(search_path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_visible_startup_player_file_name(&name) {
+                return Ok(true);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(false),
+    }
+}
+
 fn startup_player_file_references(paths: &AppPaths) -> io::Result<Vec<String>> {
     let config = match Config::load(paths.config_file()) {
         Ok(config) => config,
@@ -17843,12 +17888,7 @@ fn startup_player_file_references(paths: &AppPaths) -> io::Result<Vec<String>> {
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.')
-                || !Path::new(&name)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("c4p"))
-            {
+            if !is_visible_startup_player_file_name(&name) {
                 continue;
             }
             let reference = startup_participant_reference(&player_path, &entry.path(), &name);
@@ -36783,6 +36823,13 @@ impl GameApp {
     }
 
     fn open_new_startup_player_properties(&mut self) {
+        self.open_new_startup_player_properties_from(StartupPlayerPropertiesOrigin::SelectionNew);
+    }
+
+    fn open_new_startup_player_properties_from(
+        &mut self,
+        origin: StartupPlayerPropertiesOrigin,
+    ) {
         self.close_context_menu_silently();
         self.startup_tooltip.pointer_left();
         let controller = self.new_startup_player_properties_controller(
@@ -36790,7 +36837,7 @@ impl GameApp {
             classic_safe_random(5),
         );
         self.startup_player_properties_dialog = Some(PendingStartupPlayerProperties {
-            origin: StartupPlayerPropertiesOrigin::SelectionNew,
+            origin,
             controller,
         });
         self.status_text.clear();
@@ -36921,7 +36968,8 @@ impl GameApp {
             ));
         }
         let existing_path = match &origin {
-            StartupPlayerPropertiesOrigin::SelectionNew => None,
+            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+            | StartupPlayerPropertiesOrigin::SelectionNew => None,
             StartupPlayerPropertiesOrigin::SelectionEdit { path, .. } => Some(path.as_path()),
         };
         let result = self
@@ -36969,13 +37017,36 @@ impl GameApp {
             self.mark_menu_dirty();
             return;
         };
+        let forced_participant_persistence = matches!(
+            &origin,
+            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+        )
+        .then(|| {
+            persist_config_value(
+                paths,
+                "General",
+                "Participants",
+                saved.file_name.clone(),
+            )
+        });
         let mut players = match discover_player_files(paths) {
             Ok(players) => players,
             Err(error) => {
                 tracing::error!(%error, "failed to refresh startup players after save");
                 self.startup_tooltip.pointer_left();
                 self.startup_player_properties_dialog = None;
-                self.status_text = format!("Player saved, but the list could not be refreshed: {error}");
+                self.refresh_participants_label();
+                if let Some(persistence_error) =
+                    forced_participant_persistence.and_then(Result::err)
+                {
+                    tracing::error!(%persistence_error, "failed to select the first saved player");
+                    self.status_text = format!(
+                        "Player saved, but participant selection failed: {persistence_error}"
+                    );
+                } else {
+                    self.status_text =
+                        format!("Player saved, but the list could not be refreshed: {error}");
+                }
                 self.mark_menu_dirty();
                 return;
             }
@@ -36986,22 +37057,30 @@ impl GameApp {
         };
         let saved_index = players.iter().position(|player| is_saved(player));
         for player in &mut players {
-            let activated = if is_saved(player) {
-                match &origin {
-                    StartupPlayerPropertiesOrigin::SelectionNew => true,
-                    StartupPlayerPropertiesOrigin::SelectionEdit { was_activated, .. } => {
-                        *was_activated
+            let was_activated = previous_activations
+                .iter()
+                .find(|(reference, _)| reference.eq_ignore_ascii_case(&player.file_name))
+                .is_some_and(|(_, activated)| *activated);
+            let activated = match &origin {
+                StartupPlayerPropertiesOrigin::MainMenuFirstPlayer => is_saved(player),
+                StartupPlayerPropertiesOrigin::SelectionNew => is_saved(player) || was_activated,
+                StartupPlayerPropertiesOrigin::SelectionEdit {
+                    was_activated: saved_was_activated,
+                    ..
+                } => {
+                    if is_saved(player) {
+                        *saved_was_activated
+                    } else {
+                        was_activated
                     }
                 }
-            } else {
-                previous_activations
-                    .iter()
-                    .find(|(reference, _)| reference.eq_ignore_ascii_case(&player.file_name))
-                    .is_some_and(|(_, activated)| *activated)
             };
             player.set_activated(activated);
         }
-        let persistence_error = persist_activations(&paths.config_file(), &players).err();
+        let persistence_error = match forced_participant_persistence {
+            Some(result) => result.err(),
+            None => persist_activations(&paths.config_file(), &players).err(),
+        };
         self.startup_player_models = players
             .iter()
             .map(|player| player.render_model.clone())
@@ -41099,6 +41178,19 @@ impl GameApp {
         }
         if let Some(dialog) = self.startup_about_dialog.as_mut() {
             dialog.pointer_left();
+        }
+        match self.app_paths.as_ref().map(startup_player_file_exists) {
+            Some(Ok(false)) => self
+                .open_new_startup_player_properties_from(
+                    StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
+                ),
+            Some(Err(error)) => {
+                tracing::warn!(%error, "failed to scan startup player files");
+                self.open_new_startup_player_properties_from(
+                    StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
+                );
+            }
+            Some(Ok(true)) | None => {}
         }
     }
 
@@ -61304,6 +61396,14 @@ mod tests {
     /// `AppMode::Menu` only after `update()` polls the boot completion. Panics if
     /// it never settles, so a genuinely stuck boot still fails the test.
     fn wait_for_menu(app: &mut GameApp) {
+        wait_for_menu_impl(app, true);
+    }
+
+    fn wait_for_menu_preserving_first_player_dialog(app: &mut GameApp) {
+        wait_for_menu_impl(app, false);
+    }
+
+    fn wait_for_menu_impl(app: &mut GameApp, dismiss_first_player_dialog: bool) {
         // Asset-less unit fixtures intentionally test isolated menu logic.
         // Production stays in Loading and reports the typed loader boundary;
         // only this test helper bypasses startup presentation explicitly.
@@ -61314,6 +61414,18 @@ mod tests {
         }
         for _ in 0..480 {
             if matches!(app.mode, AppMode::Menu) {
+                if dismiss_first_player_dialog
+                    && app.startup_player_properties_dialog.as_ref().is_some_and(
+                        |pending| matches!(
+                            &pending.origin,
+                            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+                        ),
+                    )
+                {
+                    app.process_startup_player_properties_actions(vec![
+                        lc_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
+                    ]);
+                }
                 return;
             }
             app.update().expect("tick while waiting for boot to finish");
@@ -78031,6 +78143,13 @@ public func Grant(password) { return GainMissionAccess(password); }
         persist_config_value(
             paths,
             "General",
+            "PlayerPath",
+            root.to_string_lossy().into_owned(),
+        )
+        .expect("configure exact test player path");
+        persist_config_value(
+            paths,
+            "General",
             "Participants",
             player.to_string_lossy().into_owned(),
         )
@@ -78794,6 +78913,251 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(controller.big_icon_preview().is_some_and(|image| {
             image.width() <= 64 && image.height() <= 64
         }));
+    }
+
+    #[test]
+    fn startup_player_existence_scan_stops_after_the_first_visible_file() {
+        let _lock = env_lock().lock();
+        let install_root = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        fs::create_dir_all(install_root.path().join("planet/System.c4g"))
+            .expect("create system group marker");
+        fs::create_dir_all(install_root.path().join("Players"))
+            .expect("create first player root");
+        fs::write(
+            install_root.path().join("Players/Visible.C4P"),
+            b"filename-only player marker",
+        )
+        .expect("create visible player filename");
+        fs::create_dir_all(install_root.path().join("build"))
+            .expect("create later developer root");
+        fs::write(
+            install_root.path().join("build/Players"),
+            b"not a directory",
+        )
+        .expect("create unreadable later player root");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover isolated app paths");
+        persist_config_value(&paths, "General", "PlayerPath", "Players")
+            .expect("configure relative player path");
+
+        assert!(
+            startup_player_file_exists(&paths).expect("short-circuit existence scan")
+        );
+
+        fs::remove_file(install_root.path().join("Players/Visible.C4P"))
+            .expect("remove first visible player");
+        assert!(startup_player_file_exists(&paths).is_err());
+
+        fs::remove_dir(install_root.path().join("Players"))
+            .expect("remove empty first player root");
+        fs::write(
+            install_root.path().join("Players"),
+            b"not a directory",
+        )
+        .expect("make first player root unreadable");
+        fs::remove_file(install_root.path().join("build/Players"))
+            .expect("remove unreadable later player root");
+        fs::create_dir_all(install_root.path().join("build/Players"))
+            .expect("create later player root");
+        fs::write(
+            install_root.path().join("build/Players/Later.c4p"),
+            b"later filename-only player marker",
+        )
+        .expect("create later visible player filename");
+        assert!(
+            startup_player_file_exists(&paths).expect("continue after an earlier scan error")
+        );
+
+        fs::remove_file(install_root.path().join("build/Players/Later.c4p"))
+            .expect("remove later visible player");
+        assert!(startup_player_file_exists(&paths).is_err());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn main_menu_without_visible_player_forces_creation_and_overwrites_participants() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let player_root = user_data.path().join("Players");
+        fs::create_dir_all(player_root.join(".Private.c4p"))
+            .expect("create ignored private player entry");
+        fs::create_dir_all(player_root.join("Nested/Deep.c4p"))
+            .expect("create ignored nested player entry");
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            player_root.to_string_lossy(),
+        );
+        config.set_in(
+            Some("General"),
+            "Participants",
+            "Stale.c4p;Other.c4p",
+        );
+        config.set_in(Some("General"), "FirstStart", "0");
+        fs::create_dir_all(paths.config_file().parent().expect("config parent"))
+            .expect("create config parent");
+        config.save(paths.config_file()).expect("save config");
+
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise fresh-profile app");
+        wait_for_menu_preserving_first_player_dialog(&mut app);
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(matches!(
+            app.startup_player_properties_dialog
+                .as_ref()
+                .map(|pending| pending.controller.mode()),
+            Some(lc_frontend::startup_plrproperties::PlayerPropertiesMode::New)
+        ));
+        assert!(app.startup_player_properties_dialog.as_ref().is_some_and(
+            |pending| matches!(
+                &pending.origin,
+                StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+            )
+        ));
+
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
+        ]);
+        assert!(app.startup_player_properties_dialog.is_none());
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
+            .expect("cancelled main menu remains usable");
+        assert_eq!(app.startup_view, StartupView::PlayerSelection);
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::Back,
+        ])
+        .expect("return to main without a player");
+        assert!(app.startup_player_properties_dialog.is_some());
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
+        ]);
+
+        let broken = player_root.join("Broken.C4P");
+        fs::write(&broken, b"not a player group").expect("create visible broken player entry");
+        app.show_main_menu();
+        assert!(
+            app.startup_player_properties_dialog.is_none(),
+            "the native scan matches names without opening player groups"
+        );
+        fs::remove_file(&broken).expect("remove visible broken player entry");
+        app.show_main_menu();
+        assert!(app.startup_player_properties_dialog.as_ref().is_some_and(
+            |pending| matches!(
+                &pending.origin,
+                StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
+            )
+        ));
+
+        let raced = player_root.join("Racer.c4p");
+        fs::create_dir_all(&raced).expect("create player that appears behind the modal");
+        fs::write(
+            raced.join("Player.txt"),
+            "[Player]\nName=Racer\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write raced player core");
+        let mut raced_config = Config::load(paths.config_file()).expect("reload raced config");
+        raced_config.set_in(
+            Some("General"),
+            "Participants",
+            raced.to_string_lossy(),
+        );
+        raced_config
+            .save(paths.config_file())
+            .expect("select raced player behind modal");
+
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("forced editor")
+            .controller
+            .set_name("First");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+        let created = player_root.join("First.c4p");
+        assert!(created.is_file());
+        assert!(app.startup_player_properties_dialog.is_none());
+        assert_eq!(app.startup_player_files.len(), 2);
+        assert!(
+            app.startup_player_files.iter().any(|player| {
+                player.file_name.eq_ignore_ascii_case(created.to_string_lossy().as_ref())
+                    && player.render_model.activated
+            })
+        );
+        assert!(
+            app.startup_player_files.iter().any(|player| {
+                player.file_name.eq_ignore_ascii_case(raced.to_string_lossy().as_ref())
+                    && !player.render_model.activated
+            }),
+            "standalone creation deactivates a player that appears while its modal is open"
+        );
+        assert_eq!(app.main_menu_state.participants_label, "Players: First");
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload config")
+                .get_in(Some("General"), "Participants"),
+            Some(created.to_string_lossy().as_ref()),
+            "forced creation overwrites stale participants with the new file"
+        );
+
+        app.show_main_menu();
+        assert!(
+            app.startup_player_properties_dialog.is_none(),
+            "a visible player prevents another forced dialog"
+        );
+        app.handle_main_menu_activation(MainMenuItem::PlayerSelection)
+            .expect("open player selection");
+        fs::remove_dir_all(&raced).expect("remove non-participating raced player");
+        app.delete_startup_player_and_refresh(&created)
+            .expect("delete the last player");
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::Back,
+        ])
+        .expect("return after deleting the last player");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(
+            app.startup_player_properties_dialog.is_some(),
+            "every main-menu show rechecks the physical player directory"
+        );
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
+        ]);
+        assert!(app.startup_player_properties_dialog.is_none());
+        app.handle_main_menu_activation(MainMenuItem::Options)
+            .expect("main menu remains usable after cancelling forced creation");
+        assert_eq!(app.startup_view, StartupView::Options);
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -85823,6 +86187,7 @@ ScenInfoArea=70,5,25,90
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
+        configure_test_startup_participant(&paths, user_data.path());
         let mut app = GameApp::new(
             1280,
             720,
@@ -85843,6 +86208,8 @@ ScenInfoArea=70,5,25,90
         )
         .expect("initialise app");
         wait_for_menu(&mut app);
+        app.startup_player_files.clear();
+        app.startup_player_models.clear();
         let main_layout = lc_frontend::main_menu_layout(1280, 720);
         let click_main_button = |app: &mut GameApp, index: usize| {
             let button = main_layout.buttons[index];
