@@ -15,6 +15,7 @@ mod host_initial_resources;
 mod initial_network_dynamic;
 mod initial_network_metadata;
 mod initial_network_parameters;
+mod irc;
 mod join_client_registry;
 mod join_player_registry;
 mod join_team_registry;
@@ -123,6 +124,12 @@ pub use initial_network_metadata::{
 pub use initial_network_parameters::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
     InitialNetworkScenarioDefaults,
+};
+pub use irc::{
+    resolve_irc_server, IrcChannel, IrcClientError, IrcClientEvent, IrcClientHandle,
+    IrcClientSnapshot, IrcClientState, IrcCommand, IrcConnectConfig, IrcConnectionState,
+    IrcLineDecoder, IrcMessage, IrcMessageType, IrcReduceResult, IrcUser, IRC_DEFAULT_PORT,
+    IRC_MAX_LOG_LENGTH, IRC_MAX_READ_LOG_LENGTH,
 };
 pub use league::{
     decode_league_auth_response, decode_league_end_response, decode_league_join_response,

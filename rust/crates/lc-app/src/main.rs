@@ -11901,7 +11901,7 @@ impl fmt::Display for ClassicParityBoundary {
             ),
             Self::StartupSubscreen(ClassicStartupSubscreen::NetworkGameChat) => write!(
                 f,
-                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the startup Chat pane"
+                "classic IRC Chat frontend is not implemented yet; refusing an incomplete startup Chat pane"
             ),
             Self::StartupSubscreen(subscreen) => write!(
                 f,
@@ -12013,7 +12013,7 @@ impl fmt::Display for ClassicParityBoundary {
             ),
             Self::RuntimeIrcChatToggle => write!(
                 f,
-                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the runtime Alt+C toggle"
+                "classic IRC Chat frontend is not implemented yet; refusing the runtime Alt+C toggle"
             ),
             Self::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable) => write!(
                 f,
@@ -12078,7 +12078,7 @@ impl fmt::Display for ClassicParityBoundary {
                 ClassicGameLobbyChild::ExternalIrcChat,
             )) => write!(
                 f,
-                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the game-lobby IRC button"
+                "classic IRC Chat frontend is not implemented yet; refusing the game-lobby IRC button"
             ),
             Self::GameLobby(ClassicGameLobbyBoundary::Child(child)) => write!(
                 f,
@@ -25227,7 +25227,7 @@ impl GameApp {
         )))
     }
 
-    fn handle_runtime_irc_drop_key(
+    fn handle_runtime_irc_unported_key(
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
@@ -25362,7 +25362,7 @@ impl GameApp {
                 return Ok(());
             }
             if context_menu_was_open {
-                if self.handle_runtime_irc_drop_key(key, state)? {
+                if self.handle_runtime_irc_unported_key(key, state)? {
                     return Ok(());
                 }
                 // A popup makes its parent Edit and chat callbacks inactive,
@@ -25674,7 +25674,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if self.handle_runtime_irc_drop_key(key, state)? {
+        if self.handle_runtime_irc_unported_key(key, state)? {
             return Ok(());
         }
         if self.handle_running_chat_key(key, state)? {
@@ -34531,7 +34531,7 @@ impl GameApp {
             self.display_flags.show_commands
                 && !(self.engine.film() && self.engine.replay()),
             mouse_viewport,
-            false, // External IRC chat is intentionally absent (M08-P4-L071).
+            false, // The external IRC frontend is not wired yet (M09-P3-L028).
         ) {
             return Some(IngameViewportRegion::ViewportButton(button));
         }
@@ -36629,7 +36629,7 @@ impl GameApp {
                 }
                 lc_frontend::hud::ViewportButton::Chat => {
                     // The conditional C4ChatDlg/IRC row is never registered
-                    // without the intentionally dropped external IRC client.
+                    // until the shared external IRC frontend is wired.
                     Ok(())
                 }
             };
@@ -70140,7 +70140,7 @@ mod tests {
         assert_eq!(
             app.ingame_viewport_region(owner, chat),
             None,
-            "the deliberately absent external IRC client keeps Chat inactive"
+            "the pending external IRC frontend keeps Chat inactive"
         );
 
         let mut network_commands = install_mouse_network_capture(&mut app);
@@ -93584,7 +93584,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn legacy_plaintext_irc_chat_is_intentionally_dropped_at_retained_entry_points() {
+    fn irc_frontend_stays_fail_closed_while_the_backend_is_wired() {
         let mut app = new_real_classic_menu_app(640, 480);
         let boundary = ClassicParityBoundary::StartupSubscreen(
             ClassicStartupSubscreen::NetworkGameChat,
@@ -93592,7 +93592,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let expected = boundary.to_string();
         assert_eq!(
             expected,
-            "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the startup Chat pane"
+            "classic IRC Chat frontend is not implemented yet; refusing an incomplete startup Chat pane"
         );
 
         app.open_network_game_dialog();
@@ -93614,7 +93614,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut frame = vec![0xa5; 640 * 480 * 4];
         let render_error = app
             .render(&mut frame)
-            .expect_err("dropped IRC pane must be rejected before pixels");
+            .expect_err("pending IRC frontend must be rejected before pixels");
         assert_eq!(
             render_error.downcast_ref::<ClassicParityBoundary>(),
             Some(&boundary)
@@ -93647,12 +93647,12 @@ public func Grant(password) { return GainMissionAccess(password); }
             let runtime_expected = runtime_boundary.to_string();
             assert_eq!(
                 runtime_expected,
-                "legacy plaintext IRC chat is intentionally dropped from the Rust port; refusing the runtime Alt+C toggle"
+                "classic IRC Chat frontend is not implemented yet; refusing the runtime Alt+C toggle"
             );
             for _ in 0..2 {
                 let runtime_error = runtime_app
                     .handle_key(VirtualKeyCode::C, ElementState::Pressed)
-                    .expect_err("runtime IRC chord must fail at the drop boundary");
+                    .expect_err("runtime IRC chord must fail at the pending frontend boundary");
                 let mut after = runtime_global_ui_snapshot(&runtime_app);
                 after.menu_render_version = before.menu_render_version;
                 assert_eq!(after, before);
@@ -93695,7 +93695,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .handle_modifiers_changed(modifiers)
                 .expect("set non-IRC modifiers");
             assert!(!ignored_runtime
-                .handle_runtime_irc_drop_key(VirtualKeyCode::C, ElementState::Pressed)
+                .handle_runtime_irc_unported_key(VirtualKeyCode::C, ElementState::Pressed)
                 .expect("non-IRC chord is unhandled"));
         }
     }
@@ -111279,7 +111279,7 @@ ScenInfoArea=70,5,25,90
             .expect("hold Alt over chat context menu");
         let irc_error = app
             .handle_key(VirtualKeyCode::C, ElementState::Pressed)
-            .expect_err("global IRC chord reaches its explicit drop boundary");
+            .expect_err("global IRC chord reaches its pending frontend boundary");
         assert_engine_parity_boundary(
             irc_error,
             ClassicParityBoundary::RuntimeIrcChatToggle,
@@ -144149,7 +144149,7 @@ func ControlDig() { dig_count = 1; return(1); }
         menu.handle_modifiers_changed(ModifiersState::ALT)
             .expect("set menu Alt modifier");
         menu.handle_key(VirtualKeyCode::C, ElementState::Pressed)
-            .expect("runtime IRC drop is not registered in Menu mode");
+            .expect("runtime IRC frontend is not registered in Menu mode");
         menu.handle_key(VirtualKeyCode::C, ElementState::Released)
             .expect("menu IRC chord release remains outside the runtime helper");
 
@@ -144172,7 +144172,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("set loading Alt modifier");
         loading
             .handle_key(VirtualKeyCode::C, ElementState::Pressed)
-            .expect("runtime IRC drop is not registered in Loading mode");
+            .expect("runtime IRC frontend is not registered in Loading mode");
         loading
             .handle_key(VirtualKeyCode::C, ElementState::Released)
             .expect("loading IRC chord release remains outside the runtime helper");
