@@ -5279,6 +5279,10 @@ fn run_menu_dump(
         (s.width(), s.height())
     };
     let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
+    while app.startup_dialog_fade_active() {
+        app.render(&mut frame)
+            .context("failed to settle startup dialog fade for menu dump")?;
+    }
     app.render(&mut frame)
         .context("failed to render menu frame")?;
     let png = encode_surface_to_png(app.graphics.surface())
@@ -5928,6 +5932,9 @@ fn apply_options_display_requests(
     paths: Option<&AppPaths>,
 ) -> Result<()> {
     while let Some(request) = app.pending_options_display_requests.pop_front() {
+        let recreate_options = app.mode == AppMode::Menu
+            && app.startup_view == StartupView::Options
+            && app.startup_options_dialog.is_some();
         match request {
             OptionsDisplayRequest::SetMode(mode) => {
                 let mode = match mode {
@@ -5968,6 +5975,9 @@ fn apply_options_display_requests(
             if let Some(paths) = paths {
                 display_options.persist_if_dirty(paths);
             }
+        }
+        if recreate_options {
+            app.begin_startup_dialog_fade(StartupDialog::Options);
         }
         window.request_redraw();
     }
@@ -9894,6 +9904,10 @@ struct GameApp {
     startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
+    /// C4Startup::SwitchDialog's paired FadeOut/FadeIn. The outgoing pixels
+    /// are frozen because opening the replacement mutates or destroys several
+    /// startup controllers before the next presentation.
+    startup_dialog_fade: Option<StartupDialogFade>,
     /// Process-local `C4Startup::eLastDlgID`. The network lobby and staged
     /// loader are game states rather than startup dialogs, so they must not
     /// displace the dialog reopened after the round ends.
@@ -12184,6 +12198,32 @@ enum StartupDialog {
     Options,
     About,
     PlayerSelection,
+}
+
+const STARTUP_DIALOG_FADE_STEPS: u8 = 10;
+
+struct StartupDialogFade {
+    outgoing: Option<StartupDialog>,
+    incoming: StartupDialog,
+    /// Number of already presented fade frames. C++ advances opacity before
+    /// drawing, so the first presentation changes this from zero to one.
+    step: u8,
+    width: u32,
+    height: u32,
+    underlay: Vec<u8>,
+    outgoing_frame: Option<Vec<u8>>,
+    outgoing_native_frame: Option<Vec<u8>>,
+    outgoing_native_text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
+    outgoing_native_fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
+}
+
+struct StartupDialogFadeLayers {
+    width: u32,
+    height: u32,
+    underlay: Vec<u8>,
+    outgoing_frame: Vec<u8>,
+    outgoing_native_frame: Vec<u8>,
+    outgoing_native_text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
 }
 
 #[cfg(test)]
@@ -19443,6 +19483,7 @@ impl GameApp {
             startup_options_dialog: None,
             startup_about_dialog: None,
             startup_view: StartupView::MainMenu,
+            startup_dialog_fade: None,
             last_startup_dialog: StartupDialog::MainMenu,
             startup_scenario_back_dialog: None,
             startup_view_flags: StartupViewFlags {
@@ -19682,6 +19723,7 @@ impl GameApp {
     fn can_defer_native_main_menu_text(&self, scale: f32) -> bool {
         self.mode == AppMode::Menu
             && self.startup_view == StartupView::MainMenu
+            && !self.startup_dialog_fade_active()
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none()
             && !self.startup_element_tooltip_pending()
@@ -19762,6 +19804,7 @@ impl GameApp {
             logical_layer: None,
             clip: None,
             text,
+            fonts: None,
         });
     }
 
@@ -19790,6 +19833,7 @@ impl GameApp {
                 logical_layer: has_raster.then(|| surface.pixels().to_vec()),
                 clip,
                 text,
+                fonts: None,
             });
         }
     }
@@ -19852,7 +19896,7 @@ impl GameApp {
         let Some(plan) = self.pending_native_presentation.take() else {
             return Ok(());
         };
-        let fonts = self
+        let default_fonts = self
             .native_startup_fonts
             .as_deref()
             .context("scale-native font bundle disappeared before presentation")?;
@@ -19875,6 +19919,7 @@ impl GameApp {
             if batch.text.is_empty() {
                 continue;
             }
+            let fonts = batch.fonts.as_deref().unwrap_or(default_fonts);
             composer.draw_native(|physical, geometry| -> Result<()> {
                 let (width, height) = geometry.physical_size();
                 let mut surface =
@@ -19932,6 +19977,10 @@ impl GameApp {
 
     fn startup_network_transition_active(&self) -> bool {
         self.mode != AppMode::Running && self.startup_network_connection.is_some()
+    }
+
+    fn startup_dialog_fade_active(&self) -> bool {
+        self.mode == AppMode::Menu && self.startup_dialog_fade.is_some()
     }
 
     fn classic_host_lobby_active(&self) -> bool {
@@ -20222,6 +20271,10 @@ impl GameApp {
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
+        let restart_same_dialog_fade = self.startup_dialog_fade.as_ref().and_then(|fade| {
+            (fade.outgoing == Some(fade.incoming)).then_some(fade.incoming)
+        });
+        self.startup_dialog_fade = None;
         self.close_context_menu_silently();
         // Native resize tears down/repositions dialog elements and therefore
         // clears CMouse's owned hover element. A retained screen coordinate
@@ -20319,6 +20372,9 @@ impl GameApp {
             if let Some(controller) = self.definition_selector.as_mut() {
                 controller.cancel_interaction();
             }
+        }
+        if let Some(dialog) = restart_same_dialog_fade {
+            self.begin_startup_dialog_fade(dialog);
         }
         Ok(())
     }
@@ -20801,6 +20857,9 @@ impl GameApp {
             return Ok(());
         }
         if self.mode != AppMode::Menu || character.is_control() {
+            return Ok(());
+        }
+        if self.startup_dialog_fade_active() {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -21455,6 +21514,9 @@ impl GameApp {
             }
         }
         if self.game_option_input_dialog.is_some() {
+            return Ok(());
+        }
+        if self.startup_dialog_fade_active() {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -23247,7 +23309,7 @@ impl GameApp {
         Ok(false)
     }
 
-    fn startup_options_dialog_is_active(&self) -> bool {
+    fn startup_options_dialog_has_focus_owner(&self) -> bool {
         self.mode == AppMode::Menu
             && self.startup_view == StartupView::Options
             && self.startup_options_dialog.is_some()
@@ -23255,6 +23317,10 @@ impl GameApp {
             && self.context_menu.is_none()
             && self.definition_selector.is_none()
             && self.game_option_input_dialog.is_none()
+    }
+
+    fn startup_options_dialog_is_active(&self) -> bool {
+        self.startup_options_dialog_has_focus_owner() && !self.startup_dialog_fade_active()
     }
 
     /// Handles the exact default ScoreboardToggle key before generic app input
@@ -24190,6 +24256,11 @@ impl GameApp {
             return Ok(());
         }
         if input_dialog_release_latched {
+            return Ok(());
+        }
+        // Modal/context owners above the startup dialog remain active. Only
+        // the fading base dialogs mirror Dialog::IsActive(false).
+        if self.startup_dialog_fade_active() {
             return Ok(());
         }
         if self.handle_options_tab_key(key, state)? {
@@ -29735,6 +29806,10 @@ impl GameApp {
                 ClusterOwner::Input
             } else if game_over_open {
                 ClusterOwner::GameOver
+            } else if self.startup_dialog_fade_active()
+                && self.startup_player_properties_dialog.is_none()
+            {
+                ClusterOwner::Suppressed
             } else {
                 ClusterOwner::Base
             };
@@ -29791,6 +29866,10 @@ impl GameApp {
                                     && self.game_over_dialog.is_some()
                                 {
                                     ClusterOwner::GameOver
+                                } else if self.startup_dialog_fade_active()
+                                    && self.startup_player_properties_dialog.is_none()
+                                {
+                                    ClusterOwner::Suppressed
                                 } else {
                                     ClusterOwner::Base
                                 };
@@ -30951,6 +31030,10 @@ impl GameApp {
         if !runtime_client_list_above_game_over
             && self.handle_runtime_client_list_pointer_move(point)
         {
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
+        if self.startup_dialog_fade_active() {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -32404,6 +32487,9 @@ impl GameApp {
                 }
             }
         }
+        if self.startup_dialog_fade_active() {
+            return Ok(());
+        }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_secondary_button(button_state);
         }
@@ -32542,6 +32628,9 @@ impl GameApp {
             return Ok(());
         }
         if input_dialog_release_latched {
+            return Ok(());
+        }
+        if self.startup_dialog_fade_active() {
             return Ok(());
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame {
@@ -33732,6 +33821,9 @@ impl GameApp {
         {
             return Ok(());
         }
+        if self.startup_dialog_fade_active() {
+            return Ok(());
+        }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_pointer_button(button_state);
         }
@@ -34417,6 +34509,9 @@ impl GameApp {
             return Ok(());
         }
         if self.mode != AppMode::Menu {
+            return Ok(());
+        }
+        if self.startup_dialog_fade_active() {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -35109,7 +35204,7 @@ impl GameApp {
                     if summary.identifier == BACK_ENTRY_IDENTIFIER {
                         self.play_ui_sound("DoorClose");
                         if self.menu_state.stack.len() <= 1 {
-                            self.show_main_menu();
+                            self.close_scenario_browser();
                         } else {
                             self.menu_state.leave_folder();
                             self.configure_current_folder_map();
@@ -36248,7 +36343,10 @@ impl GameApp {
                     lc_frontend::startup_netdlg::NetDlgSound::ArrowHit => "ArrowHit",
                     lc_frontend::startup_netdlg::NetDlgSound::Command => "Command",
                 }),
-                NetDlgAction::Back => self.show_main_menu(),
+                NetDlgAction::Back => {
+                    self.begin_startup_dialog_fade(StartupDialog::MainMenu);
+                    self.show_main_menu();
+                }
                 NetDlgAction::Refresh => {
                     self.request_startup_network_refresh()?;
                 }
@@ -36325,6 +36423,9 @@ impl GameApp {
                 NetDlgAction::CreateGame => {
                     // C4StartupNetDlg opens C4StartupScenSelDlg(true) before
                     // any host socket or NetworkManager exists.
+                    self.begin_startup_dialog_fade(StartupDialog::ScenarioBrowser(
+                        ScenarioSelectorMode::NetworkHost,
+                    ));
                     self.open_network_host_scenario_browser();
                 }
                 NetDlgAction::MasterserverSignupChanged(enabled) => {
@@ -38978,6 +39079,7 @@ impl GameApp {
                                         "failed to reload selected application language"
                                     ),
                                 }
+                                self.begin_startup_dialog_fade(StartupDialog::Options);
                                 self.open_options_menu();
                             }
                             Some(Err(error)) => tracing::warn!(
@@ -38986,6 +39088,7 @@ impl GameApp {
                             ),
                             None => {
                                 let _ = self.reload_application_language_resources();
+                                self.begin_startup_dialog_fade(StartupDialog::Options);
                                 self.open_options_menu();
                             }
                         }
@@ -39751,7 +39854,10 @@ impl GameApp {
         for action in actions {
             match action {
                 PlrSelAction::SelectionChanged(_) | PlrSelAction::FocusChanged(_) => {}
-                PlrSelAction::Back => self.show_main_menu(),
+                PlrSelAction::Back => {
+                    self.begin_startup_dialog_fade(StartupDialog::MainMenu);
+                    self.show_main_menu();
+                }
                 PlrSelAction::NewPlayer => {
                     self.open_new_startup_player_properties();
                 }
@@ -40409,6 +40515,7 @@ impl GameApp {
                 OptionsDlgAction::GamepadGuiControlChanged(enabled) => {
                     self.gamepad_gui_control = enabled;
                     self.play_ui_sound("ArrowHit");
+                    self.begin_startup_dialog_fade(StartupDialog::Options);
                 }
                 OptionsDlgAction::OpenNetworkText(field) => {
                     self.open_options_network_input(field)?;
@@ -40511,6 +40618,7 @@ impl GameApp {
             }
         }
 
+        self.begin_startup_dialog_fade(StartupDialog::Options);
         let ClassicFontBundle {
             fonts,
             tooltip,
@@ -40813,7 +40921,10 @@ impl GameApp {
 
         for action in actions {
             match action {
-                AboutDlgAction::Back => self.show_main_menu(),
+                AboutDlgAction::Back => {
+                    self.begin_startup_dialog_fade(StartupDialog::MainMenu);
+                    self.show_main_menu();
+                }
                 AboutDlgAction::CheckForUpdates => self.open_launcher_update_dialog()?,
                 AboutDlgAction::PageChanged(_) => self.play_ui_sound("Click"),
                 AboutDlgAction::LicenseChanged(_) => self.play_ui_sound("Command"),
@@ -43366,22 +43477,29 @@ impl GameApp {
     fn handle_main_menu_activation(&mut self, item: MainMenuItem) -> Result<(), EngineError> {
         match item {
             MainMenuItem::LocalGame => {
+                self.begin_startup_dialog_fade(StartupDialog::ScenarioBrowser(
+                    ScenarioSelectorMode::Local,
+                ));
                 self.open_scenario_browser();
             }
             MainMenuItem::NetworkGame => {
                 if self.network_mode.is_some() && self.network_lobby.is_some() {
                     self.open_network_lobby();
                 } else {
+                    self.begin_startup_dialog_fade(StartupDialog::NetworkGame);
                     self.open_network_game_dialog();
                 }
             }
             MainMenuItem::PlayerSelection => {
+                self.begin_startup_dialog_fade(StartupDialog::PlayerSelection);
                 self.open_player_selection_dialog();
             }
             MainMenuItem::Options => {
+                self.begin_startup_dialog_fade(StartupDialog::Options);
                 self.open_options_menu();
             }
             MainMenuItem::About => {
+                self.begin_startup_dialog_fade(StartupDialog::About);
                 self.open_about_dialog();
             }
             MainMenuItem::Quit => {
@@ -43445,10 +43563,12 @@ impl GameApp {
                 // remembered ID remains the selector until a later explicit
                 // switch replaces it.
                 let remembered = self.last_startup_dialog;
+                self.begin_startup_dialog_fade(StartupDialog::MainMenu);
                 self.show_main_menu();
                 self.last_startup_dialog = remembered;
             }
             Some(StartupDialog::NetworkGame) => {
+                self.begin_startup_dialog_fade(StartupDialog::NetworkGame);
                 self.close_context_menu_silently();
                 self.game_option_input_dialog = None;
                 self.game_option_input_consumed_keys.clear();
@@ -43466,6 +43586,7 @@ impl GameApp {
             _ => {
                 // `DoStartup` recreated the selector without `pLastDlg`.
                 // Native normalizes Back in that state to an explicit Main.
+                self.begin_startup_dialog_fade(StartupDialog::MainMenu);
                 self.show_main_menu();
             }
         }
@@ -43659,6 +43780,146 @@ impl GameApp {
         self.open_scenario_browser_with_mode(ScenarioSelectorMode::Local);
     }
 
+    fn visible_startup_dialog(&self) -> Option<StartupDialog> {
+        match self.startup_view {
+            StartupView::MainMenu => Some(StartupDialog::MainMenu),
+            StartupView::ScenarioBrowser => Some(StartupDialog::ScenarioBrowser(
+                self.scenario_selector_mode,
+            )),
+            StartupView::NetworkGame => Some(StartupDialog::NetworkGame),
+            StartupView::Options => Some(StartupDialog::Options),
+            StartupView::About => Some(StartupDialog::About),
+            StartupView::PlayerSelection => Some(StartupDialog::PlayerSelection),
+            // C4GameLobby is a game state, not a C4Startup dialog.
+            StartupView::NetworkLobby => None,
+        }
+    }
+
+    fn render_inactive_startup_dialog_layer(&mut self, frame: &mut [u8]) -> Result<()> {
+        render_startup_frame(
+            &mut self.graphics,
+            self.assets.as_ref(),
+            &mut self.main_menu_state,
+            &mut self.menu_state,
+            &self.scenario_entry_enabled,
+            self.startup_network_dialog.as_ref(),
+            self.startup_player_dialog.as_ref(),
+            &self.startup_player_models,
+            &self.startup_crew_models,
+            None,
+            true,
+            true,
+            true,
+            true,
+            &self.scenario_game_options,
+            self.scenario_selector_mode,
+            self.startup_options_dialog.as_ref(),
+            false,
+            self.startup_about_dialog.as_ref(),
+            self.startup_view,
+            None,
+            self.startup_view_flags,
+            &mut self.menu_backdrop_cache,
+            false,
+            frame,
+        )
+    }
+
+    fn capture_startup_dialog_fade_layers(&mut self) -> Result<StartupDialogFadeLayers> {
+        let (width, height) = {
+            let surface = self.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut underlay = vec![0_u8; width as usize * height as usize * 4];
+        render_startup_underlay(
+            &mut self.graphics,
+            self.assets.as_ref(),
+            &mut underlay,
+        );
+        let mut outgoing = vec![0_u8; underlay.len()];
+        self.render_inactive_startup_dialog_layer(&mut outgoing)?;
+
+        self.begin_native_text_capture(false);
+        let mut outgoing_native = vec![0_u8; underlay.len()];
+        let native_result = self.render_inactive_startup_dialog_layer(&mut outgoing_native);
+        let outgoing_native_text = self.graphics.surface_mut().take_clonk_text_capture();
+        native_result?;
+
+        Ok(StartupDialogFadeLayers {
+            width,
+            height,
+            underlay,
+            outgoing_frame: outgoing,
+            outgoing_native_frame: outgoing_native,
+            outgoing_native_text,
+        })
+    }
+
+    fn begin_startup_dialog_fade(&mut self, incoming: StartupDialog) {
+        let Some(outgoing) = self.visible_startup_dialog() else {
+            return;
+        };
+        if self.mode != AppMode::Menu {
+            return;
+        }
+        self.pointer_left_unchecked();
+        let layers = match self.capture_startup_dialog_fade_layers() {
+            Ok(layers) => layers,
+            Err(error) => {
+                tracing::error!(%error, "failed to capture outgoing startup dialog fade layer");
+                return;
+            }
+        };
+        self.startup_dialog_fade = Some(StartupDialogFade {
+            outgoing: Some(outgoing),
+            incoming,
+            step: 0,
+            width: layers.width,
+            height: layers.height,
+            underlay: layers.underlay,
+            outgoing_frame: Some(layers.outgoing_frame),
+            outgoing_native_frame: Some(layers.outgoing_native_frame),
+            outgoing_native_text: layers.outgoing_native_text,
+            outgoing_native_fonts: self.native_startup_fonts.clone(),
+        });
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
+    }
+
+    fn begin_startup_dialog_fade_in(&mut self) {
+        let Some(incoming) = self.visible_startup_dialog() else {
+            return;
+        };
+        if self.mode != AppMode::Menu {
+            return;
+        }
+        self.pointer_left_unchecked();
+        let (width, height) = {
+            let surface = self.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut underlay = vec![0_u8; width as usize * height as usize * 4];
+        render_startup_underlay(
+            &mut self.graphics,
+            self.assets.as_ref(),
+            &mut underlay,
+        );
+        self.startup_dialog_fade = Some(StartupDialogFade {
+            outgoing: None,
+            incoming,
+            step: 0,
+            width,
+            height,
+            underlay,
+            outgoing_frame: None,
+            outgoing_native_frame: None,
+            outgoing_native_text: Vec::new(),
+            outgoing_native_fonts: None,
+        });
+        self.startup_tooltip.pointer_left();
+        self.menu_frame_cache = None;
+    }
+
     fn replace_startup_view(&mut self, view: StartupView) {
         // Destroying/replacing a native dialog clears CMouse's owned
         // pMouseOverElement. Retaining only the screen coordinate would
@@ -43666,6 +43927,13 @@ impl GameApp {
         self.startup_tooltip.pointer_left();
         self.menu_frame_cache = None;
         self.startup_view = view;
+        let keeps_pending_fade = self
+            .visible_startup_dialog()
+            .zip(self.startup_dialog_fade.as_ref())
+            .is_some_and(|(dialog, fade)| dialog == fade.incoming);
+        if !keeps_pending_fade {
+            self.startup_dialog_fade = None;
+        }
     }
 
     fn replace_startup_dialog(&mut self, view: StartupView, dialog: StartupDialog) {
@@ -43987,6 +44255,7 @@ impl GameApp {
         if let Some(Err(error)) = save_result {
             tracing::warn!(error = %error, "failed to save options dialog settings");
         }
+        self.begin_startup_dialog_fade(StartupDialog::MainMenu);
         self.show_main_menu();
     }
 
@@ -45847,6 +46116,7 @@ impl GameApp {
             // the backdrop also frees its full-screen buffer during play.
             self.menu_frame_cache = None;
             self.menu_backdrop_cache = StartupBackdropCache::default();
+            self.startup_dialog_fade = None;
         }
         match self.mode {
             AppMode::Running => {
@@ -46787,6 +47057,7 @@ impl GameApp {
                     self.open_network_lobby();
                 } else {
                     self.show_main_menu();
+                    self.begin_startup_dialog_fade_in();
                 }
                 self.begin_frontend_music_entry();
                 // `--sandbox`: jump straight into the built-in sandbox once boot
@@ -48712,6 +48983,13 @@ impl GameApp {
         {
             return None;
         }
+        if let Some(properties) = self.startup_player_properties_dialog.as_ref() {
+            let book = self.assets.options_book_fonts.as_deref()?;
+            return properties.controller.tooltip_at(point, &book.book_small);
+        }
+        if self.startup_dialog_fade_active() {
+            return None;
+        }
 
         match self.startup_view {
             StartupView::MainMenu => self.main_menu_state.tooltip_at(point),
@@ -48802,12 +49080,6 @@ impl GameApp {
     }
 
     fn player_selection_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
-        // The properties dialog is modal: even an untipped point on it (or
-        // outside it) must not fall through to the player dialog beneath.
-        if let Some(properties) = self.startup_player_properties_dialog.as_ref() {
-            let book = self.assets.options_book_fonts.as_deref()?;
-            return properties.controller.tooltip_at(point, &book.book_small);
-        }
         let dialog = self.startup_player_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let layout = dialog.layout();
@@ -49242,8 +49514,41 @@ impl GameApp {
                     let surface = self.graphics.surface();
                     (surface.width(), surface.height())
                 };
+                let expected_len = width as usize * height as usize * 4;
+                let visible_dialog = self.visible_startup_dialog();
+                let fade_compatible = self.startup_dialog_fade.as_ref().is_some_and(|fade| {
+                    Some(fade.incoming) == visible_dialog
+                        && frame.len() == expected_len
+                        && fade.width == width
+                        && fade.height == height
+                        && fade.underlay.len() == expected_len
+                        && fade
+                            .outgoing_frame
+                            .as_ref()
+                            .is_none_or(|outgoing| outgoing.len() == expected_len)
+                        && (!ordered_native
+                            || fade
+                                .outgoing_native_frame
+                                .as_ref()
+                                .is_none_or(|outgoing| outgoing.len() == expected_len))
+                });
+                if self.startup_dialog_fade.is_some() && !fade_compatible {
+                    self.startup_dialog_fade = None;
+                }
+                let fade_was_active = fade_compatible;
+                if let Some(fade) = self.startup_dialog_fade.as_mut() {
+                    fade.step = fade
+                        .step
+                        .saturating_add(1)
+                        .min(STARTUP_DIALOG_FADE_STEPS);
+                }
+                let fade_draw_inactive = self
+                    .startup_dialog_fade
+                    .as_ref()
+                    .is_some_and(|fade| fade.step < STARTUP_DIALOG_FADE_STEPS);
                 let startup_tooltip_pending = self.startup_element_tooltip_pending();
                 let cache_eligible = !ordered_native
+                    && !fade_was_active
                     && self.context_menu.is_none()
                     && self.startup_player_properties_dialog.is_none()
                     && self.game_option_input_dialog.is_none()
@@ -49267,9 +49572,14 @@ impl GameApp {
                 let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
                 let game_option_input_open = self.game_option_input_dialog.is_some();
-                let context_menu_open = self.context_menu.is_some();
-                let options_draw_focus = self.startup_options_dialog_is_active();
-                let base_context_menu = if ordered_native {
+                // A fading C4GUI::Dialog is inactive even when it retains its
+                // focused control. Reuse the renderer's inactive-focus path.
+                let context_menu_open = self.context_menu.is_some()
+                    || self.startup_player_properties_dialog.is_some()
+                    || fade_draw_inactive;
+                let options_draw_focus =
+                    self.startup_options_dialog_has_focus_owner() && !fade_draw_inactive;
+                let base_context_menu = if ordered_native || fade_was_active {
                     None
                 } else {
                     Self::startup_base_context_menu(
@@ -49286,9 +49596,6 @@ impl GameApp {
                     &self.scenario_entry_enabled,
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
-                    self.startup_player_properties_dialog
-                        .as_ref()
-                        .map(|pending| &pending.controller),
                     &self.startup_player_models,
                     &self.startup_crew_models,
                     base_context_menu,
@@ -49305,11 +49612,96 @@ impl GameApp {
                     network_lobby,
                     self.startup_view_flags,
                     &mut self.menu_backdrop_cache,
-                    defer_native_main_text,
+                    defer_native_main_text && !fade_was_active,
                     frame,
                 )?;
+                if fade_was_active {
+                    let fade = self
+                        .startup_dialog_fade
+                        .take()
+                        .expect("compatible startup fade must still be present");
+                    if ordered_native {
+                        let incoming_frame = frame.to_vec();
+                        let incoming_text =
+                            self.graphics.surface_mut().take_clonk_text_capture();
+                        let incoming_opacity =
+                            startup_dialog_fade_opacity(fade.step.saturating_mul(10));
+                        let outgoing_opacity = startup_dialog_fade_opacity(
+                            100_u8.saturating_sub(fade.step.saturating_mul(10)),
+                        );
+                        frame.copy_from_slice(&fade.underlay);
+                        let mut plan = NativePresentationPlan::default();
+                        if outgoing_opacity != 0 {
+                            if let Some(outgoing) = fade.outgoing_native_frame.as_deref() {
+                                plan.batches.push(NativePresentationBatch {
+                                    logical_layer: Some(startup_fade_native_layer(
+                                        outgoing,
+                                        outgoing_opacity,
+                                    )),
+                                    clip: None,
+                                    text: startup_fade_native_text(
+                                        &fade.outgoing_native_text,
+                                        outgoing_opacity,
+                                    ),
+                                    fonts: fade.outgoing_native_fonts.clone(),
+                                });
+                            }
+                        }
+                        if incoming_opacity != 0 {
+                            plan.batches.push(NativePresentationBatch {
+                                logical_layer: Some(startup_fade_native_layer(
+                                    &incoming_frame,
+                                    incoming_opacity,
+                                )),
+                                clip: None,
+                                text: startup_fade_native_text(
+                                    &incoming_text,
+                                    incoming_opacity,
+                                ),
+                                fonts: None,
+                            });
+                        }
+                        self.pending_native_presentation = Some(plan);
+                        self.begin_native_text_capture(true);
+                    } else {
+                        if fade.step < STARTUP_DIALOG_FADE_STEPS {
+                            blend_startup_dialog_frames(
+                                &fade.underlay,
+                                fade.outgoing_frame.as_deref(),
+                                frame,
+                                fade.step * 10,
+                            );
+                        }
+                        self.graphics
+                            .surface_mut()
+                            .pixels_mut()
+                            .copy_from_slice(frame);
+                    }
+                    if fade.step < STARTUP_DIALOG_FADE_STEPS {
+                        self.startup_dialog_fade = Some(fade);
+                    }
+                }
                 if ordered_native {
-                    self.commit_pending_native_base(frame);
+                    if !fade_was_active {
+                        self.commit_pending_native_base(frame);
+                        self.begin_native_text_capture(true);
+                    }
+                }
+                if let (Some(pending), Some(properties_assets), Some(fonts)) = (
+                    self.startup_player_properties_dialog.as_ref(),
+                    self.assets.plrprop_assets(),
+                    self.assets.clonk_fonts.as_deref(),
+                ) {
+                    lc_frontend::startup_plrproperties::PlayerPropertiesScreen::render(
+                        self.graphics.surface_mut(),
+                        &properties_assets,
+                        fonts,
+                        &pending.controller,
+                        Some(startup_gamma()),
+                    );
+                }
+                if ordered_native {
+                    self.commit_pending_native_overlay();
                     self.begin_native_text_capture(true);
                     self.render_ordered_startup_tooltips()?;
                     self.next_pending_native_overlay();
@@ -49339,9 +49731,16 @@ impl GameApp {
                 if ordered_native && !game_option_input_open && self.context_menu.is_some() {
                     self.next_pending_native_overlay();
                     self.render_ordered_context_menu(Some(startup_gamma()))?;
+                } else if fade_was_active && !game_option_input_open {
+                    if let Some(context_menu) = self.context_menu.as_ref() {
+                        context_menu
+                            .render(self.graphics.surface_mut(), Some(startup_gamma()))?;
+                    }
                 }
                 if !ordered_native
-                    && (definition_selector_open
+                    && (fade_was_active
+                        || self.startup_player_properties_dialog.is_some()
+                        || definition_selector_open
                         || game_option_input_open
                         || !self.message_dialogs.is_empty())
                 {
@@ -50131,6 +50530,7 @@ impl GameApp {
                     logical_layer: None,
                     clip: None,
                     text,
+                    fonts: None,
                 });
             surface.clear_clip();
             surface.fill(Color::transparent());
@@ -52151,6 +52551,7 @@ impl GameApp {
         self.show_main_menu();
         if restore_dialog {
             self.restore_startup_dialog(last_startup_dialog);
+            self.begin_startup_dialog_fade_in();
         } else {
             // Restart/Next Mission immediately opens another game. Retain the
             // eventual startup destination without constructing a dialog (or
@@ -54709,6 +55110,8 @@ struct NativePresentationBatch {
     /// Mixed and otherwise unproven layers retain full-frame composition.
     clip: Option<Rect>,
     text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
+    /// A fading outgoing dialog retains the font bundle it was captured with.
+    fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
 }
 
 /// Config-driven bits the startup parity renderers display.
@@ -55400,6 +55803,34 @@ fn startup_gamma() -> &'static lc_graphics::GammaRamp {
     STARTUP_GAMMA.get_or_init(lc_graphics::GammaRamp::standard)
 }
 
+fn render_startup_underlay(
+    graphics: &mut GraphicsSystem,
+    assets: &FrontendAssets,
+    frame: &mut [u8],
+) {
+    let surface = graphics.surface_mut();
+    if let Some(background) = assets.menu_background() {
+        let rect = lc_gui::Rect::from_origin_size(
+            GuiPoint::new(0.0, 0.0),
+            lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
+        );
+        lc_frontend::draw_image_bilinear(
+            surface,
+            &rect,
+            &background,
+            Some(startup_gamma()),
+        );
+    } else {
+        surface.fill(Color::opaque(0, 0, 0));
+    }
+    startup_gamma().apply_to_surface(surface);
+    if surface.pixels().len() == frame.len() {
+        frame.copy_from_slice(surface.pixels());
+    } else {
+        copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_startup_frame(
     graphics: &mut GraphicsSystem,
@@ -55409,9 +55840,6 @@ fn render_startup_frame(
     scenario_entry_enabled: &HashMap<String, bool>,
     network_dialog: Option<&lc_frontend::startup_netdlg::NetDlgController>,
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
-    player_properties: Option<
-        &lc_frontend::startup_plrproperties::PlayerPropertiesController,
-    >,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
     crew_models: &[lc_frontend::startup_plrsel::PlrSelCrew],
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
@@ -55622,20 +56050,9 @@ fn render_startup_frame(
                         player_models,
                         crew_models,
                         dialog,
-                        !context_menu_open && player_properties.is_none(),
+                        !context_menu_open,
                         Some(startup_gamma()),
                     );
-                    if let (Some(properties), Some(properties_assets)) =
-                        (player_properties, assets.plrprop_assets())
-                    {
-                        lc_frontend::startup_plrproperties::PlayerPropertiesScreen::render(
-                            surface,
-                            &properties_assets,
-                            fonts,
-                            properties,
-                            Some(startup_gamma()),
-                        );
-                    }
                     true
                 }
                 _ => false,
@@ -55795,6 +56212,62 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
         if end <= src.len() && dest_offset + stride <= dest.len() {
             dest[dest_offset..dest_offset + stride].copy_from_slice(&src[src_offset..end]);
         }
+    }
+}
+
+/// Converts C4GUI's 0..=100 fade value to effective opaque coverage. The
+/// renderer stores the inverse byte as `((100 - fade) * 255 / 100)`.
+fn startup_dialog_fade_opacity(fade: u8) -> u8 {
+    let fade = fade.min(100);
+    255 - (u16::from(100 - fade) * 255 / 100) as u8
+}
+
+fn startup_fade_native_layer(pixels: &[u8], opacity: u8) -> Vec<u8> {
+    pixels
+        .iter()
+        .map(|value| ((u16::from(*value) * u16::from(opacity) + 127) / 255) as u8)
+        .collect()
+}
+
+fn startup_fade_native_text(
+    commands: &[lc_graphics::clonk_font::CapturedClonkText],
+    opacity: u8,
+) -> Vec<lc_graphics::clonk_font::CapturedClonkText> {
+    commands
+        .iter()
+        .cloned()
+        .map(|mut command| {
+            command.color[3] = ((u16::from(command.color[3]) * u16::from(opacity) + 127) / 255)
+                as u8;
+            command
+        })
+        .collect()
+}
+
+fn blend_startup_dialog_frames(
+    underlay: &[u8],
+    outgoing: Option<&[u8]>,
+    incoming: &mut [u8],
+    incoming_percent: u8,
+) {
+    debug_assert_eq!(underlay.len(), incoming.len());
+    debug_assert!(outgoing.is_none_or(|outgoing| outgoing.len() == incoming.len()));
+    let incoming_opacity = u32::from(startup_dialog_fade_opacity(incoming_percent));
+    let outgoing_opacity = u32::from(startup_dialog_fade_opacity(
+        100_u8.saturating_sub(incoming_percent),
+    ));
+    for (index, new) in incoming.iter_mut().enumerate() {
+        let mut composed = u32::from(underlay[index]);
+        if let Some(outgoing) = outgoing {
+            composed = (u32::from(outgoing[index]) * outgoing_opacity
+                + composed * (255 - outgoing_opacity)
+                + 127)
+                / 255;
+        }
+        composed =
+            (u32::from(*new) * incoming_opacity + composed * (255 - incoming_opacity) + 127)
+                / 255;
+        *new = composed as u8;
     }
 }
 
@@ -66152,6 +66625,7 @@ mod tests {
         if app.app_paths.is_none() && app.loader_error.is_some() {
             app.boot_loading = None;
             app.mode = AppMode::Menu;
+            app.startup_dialog_fade = None;
             return;
         }
         for _ in 0..480 {
@@ -66168,6 +66642,7 @@ mod tests {
                         lc_frontend::startup_plrproperties::PlayerPropertiesAction::Cancel,
                     ]);
                 }
+                app.startup_dialog_fade = None;
                 return;
             }
             app.update().expect("tick while waiting for boot to finish");
@@ -92220,6 +92695,15 @@ ScenInfoArea=70,5,25,90
             app.handle_mouse_button(ElementState::Released)
                 .expect("release main button");
         };
+        let settle_startup_fade = |app: &mut GameApp| {
+            assert!(app.startup_dialog_fade_active());
+            let mut frame = vec![0_u8; 1280 * 720 * 4];
+            for _ in 0..STARTUP_DIALOG_FADE_STEPS {
+                app.render(&mut frame)
+                    .expect("complete startup dialog transition");
+            }
+            assert!(!app.startup_dialog_fade_active());
+        };
 
         click_main_button(&mut app, 0);
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
@@ -92227,6 +92711,7 @@ ScenInfoArea=70,5,25,90
 
         click_main_button(&mut app, 1);
         assert_eq!(app.startup_view, StartupView::NetworkGame);
+        settle_startup_fade(&mut app);
         let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
             caption_back_extent: 51,
             text_ip_extent: 18,
@@ -92247,6 +92732,7 @@ ScenInfoArea=70,5,25,90
         app.handle_mouse_button(ElementState::Released)
             .expect("release network Back");
         assert_eq!(app.startup_view, StartupView::MainMenu);
+        settle_startup_fade(&mut app);
 
         let test_player = lc_frontend::startup_plrsel::PlrSelPlayer {
             name: "Test Player".to_string(),
@@ -92270,6 +92756,7 @@ ScenInfoArea=70,5,25,90
         app.startup_player_models.push(test_player);
         click_main_button(&mut app, 2);
         assert_eq!(app.startup_view, StartupView::PlayerSelection);
+        settle_startup_fade(&mut app);
         let player_layout = lc_frontend::startup_plrsel::plrsel_layout(1280, 720);
         let player_row = PhysicalPosition::new(
             f64::from(player_layout.list_client.x + player_layout.item_height + 4),
@@ -92308,9 +92795,11 @@ ScenInfoArea=70,5,25,90
         app.handle_mouse_button(ElementState::Released)
             .expect("release player Back");
         assert_eq!(app.startup_view, StartupView::MainMenu);
+        settle_startup_fade(&mut app);
 
         click_main_button(&mut app, 3);
         assert_eq!(app.startup_view, StartupView::Options);
+        settle_startup_fade(&mut app);
         app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
             .expect("select Graphics sheet");
         app.handle_key(VirtualKeyCode::Down, ElementState::Released)
@@ -92351,9 +92840,11 @@ ScenInfoArea=70,5,25,90
         app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
             .expect("Back leaves options");
         assert_eq!(app.startup_view, StartupView::MainMenu);
+        settle_startup_fade(&mut app);
 
         click_main_button(&mut app, 4);
         assert_eq!(app.startup_view, StartupView::About);
+        settle_startup_fade(&mut app);
         let about_layout = lc_frontend::startup_about_dlg::about_layout(1280, 720);
         let licenses = about_layout.buttons[2];
         let licenses_point = PhysicalPosition::new(
@@ -92422,6 +92913,7 @@ ScenInfoArea=70,5,25,90
         app.handle_mouse_button(ElementState::Released)
             .expect("leave About");
         assert_eq!(app.startup_view, StartupView::MainMenu);
+        settle_startup_fade(&mut app);
 
         click_main_button(&mut app, 5);
         assert!(app.take_exit_request(), "Exit button requests shutdown");
@@ -95862,6 +96354,345 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             fresh, recomposed,
             "cached replay must match a fresh recomposition"
+        );
+    }
+
+    #[test]
+    fn startup_dialog_fade_uses_classic_ten_presentation_ramp() {
+        assert_eq!(
+            (1..=STARTUP_DIALOG_FADE_STEPS)
+                .map(|step| startup_dialog_fade_opacity(step * 10))
+                .collect::<Vec<_>>(),
+            vec![26, 51, 77, 102, 128, 153, 179, 204, 230, 255]
+        );
+
+        let underlay = [10_u8, 20, 30, 40];
+        let outgoing = [110_u8, 120, 130, 140];
+        let incoming = [210_u8, 220, 230, 240];
+        for (percent, expected) in [
+            (10, [111, 121, 131, 141]),
+            (50, [135, 145, 155, 165]),
+            (90, [191, 201, 211, 221]),
+            (100, incoming),
+        ] {
+            let mut actual = incoming;
+            blend_startup_dialog_frames(
+                &underlay,
+                Some(&outgoing),
+                &mut actual,
+                percent,
+            );
+            assert_eq!(actual, expected, "independent source-over at {percent}%");
+        }
+        let mut incoming_only = incoming;
+        blend_startup_dialog_frames(&underlay, None, &mut incoming_only, 10);
+        assert_eq!(incoming_only, [30, 40, 50, 60]);
+
+        let mut app = new_classic_menu_app(320, 200);
+        let mut main = vec![0_u8; 320 * 200 * 4];
+        assert!(app.render(&mut main).expect("present stable Main dialog"));
+
+        app.handle_main_menu_activation(MainMenuItem::About)
+            .expect("switch Main to About");
+        let fade = app.startup_dialog_fade.as_ref().expect("fade started");
+        assert_eq!(fade.outgoing, Some(StartupDialog::MainMenu));
+        assert_eq!(fade.incoming, StartupDialog::About);
+        assert_eq!(fade.step, 0);
+        let fade_underlay = fade.underlay.clone();
+        let fade_outgoing = fade
+            .outgoing_frame
+            .clone()
+            .expect("cross-fade has an outgoing layer");
+        app.update().expect("menu update does not advance a draw fade");
+        assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, 0);
+
+        let mut presented = Vec::new();
+        for expected_step in 1..=STARTUP_DIALOG_FADE_STEPS {
+            let mut frame = vec![0xa5; 320 * 200 * 4];
+            assert!(app.render(&mut frame).expect("present fade frame"));
+            if expected_step < STARTUP_DIALOG_FADE_STEPS {
+                assert_eq!(
+                    app.startup_dialog_fade.as_ref().map(|fade| fade.step),
+                    Some(expected_step)
+                );
+                assert!(app.menu_frame_cache.is_none());
+            } else {
+                assert!(app.startup_dialog_fade.is_none());
+            }
+            presented.push(frame);
+        }
+
+        let about = presented.last().expect("fully visible About").clone();
+        assert_ne!(main, about);
+        for (index, actual) in presented.iter().take(9).enumerate() {
+            let mut expected = about.clone();
+            blend_startup_dialog_frames(
+                &fade_underlay,
+                Some(&fade_outgoing),
+                &mut expected,
+                (index as u8 + 1) * 10,
+            );
+            assert_eq!(actual, &expected, "fade presentation {}", index + 1);
+        }
+        assert_eq!(presented[9], about, "frame ten is fully incoming");
+
+        let mut cached = vec![0_u8; 320 * 200 * 4];
+        assert!(app.render(&mut cached).expect("cache settled About"));
+        assert_eq!(cached, about);
+        let mut replay = vec![0_u8; 320 * 200 * 4];
+        assert!(!app.render(&mut replay).expect("replay settled About"));
+        assert_eq!(replay, about);
+    }
+
+    #[test]
+    fn startup_dialog_fade_suppresses_input_until_frame_ten_and_reverses() {
+        let mut app = new_classic_menu_app(320, 200);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("present Main");
+        app.handle_main_menu_activation(MainMenuItem::About)
+            .expect("switch Main to About");
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("suppress early Escape");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("suppress early Escape release");
+        app.process_gamepad_event_batch([GamepadEvent::Action {
+            slot: GamepadSlot::new(0),
+            action: GamepadActionType::Cancel,
+            state: ElementState::Pressed,
+        }])
+        .expect("suppress early gamepad Cancel");
+        assert_eq!(app.startup_view, StartupView::About);
+        assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, 0);
+
+        for expected_step in 1..=9 {
+            app.render(&mut frame).expect("present inactive About");
+            assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, expected_step);
+        }
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("suppress ninth-frame Escape");
+        assert_eq!(app.startup_view, StartupView::About);
+
+        app.render(&mut frame).expect("complete About fade-in");
+        assert!(app.startup_dialog_fade.is_none());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("active About handles Escape");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        let reverse = app.startup_dialog_fade.as_ref().expect("reverse fade started");
+        assert_eq!(reverse.outgoing, Some(StartupDialog::About));
+        assert_eq!(reverse.incoming, StartupDialog::MainMenu);
+        assert_eq!(reverse.step, 0);
+
+        let mut ninth = None;
+        for expected_step in 1..=9 {
+            app.render(&mut frame).expect("present inactive Main");
+            assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, expected_step);
+            if expected_step == 9 {
+                ninth = Some(frame.clone());
+            }
+        }
+        app.render(&mut frame).expect("complete Main fade-in");
+        assert!(app.startup_dialog_fade.is_none());
+        let frame_ten = frame.clone();
+        let mut settled = vec![0_u8; frame.len()];
+        app.render(&mut settled).expect("present active settled Main");
+        assert_eq!(frame_ten, settled, "frame ten must already draw active focus");
+        assert_ne!(ninth.expect("ninth frame"), frame_ten);
+
+        app.handle_main_menu_activation(MainMenuItem::Options)
+            .expect("switch Main to Options");
+        for _ in 0..STARTUP_DIALOG_FADE_STEPS {
+            app.render(&mut frame).expect("complete Options fade-in");
+        }
+        app.process_options_dialog_actions(vec![
+            lc_frontend::startup_options_dlg::OptionsDlgAction::Back,
+        ])
+        .expect("Options Back switches to Main");
+        let back = app.startup_dialog_fade.as_ref().expect("Back fade started");
+        assert_eq!(back.outgoing, Some(StartupDialog::Options));
+        assert_eq!(back.incoming, StartupDialog::MainMenu);
+        assert_eq!(back.step, 0);
+        for _ in 0..STARTUP_DIALOG_FADE_STEPS {
+            app.render(&mut frame).expect("complete Options Back fade");
+        }
+        assert!(app.startup_dialog_fade.is_none());
+    }
+
+    #[test]
+    fn startup_dialog_fade_in_without_outgoing_suppresses_input_for_ten_frames() {
+        let mut app = new_classic_menu_app(320, 200);
+        app.begin_startup_dialog_fade_in();
+        let fade = app.startup_dialog_fade.as_ref().expect("fade-in started");
+        assert_eq!(fade.outgoing, None);
+        assert_eq!(fade.incoming, StartupDialog::MainMenu);
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("initial fade suppresses Escape");
+        assert!(!app.take_exit_request());
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        for expected_step in 1..STARTUP_DIALOG_FADE_STEPS {
+            app.render(&mut frame).expect("present initial fade-in");
+            assert_eq!(app.startup_dialog_fade.as_ref().unwrap().step, expected_step);
+        }
+        app.render(&mut frame).expect("complete initial fade-in");
+        assert!(app.startup_dialog_fade.is_none());
+
+        let mut modal_app = new_classic_menu_app(320, 200);
+        modal_app.open_new_startup_player_properties_from(
+            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
+        );
+        modal_app.begin_startup_dialog_fade_in();
+        for _ in 0..STARTUP_DIALOG_FADE_STEPS {
+            modal_app
+                .render(&mut frame)
+                .expect("fade Main beneath first-player modal");
+        }
+        let frame_ten = frame.clone();
+        modal_app
+            .render(&mut frame)
+            .expect("render settled first-player modal");
+        assert_eq!(frame_ten, frame, "first-player modal remains visible after fade");
+        assert!(modal_app.startup_player_properties_dialog.is_some());
+    }
+
+    #[test]
+    fn startup_dialog_fade_preserves_ordered_native_text_at_scaled_output() {
+        let scale = 1.5;
+        let mut app = new_classic_menu_app(320, 200);
+        install_native_test_fonts(&mut app, scale);
+        app.graphics.set_presentation_scale(scale);
+        let _ = render_ordered_test_frame(&mut app, scale, 480, 300);
+
+        app.handle_main_menu_activation(MainMenuItem::About)
+            .expect("switch scaled Main to About");
+        let mut frame_ten = None;
+        for step in 1..=STARTUP_DIALOG_FADE_STEPS {
+            let (_, output, plan) = render_ordered_test_frame(&mut app, scale, 480, 300);
+            if step == 1 {
+                assert_eq!(plan.batches.len(), 2, "outgoing then incoming layers");
+                assert!(plan.batches.iter().all(|batch| batch.logical_layer.is_some()));
+                assert!(plan.batches.iter().all(|batch| !batch.text.is_empty()));
+                assert!(plan.batches[0].fonts.is_some(), "outgoing retains its fonts");
+                assert!(plan.batches[0]
+                    .text
+                    .iter()
+                    .all(|command| command.color[3] <= 230));
+                assert!(plan.batches[1]
+                    .text
+                    .iter()
+                    .all(|command| command.color[3] <= 26));
+            }
+            if step == STARTUP_DIALOG_FADE_STEPS {
+                frame_ten = Some(output);
+            }
+        }
+        assert!(app.startup_dialog_fade.is_none());
+        let (_, settled, _) = render_ordered_test_frame(&mut app, scale, 480, 300);
+        assert_eq!(
+            frame_ten.expect("scaled frame ten"),
+            settled,
+            "scaled frame ten must already use the settled native-text path"
+        );
+    }
+
+    #[test]
+    fn nonstartup_modal_stays_unfaded_and_keeps_input_priority() {
+        let mut actual_app = new_classic_menu_app(320, 200);
+        let mut expected_app = new_classic_menu_app(320, 200);
+        let mut scratch = vec![0_u8; 320 * 200 * 4];
+        actual_app.render(&mut scratch).expect("present actual Main");
+        expected_app
+            .render(&mut scratch)
+            .expect("present expected Main");
+        actual_app
+            .handle_main_menu_activation(MainMenuItem::About)
+            .expect("switch Main to About");
+        expected_app
+            .handle_main_menu_activation(MainMenuItem::About)
+            .expect("switch expected Main to About");
+
+        let make_message = || {
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            )
+        };
+        actual_app
+            .push_message_dialog(make_message(), MessageDialogContinuation::None)
+            .expect("open actual modal");
+        expected_app
+            .push_message_dialog(make_message(), MessageDialogContinuation::None)
+            .expect("open expected modal");
+
+        let mut actual = vec![0_u8; scratch.len()];
+        actual_app.render(&mut actual).expect("render modal over fade");
+        let pending = expected_app.message_dialogs.pop().expect("expected modal");
+        let mut faded_base = vec![0_u8; scratch.len()];
+        expected_app
+            .render(&mut faded_base)
+            .expect("render matching faded base");
+        expected_app
+            .graphics
+            .surface_mut()
+            .pixels_mut()
+            .copy_from_slice(&faded_base);
+        expected_app.message_dialogs.push(pending);
+        expected_app
+            .render_message_dialogs(Some(startup_gamma()))
+            .expect("render modal after composition");
+        let expected = expected_app.graphics.surface().pixels().to_vec();
+        assert_eq!(actual, expected, "modal pixels must be composed after the fade");
+
+        actual_app
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("modal handles Escape above fading startup dialogs");
+        assert!(actual_app.message_dialogs.is_empty());
+        assert_eq!(actual_app.startup_view, StartupView::About);
+        assert_eq!(actual_app.startup_dialog_fade.as_ref().unwrap().step, 1);
+
+        let mut options = new_classic_menu_app(320, 200);
+        options.open_options_menu();
+        options.render(&mut scratch).expect("present Options immediately");
+        options
+            .startup_options_dialog
+            .as_mut()
+            .expect("Options dialog")
+            .program_mut()
+            .preloading = true;
+        options
+            .process_options_dialog_actions(vec![
+                lc_frontend::startup_options_dlg::OptionsDlgAction::GamepadGuiControlChanged(true),
+            ])
+            .expect("recreate Options after changing gamepad GUI control");
+        let recreate = options
+            .startup_dialog_fade
+            .as_ref()
+            .expect("same-dialog Options reconstruction fades");
+        assert_eq!(recreate.outgoing, Some(StartupDialog::Options));
+        assert_eq!(recreate.incoming, StartupDialog::Options);
+        assert!(options
+            .startup_options_dialog
+            .as_ref()
+            .expect("recreated Options dialog")
+            .program()
+            .preloading);
+        options.resize(400, 300).expect("resize during Options recreation");
+        let resized = options
+            .startup_dialog_fade
+            .as_ref()
+            .expect("same-dialog fade restarts after resize");
+        assert_eq!((resized.width, resized.height, resized.step), (400, 300, 0));
+        assert!(options
+            .startup_options_dialog
+            .as_ref()
+            .expect("resized Options dialog")
+            .program()
+            .preloading);
+        options.open_network_lobby();
+        assert!(
+            options.startup_dialog_fade.is_none(),
+            "C4GameLobby is not a fading startup dialog"
         );
     }
 
@@ -125141,6 +125972,68 @@ func ControlDig() { dig_count = 1; return(1); }
             cluster,
             event,
         };
+        let activate_network_game = |cluster: u64| {
+            [
+                // D-pad Down moves focus from Start Game to Start Network Game.
+                source(
+                    cluster,
+                    GamepadEvent::Direction {
+                        slot: GamepadSlot::new(0),
+                        button: ControlButton::Down,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                // A new South cluster presses and releases the focused button.
+                source(
+                    cluster + 1,
+                    GamepadEvent::GuiButton {
+                        slot: GamepadSlot::new(0),
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    cluster + 1,
+                    GamepadEvent::Action {
+                        slot: GamepadSlot::new(0),
+                        action: GamepadActionType::Select,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    cluster + 1,
+                    GamepadEvent::Button {
+                        slot: GamepadSlot::new(0),
+                        button: LegacyGamepadButton::new(0),
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    cluster + 2,
+                    GamepadEvent::GuiButton {
+                        slot: GamepadSlot::new(0),
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Released,
+                    },
+                ),
+                source(
+                    cluster + 2,
+                    GamepadEvent::Action {
+                        slot: GamepadSlot::new(0),
+                        action: GamepadActionType::Select,
+                        state: ElementState::Released,
+                    },
+                ),
+                source(
+                    cluster + 2,
+                    GamepadEvent::Button {
+                        slot: GamepadSlot::new(0),
+                        button: LegacyGamepadButton::new(0),
+                        state: ElementState::Released,
+                    },
+                ),
+            ]
+        };
         app.process_sourced_gamepad_event_batch(
             [
                 // Select: High plus MenuToggle. The first alias is owned by the
@@ -125168,69 +126061,26 @@ func ControlDig() { dig_count = 1; return(1); }
                         slot: GamepadSlot::new(0),
                     },
                 ),
-                // A later D-pad cluster reaches the exposed main menu and moves
-                // its focus from Start Game to Start Network Game.
-                source(
-                    21,
-                    GamepadEvent::Direction {
-                        slot: GamepadSlot::new(0),
-                        button: ControlButton::Down,
-                        state: ElementState::Pressed,
-                    },
-                ),
-                // A new South cluster must also reach that screen. Its press and
-                // release activate the newly focused Network Game button.
-                source(
-                    22,
-                    GamepadEvent::GuiButton {
-                        slot: GamepadSlot::new(0),
-                        class: GuiButtonClass::Low,
-                        state: ElementState::Pressed,
-                    },
-                ),
-                source(
-                    22,
-                    GamepadEvent::Action {
-                        slot: GamepadSlot::new(0),
-                        action: GamepadActionType::Select,
-                        state: ElementState::Pressed,
-                    },
-                ),
-                source(
-                    22,
-                    GamepadEvent::Button {
-                        slot: GamepadSlot::new(0),
-                        button: LegacyGamepadButton::new(0),
-                        state: ElementState::Pressed,
-                    },
-                ),
-                source(
-                    23,
-                    GamepadEvent::GuiButton {
-                        slot: GamepadSlot::new(0),
-                        class: GuiButtonClass::Low,
-                        state: ElementState::Released,
-                    },
-                ),
-                source(
-                    23,
-                    GamepadEvent::Action {
-                        slot: GamepadSlot::new(0),
-                        action: GamepadActionType::Select,
-                        state: ElementState::Released,
-                    },
-                ),
-                source(
-                    23,
-                    GamepadEvent::Button {
-                        slot: GamepadSlot::new(0),
-                        button: LegacyGamepadButton::new(0),
-                        state: ElementState::Released,
-                    },
-                ),
-            ],
+            ]
+            .into_iter()
+            // Capture ends at the next physical cluster, but the newly started
+            // startup fade must suppress every later cluster in this batch.
+            .chain(activate_network_game(21)),
             true,
         )
+        .expect("raw High returns to startup and the fade owns later clusters");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.startup_dialog_fade_active());
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        for _ in 0..STARTUP_DIALOG_FADE_STEPS {
+            app.render(&mut frame)
+                .expect("complete the post-round startup fade");
+        }
+        assert!(!app.startup_dialog_fade_active());
+
+        app.process_sourced_gamepad_event_batch(activate_network_game(24), true)
         .expect("later physical clusters route to the newly exposed main menu");
 
         assert_eq!(app.mode, AppMode::Menu);
