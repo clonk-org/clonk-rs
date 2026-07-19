@@ -8881,6 +8881,81 @@ struct ClassicHostLobbyState {
     resource_rows: BTreeMap<i32, LobbyResourceRow>,
 }
 
+const RESTART_RESTORE_PLAYER_TEAMS: i32 = 0x2;
+
+/// Process-runtime `C4NetworkRestartInfos::Player` snapshot retained while a
+/// round is restarted. Script-player restoration consumes the type/color too,
+/// so keep the complete native payload even though PlayerListItem only reads
+/// the recorded team.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RestartRestorePlayerInfo {
+    player_type: u8,
+    team: i32,
+    color: u32,
+}
+
+/// `Game.RestartRestoreInfos` survives `C4Game::Clear` for Restart, but is
+/// deliberately outside savegame/engine serialization.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RestartRestoreInfos {
+    what: i32,
+    players: BTreeMap<Vec<u8>, RestartRestorePlayerInfo>,
+}
+
+impl RestartRestoreInfos {
+    fn capture_player_infos(&mut self, player_infos: &ControlPlayerInfoRegistry) {
+        *self = Self::default();
+        let (_, packets) = player_infos.retained_rows_snapshot();
+        for (_, _, players) in packets {
+            for player in players {
+                if player.flags
+                    & (lc_engine::PLAYER_INFO_FLAG_REMOVED
+                        | lc_engine::PLAYER_INFO_FLAG_INVISIBLE)
+                    != 0
+                {
+                    continue;
+                }
+                // std::map::emplace retains the first exact duplicate name.
+                self.players
+                    .entry(restart_restore_player_name(&player))
+                    .or_insert(RestartRestorePlayerInfo {
+                        player_type: player.player_type,
+                        team: player.team,
+                        color: player.color,
+                    });
+            }
+        }
+    }
+}
+
+fn restart_restore_player_name(player: &lc_engine::ControlPlayerInfoEntry) -> Vec<u8> {
+    if !player.league_account.as_bytes().is_empty() {
+        player.league_account.as_bytes().to_vec()
+    } else if !player.forced_name.as_bytes().is_empty() {
+        player.forced_name.as_bytes().to_vec()
+    } else {
+        player.name.as_bytes().to_vec()
+    }
+}
+
+fn restart_restore_lobby_name(player: &lc_engine::ControlPlayerInfoEntry) -> Vec<u8> {
+    if !player.league_account.as_bytes().is_empty() {
+        if player.clan_tag.as_bytes().is_empty() {
+            return player.league_account.as_bytes().to_vec();
+        }
+        let mut name = b"<c afafaf>".to_vec();
+        name.extend_from_slice(player.clan_tag.as_bytes());
+        name.extend_from_slice(b"</c> ");
+        name.extend_from_slice(player.league_account.as_bytes());
+        return name;
+    }
+    if !player.forced_name.as_bytes().is_empty() {
+        player.forced_name.as_bytes().to_vec()
+    } else {
+        player.name.as_bytes().to_vec()
+    }
+}
+
 struct NetworkStartWaitDialogState {
     controller: lc_frontend::network_start_wait::NetworkStartWaitState,
     expected_status: lc_network::NetworkStatus,
@@ -10447,6 +10522,12 @@ struct GameApp {
     control_clients: ControlClientRegistry,
     network_client_activity: NetworkClientActivity,
     control_player_infos: ControlPlayerInfoRegistry,
+    /// Native restart handoff captured at full game initialization and kept
+    /// across the next same-scenario lobby only.
+    restart_restore_infos: RestartRestoreInfos,
+    /// PlayerListItem runs its restore hook only on construction, not on each
+    /// later row update. Track the items already constructed in this lobby.
+    restart_restore_roster_items: HashSet<(i32, i32)>,
     /// Process-local `C4PlayerInfo::dwAlternateColor` values for players
     /// loaded by this host. The synchronized row intentionally omits this
     /// field, so resource identity carries it across authoritative echoes and
@@ -20395,6 +20476,8 @@ impl GameApp {
             control_clients,
             network_client_activity: NetworkClientActivity::default(),
             control_player_infos,
+            restart_restore_infos: RestartRestoreInfos::default(),
+            restart_restore_roster_items: HashSet::new(),
             host_local_alternate_colors_by_resource,
             host_local_player_info_ids,
             deferred_network_savegame_recreation: Vec::new(),
@@ -28736,12 +28819,21 @@ impl GameApp {
 
     /// Restart the running round (C4AbortGameDialog's Restart button:
     /// `Application.SetNextMission` + `Game.Abort`, C4GameDialogs.cpp:116-120).
+    fn retain_restart_restore_mask_for_restart(&mut self) {
+        self.restart_restore_infos.what = self.engine.restart_restore_info_mask();
+    }
+
     fn restart_current_scenario(&mut self) -> Result<(), EngineError> {
+        if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+            self.restart_current_network_scenario();
+            return Ok(());
+        }
         let Some(scenario) = self.active_scenario.clone() else {
             self.return_to_menu();
             return Ok(());
         };
         let definition_load = self.active_definition_load.clone();
+        self.retain_restart_restore_mask_for_restart();
         self.return_to_menu_for_relaunch();
         let start_result = match definition_load {
             Some(definition_load) => {
@@ -42133,7 +42225,108 @@ impl GameApp {
         self.open_context_menu_at(entries, anchor)
     }
 
+    /// PlayerListItem's constructor restores a differing recorded team by
+    /// cloning the complete owning client packet and submitting an update.
+    /// Keep this side effect outside the pure row projector and run it once
+    /// for each item construction, while authoritative state still waits for
+    /// the network echo.
+    fn submit_restart_restore_team_updates_for_new_roster_items(&mut self) {
+        if self.restart_restore_infos.what & RESTART_RESTORE_PLAYER_TEAMS == 0
+            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || self.network.is_none()
+            || (self.classic_host_lobby.is_none() && self.network_lobby.is_none())
+        {
+            return;
+        }
+
+        let (_, packets) = self.control_player_infos.retained_rows_snapshot();
+        let mut visible_items = HashSet::new();
+        for (client_id, _, players) in &packets {
+            if !self.control_clients.contains(*client_id)
+                || self.control_clients.is_observer(*client_id)
+            {
+                continue;
+            }
+            visible_items.extend(players.iter().filter_map(|player| {
+                (player.flags
+                    & (lc_engine::PLAYER_INFO_FLAG_REMOVED
+                        | lc_engine::PLAYER_INFO_FLAG_INVISIBLE)
+                    == 0)
+                    .then_some((*client_id, player.id))
+            }));
+        }
+        self.restart_restore_roster_items
+            .retain(|item| visible_items.contains(item));
+
+        let mut requests = Vec::new();
+        let mut restored_teams = Vec::new();
+        for (client_id, flags, players) in packets {
+            if !self.control_clients.contains(client_id)
+                || self.control_clients.is_observer(client_id)
+            {
+                continue;
+            }
+            let mut working_players = players;
+            for index in 0..working_players.len() {
+                let player = &working_players[index];
+                if player.flags
+                    & (lc_engine::PLAYER_INFO_FLAG_REMOVED
+                        | lc_engine::PLAYER_INFO_FLAG_INVISIBLE)
+                    != 0
+                    || !self
+                        .restart_restore_roster_items
+                        .insert((client_id, player.id))
+                    || player.player_type != lc_engine::PLAYER_INFO_TYPE_USER
+                {
+                    continue;
+                }
+                let lobby_name = restart_restore_lobby_name(player);
+                let Some(restore) = self.restart_restore_infos.players.get(&lobby_name) else {
+                    continue;
+                };
+                if restore.team == player.team {
+                    continue;
+                }
+                let restored_team = restore.team;
+                working_players[index].team = restored_team;
+                restored_teams.push(restored_team);
+                requests.push(lc_network::PlayerInfoUpdateRequest {
+                    client_id,
+                    flags,
+                    players: working_players.clone(),
+                });
+            }
+        }
+
+        let mut generated_team = false;
+        if let Some(assignment) = self.network_team_assignment.as_mut() {
+            for team in restored_teams {
+                generated_team |= assignment.generate_team_for_id(team);
+            }
+        }
+        if generated_team {
+            if let (Some(assignment), Some(snapshot)) = (
+                self.network_team_assignment.as_ref(),
+                self.host_join_snapshot.as_mut(),
+            ) {
+                snapshot.parameters.teams =
+                    lc_network::join_team_list_snapshot(assignment.teams().clone());
+            }
+            self.publish_updated_host_join_snapshot();
+        }
+
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        for request in requests {
+            if let Err(error) = network.submit_player_info_update(request) {
+                tracing::error!(%error, "failed to submit restart team PlayerInfo update");
+            }
+        }
+    }
+
     fn sync_classic_lobby_roster(&mut self) {
+        self.submit_restart_restore_team_updates_for_new_roster_items();
         let local_client_id = self
             .network
             .as_ref()
@@ -47300,6 +47493,7 @@ impl GameApp {
                     // the lobby still exists so pointer/key activation keeps
                     // that ordering; Escape and Alt+X enqueue no click.
                     self.play_classic_lobby_sounds();
+                    self.restart_restore_roster_items.clear();
                     self.show_main_menu();
                     self.begin_frontend_music_entry();
                     return Ok(());
@@ -47642,6 +47836,7 @@ impl GameApp {
         let mut values = self.scenario_game_options.values().clone();
         values.countdown = false;
         values.lobby_is_league = false;
+        self.retain_restart_restore_mask_for_restart();
         self.return_to_menu_for_relaunch();
         self.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
@@ -52549,6 +52744,9 @@ impl GameApp {
             GameOverAction::NextMission => {
                 let path = self.engine.next_mission().path.clone();
                 let definition_load = self.active_definition_load.clone();
+                // C4GameOverDlg preserves restart infos only for Restart;
+                // actual Next Mission clears them as soon as it closes.
+                self.restart_restore_infos = RestartRestoreInfos::default();
                 let Some(scenario) = resolve_next_mission_scenario(&self.scenario_catalog, &path)
                 else {
                     self.status_text = format!("Next scenario is unavailable: {path}");
@@ -59119,6 +59317,7 @@ impl GameApp {
     }
 
     fn return_to_menu(&mut self) {
+        self.restart_restore_infos = RestartRestoreInfos::default();
         self.return_to_menu_with_dialog_restore(true);
     }
 
@@ -59128,6 +59327,7 @@ impl GameApp {
 
     fn return_to_menu_with_dialog_restore(&mut self, restore_dialog: bool) {
         let last_startup_dialog = self.last_startup_dialog;
+        self.restart_restore_roster_items.clear();
         // C4Game::Clear starts the fade before tearing down game state.
         self.fade_out_game_music();
         if let Some(audio) = self.audio.as_mut() {
@@ -60293,6 +60493,12 @@ impl GameApp {
             &self.network_league_name,
             &self.control_player_infos,
         );
+        // Full C4Game::InitGame clears the consumed restart handoff and
+        // snapshots the authoritative PlayerInfos before this round's script
+        // selects which fields a later Restart should restore.
+        self.restart_restore_infos
+            .capture_player_infos(&self.control_player_infos);
+        self.restart_restore_roster_items.clear();
         self.apply_material_library_to(&mut engine);
         if replay {
             // C4GameControl::InitReplay sets fHost=false; replayed Set
@@ -88887,6 +89093,213 @@ public func Grant(password) { return GainMissionAccess(password); }
             .rows()
             .iter()
             .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.name == "Alice")));
+    }
+
+    #[test]
+    fn l074_restart_restore_team_submits_full_player_packet_on_roster_construction() {
+        let mut app = new_menu_app(640, 480);
+        let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+        chooser.forced_name =
+            LegacyCString::from_bytes(b"Restart Alias".to_vec()).expect("valid forced name");
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let mut recorded = chooser.clone();
+        recorded.team = 2;
+        let mut recorded_companion = companion.clone();
+        recorded_companion.team = 5;
+        app.control_player_infos.replace_snapshot(
+            8,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![recorded, recorded_companion],
+                by_client: 0,
+            }],
+        );
+        app.restart_restore_infos
+            .capture_player_infos(&app.control_player_infos);
+        app.control_player_infos.replace_snapshot(
+            8,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![chooser.clone(), companion.clone()],
+                by_client: 0,
+            }],
+        );
+        app.engine
+            .execute_script_control(
+                &lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: LegacyCString::from_bytes(
+                        b"SetRestoreInfos(RESTORE_PlayerTeams)".to_vec(),
+                    )
+                    .expect("script has no NUL"),
+                    by_client: 0,
+                },
+                ScriptControlPolicy::live(false),
+            )
+            .expect("SetRestoreInfos executes");
+        assert_eq!(app.engine.restart_restore_info_mask(), 2);
+        app.retain_restart_restore_mask_for_restart();
+
+        app.sync_classic_lobby_roster();
+
+        let mut restored = chooser.clone();
+        restored.team = 2;
+        let mut restored_companion = companion.clone();
+        restored_companion.team = 5;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![
+                lc_network::PlayerInfoUpdateRequest {
+                    client_id: 0,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![restored.clone(), companion],
+                },
+                lc_network::PlayerInfoUpdateRequest {
+                    client_id: 0,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![restored, restored_companion],
+                },
+            ],
+            "each synchronous PlayerListItem update carries earlier restored teammates forward"
+        );
+        assert!(
+            app.network_team_assignment
+                .as_ref()
+                .unwrap()
+                .teams()
+                .teams
+                .iter()
+                .any(|team| team.id == 5),
+            "GetGenerateTeamByID creates a missing restored team before submission"
+        );
+        assert_eq!(
+            app.control_player_infos
+                .client_update_request(0)
+                .unwrap()
+                .players[0]
+                .team,
+            1,
+            "the roster waits for the authoritative PlayerInfo echo"
+        );
+
+        app.sync_classic_lobby_roster();
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "an existing PlayerListItem does not rerun its constructor hook"
+        );
+    }
+
+    #[test]
+    fn l074_host_round_restart_returns_to_network_lobby_staging() {
+        let mut app = new_running_sandbox_app();
+        configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
+        app.engine
+            .execute_script_control(
+                &lc_engine::ScriptControlData {
+                    target_object: lc_engine::SCRIPT_SCOPE_GLOBAL,
+                    strictness: lc_engine::ScriptStrictness::Strict3,
+                    script: LegacyCString::from_bytes(
+                        b"SetRestoreInfos(RESTORE_PlayerTeams)".to_vec(),
+                    )
+                    .expect("script has no NUL"),
+                    by_client: 0,
+                },
+                ScriptControlPolicy::live(false),
+            )
+            .expect("SetRestoreInfos executes");
+
+        app.restart_current_scenario()
+            .expect("host restart selects network lobby staging");
+
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost,
+            "a hosted round must rebuild its lobby instead of launching locally"
+        );
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(
+            app.restart_restore_infos.what,
+            RESTART_RESTORE_PLAYER_TEAMS,
+            "the lobby handoff retains the raw SetRestoreInfos mask"
+        );
+        assert!(
+            app.status_text.starts_with("Cannot host"),
+            "the pathless sandbox fixture reaches host staging and fails there"
+        );
+    }
+
+    #[test]
+    fn l074_restart_restore_team_obeys_mask_user_and_equal_team_guards() {
+        let submitted = |mask: i32, player_type: u8, live_team: i32, restore_team: i32| {
+            let mut app = new_menu_app(640, 480);
+            let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+            chooser.player_type = player_type;
+            chooser.team = live_team;
+            app.control_player_infos.replace_snapshot(
+                8,
+                [lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![chooser.clone(), companion],
+                    by_client: 0,
+                }],
+            );
+            let (network, _events, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(0);
+            app.network = Some(network);
+            app.network_mode = Some(NetworkMode::Host(HostSettings {
+                bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                player_name: "Host".to_string(),
+                prepared: None,
+            }));
+            app.restart_restore_infos.what = mask;
+            app.restart_restore_infos.players.insert(
+                b"Chooser".to_vec(),
+                RestartRestorePlayerInfo {
+                    player_type: lc_engine::PLAYER_INFO_TYPE_USER,
+                    team: restore_team,
+                    color: chooser.color,
+                },
+            );
+
+            app.sync_classic_lobby_roster();
+            commands.take_player_info_updates()
+        };
+
+        assert!(
+            submitted(0, lc_engine::PLAYER_INFO_TYPE_USER, 1, 2).is_empty(),
+            "RESTORE_PlayerTeams must be selected"
+        );
+        assert!(
+            submitted(
+                RESTART_RESTORE_PLAYER_TEAMS,
+                lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                1,
+                2,
+            )
+            .is_empty(),
+            "only current User rows run the restore hook"
+        );
+        assert!(
+            submitted(
+                RESTART_RESTORE_PLAYER_TEAMS,
+                lc_engine::PLAYER_INFO_TYPE_USER,
+                2,
+                2,
+            )
+            .is_empty(),
+            "an already-restored team is a no-op"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use lc_engine::{
     ControlPlayerInfoEntry, ControlPlayerInfoRegistry, InitialNetworkTeamDistribution,
-    InitialNetworkTeamMetadata, LegacyCString, PlayerInfoAdmission, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, TeamColorUpdateError,
+    InitialHostTeamAssignmentOracle, InitialNetworkTeamMetadata, LegacyCString, PlayerInfoAdmission,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, TeamColorUpdateError,
 };
 use thiserror::Error;
 
@@ -54,6 +54,40 @@ impl NetworkTeamAssignmentState {
 
     pub(crate) fn set_generated_team_name_template(&mut self, template: LegacyCString) {
         self.generated_team_name_template = template;
+    }
+
+    /// `C4TeamList::GetGenerateTeamByID`: while multiteams are active, create
+    /// default teams through a missing positive ID. `TEAMID_New` (-1) asks the
+    /// generator for the next ID, although the caller still retains -1 in its
+    /// copied PlayerInfo exactly like the native restart hook.
+    pub(crate) fn generate_team_for_id(&mut self, requested_id: i32) -> bool {
+        if !self.teams.active {
+            return false;
+        }
+        let target_id = if requested_id == -1 {
+            self.teams
+                .teams
+                .iter()
+                .map(|team| team.id)
+                .max()
+                .unwrap_or(0)
+                .wrapping_add(1)
+        } else {
+            requested_id
+        };
+        if target_id <= self.teams.last_team_id {
+            return false;
+        }
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+            self.generated_team_name_template.clone(),
+        );
+        while self.teams.last_team_id < target_id {
+            let id = self.teams.last_team_id.wrapping_add(1);
+            let generated = oracle.generate_team(id, &self.teams.teams);
+            self.teams.last_team_id = id;
+            self.teams.teams.push(generated);
+        }
+        true
     }
 
     /// Run the control host's post-PlayerInfo random-team reconciliation on
