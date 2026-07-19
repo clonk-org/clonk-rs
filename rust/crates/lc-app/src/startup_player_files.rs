@@ -36,6 +36,13 @@ pub struct SavedStartupPlayer {
     pub file_name: String,
 }
 
+/// One checked player that the native fixed-size Participants buffer refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerActivationRefusal {
+    pub index: usize,
+    pub player_name: String,
+}
+
 /// Typed failures from player name validation and `.c4p` persistence.
 #[derive(Debug, thiserror::Error)]
 pub enum PlayerPropertiesSaveError {
@@ -849,7 +856,17 @@ pub fn discover_player_files_in(
 }
 
 /// Rewrites `Config.General.Participants` from the checked entries and saves it.
-pub fn persist_activations(config_path: &Path, players: &[StartupPlayerFile]) -> io::Result<()> {
+///
+/// C++ reserves `CFG_MaxString + 1` bytes and, before each `SAddModule`,
+/// requires `current_len + 1 + filename_len < sizeof(Participants)`. The
+/// unconditional separator byte means the first filename is limited to 1023
+/// bytes, while a populated list may reach the full 1024-byte payload.
+pub fn persist_activations(
+    config_path: &Path,
+    players: &mut [StartupPlayerFile],
+) -> io::Result<Vec<PlayerActivationRefusal>> {
+    const CFG_MAX_STRING: usize = 1024;
+
     let mut config = match Config::load(config_path) {
         Ok(config) => config,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
@@ -857,15 +874,38 @@ pub fn persist_activations(config_path: &Path, players: &[StartupPlayerFile]) ->
     };
     let mut participant_keys = Vec::new();
     let mut participants = Vec::new();
-    for player in players
-        .iter()
-        .filter(|player| player.render_model.activated)
-    {
+    let mut participants_byte_len = 0_usize;
+    let mut refusals = Vec::new();
+    for (index, player) in players.iter().enumerate() {
+        if !player.render_model.activated {
+            continue;
+        }
+        let filename_byte_len = lc_script::c4_string_byte_len(&player.file_name);
+        if participants_byte_len
+            .saturating_add(1)
+            .saturating_add(filename_byte_len)
+            > CFG_MAX_STRING
+        {
+            refusals.push(PlayerActivationRefusal {
+                index,
+                player_name: player.render_model.name.clone(),
+            });
+            continue;
+        }
+        // SAddModule accepts the guard above but does not append empty or
+        // case-insensitively duplicate module names.
+        if player.file_name.is_empty() {
+            continue;
+        }
         let key = player.file_name.to_ascii_lowercase();
         if participant_keys.iter().any(|known| known == &key) {
             continue;
         }
         participant_keys.push(key);
+        if !participants.is_empty() {
+            participants_byte_len += 1;
+        }
+        participants_byte_len += filename_byte_len;
         participants.push(player.file_name.as_str());
     }
     config.set_in(Some("General"), "Participants", participants.join(";"));
@@ -875,7 +915,11 @@ pub fn persist_activations(config_path: &Path, players: &[StartupPlayerFile]) ->
     {
         fs::create_dir_all(parent)?;
     }
-    config.save(config_path)
+    config.save(config_path)?;
+    for refusal in &refusals {
+        players[refusal.index].set_activated(false);
+    }
+    Ok(refusals)
 }
 
 /// Validates and saves the editable subset of `C4PlayerInfoCore`, preserving
@@ -1474,6 +1518,27 @@ mod tests {
         CrewInfo::load(&child).expect("load crew info")
     }
 
+    fn synthetic_player(file_name: impl Into<String>, name: &str) -> StartupPlayerFile {
+        StartupPlayerFile {
+            path: PathBuf::new(),
+            file_name: file_name.into(),
+            player_file: PlayerFile::default(),
+            render_model: PlrSelPlayer {
+                name: name.to_string(),
+                activated: true,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            },
+        }
+    }
+
     #[test]
     fn discovery_uses_cpp_player_path_references_and_marks_participants() {
         // C4StartupPlrSelDlg::UpdatePlayerList (C4StartupPlrSelDlg.cpp:678-733)
@@ -1588,7 +1653,7 @@ mod tests {
         players[0].set_activated(true);
         players[1].set_activated(false);
 
-        persist_activations(&config_path, &players).expect("save activation");
+        persist_activations(&config_path, &mut players).expect("save activation");
 
         let saved = Config::load(&config_path).expect("reload config");
         assert_eq!(
@@ -1599,6 +1664,95 @@ mod tests {
             saved.get_in(Some("General"), "FairCrew"),
             Some("true"),
             "unrelated config survives the rewrite"
+        );
+    }
+
+    #[test]
+    fn l063_persist_activations_accepts_exact_cpp_buffer_payload() {
+        let root = tempdir().expect("config root");
+        let config_path = root.path().join("legacyclonk.config");
+        let tail = "b".repeat(1022);
+        let mut players = vec![
+            synthetic_player("A", "Alpha"),
+            synthetic_player(tail.clone(), "Exact"),
+        ];
+
+        let refusals =
+            persist_activations(&config_path, &mut players).expect("save exact-size list");
+
+        assert!(refusals.is_empty());
+        let saved = Config::load(&config_path).expect("reload exact-size config");
+        let participants = saved
+            .get_in(Some("General"), "Participants")
+            .expect("participants value");
+        assert_eq!(participants, format!("A;{tail}"));
+        assert_eq!(lc_script::c4_string_byte_len(participants), 1024);
+        assert!(players.iter().all(|player| player.render_model.activated));
+    }
+
+    #[test]
+    fn l063_persist_activations_refuses_overflow_and_continues() {
+        let root = tempdir().expect("config root");
+        let config_path = root.path().join("legacyclonk.config");
+        fs::write(
+            &config_path,
+            "[General]\nParticipants=Stale.c4p\nFairCrew=true\n",
+        )
+        .expect("write existing config");
+        let mut players = vec![
+            synthetic_player("A", "Alpha"),
+            synthetic_player("b".repeat(1023), "Overflow"),
+            synthetic_player("C", "Charlie"),
+        ];
+
+        let refusals =
+            persist_activations(&config_path, &mut players).expect("save bounded list");
+
+        assert_eq!(
+            refusals,
+            vec![PlayerActivationRefusal {
+                index: 1,
+                player_name: "Overflow".to_string(),
+            }]
+        );
+        assert!(players[0].render_model.activated);
+        assert!(!players[1].render_model.activated);
+        assert!(players[2].render_model.activated);
+        let saved = Config::load(&config_path).expect("reload bounded config");
+        assert_eq!(
+            saved.get_in(Some("General"), "Participants"),
+            Some("A;C")
+        );
+        assert_eq!(saved.get_in(Some("General"), "FairCrew"), Some("true"));
+    }
+
+    #[test]
+    fn l063_persist_activations_reserves_separator_for_first_player() {
+        let root = tempdir().expect("config root");
+        let accepted_path = root.path().join("accepted.config");
+        let mut accepted = vec![synthetic_player("a".repeat(1023), "Accepted")];
+        assert!(
+            persist_activations(&accepted_path, &mut accepted)
+                .expect("save 1023-byte first player")
+                .is_empty()
+        );
+
+        let refused_path = root.path().join("refused.config");
+        let mut refused = vec![synthetic_player("b".repeat(1024), "Refused")];
+        assert_eq!(
+            persist_activations(&refused_path, &mut refused)
+                .expect("save list without oversized first player"),
+            vec![PlayerActivationRefusal {
+                index: 0,
+                player_name: "Refused".to_string(),
+            }]
+        );
+        assert!(!refused[0].render_model.activated);
+        assert_eq!(
+            Config::load(&refused_path)
+                .expect("reload refused config")
+                .get_in(Some("General"), "Participants"),
+            Some("")
         );
     }
 

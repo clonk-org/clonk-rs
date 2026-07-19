@@ -1288,6 +1288,18 @@ impl PlrSelController {
         self.player_activations.get(index).copied()
     }
 
+    /// Updates one checkbox without rebuilding the list, changing selection,
+    /// or resetting its ScrollWindow offset. This is the controller analogue
+    /// of C++ `PlayerListItem::SetActivated`, whose checkbox setter does not
+    /// invoke the activation callback.
+    pub fn set_player_activation(&mut self, index: usize, activated: bool) -> bool {
+        let Some(current) = self.player_activations.get_mut(index) else {
+            return false;
+        };
+        *current = activated;
+        true
+    }
+
     pub fn set_crew_participations(&mut self, participations: Vec<bool>) -> bool {
         if !self.is_crew_mode() {
             return false;

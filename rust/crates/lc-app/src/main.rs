@@ -191,11 +191,11 @@ use serde::{
 use sha1::{Digest, Sha1};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use startup_player_files::{
-    PlayerImageWrite, SavedStartupPlayer, StartupCrewFile, StartupCrewMutationError,
-    StartupPlayerFile, delete_crew_file, delete_player_file, discover_crew_files,
-    discover_player_files, discover_player_files_in, load_network_player_big_icon,
-    persist_activations, rename_crew, save_player_properties, set_crew_death_message,
-    set_crew_participation,
+    PlayerActivationRefusal, PlayerImageWrite, SavedStartupPlayer, StartupCrewFile,
+    StartupCrewMutationError, StartupPlayerFile, delete_crew_file, delete_player_file,
+    discover_crew_files, discover_player_files, discover_player_files_in,
+    load_network_player_big_icon, persist_activations, rename_crew, save_player_properties,
+    set_crew_death_message, set_crew_participation,
 };
 use time::{OffsetDateTime, macros::format_description};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -41676,9 +41676,13 @@ impl GameApp {
             };
             player.set_activated(activated);
         }
-        let persistence_error = match forced_participant_persistence {
-            Some(result) => result.err(),
-            None => persist_activations(&paths.config_file(), &players).err(),
+        let persistence = match forced_participant_persistence {
+            Some(result) => result.map(|()| Vec::new()),
+            None => persist_activations(&paths.config_file(), &mut players),
+        };
+        let (persistence_error, activation_refusals) = match persistence {
+            Ok(refusals) => (None, refusals),
+            Err(error) => (Some(error), Vec::new()),
         };
         self.startup_player_models = players
             .iter()
@@ -41713,7 +41717,37 @@ impl GameApp {
         } else {
             self.status_text.clear();
         }
+        if let Err(error) =
+            self.show_startup_player_activation_refusals(&activation_refusals)
+        {
+            tracing::error!(%error, "failed to show participant overflow after player save");
+        }
         self.mark_menu_dirty();
+    }
+
+    fn show_startup_player_activation_refusals(
+        &mut self,
+        refusals: &[PlayerActivationRefusal],
+    ) -> Result<(), EngineError> {
+        if refusals.is_empty() {
+            return Ok(());
+        }
+        let template = self.runtime_resource_text(
+            "IDS_ERR_PLAYERSTOOLONG",
+            "Player \"%s\" has been deactivated: Too many activated players or path too long!",
+        );
+        let caption = self.runtime_resource_text("IDS_ERR_TITLE", "Error");
+        for refusal in refusals {
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    format_resource_string(template.clone(), &[&refusal.player_name]),
+                    caption.clone(),
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+        }
+        Ok(())
     }
 
     fn process_player_dialog_actions(
@@ -41765,11 +41799,24 @@ impl GameApp {
                         .as_ref()
                         .ok_or_else(|| "application paths are unavailable".to_string())
                         .and_then(|paths| {
-                            persist_activations(&paths.config_file(), &self.startup_player_files)
-                                .map_err(|error| error.to_string())
-                        });
+                            persist_activations(
+                                &paths.config_file(),
+                                &mut self.startup_player_files,
+                            )
+                            .map_err(|error| error.to_string())
+                    });
                     match persisted {
-                        Ok(()) => {
+                        Ok(refusals) => {
+                            for refusal in &refusals {
+                                if let Some(player) =
+                                    self.startup_player_models.get_mut(refusal.index)
+                                {
+                                    player.activated = false;
+                                }
+                                if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                                    dialog.set_player_activation(refusal.index, false);
+                                }
+                            }
                             self.selected_player_file = self
                                 .startup_player_files
                                 .iter()
@@ -41777,6 +41824,7 @@ impl GameApp {
                                 .map(|player| player.player_file.clone());
                             self.refresh_participants_label();
                             self.status_text.clear();
+                            self.show_startup_player_activation_refusals(&refusals)?;
                         }
                         Err(error) => {
                             if let Some(old_activated) = old_activated {
@@ -46222,6 +46270,34 @@ impl GameApp {
         self.startup_crew_files.clear();
         self.startup_crew_models.clear();
         self.startup_crew_player_index = None;
+        let activation_refusals = self
+            .app_paths
+            .as_ref()
+            .map(AppPaths::config_file)
+            .map(|config_path| {
+                persist_activations(&config_path, &mut self.startup_player_files)
+            })
+            .transpose();
+        let activation_refusals = match activation_refusals {
+            Ok(Some(refusals)) => refusals,
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                tracing::warn!(%error, "failed to validate participants while opening player selection");
+                Vec::new()
+            }
+        };
+        for refusal in &activation_refusals {
+            if let Some(player) = self.startup_player_models.get_mut(refusal.index) {
+                player.activated = false;
+            }
+        }
+        if !activation_refusals.is_empty() {
+            self.selected_player_file = self
+                .startup_player_files
+                .iter()
+                .find(|player| player.render_model.activated)
+                .map(|player| player.player_file.clone());
+        }
         let mut dialog =
             lc_frontend::startup_plrsel::PlrSelController::new(self.startup_player_models.len());
         dialog.set_player_activations(
@@ -46247,6 +46323,11 @@ impl GameApp {
             StartupDialog::PlayerSelection,
         );
         self.status_text.clear();
+        if let Err(error) =
+            self.show_startup_player_activation_refusals(&activation_refusals)
+        {
+            tracing::error!(%error, "failed to show participant overflow while opening player selection");
+        }
     }
 
     fn open_options_menu(&mut self) {
@@ -50918,7 +50999,7 @@ impl GameApp {
             tracing::error!("cannot refresh startup players without application paths");
             return;
         };
-        let players = match discover_player_files(paths) {
+        let mut players = match discover_player_files(paths) {
             Ok(players) => players,
             Err(error) => {
                 tracing::error!(%error, "failed to rediscover startup players after deletion");
@@ -50927,9 +51008,13 @@ impl GameApp {
         };
         self.startup_tooltip.pointer_left();
         self.menu_frame_cache = None;
-        if let Err(error) = persist_activations(&paths.config_file(), &players) {
-            tracing::warn!(%error, "failed to rebuild participants after player deletion");
-        }
+        let activation_refusals = match persist_activations(&paths.config_file(), &mut players) {
+            Ok(refusals) => refusals,
+            Err(error) => {
+                tracing::warn!(%error, "failed to rebuild participants after player deletion");
+                Vec::new()
+            }
+        };
         self.startup_player_models = players
             .iter()
             .map(|player| player.render_model.clone())
@@ -50950,6 +51035,11 @@ impl GameApp {
         self.plrsel_last_click = None;
         self.refresh_participants_label();
         self.status_text.clear();
+        if let Err(error) =
+            self.show_startup_player_activation_refusals(&activation_refusals)
+        {
+            tracing::error!(%error, "failed to show participant overflow after player deletion");
+        }
         self.mark_menu_dirty();
     }
 
@@ -90039,6 +90129,133 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.process_player_dialog_actions(actions)
             .expect("route the button-release sound before Back");
         assert_eq!(app.ui_sound_log, ["Command", "ArrowHit", "Click"]);
+    }
+
+    #[test]
+    fn l063_activation_overflow_reverts_row_and_shows_native_error() {
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated player-selection config");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let player_model = |name: &str, activated: bool| {
+            lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: name.to_string(),
+                activated,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0xff,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            }
+        };
+        let alpha = player_model("Alpha", true);
+        let overflow = player_model("Overflow", true);
+        let mut app = new_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.startup_player_files.push(StartupPlayerFile {
+            path: PathBuf::from("A"),
+            file_name: "A".to_string(),
+            player_file: PlayerFile {
+                name: "Alpha".to_string(),
+                ..PlayerFile::default()
+            },
+            render_model: alpha.clone(),
+        });
+        app.startup_player_models.push(alpha);
+        for index in 1..19 {
+            let model = player_model(&format!("Inactive {index}"), false);
+            app.startup_player_files.push(StartupPlayerFile {
+                path: PathBuf::from(format!("Inactive{index}.c4p")),
+                file_name: format!("Inactive{index}.c4p"),
+                player_file: PlayerFile::default(),
+                render_model: model.clone(),
+            });
+            app.startup_player_models.push(model);
+        }
+        let overflow_index = app.startup_player_files.len();
+        app.startup_player_files.push(StartupPlayerFile {
+            path: PathBuf::from("Overflow.c4p"),
+            file_name: "b".repeat(1023),
+            player_file: PlayerFile {
+                name: "Overflow".to_string(),
+                ..PlayerFile::default()
+            },
+            render_model: overflow.clone(),
+        });
+        app.startup_player_models.push(overflow);
+        app.selected_player_file = Some(PlayerFile {
+            name: "Overflow".to_string(),
+            ..PlayerFile::default()
+        });
+        app.open_player_selection_dialog();
+        assert!(!app.startup_player_files[overflow_index]
+            .render_model
+            .activated);
+        assert!(!app.startup_player_models[overflow_index].activated);
+        assert_eq!(
+            app.selected_player_file
+                .as_ref()
+                .map(|player| player.name.as_str()),
+            Some("Alpha")
+        );
+        assert_eq!(app.message_dialogs.len(), 1);
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss open-time overflow error");
+        let (actions, scroll_before) = {
+            let dialog = app
+                .startup_player_dialog
+                .as_mut()
+                .expect("player-selection controller");
+            dialog.set_selected_index(Some(overflow_index));
+            let scroll_before = dialog.list_scroll_offset();
+            assert!(scroll_before > 0, "fixture must exercise a scrolled list");
+            let actions = dialog.handle_key_down(KeyCode::Space);
+            assert_eq!(dialog.is_player_activated(overflow_index), Some(true));
+            (actions, scroll_before)
+        };
+
+        app.process_player_dialog_actions(actions)
+            .expect("refuse oversized activation");
+
+        assert!(!app.startup_player_files[overflow_index]
+            .render_model
+            .activated);
+        assert!(!app.startup_player_models[overflow_index].activated);
+        let dialog = app
+            .startup_player_dialog
+            .as_ref()
+            .expect("player-selection controller remains open");
+        assert_eq!(
+            dialog.is_player_activated(overflow_index),
+            Some(false)
+        );
+        assert_eq!(dialog.selected_index(), Some(overflow_index));
+        assert_eq!(dialog.list_scroll_offset(), scroll_before);
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload bounded participants")
+                .get_in(Some("General"), "Participants"),
+            Some("A")
+        );
+        assert!(app.status_text.is_empty());
+        assert_eq!(app.message_dialogs.len(), 1);
+        let error = &app.message_dialogs[0].state;
+        assert_eq!(error.caption(), "Error");
+        assert_eq!(
+            error.message(),
+            "Player \"Overflow\" has been deactivated: Too many activated players or path too long!"
+        );
+        assert_eq!(
+            error.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK
+        );
+        assert_eq!(
+            error.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
     }
 
     #[test]
