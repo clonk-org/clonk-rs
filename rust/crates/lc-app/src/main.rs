@@ -10301,8 +10301,8 @@ struct GameApp {
     /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
     ingame_gui_pointer: Option<GuiPoint>,
     ingame_pointer: Option<ViewportPointer>,
-    /// `C4MouseControl::Help`, activated locally by the viewport Help
-    /// button. L053 extends this seam with cursor and caption behavior.
+    /// `C4MouseControl::Help`, activated locally by the viewport Help button.
+    /// This is deliberately independent from the F1 `ShowHelp` overlay.
     ingame_mouse_help: bool,
     /// `C4MouseControl::InitCentered`: the first viewport move after `Init`
     /// is evaluated at the viewport center, regardless of the platform point.
@@ -10322,6 +10322,9 @@ struct GameApp {
     /// Player menu whose title close button retained the current left-down.
     /// C4GUI::Button invokes only when that same button receives left-up.
     ingame_menu_close_pointer_capture: Option<i32>,
+    /// Tooltip-style caption installed by a Help-mode object click or region
+    /// hover, including C4MouseControl's move-count lifetime.
+    ingame_mouse_help_caption: Option<IngameMouseHelpCaption>,
     mouse_state: Option<IngameButtonMouseState>,
     ingame_right_mouse_state: Option<IngameButtonMouseState>,
     /// C4Menu's retained drag element begins in GUI coordinates and becomes
@@ -12506,6 +12509,12 @@ struct IngameMouseState {
     region_drag_cursor: Option<IngameRegionDragCursor>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IngameMouseHelpCaption {
+    text: String,
+    keep_moves: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IngameDragSelectionKind {
     Unknown,
@@ -12553,6 +12562,9 @@ struct IngameButtonMouseState {
     /// Fog replaced the native DownCursor with Nothing. Moving into a visible
     /// area later must remain DragNone and use the release-time cursor.
     down_cursor_nothing: bool,
+    /// The copied DownCursor was C4MC_Cursor_Help. Crossing the drag
+    /// threshold must remain DragNone and button-up must emit no command.
+    down_cursor_help: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -13424,10 +13436,15 @@ impl IngameButtonMouseState {
             down_target,
             down_region,
             down_cursor_nothing: false,
+            down_cursor_help: false,
         }
     }
 
     fn update_with_fog(&mut self, pointer: ViewportPointer, fog_blocked: bool) -> bool {
+        if self.down_cursor_help {
+            self.motion.update(pointer);
+            return false;
+        }
         if self.down_cursor_nothing {
             self.motion.last = pointer;
             return false;
@@ -19886,6 +19903,7 @@ impl GameApp {
             running_pointer_position: None,
             primary_pointer_left_down: false,
             ingame_menu_close_pointer_capture: None,
+            ingame_mouse_help_caption: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
             construction_menu_drag: None,
@@ -21934,7 +21952,11 @@ impl GameApp {
         }
         if self.mode == AppMode::Running {
             self.initialize_ingame_mouse_for_wheel();
+            self.advance_ingame_mouse_help_caption();
             if !self.mouse_control {
+                if let Some(pointer) = self.ingame_pointer {
+                    self.refresh_ingame_mouse_help_region_caption(pointer);
+                }
                 return Ok(());
             }
             let Some(owner) = self.local_controls.mouse_owner() else {
@@ -32099,8 +32121,28 @@ impl GameApp {
         )
     }
 
+    fn ingame_help_cursor_active(&self) -> bool {
+        let Some(pointer) = self.ingame_pointer else {
+            return false;
+        };
+        self.ingame_mouse_help
+            && matches!(self.mode, AppMode::Running)
+            && self.window_active
+            && self.ingame_mouse_controls_owner(pointer.owner)
+            && self.message_dialogs.is_empty()
+            && self.startup_player_properties_dialog.is_none()
+            && self.definition_selector.is_none()
+            && self.context_menu.is_none()
+            && self.game_option_input_dialog.is_none()
+            && self.game_over_dialog.is_none()
+            && !self.scoreboard_close_pointer_capture
+            && !self.ingame_edge_cursor_active()
+    }
+
     fn ingame_custom_cursor_active(&self) -> bool {
-        self.ingame_construction_drag_active() || self.ingame_edge_cursor_active()
+        self.ingame_construction_drag_active()
+            || self.ingame_edge_cursor_active()
+            || self.ingame_help_cursor_active()
     }
 
     fn ingame_region_drag_active(&self) -> bool {
@@ -32153,6 +32195,8 @@ impl GameApp {
         self.ingame_pointer = None;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
+        self.ingame_mouse_help = false;
+        self.ingame_mouse_help_caption = None;
         self.cancel_ingame_mouse_gestures();
     }
 
@@ -32400,6 +32444,7 @@ impl GameApp {
     }
 
     fn update_ingame_pointer(&mut self, point: GuiPoint) -> Result<(), EngineError> {
+        self.advance_ingame_mouse_help_caption();
         // GraphicsSystem::MouseMove applies ceil after dividing by the
         // presentation scale, before clamping into the assigned viewport.
         // The event path has already divided by scale and normally quantized
@@ -32561,6 +32606,7 @@ impl GameApp {
             }
             self.ingame_pointer = Some(pointer);
             self.update_ingame_drag_selection_kinds();
+            self.refresh_ingame_mouse_help_region_caption(pointer);
             // A fallible script-menu region lookup must never leave a prior
             // border direction armed after this new pointer position.
             self.ingame_edge_scroll = None;
@@ -32623,6 +32669,7 @@ impl GameApp {
     /// retained VpX/VpY so disappearing regions and resized layouts take
     /// effect without a new platform motion event.
     fn refresh_ingame_edge_scroll_tick5(&mut self) -> Result<bool, EngineError> {
+        self.advance_ingame_mouse_help_caption();
         let Some((scroll, viewport)) = self.reevaluate_ingame_edge_scroll()? else {
             self.ingame_edge_scroll = None;
             return Ok(false);
@@ -32701,6 +32748,7 @@ impl GameApp {
         }
         self.ingame_pointer = Some(pointer);
         self.update_ingame_drag_selection_kinds();
+        self.refresh_ingame_mouse_help_region_caption(pointer);
         let Some(edge) =
             viewport_edge_scroll_at(retained.position.x, retained.position.y, width, height)
         else {
@@ -33078,6 +33126,54 @@ impl GameApp {
         (!blocked).then_some(target)
     }
 
+    /// Help widens C4MouseControl's ordinary interaction mask to OCF_All,
+    /// while retaining the same viewport visibility and fog gates.
+    fn ingame_help_mouse_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
+        let target = self
+            .graphics
+            .object_at_point(&self.snapshot, owner, point)?;
+        let blocked = self
+            .graphics
+            .viewport_point_at(point)
+            .filter(|pointer| pointer.owner == owner)
+            .is_some_and(|pointer| !self.ingame_fog_allows_target(pointer, target));
+        (!blocked).then_some(target)
+    }
+
+    fn set_ingame_mouse_help_caption(&mut self, target: ObjectId, keep: bool) {
+        let Some(text) = self.engine.object_help_caption(target) else {
+            return;
+        };
+        let keep_moves = if keep {
+            lc_script::c4_string_bytes(&text).len() / 2
+        } else {
+            0
+        };
+        self.ingame_mouse_help_caption = Some(IngameMouseHelpCaption { text, keep_moves });
+    }
+
+    /// Top-of-`C4MouseControl::Move` caption lifetime update. A countdown
+    /// reaching zero remains visible through that move and clears on the
+    /// following one.
+    fn advance_ingame_mouse_help_caption(&mut self) {
+        match self.ingame_mouse_help_caption.as_mut() {
+            Some(caption) if caption.keep_moves != 0 => caption.keep_moves -= 1,
+            Some(_) => self.ingame_mouse_help_caption = None,
+            None => {}
+        }
+    }
+
+    fn refresh_ingame_mouse_help_region_caption(&mut self, pointer: ViewportPointer) {
+        if !self.ingame_mouse_help {
+            return;
+        }
+        if let Some(IngameViewportRegion::Inventory(target)) =
+            self.ingame_viewport_region(pointer.owner, pointer.screen)
+        {
+            self.set_ingame_mouse_help_caption(target, false);
+        }
+    }
+
     fn ingame_mouse_select_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
         self.ingame_primary_mouse_target(owner, point)
             .filter(|object| self.ingame_mouse_selectable_object(owner, *object))
@@ -33229,7 +33325,7 @@ impl GameApp {
         if moving_drag && button_state == ElementState::Released {
             return self.on_ingame_mouse_up();
         }
-        let script_menu_target = if moving_drag {
+        let script_menu_target = if moving_drag || self.ingame_mouse_help {
             None
         } else {
             match (self.local_controls.mouse_owner(), self.ingame_gui_pointer) {
@@ -33307,6 +33403,10 @@ impl GameApp {
             }
             ElementState::Released => {
                 if std::mem::take(&mut self.ingame_ignore_left_up) {
+                    self.advance_ingame_mouse_help_caption();
+                    if let Some(pointer) = self.ingame_pointer {
+                        self.refresh_ingame_mouse_help_region_caption(pointer);
+                    }
                     self.mouse_state = None;
                     Ok(())
                 } else {
@@ -33480,7 +33580,7 @@ impl GameApp {
                 Ok(())
             }
             AppMode::Running => {
-                if self.ingame_captured_drag_active() {
+                if self.ingame_mouse_help || self.ingame_captured_drag_active() {
                     self.handle_ingame_right_mouse_button(button_state)
                 } else {
                     let scoreboard_hit = self
@@ -33619,6 +33719,10 @@ impl GameApp {
         }
         if self.mode == AppMode::Running {
             self.initialize_ingame_mouse_center()?;
+            self.advance_ingame_mouse_help_caption();
+            if let Some(pointer) = self.ingame_pointer {
+                self.refresh_ingame_mouse_help_region_caption(pointer);
+            }
         }
         Ok(())
     }
@@ -33631,6 +33735,16 @@ impl GameApp {
             if button_state == ElementState::Released {
                 self.finish_construction_menu_drag()?;
             }
+            return Ok(());
+        }
+        self.advance_ingame_mouse_help_caption();
+        if self.ingame_mouse_help && button_state == ElementState::Released {
+            self.ingame_right_mouse_state = None;
+            self.ingame_mouse_help = false;
+            if let Some(caption) = self.ingame_mouse_help_caption.as_mut() {
+                caption.keep_moves = 0;
+            }
+            self.ingame_dragged_objects.clear();
             return Ok(());
         }
         let moving_drag = self.ingame_moving_drag_active();
@@ -33693,7 +33807,11 @@ impl GameApp {
                 if region.is_some() {
                     return None;
                 }
-                self.ingame_primary_mouse_target(self.local_owner, pointer.screen)
+                if self.ingame_mouse_help {
+                    self.ingame_help_mouse_target(self.local_owner, pointer.screen)
+                } else {
+                    self.ingame_primary_mouse_target(self.local_owner, pointer.screen)
+                }
             });
             let mut state = IngameButtonMouseState::new(
                 pointer,
@@ -33701,12 +33819,19 @@ impl GameApp {
                 region.is_some(),
             );
             state.motion.down_region = region;
+            state.down_cursor_help = self.ingame_mouse_help;
+            if state.down_cursor_help {
+                state.motion.selection_frame = false;
+            }
             let fog_blocked = region.is_none() && self.ingame_pointer_fog_blocked(pointer);
             if fog_blocked {
                 state.motion.selection_frame = false;
                 state.down_cursor_nothing = down_target.is_none();
             }
             self.ingame_right_mouse_state = Some(state);
+            if self.ingame_mouse_help {
+                self.refresh_ingame_mouse_help_region_caption(pointer);
+            }
             return Ok(());
         }
 
@@ -34255,6 +34380,7 @@ impl GameApp {
     }
 
     fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
+        self.advance_ingame_mouse_help_caption();
         let Some(pointer) = self.ingame_pointer else {
             self.mouse_state = None;
             return Ok(());
@@ -34262,10 +34388,14 @@ impl GameApp {
         let region = self.ingame_viewport_region(pointer.owner, pointer.screen);
         if !self.ingame_mouse_controls_owner(pointer.owner)
             || (!self.mouse_control
+                && !self.ingame_mouse_help
                 && !matches!(region, Some(IngameViewportRegion::ViewportButton(_))))
         {
             self.cancel_ingame_mouse_gestures();
             return Ok(());
+        }
+        if self.ingame_mouse_help {
+            self.refresh_ingame_mouse_help_region_caption(pointer);
         }
         let region_target = region.and_then(|region| match region {
             IngameViewportRegion::Inventory(target) => Some(target),
@@ -34275,7 +34405,13 @@ impl GameApp {
         let down_target = region_target.or_else(|| {
             region
                 .is_none()
-                .then(|| self.ingame_primary_mouse_target(pointer.owner, pointer.screen))
+                .then(|| {
+                    if self.ingame_mouse_help {
+                        self.ingame_help_mouse_target(pointer.owner, pointer.screen)
+                    } else {
+                        self.ingame_primary_mouse_target(pointer.owner, pointer.screen)
+                    }
+                })
                 .flatten()
         });
         let mut state = IngameButtonMouseState::new(
@@ -34284,6 +34420,10 @@ impl GameApp {
             region.is_some(),
         );
         state.motion.down_region = region;
+        state.down_cursor_help = self.ingame_mouse_help;
+        if state.down_cursor_help {
+            state.motion.selection_frame = false;
+        }
         let fog_blocked = region.is_none() && self.ingame_pointer_fog_blocked(pointer);
         if fog_blocked {
             state.motion.selection_frame = false;
@@ -34291,14 +34431,16 @@ impl GameApp {
         }
         self.mouse_state = Some(state);
 
-        if let Some(region) = region {
-            let (command, _) = region.control();
-            let control_style = self
-                .engine
-                .player(pointer.owner)
-                .is_some_and(|player| player.control_style());
-            if control_style && command & (lc_engine::COM_SINGLE | lc_engine::COM_DOUBLE) == 0 {
-                self.dispatch_ingame_region_control(pointer.owner, region, false)?;
+        if !self.ingame_mouse_help {
+            if let Some(region) = region {
+                let (command, _) = region.control();
+                let control_style = self
+                    .engine
+                    .player(pointer.owner)
+                    .is_some_and(|player| player.control_style());
+                if control_style && command & (lc_engine::COM_SINGLE | lc_engine::COM_DOUBLE) == 0 {
+                    self.dispatch_ingame_region_control(pointer.owner, region, false)?;
+                }
             }
         }
         Ok(())
@@ -34347,6 +34489,10 @@ impl GameApp {
     }
 
     fn on_ingame_mouse_up(&mut self) -> Result<(), EngineError> {
+        self.advance_ingame_mouse_help_caption();
+        if let Some(pointer) = self.ingame_pointer {
+            self.refresh_ingame_mouse_help_region_caption(pointer);
+        }
         let Some(drag) = self.mouse_state.take() else {
             return Ok(());
         };
@@ -34362,6 +34508,20 @@ impl GameApp {
             // next LeftDouble synthesis; an immediate object-frame-to-member
             // drag must begin a fresh gesture.
             self.ingame_last_left_down = None;
+        }
+        if drag.down_cursor_help {
+            self.ingame_dragged_objects.clear();
+            let release_is_region = self
+                .ingame_viewport_region(motion.last.owner, motion.last.screen)
+                .is_some();
+            if release_is_region {
+                self.refresh_ingame_mouse_help_region_caption(motion.last);
+            } else if motion.down_region.is_none() {
+                if let Some(target) = drag.down_target {
+                    self.set_ingame_mouse_help_caption(target, true);
+                }
+            }
+            return Ok(());
         }
         let current_is_region = self
             .ingame_viewport_region(motion.last.owner, motion.last.screen)
@@ -34462,6 +34622,9 @@ impl GameApp {
         {
             return Ok(());
         }
+        if self.ingame_mouse_help {
+            return Ok(());
+        }
         let point = ingame_pointer_world_pixel(pointer);
         let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
         // Move snapshots dwKeyFlags before dispatching LeftUp, and every
@@ -34523,7 +34686,14 @@ impl GameApp {
     }
 
     fn on_ingame_mouse_double(&mut self) -> Result<(), EngineError> {
-        if !matches!(self.mode, AppMode::Running) || !self.mouse_control {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(());
+        }
+        self.advance_ingame_mouse_help_caption();
+        if let Some(pointer) = self.ingame_pointer {
+            self.refresh_ingame_mouse_help_region_caption(pointer);
+        }
+        if self.ingame_mouse_help || !self.mouse_control {
             return Ok(());
         }
         let Some(pointer) = self.ingame_pointer else {
@@ -35180,7 +35350,10 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
-                if self.ingame_moving_drag_active() || self.construction_menu_drag_captured() {
+                if self.ingame_mouse_help
+                    || self.ingame_moving_drag_active()
+                    || self.construction_menu_drag_captured()
+                {
                     self.handle_ingame_mouse_button(button_state)
                 } else if self.handle_scoreboard_pointer_button(button_state)?
                     || self.handle_ingame_menu_pointer_button(button_state, false)?
@@ -47580,6 +47753,7 @@ impl GameApp {
                 // every successfully executed game frame. Re-run the last
                 // clamped border move even when the OS emitted no new motion.
                 let player_view_scrolled = if self.ingame_edge_scroll.is_some() {
+                    self.advance_ingame_mouse_help_caption();
                     self.apply_ingame_edge_scroll()?
                 } else if self.engine.frame() % 5 == 0 {
                     if self.initialize_ingame_mouse_center()? {
@@ -52345,18 +52519,53 @@ impl GameApp {
             } else {
                 false
             };
+        let help_cursor = self
+            .ingame_help_cursor_active()
+            .then(|| self.ingame_pointer.map(|pointer| pointer.screen))
+            .flatten();
         if !construction_cursor_drawn
             && !self.ingame_construction_drag_active()
             && !selection_frame_drawn
-            && self.ingame_edge_cursor_active()
         {
-            if let Some(scroll) = self.ingame_edge_scroll {
+            if let Some(screen) = help_cursor {
                 self.graphics.draw_mouse_cursor(
-                    scroll.edge.cursor,
-                    scroll.screen,
+                    lc_frontend::MouseCursorPhase::Help,
+                    screen,
                     Some(&frame_gamma),
                 );
+            } else if self.ingame_edge_cursor_active() {
+                if let Some(scroll) = self.ingame_edge_scroll {
+                    self.graphics.draw_mouse_cursor(
+                        scroll.edge.cursor,
+                        scroll.screen,
+                        Some(&frame_gamma),
+                    );
+                }
             }
+        }
+        let help_caption = self
+            .ingame_mouse_help_caption
+            .as_ref()
+            .zip(self.ingame_pointer)
+            .and_then(|(caption, pointer)| {
+                self.graphics
+                    .viewport_rect(pointer.owner)
+                    .map(|facet| (caption.text.clone(), pointer.screen, facet))
+            });
+        if let (Some((caption, pointer, facet)), Some(font)) =
+            (help_caption, self.assets.global_tooltip_font.clone())
+        {
+            let font = lc_frontend::hud::HudFont::Clonk(font.as_ref());
+            let caption = c4_presentation_text(&caption);
+            ingame_menu::draw_tooltip(
+                self.graphics.surface_mut(),
+                &font,
+                facet,
+                pointer.x as i32,
+                pointer.y as i32,
+                &caption,
+                Some(&frame_gamma),
+            );
         }
         if ordered_native {
             self.next_pending_native_overlay();
@@ -53790,6 +53999,8 @@ impl GameApp {
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
         self.runtime_help_visible = false;
+        self.ingame_mouse_help = false;
+        self.ingame_mouse_help_caption = None;
         self.runtime_flash_message = None;
         self.film_view_player = None;
         self.film_view_player_on_observer = false;
@@ -56315,6 +56526,7 @@ impl GameApp {
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
         self.ingame_mouse_help = false;
+        self.ingame_mouse_help_caption = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -62020,6 +62232,386 @@ mod tests {
         commands
     }
 
+    fn install_mouse_help_target(
+        app: &mut GameApp,
+        definition_id: &str,
+        custom_name: &str,
+        description: Option<&str>,
+    ) -> (ObjectId, GuiPoint) {
+        render_mouse_test_app(app);
+        let owner = app.local_owner;
+        let viewport = app.graphics.viewport_rect(owner).expect("sandbox viewport");
+        let inset_x = 24_i32.min(viewport.width as i32 / 4);
+        let inset_y = 24_i32.min(viewport.height as i32 / 4);
+        let position = (viewport.y + inset_y..viewport.y + viewport.height as i32 - inset_y)
+            .flat_map(|y| {
+                (viewport.x + inset_x..viewport.x + viewport.width as i32 - inset_x)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find_map(|point| {
+                let routed = GuiPoint::new(point.x.ceil(), point.y.ceil());
+                let pointer = app.graphics.viewport_point_at(routed)?;
+                (pointer.owner == owner
+                    && app.ingame_viewport_region(owner, routed).is_none()
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, routed)
+                        .is_none())
+                .then_some(ingame_pointer_world_pixel(pointer))
+            })
+            .expect("help target has an empty interior spawn point");
+        let mut definition =
+            Definition::from_script(definition_id, "Definition name", "#strict\n")
+                .expect("help target compiles");
+        definition.set_category(lc_engine::CATEGORY_OBJECT);
+        definition.set_shape_rect(Some(lc_engine::DefinitionRect::new(-4, -4, 8, 8)));
+        definition.set_description(description.map(str::to_string));
+        app.engine
+            .register_definition(definition)
+            .expect("register help target");
+        let mut spawn = SpawnConfig::new(definition_id)
+            .with_position(position)
+            .with_custom_name(custom_name);
+        if let Some(layer) = app
+            .engine
+            .crew_cursor(owner)
+            .and_then(|cursor| app.engine.object_snapshot(cursor))
+            .and_then(|cursor| cursor.layer)
+        {
+            spawn = spawn.with_layer(layer);
+        }
+        let target = app
+            .engine
+            .spawn_object(spawn)
+            .expect("spawn help target");
+        render_mouse_test_app(app);
+        let point = mouse_test_object_point(app, owner, target);
+        assert_eq!(
+            app.ingame_primary_mouse_target(owner, point),
+            None,
+            "the normal interaction OCF mask excludes the help-only target"
+        );
+        assert_eq!(
+            app.ingame_help_mouse_target(owner, point),
+            Some(target),
+            "Help widens the target mask to OCF_All"
+        );
+        (target, point)
+    }
+
+    #[test]
+    fn l053_help_click_describes_ocf_all_target_without_commands_or_drag() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let (target, point) = install_mouse_help_target(
+            &mut app,
+            "HLP1",
+            "Named target",
+            Some("Helpful details."),
+        );
+        let (empty, _) = mouse_test_empty_point(&app, owner, point, None);
+        let help = viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::Help);
+        let menu =
+            viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::PlayerMenu);
+        assert_eq!(
+            app.ingame_viewport_region(owner, help),
+            Some(IngameViewportRegion::ViewportButton(
+                lc_frontend::hud::ViewportButton::Help,
+            ))
+        );
+        assert_eq!(
+            app.ingame_viewport_region(owner, menu),
+            Some(IngameViewportRegion::ViewportButton(
+                lc_frontend::hud::ViewportButton::PlayerMenu,
+            ))
+        );
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        physical_left_click_with_modifiers(
+            &mut app,
+            help,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert!(app.ingame_mouse_help, "the HUD Help button enters Help mode");
+        assert_eq!(
+            commands.take_submitted_mouse_controls(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "COM_Help remains process-local"
+        );
+
+        physical_left_click_with_modifiers(
+            &mut app,
+            menu,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert!(app.ingame_mouse_help, "region clicks keep Help active");
+        assert!(
+            !app.ingame_menu_belongs_to(owner),
+            "Help suppresses the PlayerMenu region's local side effect"
+        );
+        assert_eq!(
+            commands.take_submitted_mouse_controls(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "Help suppresses synchronized region controls too"
+        );
+
+        physical_left_click_with_modifiers(
+            &mut app,
+            point,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert!(app.ingame_mouse_help, "left-up keeps Help active");
+        let expected = "Named target: Helpful details.";
+        assert_eq!(
+            app.ingame_mouse_help_caption,
+            Some(IngameMouseHelpCaption {
+                text: expected.to_string(),
+                keep_moves: lc_script::c4_string_bytes(expected).len() / 2,
+            })
+        );
+        assert!(app.ingame_help_cursor_active());
+        assert_eq!(
+            commands.take_submitted_mouse_controls(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "a Help click never enters any synchronized mouse queue"
+        );
+
+        install_native_test_fonts(&mut app, 3.0);
+        let (_, _, plan) = render_ordered_test_frame(&mut app, 3.0, 960, 600);
+        let caption = plan
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.text)
+            .find(|command| command.text == expected)
+            .expect("Help caption reaches ordered native text");
+        assert_eq!(
+            caption.role,
+            lc_graphics::clonk_font::ClonkFontRole::GuiTooltip,
+            "Help captions use the global tooltip font"
+        );
+
+        app.ingame_last_left_down = None;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("move back onto help target");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("help drag left-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(empty.x),
+            f64::from(empty.y),
+        ))
+        .expect("move beyond drag sensitivity in Help");
+        let state = app.mouse_state.expect("Help retains DragNone state");
+        assert!(state.down_cursor_help);
+        assert!(state.motion.moved);
+        assert!(!state.motion.world_drag_started);
+        assert!(!state.motion.region_drag_started);
+        assert!(!state.motion.selection_frame);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("help drag left-up");
+        assert_eq!(
+            commands.take_submitted_mouse_controls(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "crossing the drag threshold in Help still emits nothing"
+        );
+        assert_eq!(
+            app.ingame_mouse_help_caption
+                .as_ref()
+                .map(|caption| caption.text.as_str()),
+            Some(expected),
+            "Help reports the object captured on left-down"
+        );
+        assert_eq!(app.engine.object_help_caption(target).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn l053_help_caption_uses_name_only_and_cpp_move_lifetime() {
+        let mut app = new_running_sandbox_app();
+        let raw_name = lc_script::c4_string_from_bytes(b"Ren\xe9X");
+        let (_target, point) =
+            install_mouse_help_target(&mut app, "HLP2", &raw_name, None);
+        app.ingame_mouse_help = true;
+        physical_left_click_with_modifiers(
+            &mut app,
+            point,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+
+        let keep = lc_script::c4_string_bytes(&raw_name).len() / 2;
+        assert_ne!(keep, raw_name.len() / 2, "KeepCaption counts C4 bytes");
+        assert_eq!(
+            app.ingame_mouse_help_caption,
+            Some(IngameMouseHelpCaption {
+                text: raw_name,
+                keep_moves: keep,
+            })
+        );
+        for remaining in (0..keep).rev() {
+            app.update_ingame_pointer(point)
+                .expect("advance help caption move");
+            assert_eq!(
+                app.ingame_mouse_help_caption
+                    .as_ref()
+                    .map(|caption| caption.keep_moves),
+                Some(remaining),
+                "caption survives the move that decrements KeepCaption to zero"
+            );
+        }
+        app.update_ingame_pointer(point)
+            .expect("clear expired help caption");
+        assert!(app.ingame_mouse_help_caption.is_none());
+
+        app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
+            text: "wheel".to_string(),
+            keep_moves: 2,
+        });
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("wheel runs a native mouse Move");
+        assert_eq!(
+            app.ingame_mouse_help_caption
+                .as_ref()
+                .map(|caption| caption.keep_moves),
+            Some(1)
+        );
+
+        app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
+            text: "ignored up".to_string(),
+            keep_moves: 2,
+        });
+        app.ingame_ignore_left_up = true;
+        app.handle_ingame_mouse_button(ElementState::Released)
+            .expect("ignored post-double LeftUp still runs Move");
+        assert!(!app.ingame_ignore_left_up);
+        assert_eq!(
+            app.ingame_mouse_help_caption
+                .as_ref()
+                .map(|caption| caption.keep_moves),
+            Some(1)
+        );
+
+        app.ingame_mouse_help_caption = Some(IngameMouseHelpCaption {
+            text: "middle".to_string(),
+            keep_moves: 2,
+        });
+        app.handle_other_mouse_button(ElementState::Pressed)
+            .expect("middle-down runs a native mouse Move");
+        assert_eq!(
+            app.ingame_mouse_help_caption
+                .as_ref()
+                .map(|caption| caption.keep_moves),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn l053_help_suppresses_open_ingame_menu_and_right_up_exits() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        app.activate_ingame_main_menu_for_player(owner)
+            .expect("open player menu for Help interception");
+        render_mouse_test_app(&mut app);
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let close = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let point = GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5);
+                (app.ingame_menu_pointer_target(point)
+                    == Some((owner, IngameMenuPointerTarget::Close)))
+                .then_some(point)
+            })
+            .expect("player menu exposes its close button");
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        app.ingame_mouse_help = true;
+        physical_left_click_with_modifiers(
+            &mut app,
+            close,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert!(app.ingame_mouse_help);
+        assert!(
+            app.ingame_menu_belongs_to(owner),
+            "Help suppresses already-open player-menu controls"
+        );
+        assert_eq!(
+            commands.take_submitted_mouse_controls(),
+            (Vec::new(), Vec::new(), Vec::new())
+        );
+
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("Help right-down over player menu");
+        assert!(app.ingame_mouse_help);
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("Help right-up over player menu");
+        assert!(!app.ingame_mouse_help);
+        assert!(app.ingame_menu_belongs_to(owner));
+        assert_eq!(
+            commands.take_submitted_mouse_controls(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "Help menu interception queues no controls"
+        );
+    }
+
+    #[test]
+    fn l053_help_right_up_exits_without_context_or_crew_cycle() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let (_target, point) =
+            install_mouse_help_target(&mut app, "HLP3", "Right target", None);
+        let (empty, _) = mouse_test_empty_point(&app, owner, point, None);
+        let cursor = app.engine.crew_cursor(owner);
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        for release in [point, empty] {
+            app.ingame_mouse_help = true;
+            physical_left_click_with_modifiers(
+                &mut app,
+                point,
+                ModifiersState::empty(),
+                ModifiersState::empty(),
+            );
+            assert!(app.ingame_mouse_help_caption.is_some());
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(release.x),
+                f64::from(release.y),
+            ))
+            .expect("move Help right-click");
+            app.handle_right_mouse_button(ElementState::Pressed)
+                .expect("Help right-down");
+            assert!(app.ingame_mouse_help, "right-down retains Help");
+            app.handle_right_mouse_button(ElementState::Released)
+                .expect("Help right-up");
+            assert!(!app.ingame_mouse_help, "right-up exits Help");
+            assert_eq!(app.engine.crew_cursor(owner), cursor);
+            assert_eq!(
+                commands.take_submitted_mouse_controls(),
+                (Vec::new(), Vec::new(), Vec::new()),
+                "Help right-up queues neither Context nor player selection"
+            );
+            assert_eq!(
+                app.ingame_mouse_help_caption,
+                Some(IngameMouseHelpCaption {
+                    text: "Right target".to_string(),
+                    keep_moves: 0,
+                }),
+                "right-up clears KeepCaption without erasing the caption immediately"
+            );
+            app.update_ingame_pointer(release)
+                .expect("the next Move clears the zero-lifetime caption");
+            assert!(app.ingame_mouse_help_caption.is_none());
+        }
+    }
+
     #[test]
     fn l043_shift_left_clicks_append_and_sample_release_modifiers() {
         let mut app = new_running_sandbox_app();
@@ -64289,7 +64881,18 @@ mod tests {
         app.handle_mouse_button(ElementState::Released)
             .expect("release passive observer Help");
         assert!(app.ingame_mouse_help);
+        assert!(
+            app.ingame_help_cursor_active(),
+            "ownerless Help uses the native Help cursor too"
+        );
         assert!(app.ingame_menu.is_none());
+
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("press passive observer right button in Help");
+        assert!(app.ingame_mouse_help, "right-down retains passive Help");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("release passive observer right button in Help");
+        assert!(!app.ingame_mouse_help, "right-up exits passive Help");
 
         app.ingame_last_left_down = None;
         let menu = center(menu_rect);

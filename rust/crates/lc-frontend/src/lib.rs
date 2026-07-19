@@ -1656,7 +1656,8 @@ pub struct ViewportPointer {
 }
 
 /// The C4MouseControl cursor cells currently drawn by the Rust frontend: the
-/// eight viewport-scroll cursors, Shift add marker, and construction fallback.
+/// eight viewport-scroll cursors, help, Shift add marker, and construction
+/// fallback.
 /// Their numeric atlas phases are fixed in src/C4MouseControl.cpp:45-75.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MouseCursorPhase {
@@ -1668,6 +1669,7 @@ pub enum MouseCursorPhase {
     UpRight,
     DownLeft,
     DownRight,
+    Help,
     Add,
     Construct,
 }
@@ -1683,6 +1685,7 @@ impl MouseCursorPhase {
             Self::UpRight => 15,
             Self::DownLeft => 16,
             Self::DownRight => 17,
+            Self::Help => 29,
             Self::Add => 31,
             Self::Construct => 32,
         }
@@ -1699,7 +1702,7 @@ impl MouseCursorPhase {
             Self::UpRight => (cell, 0),
             Self::DownLeft => (0, cell),
             Self::DownRight => (cell, cell),
-            Self::Add => (center, center),
+            Self::Help | Self::Add => (center, center),
             Self::Construct => (center, center),
         }
     }
@@ -19407,6 +19410,7 @@ mod tests {
             (MouseCursorPhase::UpRight, (6, 10)),
             (MouseCursorPhase::DownLeft, (10, 6)),
             (MouseCursorPhase::DownRight, (6, 6)),
+            (MouseCursorPhase::Help, (8, 8)),
             (MouseCursorPhase::Add, (8, 8)),
             (MouseCursorPhase::Construct, (8, 8)),
         ];

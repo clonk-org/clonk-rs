@@ -30298,6 +30298,29 @@ impl Engine {
             })
     }
 
+    /// Exact text used by `C4MouseControl` for an object's help caption:
+    /// `C4Object::GetName()`, followed by the definition description when it
+    /// exists (src/C4MouseControl.cpp:1134-1142).
+    pub fn object_help_caption(&self, id: ObjectId) -> Option<String> {
+        let object = self.objects.iter().find(|object| object.id == id)?;
+        let definition = self.definitions.get(&object.definition_id)?;
+        let name = object
+            .state
+            .custom_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                self.crew_object_infos
+                    .get(&id)
+                    .map(|info| info.name.as_str())
+            })
+            .unwrap_or_else(|| definition.name());
+        Some(match definition.description() {
+            Some(description) => format!("{name}: {description}"),
+            None => name.to_string(),
+        })
+    }
+
     pub fn apply_object_update(
         &mut self,
         id: ObjectId,
