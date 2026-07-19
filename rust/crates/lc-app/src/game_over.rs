@@ -1,5 +1,5 @@
 use lc_frontend::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
-use lc_frontend::{ClonkFontSet, ImageData};
+use lc_frontend::{expand_hotkey_markup, ClonkFontSet, ImageData};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, GammaRamp, Rect, Surface, TextFont};
 
@@ -130,6 +130,29 @@ pub enum GameOverAction {
     Continue,
     Restart,
     NextMission,
+}
+
+/// The real `C4GUI::Dialog` focus owner for the evaluation dialog.
+///
+/// The caption close icon is constructed first, followed by the (selection-
+/// disabled, but still focusable) player list and then the visible buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameOverFocus {
+    Close,
+    PlayerList(usize),
+    Button(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameOverActivationKey {
+    Confirm,
+    Space,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameOverSound {
+    ArrowHit,
+    Click,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,8 +301,12 @@ pub struct GameOverState {
     hovered_button: Option<usize>,
     pressed_button: Option<usize>,
     close_pressed: bool,
+    focused: Option<GameOverFocus>,
+    down_controls: Vec<GameOverFocus>,
+    sounds: Vec<GameOverSound>,
     classic_button_width: Option<i32>,
     pointer_position: Option<(f32, f32)>,
+    pointer_surface_size: Option<(u32, u32)>,
 }
 
 impl GameOverState {
@@ -355,8 +382,12 @@ impl GameOverState {
             hovered_button: None,
             pressed_button: None,
             close_pressed: false,
+            focused: None,
+            down_controls: Vec::new(),
+            sounds: Vec::new(),
             classic_button_width: None,
             pointer_position: None,
+            pointer_surface_size: None,
         }
     }
 
@@ -385,6 +416,95 @@ impl GameOverState {
         self.buttons.iter().map(|button| button.action).collect()
     }
 
+    pub fn set_button_content(
+        &mut self,
+        action: GameOverAction,
+        label: String,
+        description: String,
+    ) {
+        if let Some(button) = self
+            .buttons
+            .iter_mut()
+            .find(|button| button.action == action)
+        {
+            button.label = label;
+            button.description = description;
+        }
+    }
+
+    pub fn focused(&self) -> Option<GameOverFocus> {
+        self.focused
+    }
+
+    pub fn focused_action(&self) -> Option<GameOverAction> {
+        self.focused.and_then(|focus| self.action_for_focus(focus))
+    }
+
+    pub fn advance_focus(&mut self, backwards: bool) -> GameOverFocus {
+        // The currently modeled presentation owns one PlayerInfo list. L116
+        // extends this sequence with the optional second team list.
+        let focus_count = self.buttons.len() + 2;
+        let current = self.focused.and_then(|focus| match focus {
+            GameOverFocus::Close => Some(0),
+            GameOverFocus::PlayerList(0) => Some(1),
+            GameOverFocus::PlayerList(_) => None,
+            GameOverFocus::Button(index) if index < self.buttons.len() => Some(index + 2),
+            GameOverFocus::Button(_) => None,
+        });
+        let index = match current {
+            Some(0) if backwards => focus_count - 1,
+            Some(index) if backwards => index - 1,
+            Some(index) => (index + 1) % focus_count,
+            None if backwards => focus_count - 1,
+            None => 0,
+        };
+        let focus = match index {
+            0 => GameOverFocus::Close,
+            1 => GameOverFocus::PlayerList(0),
+            index => GameOverFocus::Button(index - 2),
+        };
+        self.focused = Some(focus);
+        focus
+    }
+
+    /// Mirrors the focused `C4GUI::Button` key binding. Space, Return and
+    /// gamepad Low all mutate the focused button's one native `fDown` latch.
+    pub fn handle_activation_down(&mut self, _key: GameOverActivationKey) -> bool {
+        let Some(focus) = self
+            .focused
+            .filter(|focus| self.action_for_focus(*focus).is_some())
+        else {
+            return false;
+        };
+        self.set_down(focus);
+        true
+    }
+
+    pub fn handle_activation_up(&mut self, _key: GameOverActivationKey) -> Option<GameOverAction> {
+        let focus = self.focused?;
+        let action = self.action_for_focus(focus)?;
+        self.set_up(focus, true).then_some(action)
+    }
+
+    /// Dialog mnemonics invoke `OnPress` directly and therefore do not alter
+    /// focus/down state or emit the button's ArrowHit/Click sounds.
+    pub fn hotkey_action(&self, hotkey: char) -> Option<GameOverAction> {
+        let hotkey = hotkey.to_ascii_uppercase();
+        self.buttons.iter().find_map(|button| {
+            (expand_hotkey_markup(&button.label).1 == Some(hotkey)).then_some(button.action)
+        })
+    }
+
+    pub fn cancel_interaction(&mut self) {
+        self.pressed_button = None;
+        self.close_pressed = false;
+        self.down_controls.clear();
+    }
+
+    pub fn take_sound_events(&mut self) -> Vec<GameOverSound> {
+        std::mem::take(&mut self.sounds)
+    }
+
     pub fn hovered_description(&self) -> &str {
         self.hovered_button
             .and_then(|index| self.buttons.get(index))
@@ -399,27 +519,48 @@ impl GameOverState {
     }
 
     pub fn handle_pointer_move(&mut self, x: f32, y: f32, surface_width: u32, surface_height: u32) {
+        self.pointer_surface_size = Some((surface_width, surface_height));
+        let pressed = self.pointer_pressed_focus();
         self.pointer_position = Some((x, y));
         self.hovered_button = self
             .button_rects(surface_width, surface_height)
             .iter()
             .position(|rect| point_in_rect(x, y, *rect));
+        if let Some(focus) = pressed {
+            if self.pointer_is_over_focus(focus) {
+                self.set_down(focus);
+            } else {
+                self.set_up(focus, false);
+            }
+        }
     }
 
     pub fn pointer_left(&mut self) {
+        let pressed = self.pointer_pressed_focus();
         self.pointer_position = None;
         self.hovered_button = None;
         self.pressed_button = None;
         self.close_pressed = false;
+        if let Some(focus) = pressed {
+            self.set_up(focus, false);
+        }
     }
 
     pub fn handle_pointer_down(&mut self, surface_width: u32, surface_height: u32) {
+        self.pointer_surface_size = Some((surface_width, surface_height));
+        if self.pointer_position.is_some_and(|(x, y)| {
+            self.classic_player_list_rect(surface_width, surface_height)
+                .is_some_and(|rect| point_in_rect(x, y, rect))
+        }) {
+            self.focused = Some(GameOverFocus::PlayerList(0));
+        }
         self.close_pressed = self.pointer_position.is_some_and(|(x, y)| {
             self.classic_close_button_rect(surface_width, surface_height)
                 .is_some_and(|rect| point_in_rect(x, y, rect))
         });
         if self.close_pressed {
             self.pressed_button = None;
+            self.set_down(GameOverFocus::Close);
             return;
         }
         self.pressed_button = self.pointer_position.and_then(|(x, y)| {
@@ -427,6 +568,9 @@ impl GameOverState {
                 .iter()
                 .position(|rect| point_in_rect(x, y, *rect))
         });
+        if let Some(index) = self.pressed_button {
+            self.set_down(GameOverFocus::Button(index));
+        }
     }
 
     pub fn handle_pointer_up(
@@ -434,24 +578,72 @@ impl GameOverState {
         surface_width: u32,
         surface_height: u32,
     ) -> Option<GameOverAction> {
+        self.pointer_surface_size = Some((surface_width, surface_height));
         if std::mem::take(&mut self.close_pressed) {
             return self
-                .pointer_position
-                .filter(|(x, y)| {
-                    self.classic_close_button_rect(surface_width, surface_height)
-                        .is_some_and(|rect| point_in_rect(*x, *y, rect))
-                })
-                .map(|_| GameOverAction::End);
+                .set_up(GameOverFocus::Close, true)
+                .then_some(GameOverAction::End);
         }
         let pressed = self.pressed_button.take()?;
-        let hovered = self.pointer_position.and_then(|(x, y)| {
-            self.button_rects(surface_width, surface_height)
-                .iter()
-                .position(|rect| point_in_rect(x, y, *rect))
+        let focus = GameOverFocus::Button(pressed);
+        let action = self.buttons.get(pressed).map(|button| button.action)?;
+        self.set_up(focus, true).then_some(action)
+    }
+
+    fn action_for_focus(&self, focus: GameOverFocus) -> Option<GameOverAction> {
+        match focus {
+            GameOverFocus::Close => Some(GameOverAction::End),
+            GameOverFocus::PlayerList(_) => None,
+            GameOverFocus::Button(index) => self.buttons.get(index).map(|button| button.action),
+        }
+    }
+
+    fn pointer_pressed_focus(&self) -> Option<GameOverFocus> {
+        if self.close_pressed {
+            Some(GameOverFocus::Close)
+        } else {
+            self.pressed_button.map(GameOverFocus::Button)
+        }
+    }
+
+    fn focus_is_down(&self, focus: GameOverFocus) -> bool {
+        self.down_controls.contains(&focus)
+    }
+
+    fn set_down(&mut self, focus: GameOverFocus) {
+        if !self.focus_is_down(focus) {
+            self.down_controls.push(focus);
+            self.sounds.push(GameOverSound::ArrowHit);
+        }
+    }
+
+    fn set_up(&mut self, focus: GameOverFocus, pressed: bool) -> bool {
+        let Some(index) = self.down_controls.iter().position(|down| *down == focus) else {
+            return false;
+        };
+        self.down_controls.swap_remove(index);
+        self.sounds.push(if pressed {
+            GameOverSound::Click
+        } else {
+            GameOverSound::ArrowHit
         });
-        (hovered == Some(pressed))
-            .then(|| self.buttons.get(pressed).map(|button| button.action))
-            .flatten()
+        true
+    }
+
+    fn pointer_is_over_focus(&self, focus: GameOverFocus) -> bool {
+        match focus {
+            GameOverFocus::Close => self.pointer_position.is_some_and(|(x, y)| {
+                self.classic_close_button_rect_for_pointer()
+                    .is_some_and(|rect| point_in_rect(x, y, rect))
+            }),
+            GameOverFocus::PlayerList(_) => false,
+            GameOverFocus::Button(index) => self.hovered_button == Some(index),
+        }
+    }
+
+    fn classic_close_button_rect_for_pointer(&self) -> Option<Rect> {
+        let (width, height) = self.pointer_surface_size?;
+        self.classic_close_button_rect(width, height)
     }
 
     pub fn activate_pointer_position(
@@ -489,6 +681,33 @@ impl GameOverState {
                 self.classic_layout_with_button_width(surface_width, surface_height, button_width)
                     .close_button,
             )
+        })
+    }
+
+    fn classic_player_list_rect(&self, surface_width: u32, surface_height: u32) -> Option<Rect> {
+        self.classic_button_width.map(|button_width| {
+            let chrome =
+                self.classic_layout_with_button_width(surface_width, surface_height, button_width);
+            let goal_area_height = CLASSIC_GOAL_SIZE + 2 * CLASSIC_GOAL_MARGIN;
+            let goal_count = self.evaluation.goals().len() as i32;
+            let goals_per_row = (chrome.dialog.w / goal_area_height).max(1);
+            let goal_rows = if goal_count == 0 {
+                0
+            } else {
+                (goal_count - 1) / goals_per_row + 1
+            };
+            let post_goal_inset = if goal_rows > 0 {
+                CLASSIC_PLAYER_LIST_TOP_INSET
+            } else {
+                0
+            };
+            let y = chrome.player_area.y + goal_rows * goal_area_height + post_goal_inset;
+            surface_rect(IntRect {
+                x: chrome.player_area.x,
+                y,
+                w: chrome.player_area.w,
+                h: (chrome.player_area.y + chrome.player_area.h - y).max(0),
+            })
         })
     }
 
@@ -678,12 +897,11 @@ impl GameOverState {
                 let goals_in_row = (goal_count - row_start).min(goals_per_row);
                 let group_width = goals_in_row * goal_area_height;
                 let picture = IntRect {
-                    x: chrome.dialog.x + (chrome.dialog.w - group_width) / 2
+                    x: chrome.dialog.x
+                        + (chrome.dialog.w - group_width) / 2
                         + column * goal_area_height
                         + CLASSIC_GOAL_MARGIN,
-                    y: chrome.player_area.y
-                        + row * goal_area_height
-                        + CLASSIC_GOAL_MARGIN,
+                    y: chrome.player_area.y + row * goal_area_height + CLASSIC_GOAL_MARGIN,
                     w: CLASSIC_GOAL_SIZE,
                     h: CLASSIC_GOAL_SIZE,
                 };
@@ -707,9 +925,7 @@ impl GameOverState {
         } else {
             0
         };
-        let player_list_y = chrome.player_area.y
-            + goal_rows * goal_area_height
-            + post_goal_inset;
+        let player_list_y = chrome.player_area.y + goal_rows * goal_area_height + post_goal_inset;
         let player_list = IntRect {
             x: chrome.player_area.x,
             y: player_list_y,
@@ -717,8 +933,7 @@ impl GameOverState {
             h: (chrome.player_area.y + chrome.player_area.h - player_list_y).max(0),
         };
         let row_width =
-            (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET)
-                .max(0);
+            (player_list.w - CLASSIC_PLAYER_ROW_LEFT_INSET - CLASSIC_PLAYER_ROW_RIGHT_INSET).max(0);
         let players = self
             .evaluation
             .players()
@@ -774,14 +989,26 @@ impl GameOverState {
         classic: Option<GameOverClassicResources<'_>>,
         gamma: Option<&GammaRamp>,
     ) {
+        self.render_with_gamma_active(surface, font, classic, gamma, true, true);
+    }
+
+    pub fn render_with_gamma_active(
+        &self,
+        surface: &mut Surface,
+        font: &dyn TextFont,
+        classic: Option<GameOverClassicResources<'_>>,
+        gamma: Option<&GammaRamp>,
+        focus_active: bool,
+        mouse_active: bool,
+    ) {
         if surface.width() == 0 || surface.height() == 0 {
             return;
         }
 
         if let Some(classic) = classic {
-            self.render_classic(surface, classic, gamma);
+            self.render_classic(surface, classic, gamma, focus_active, mouse_active);
         } else {
-            self.render_fallback(surface, font, gamma);
+            self.render_fallback(surface, font, gamma, focus_active, mouse_active);
         }
     }
 
@@ -790,6 +1017,8 @@ impl GameOverState {
         surface: &mut Surface,
         font: &dyn TextFont,
         gamma: Option<&GammaRamp>,
+        focus_active: bool,
+        mouse_active: bool,
     ) {
         let surface_rect = Rect::new(0, 0, surface.width(), surface.height());
         fill_rect(surface, surface_rect, BACKDROP_COLOR, gamma);
@@ -934,7 +1163,9 @@ impl GameOverState {
             fill_rect(
                 surface,
                 rect,
-                if self.hovered_button == Some(index) {
+                if (mouse_active && self.hovered_button == Some(index))
+                    || (focus_active && self.focused == Some(GameOverFocus::Button(index)))
+                {
                     BUTTON_SELECTED_COLOR
                 } else {
                     BUTTON_COLOR
@@ -976,6 +1207,8 @@ impl GameOverState {
         surface: &mut Surface,
         resources: GameOverClassicResources<'_>,
         gamma: Option<&GammaRamp>,
+        focus_active: bool,
+        mouse_active: bool,
     ) {
         let layout = self.classic_layout(surface.width(), surface.height(), resources.fonts);
         resources.skin.draw_dialog(surface, layout.dialog, gamma);
@@ -988,7 +1221,14 @@ impl GameOverState {
             TextAlign::Left,
             gamma,
         );
-        self.render_classic_close_button(surface, resources, layout.close_button, gamma);
+        self.render_classic_close_button(
+            surface,
+            resources,
+            layout.close_button,
+            gamma,
+            focus_active,
+            mouse_active,
+        );
 
         self.render_classic_evaluation(surface, resources, gamma);
         for (index, (button, rect)) in self.buttons.iter().zip(layout.buttons).enumerate() {
@@ -998,9 +1238,9 @@ impl GameOverState {
                 &button.label,
                 resources.fonts,
                 ClassicButtonState {
-                    pressed: self.pressed_button == Some(index)
-                        && self.hovered_button == Some(index),
-                    highlighted: self.hovered_button == Some(index),
+                    pressed: self.focus_is_down(GameOverFocus::Button(index)),
+                    highlighted: (mouse_active && self.hovered_button == Some(index))
+                        || (focus_active && self.focused == Some(GameOverFocus::Button(index))),
                 },
                 gamma,
             );
@@ -1013,6 +1253,8 @@ impl GameOverState {
         resources: GameOverClassicResources<'_>,
         rect: IntRect,
         gamma: Option<&GammaRamp>,
+        focus_active: bool,
+        mouse_active: bool,
     ) {
         let hovered = self
             .pointer_position
@@ -1027,7 +1269,8 @@ impl GameOverState {
                 );
             }
         };
-        if hovered {
+        if (mouse_active && hovered) || (focus_active && self.focused == Some(GameOverFocus::Close))
+        {
             draw_highlight(surface);
         }
         let icon = resources
@@ -1037,7 +1280,7 @@ impl GameOverState {
         if let Some(icon) = icon.as_ref() {
             draw_classic_image(surface, icon, rect, gamma);
         }
-        if hovered && self.close_pressed {
+        if self.focus_is_down(GameOverFocus::Close) {
             draw_highlight(surface);
         }
     }
@@ -1078,11 +1321,7 @@ impl GameOverState {
                 player_layout.row.y,
                 player_layout.row.x + player_layout.row.w - 1,
                 player_layout.row.y + player_layout.row.h - 1,
-                if player.won {
-                    0x4faf_7a00
-                } else {
-                    0x7faf_afaf
-                },
+                if player.won { 0x4faf_7a00 } else { 0x7faf_afaf },
                 gamma,
             );
 
@@ -1146,7 +1385,6 @@ impl GameOverState {
             );
         }
     }
-
 }
 
 fn classic_button_width(fonts: &ClonkFontSet) -> i32 {
@@ -1201,8 +1439,7 @@ fn grayscale_image(image: &ImageData, offset: i32) -> ImageData {
     // pictures and clamps, preserving alpha (StdDDraw2.cpp:1241-1260).
     let mut pixels = image.pixels().to_vec();
     for pixel in pixels.chunks_exact_mut(4) {
-        let gray = ((i32::from(pixel[0]) + i32::from(pixel[1]) + i32::from(pixel[2])) / 3
-            + offset)
+        let gray = ((i32::from(pixel[0]) + i32::from(pixel[1]) + i32::from(pixel[2])) / 3 + offset)
             .clamp(0, 255) as u8;
         pixel[..3].fill(gray);
     }
@@ -1442,6 +1679,120 @@ mod tests {
     }
 
     #[test]
+    fn native_focus_order_includes_close_player_list_and_visible_buttons() {
+        let next = Some(NextMissionButton {
+            label: "Next mission".to_string(),
+            description: "Continue the campaign".to_string(),
+        });
+        let mut narrow = GameOverState::with_next_mission(
+            "Evaluation".to_string(),
+            Vec::new(),
+            1024,
+            next.clone(),
+        );
+        assert_eq!(narrow.focused(), None);
+        for expected in [
+            GameOverFocus::Close,
+            GameOverFocus::PlayerList(0),
+            GameOverFocus::Button(0),
+            GameOverFocus::Button(1),
+            GameOverFocus::Button(2),
+            GameOverFocus::Close,
+        ] {
+            assert_eq!(narrow.advance_focus(false), expected);
+        }
+
+        let mut wide =
+            GameOverState::with_next_mission("Evaluation".to_string(), Vec::new(), 1280, next);
+        assert_eq!(wide.advance_focus(true), GameOverFocus::Button(3));
+        assert_eq!(wide.focused_action(), Some(GameOverAction::NextMission));
+        assert_eq!(wide.advance_focus(false), GameOverFocus::Close);
+    }
+
+    #[test]
+    fn focused_controls_use_native_down_up_sounds_and_direct_mnemonics() {
+        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new());
+        state.advance_focus(false);
+        state.advance_focus(false);
+        state.advance_focus(false);
+        assert_eq!(state.focused_action(), Some(GameOverAction::End));
+        assert!(state.handle_activation_down(GameOverActivationKey::Confirm));
+        assert!(state.handle_activation_down(GameOverActivationKey::Space));
+        assert_eq!(state.take_sound_events(), [GameOverSound::ArrowHit]);
+        assert_eq!(
+            state.handle_activation_up(GameOverActivationKey::Space),
+            Some(GameOverAction::End)
+        );
+        assert_eq!(state.take_sound_events(), [GameOverSound::Click]);
+
+        assert!(state.handle_activation_down(GameOverActivationKey::Confirm));
+        assert_eq!(state.take_sound_events(), [GameOverSound::ArrowHit]);
+        state.advance_focus(false);
+        assert_eq!(state.focused_action(), Some(GameOverAction::Continue));
+        assert_eq!(
+            state.handle_activation_up(GameOverActivationKey::Space),
+            None
+        );
+        assert!(state.take_sound_events().is_empty());
+        assert!(state.handle_activation_down(GameOverActivationKey::Space));
+        assert_eq!(state.take_sound_events(), [GameOverSound::ArrowHit]);
+        state.advance_focus(true);
+        assert_eq!(
+            state.handle_activation_up(GameOverActivationKey::Confirm),
+            Some(GameOverAction::End)
+        );
+        assert_eq!(state.take_sound_events(), [GameOverSound::Click]);
+        assert!(
+            state.focus_is_down(GameOverFocus::Button(1)),
+            "each native Button retains its own fDown latch"
+        );
+        state.cancel_interaction();
+        assert!(!state.focus_is_down(GameOverFocus::Button(1)));
+        assert_eq!(
+            state.handle_activation_up(GameOverActivationKey::Space),
+            None
+        );
+        assert!(state.take_sound_events().is_empty());
+
+        state.set_button_content(
+            GameOverAction::End,
+            "Runde &beenden".to_string(),
+            String::new(),
+        );
+        state.set_button_content(
+            GameOverAction::Continue,
+            "&Weiterspielen".to_string(),
+            String::new(),
+        );
+        state.set_button_content(
+            GameOverAction::Restart,
+            "Neusta&rt".to_string(),
+            String::new(),
+        );
+        assert_eq!(state.hotkey_action('b'), Some(GameOverAction::End));
+        assert_eq!(state.hotkey_action('w'), Some(GameOverAction::Continue));
+        assert_eq!(state.hotkey_action('r'), Some(GameOverAction::Restart));
+        assert_eq!(state.hotkey_action('e'), None);
+        assert!(state.take_sound_events().is_empty());
+    }
+
+    #[test]
+    fn selection_disabled_player_list_can_take_pointer_focus_but_not_activate() {
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new());
+        state.configure_classic_fonts(Some(&fonts));
+        let list = state
+            .classic_player_list_rect(1024, 600)
+            .expect("classic player list");
+        state.handle_pointer_move((list.x + 1) as f32, (list.y + 1) as f32, 1024, 600);
+        state.handle_pointer_down(1024, 600);
+        assert_eq!(state.focused(), Some(GameOverFocus::PlayerList(0)));
+        assert!(!state.handle_activation_down(GameOverActivationKey::Confirm));
+        assert!(!state.handle_activation_down(GameOverActivationKey::Space));
+        assert!(state.take_sound_events().is_empty());
+    }
+
+    #[test]
     fn tutorial_seven_gamma_encodes_the_game_over_button_fragment() {
         // C4GUI::Screen renders the evaluation dialog before the gamma latch
         // at the end of C4GraphicsSystem::Execute (C4GraphicsSystem.cpp:
@@ -1507,10 +1858,31 @@ mod tests {
             Some(&score),
         );
 
-        assert_eq!(resources.gui_icons.map(|image| (image.width(), image.height())), Some((240, 360)));
-        assert_eq!(CLASSIC_FULFILLED_STAR_SOURCE, IntRect { x: 0, y: 320, w: 40, h: 40 });
-        assert_eq!(resources.player.map(|image| (image.width(), image.height())), Some((48, 48)));
-        assert_eq!(resources.score.map(|image| (image.width(), image.height())), Some((60, 30)));
+        assert_eq!(
+            resources
+                .gui_icons
+                .map(|image| (image.width(), image.height())),
+            Some((240, 360))
+        );
+        assert_eq!(
+            CLASSIC_FULFILLED_STAR_SOURCE,
+            IntRect {
+                x: 0,
+                y: 320,
+                w: 40,
+                h: 40
+            }
+        );
+        assert_eq!(
+            resources
+                .player
+                .map(|image| (image.width(), image.height())),
+            Some((48, 48))
+        );
+        assert_eq!(
+            resources.score.map(|image| (image.width(), image.height())),
+            Some((60, 30))
+        );
     }
 
     #[test]
@@ -1762,13 +2134,64 @@ mod tests {
         let state = evaluation_state(1024);
         let chrome = state.classic_layout(1024, 600, &fonts);
         let content = state.classic_evaluation_layout(1024, 600, &fonts);
-        assert_eq!(chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(), vec![65, 399, 733]);
-        assert_eq!(content.goal_display, Some(IntRect { x: 5, y: 34, w: 1014, h: 72 }));
-        assert_eq!(content.goals[0].picture, IntRect { x: 480, y: 38, w: 64, h: 64 });
-        assert_eq!(content.goals[0].fulfilled_star, IntRect { x: 512, y: 70, w: 32, h: 32 });
-        assert_eq!(content.player_list, IntRect { x: 15, y: 118, w: 994, h: 403 });
-        assert_eq!(content.players[0].row, IntRect { x: 21, y: 121, w: 969, h: 54 });
-        assert_eq!(content.players[0].icon, IntRect { x: 21, y: 121, w: 54, h: 54 });
+        assert_eq!(
+            chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(),
+            vec![65, 399, 733]
+        );
+        assert_eq!(
+            content.goal_display,
+            Some(IntRect {
+                x: 5,
+                y: 34,
+                w: 1014,
+                h: 72
+            })
+        );
+        assert_eq!(
+            content.goals[0].picture,
+            IntRect {
+                x: 480,
+                y: 38,
+                w: 64,
+                h: 64
+            }
+        );
+        assert_eq!(
+            content.goals[0].fulfilled_star,
+            IntRect {
+                x: 512,
+                y: 70,
+                w: 32,
+                h: 32
+            }
+        );
+        assert_eq!(
+            content.player_list,
+            IntRect {
+                x: 15,
+                y: 118,
+                w: 994,
+                h: 403
+            }
+        );
+        assert_eq!(
+            content.players[0].row,
+            IntRect {
+                x: 21,
+                y: 121,
+                w: 969,
+                h: 54
+            }
+        );
+        assert_eq!(
+            content.players[0].icon,
+            IntRect {
+                x: 21,
+                y: 121,
+                w: 54,
+                h: 54
+            }
+        );
         assert_eq!(content.players[0].name_anchor, (77, 123));
         assert_eq!(content.players[0].score_anchor, (988, 123));
         assert_eq!(content.players[0].time_anchor, (988, 147));
@@ -1776,22 +2199,92 @@ mod tests {
         let state = evaluation_state(1280);
         let chrome = state.classic_layout(1280, 720, &fonts);
         let content = state.classic_evaluation_layout(1280, 720, &fonts);
-        assert_eq!(chrome.dialog, IntRect { x: 75, y: 75, w: 1130, h: 570 });
-        assert_eq!(chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(), vec![108, 388, 668, 948]);
+        assert_eq!(
+            chrome.dialog,
+            IntRect {
+                x: 75,
+                y: 75,
+                w: 1130,
+                h: 570
+            }
+        );
+        assert_eq!(
+            chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(),
+            vec![108, 388, 668, 948]
+        );
         assert!(chrome.buttons.iter().all(|rect| rect.y == 583));
-        assert_eq!(content.goals[0].picture, IntRect { x: 608, y: 108, w: 64, h: 64 });
-        assert_eq!(content.player_list, IntRect { x: 85, y: 188, w: 1110, h: 383 });
-        assert_eq!(content.players[0].row, IntRect { x: 91, y: 191, w: 1085, h: 54 });
+        assert_eq!(
+            content.goals[0].picture,
+            IntRect {
+                x: 608,
+                y: 108,
+                w: 64,
+                h: 64
+            }
+        );
+        assert_eq!(
+            content.player_list,
+            IntRect {
+                x: 85,
+                y: 188,
+                w: 1110,
+                h: 383
+            }
+        );
+        assert_eq!(
+            content.players[0].row,
+            IntRect {
+                x: 91,
+                y: 191,
+                w: 1085,
+                h: 54
+            }
+        );
 
         let state = evaluation_state(1920);
         let chrome = state.classic_layout(1920, 1080, &fonts);
         let content = state.classic_evaluation_layout(1920, 1080, &fonts);
-        assert_eq!(chrome.dialog, IntRect { x: 320, y: 180, w: 1280, h: 720 });
-        assert_eq!(chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(), vec![371, 688, 1005, 1322]);
+        assert_eq!(
+            chrome.dialog,
+            IntRect {
+                x: 320,
+                y: 180,
+                w: 1280,
+                h: 720
+            }
+        );
+        assert_eq!(
+            chrome.buttons.iter().map(|rect| rect.x).collect::<Vec<_>>(),
+            vec![371, 688, 1005, 1322]
+        );
         assert!(chrome.buttons.iter().all(|rect| rect.y == 838));
-        assert_eq!(content.goals[0].picture, IntRect { x: 928, y: 213, w: 64, h: 64 });
-        assert_eq!(content.player_list, IntRect { x: 330, y: 293, w: 1260, h: 533 });
-        assert_eq!(content.players[0].row, IntRect { x: 336, y: 296, w: 1235, h: 54 });
+        assert_eq!(
+            content.goals[0].picture,
+            IntRect {
+                x: 928,
+                y: 213,
+                w: 64,
+                h: 64
+            }
+        );
+        assert_eq!(
+            content.player_list,
+            IntRect {
+                x: 330,
+                y: 293,
+                w: 1260,
+                h: 533
+            }
+        );
+        assert_eq!(
+            content.players[0].row,
+            IntRect {
+                x: 336,
+                y: 296,
+                w: 1235,
+                h: 54
+            }
+        );
     }
 
     #[test]
@@ -1818,8 +2311,24 @@ mod tests {
 
         let layout = state.classic_evaluation_layout(1024, 600, &fonts);
         assert_eq!(layout.goal_display, None);
-        assert_eq!(layout.player_list, IntRect { x: 15, y: 34, w: 994, h: 487 });
-        assert_eq!(layout.players[0].row, IntRect { x: 21, y: 37, w: 969, h: 54 });
+        assert_eq!(
+            layout.player_list,
+            IntRect {
+                x: 15,
+                y: 34,
+                w: 994,
+                h: 487
+            }
+        );
+        assert_eq!(
+            layout.players[0].row,
+            IntRect {
+                x: 21,
+                y: 37,
+                w: 969,
+                h: 54
+            }
+        );
 
         let caption = solid_image(192, 23, [200, 0, 0, 255]);
         let button = solid_image(128, 32, [0, 120, 0, 255]);
@@ -1847,15 +2356,7 @@ mod tests {
             lc_frontend::classic_gui::STANDARD_BACKGROUND_COLOR,
             None,
         );
-        lc_frontend::classic_gui::draw_engine_box(
-            &mut expected,
-            0,
-            0,
-            0,
-            0,
-            0x4faf_7a00,
-            None,
-        );
+        lc_frontend::classic_gui::draw_engine_box(&mut expected, 0, 0, 0, 0, 0x4faf_7a00, None);
         assert_eq!(
             surface.get_pixel(500, 37),
             expected.get_pixel(0, 0),
@@ -1894,6 +2395,7 @@ mod tests {
             }),
         );
         state.pressed_button = Some(1);
+        state.down_controls.push(GameOverFocus::Button(1));
         state.hovered_button = Some(1);
         let layout = state.classic_layout(1024, 600, &fonts);
         let background = Color::opaque(11, 22, 33);
@@ -2047,15 +2549,7 @@ mod tests {
             lc_frontend::classic_gui::STANDARD_BACKGROUND_COLOR,
             None,
         );
-        lc_frontend::classic_gui::draw_engine_box(
-            &mut expected,
-            0,
-            0,
-            0,
-            0,
-            0x4faf_7a00,
-            None,
-        );
+        lc_frontend::classic_gui::draw_engine_box(&mut expected, 0, 0, 0, 0, 0x4faf_7a00, None);
         assert_eq!(
             surface.get_pixel((row.x + 400) as u32, (row.y + row.h / 2) as u32),
             expected.get_pixel(0, 0),
@@ -2072,8 +2566,7 @@ mod tests {
         assert!(
             (row.y..row.y + fonts.text.cell_height).any(|y| {
                 (row.x + row.w - 300..row.x + row.w).any(|x| {
-                    surface.get_pixel(x as u32, y as u32)
-                        == Some(Color::opaque(0, 210, 240))
+                    surface.get_pixel(x as u32, y as u32) == Some(Color::opaque(0, 210, 240))
                 })
             }),
             "the settlement score line contains the Score.png inline icon"
@@ -2105,6 +2598,11 @@ mod tests {
         state.handle_pointer_down(1024, 600);
         assert_eq!(state.pressed_button, Some(0));
         assert_eq!(
+            state.focused(),
+            None,
+            "C4GUI::Button::IsFocusOnClick is false"
+        );
+        assert_eq!(
             state.handle_pointer_up(1024, 600),
             Some(GameOverAction::End)
         );
@@ -2112,6 +2610,47 @@ mod tests {
         state.handle_pointer_down(1024, 600);
         state.handle_pointer_move(0.0, 0.0, 1024, 600);
         assert_eq!(state.handle_pointer_up(1024, 600), None);
+    }
+
+    #[test]
+    fn classic_button_down_latch_is_shared_by_pointer_and_activation_keys() {
+        let fonts = endeavour_fonts();
+        let mut state = GameOverState::new("Evaluation".to_string(), Vec::new());
+        state.configure_classic_fonts(Some(&fonts));
+        let first = state.classic_layout(1024, 600, &fonts).buttons[0];
+        state.handle_pointer_move(
+            (first.x + first.w / 2) as f32,
+            (first.y + first.h / 2) as f32,
+            1024,
+            600,
+        );
+        state.handle_pointer_down(1024, 600);
+        state.handle_pointer_down(1024, 600);
+        assert_eq!(state.take_sound_events(), [GameOverSound::ArrowHit]);
+        assert_eq!(
+            state.handle_pointer_up(1024, 600),
+            Some(GameOverAction::End)
+        );
+        assert_eq!(state.take_sound_events(), [GameOverSound::Click]);
+
+        for _ in 0..3 {
+            state.advance_focus(false);
+        }
+        assert!(state.handle_activation_down(GameOverActivationKey::Confirm));
+        assert_eq!(state.take_sound_events(), [GameOverSound::ArrowHit]);
+        state.handle_pointer_down(1024, 600);
+        assert!(state.take_sound_events().is_empty());
+        assert_eq!(
+            state.handle_pointer_up(1024, 600),
+            Some(GameOverAction::End)
+        );
+        assert_eq!(state.take_sound_events(), [GameOverSound::Click]);
+        assert_eq!(
+            state.handle_activation_up(GameOverActivationKey::Space),
+            None,
+            "pointer-up already raised the shared native latch"
+        );
+        assert!(state.take_sound_events().is_empty());
     }
 
     #[test]
@@ -2124,14 +2663,8 @@ mod tests {
         let button_down = solid_image(128, 32, [0, 0, 180, 255]);
         let highlight = solid_image(16, 16, [40, 50, 60, 255]);
         let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
-        let resources = GameOverClassicResources::new(
-            skin,
-            &fonts,
-            Some(&highlight),
-            None,
-            None,
-            None,
-        );
+        let resources =
+            GameOverClassicResources::new(skin, &fonts, Some(&highlight), None, None, None);
         let mut state = GameOverState::new(
             "A Clonk".into(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
@@ -2140,19 +2673,22 @@ mod tests {
         let layout = state.classic_layout(1024, 600, &fonts);
         let first = layout.buttons[0];
         let second = layout.buttons[1];
-        let render = |state: &GameOverState| {
+        let render = |state: &GameOverState, focus_active, mouse_active| {
             let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
             surface.fill(Color::opaque(3, 4, 5));
-            state.render(
+            state.render_with_gamma_active(
                 &mut surface,
                 &lc_graphics::BitmapFont::new(),
                 Some(resources),
+                None,
+                focus_active,
+                mouse_active,
             );
             surface
         };
 
         assert_eq!(state.hovered_action(), None);
-        let idle = render(&state);
+        let idle = render(&state, true, true);
         state.handle_pointer_move(
             (first.x + first.w / 2) as f32,
             (first.y + first.h / 2) as f32,
@@ -2160,7 +2696,7 @@ mod tests {
             600,
         );
         assert_eq!(state.hovered_action(), Some(GameOverAction::End));
-        let hovered = render(&state);
+        let hovered = render(&state, true, true);
         let first_probe = ((first.x + 8) as u32, (first.y + 5) as u32);
         let second_probe = ((second.x + 8) as u32, (second.y + 5) as u32);
         assert_ne!(
@@ -2173,9 +2709,19 @@ mod tests {
             idle.get_pixel(second_probe.0, second_probe.1),
             "hover does not invent focus on another button"
         );
+        assert_eq!(
+            render(&state, false, true).pixels(),
+            hovered.pixels(),
+            "a context suppresses keyboard focus but retains mouse hover"
+        );
+        assert_eq!(
+            render(&state, false, false).pixels(),
+            idle.pixels(),
+            "a higher child dialog suppresses both focus and mouse hover"
+        );
 
         state.handle_pointer_down(1024, 600);
-        let pressed = render(&state);
+        let pressed = render(&state, true, true);
         assert_eq!(state.pressed_button, Some(0));
         assert_ne!(
             pressed.get_pixel(first_probe.0, first_probe.1),
@@ -2183,7 +2729,7 @@ mod tests {
             "pointer down selects GUIButtonDown while still over the button"
         );
         state.handle_pointer_move(0.0, 0.0, 1024, 600);
-        let dragged_out = render(&state);
+        let dragged_out = render(&state, true, true);
         assert_eq!(
             state.pressed_button,
             Some(0),
@@ -2200,7 +2746,7 @@ mod tests {
             1024,
             600,
         );
-        let dragged_back = render(&state);
+        let dragged_back = render(&state, true, true);
         assert_eq!(
             dragged_back.get_pixel(first_probe.0, first_probe.1),
             pressed.get_pixel(first_probe.0, first_probe.1),
@@ -2213,8 +2759,29 @@ mod tests {
 
         state.pointer_left();
         assert_eq!(state.hovered_action(), None);
-        let left = render(&state);
-        assert_eq!(left.pixels(), idle.pixels(), "pointer leave restores idle pixels");
+        let left = render(&state, true, true);
+        assert_eq!(
+            left.pixels(),
+            idle.pixels(),
+            "pointer leave restores idle pixels"
+        );
+
+        for _ in 0..3 {
+            state.advance_focus(false);
+        }
+        assert_eq!(state.focused(), Some(GameOverFocus::Button(0)));
+        let focused = render(&state, true, true);
+        assert_ne!(
+            focused.get_pixel(first_probe.0, first_probe.1),
+            idle.get_pixel(first_probe.0, first_probe.1),
+            "active keyboard focus draws the same additive highlight"
+        );
+        let inactive = render(&state, false, true);
+        assert_eq!(
+            inactive.pixels(),
+            idle.pixels(),
+            "a retained focus is not drawn below a child dialog or context"
+        );
     }
 
     #[test]
@@ -2313,6 +2880,11 @@ mod tests {
 
         state.handle_pointer_move(center.0 as f32, center.1 as f32, 1024, 600);
         state.handle_pointer_down(1024, 600);
+        assert_eq!(
+            state.focused(),
+            None,
+            "caption IconButton does not steal focus"
+        );
         let pressed = render(&state);
         assert_ne!(
             pressed.get_pixel(center.0 as u32, center.1 as u32),

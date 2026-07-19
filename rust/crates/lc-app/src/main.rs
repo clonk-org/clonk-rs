@@ -54,8 +54,9 @@ use clap::Parser;
 use control_message::{mentions_nick, ControlMessageState};
 use control_options::{binding_display_name, format_key_label};
 use game_over::{
-    EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
-    GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
+    EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction, GameOverActivationKey,
+    GameOverClassicResources, GameOverEntry, GameOverFocus, GameOverOutcome, GameOverSound,
+    GameOverState, NextMissionButton,
 };
 use gamepad::{
     GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
@@ -11705,12 +11706,6 @@ enum ClassicObjectMenuBoundary {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClassicChatMode {
-    All,
-    Allies,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunningChatMode {
     All,
     Allies,
@@ -11721,18 +11716,6 @@ enum RunningChatMode {
 struct RunningChatState {
     history_index: i32,
     active: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClassicGameOverFocusDirection {
-    Forward,
-    Backward,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClassicGameOverMnemonicMask {
-    Alt,
-    AltShift,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11935,9 +11918,6 @@ enum ClassicParityBoundary {
     ObjectMenu(ClassicObjectMenuBoundary),
     SaveBrowser(SaveBrowserMode),
     AppObjectMenu(AppObjectMenuMode),
-    GameOverChat(ClassicChatMode),
-    GameOverFocusTraversal(ClassicGameOverFocusDirection),
-    GameOverMnemonic(ClassicGameOverMnemonicMask),
     RuntimeHelpResources {
         detail: String,
     },
@@ -12077,18 +12057,6 @@ impl fmt::Display for ClassicParityBoundary {
             Self::AppObjectMenu(mode) => write!(
                 f,
                 "classic app-owned object menu {mode:?} is unavailable; refusing generic Rust pane"
-            ),
-            Self::GameOverChat(mode) => write!(
-                f,
-                "classic game-over {mode:?} C4MessageInput is unavailable; refusing evaluation-button activation"
-            ),
-            Self::GameOverFocusTraversal(direction) => write!(
-                f,
-                "classic game-over {direction:?} focus traversal is unavailable; refusing guessed button focus"
-            ),
-            Self::GameOverMnemonic(mask) => write!(
-                f,
-                "classic game-over {mask:?} localized mnemonic dispatch is unavailable; refusing guessed button or global-key action"
             ),
             Self::RuntimeHelpResources { detail } => write!(
                 f,
@@ -25128,6 +25096,29 @@ impl GameApp {
         Some((preferred, line_height))
     }
 
+    fn runtime_client_list_owns_game_over(&self) -> bool {
+        self.runtime_client_list_above_game_over
+            && self.runtime_client_list.is_some()
+            && self.game_over_dialog.is_some()
+    }
+
+    fn game_over_dialog_is_mouse_active(&self) -> bool {
+        self.mode == AppMode::Running
+            && self.game_over_dialog.is_some()
+            && !self.runtime_client_list_owns_game_over()
+            && self.message_dialogs.is_empty()
+            && self.game_option_input_dialog.is_none()
+            && self.definition_selector.is_none()
+            && self
+                .network_start_wait
+                .as_ref()
+                .is_none_or(|wait| !wait.visible)
+    }
+
+    fn game_over_dialog_is_active(&self) -> bool {
+        self.game_over_dialog_is_mouse_active() && self.context_menu.is_none()
+    }
+
     fn handle_runtime_client_list_key(
         &mut self,
         key: VirtualKeyCode,
@@ -25805,64 +25796,128 @@ impl GameApp {
         if self.options_modified_gui_key_is_inert(key) {
             return Ok(());
         }
-        let runtime_client_list_above_game_over =
-            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
-        if runtime_client_list_above_game_over
-            && self.handle_runtime_client_list_key(key, state)?
-        {
+        let runtime_client_list_above_game_over = self.runtime_client_list_owns_game_over();
+        if runtime_client_list_above_game_over && self.handle_runtime_client_list_key(key, state)? {
             return Ok(());
         }
-        if self.game_over_dialog.is_some() {
-            if state != ElementState::Pressed {
-                return Ok(());
-            }
+        if self.game_over_dialog_is_active() {
             // C4GUI compares the exact Alt/Ctrl/Shift mask for these global
             // bindings. The platform Logo bit is not part of C4KeyCodeEx.
             let c4_modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-            // Dialog mnemonics have PRIO_Ctrl and therefore run before the
-            // PRIO_Base global chat bindings. SDL derives the mnemonic from
-            // the first character of the localized key name (so Return can
-            // activate Restart and Escape can activate End game). Until
-            // localized visible-button ownership is modeled, every exact
-            // Alt/Alt+Shift probe must fail closed before guessing a winner.
-            let boundary = if c4_modifiers == ModifiersState::ALT {
-                Some(ClassicParityBoundary::GameOverMnemonic(
-                    ClassicGameOverMnemonicMask::Alt,
-                ))
-            } else if c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT) {
-                Some(ClassicParityBoundary::GameOverMnemonic(
-                    ClassicGameOverMnemonicMask::AltShift,
-                ))
-            } else {
-                match key {
-                    VirtualKeyCode::Return | VirtualKeyCode::F2 if c4_modifiers.is_empty() => {
-                        Some(ClassicParityBoundary::GameOverChat(ClassicChatMode::All))
+            if c4_modifiers == ModifiersState::ALT
+                || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT)
+            {
+                if state == ElementState::Pressed {
+                    let action = startup_dialog_hotkey(key).and_then(|hotkey| {
+                        self.game_over_dialog
+                            .as_ref()
+                            .and_then(|dialog| dialog.hotkey_action(hotkey))
+                    });
+                    if let Some(action) = action {
+                        self.handle_game_over_action(action)?;
+                        return Ok(());
                     }
-                    VirtualKeyCode::Return if c4_modifiers == ModifiersState::SHIFT => {
-                        Some(ClassicParityBoundary::GameOverChat(ClassicChatMode::Allies))
-                    }
-                    VirtualKeyCode::Tab if c4_modifiers.is_empty() => {
-                        Some(ClassicParityBoundary::GameOverFocusTraversal(
-                            ClassicGameOverFocusDirection::Forward,
-                        ))
-                    }
-                    VirtualKeyCode::Tab if c4_modifiers == ModifiersState::SHIFT => {
-                        Some(ClassicParityBoundary::GameOverFocusTraversal(
-                            ClassicGameOverFocusDirection::Backward,
-                        ))
-                    }
-                    VirtualKeyCode::Escape if c4_modifiers.is_empty() => {
-                        self.handle_game_over_action(GameOverAction::End)?;
-                        None
-                    }
-                    _ => return Ok(()),
                 }
-            };
-            if let Some(boundary) = boundary {
-                return Err(classic_parity_engine_error(report_classic_parity_boundary(
-                    boundary,
-                )));
+                // A visible button mnemonic has PRIO_Ctrl. Only an unmatched
+                // exact Alt+Return continues to the lower Say-chat binding.
+                if self.handle_running_chat_open_key(key, state) {
+                    return Ok(());
+                }
+                return Ok(());
+            }
+            match (key, c4_modifiers, state) {
+                (VirtualKeyCode::Tab, modifiers, ElementState::Pressed)
+                    if modifiers.is_empty() || modifiers == ModifiersState::SHIFT =>
+                {
+                    if let Some(dialog) = self.game_over_dialog.as_mut() {
+                        dialog.advance_focus(modifiers == ModifiersState::SHIFT);
+                    }
+                }
+                (VirtualKeyCode::Tab, modifiers, ElementState::Released)
+                    if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => {}
+                (VirtualKeyCode::Return | VirtualKeyCode::F2, modifiers, event_state)
+                    if modifiers.is_empty()
+                    && (key == VirtualKeyCode::F2
+                        || self.game_over_dialog.as_ref().is_some_and(|dialog| {
+                            !matches!(
+                                dialog.focused(),
+                                Some(GameOverFocus::Close | GameOverFocus::Button(_))
+                            )
+                        })) =>
+                {
+                    self.handle_running_chat_open_key(key, event_state);
+                }
+                (VirtualKeyCode::Return, ModifiersState::SHIFT, event_state) => {
+                    self.handle_running_chat_open_key(key, event_state);
+                }
+                (VirtualKeyCode::Return, modifiers, ElementState::Pressed)
+                    if modifiers.is_empty() =>
+                {
+                    let captured = self.game_over_dialog.as_mut().is_some_and(|dialog| {
+                        dialog.handle_activation_down(GameOverActivationKey::Confirm)
+                    });
+                    let sounds = self
+                        .game_over_dialog
+                        .as_mut()
+                        .map(GameOverState::take_sound_events)
+                        .unwrap_or_default();
+                    self.play_game_over_sound_events(sounds);
+                    if !captured {
+                        self.handle_running_chat_open_key(key, state);
+                    }
+                }
+                (VirtualKeyCode::Return, modifiers, ElementState::Released)
+                    if modifiers.is_empty() =>
+                {
+                    let action = self.game_over_dialog.as_mut().and_then(|dialog| {
+                        dialog.handle_activation_up(GameOverActivationKey::Confirm)
+                    });
+                    let sounds = self
+                        .game_over_dialog
+                        .as_mut()
+                        .map(GameOverState::take_sound_events)
+                        .unwrap_or_default();
+                    self.play_game_over_sound_events(sounds);
+                    if let Some(action) = action {
+                        self.handle_game_over_action(action)?;
+                    }
+                }
+                (VirtualKeyCode::Space, modifiers, ElementState::Pressed)
+                    if modifiers.is_empty() =>
+                {
+                    if let Some(dialog) = self.game_over_dialog.as_mut() {
+                        dialog.handle_activation_down(GameOverActivationKey::Space);
+                    }
+                    let sounds = self
+                        .game_over_dialog
+                        .as_mut()
+                        .map(GameOverState::take_sound_events)
+                        .unwrap_or_default();
+                    self.play_game_over_sound_events(sounds);
+                }
+                (VirtualKeyCode::Space, modifiers, ElementState::Released)
+                    if modifiers.is_empty() =>
+                {
+                    let action = self.game_over_dialog.as_mut().and_then(|dialog| {
+                        dialog.handle_activation_up(GameOverActivationKey::Space)
+                    });
+                    let sounds = self
+                        .game_over_dialog
+                        .as_mut()
+                        .map(GameOverState::take_sound_events)
+                        .unwrap_or_default();
+                    self.play_game_over_sound_events(sounds);
+                    if let Some(action) = action {
+                        self.handle_game_over_action(action)?;
+                    }
+                }
+                (VirtualKeyCode::Escape, modifiers, ElementState::Pressed)
+                    if modifiers.is_empty() =>
+                {
+                    self.handle_game_over_action(GameOverAction::End)?;
+                }
+                _ => {}
             }
             return Ok(());
         }
@@ -31947,6 +32002,12 @@ impl GameApp {
                 } else {
                     ClusterOwner::Suppressed
                 }
+            } else if self.runtime_client_list_owns_game_over() {
+                // The newer equal-z client-list dialog makes evaluation's
+                // DlgKeyCB/ControlKeyCB callbacks inactive. Its remaining
+                // gamepad focus controls are outside the current model, but
+                // input must never leak into the obscured game-over dialog.
+                ClusterOwner::Suppressed
             } else if game_over_open {
                 ClusterOwner::GameOver
             } else if self.startup_dialog_fade_active()
@@ -31998,13 +32059,22 @@ impl GameApp {
                             if self.handle_context_menu_gamepad_event(event)? {
                                 owner = ClusterOwner::Context;
                             } else {
-                                owner = if self.running_chat_active() {
+                                owner = if self.context_menu.is_some() {
+                                    // A root context may decline Left without
+                                    // closing. C4GUI still keeps its parent
+                                    // dialog inactive until the context is
+                                    // gone, so this raw cluster cannot fall
+                                    // through to evaluation focus traversal.
+                                    ClusterOwner::Suppressed
+                                } else if self.running_chat_active() {
                                     // An open context makes its parent dialog
                                     // keyboard-inactive, including the chat's
                                     // raw gamepad forwarding callback.
                                     ClusterOwner::Suppressed
                                 } else if self.game_option_input_dialog.is_some() {
                                     ClusterOwner::Input
+                                } else if self.runtime_client_list_owns_game_over() {
+                                    ClusterOwner::Suppressed
                                 } else if self.mode == AppMode::Running
                                     && self.game_over_dialog.is_some()
                                 {
@@ -32362,9 +32432,41 @@ impl GameApp {
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
                 ..
-            } => Err(classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::GameOverChat(ClassicChatMode::All),
-            ))),
+            } => {
+                let captured = self.game_over_dialog.as_mut().is_some_and(|dialog| {
+                    dialog.handle_activation_down(GameOverActivationKey::Confirm)
+                });
+                let sounds = self
+                    .game_over_dialog
+                    .as_mut()
+                    .map(GameOverState::take_sound_events)
+                    .unwrap_or_default();
+                self.play_game_over_sound_events(sounds);
+                if !captured {
+                    self.start_running_chat(RunningChatMode::All);
+                }
+                Ok(())
+            }
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+                ..
+            } => {
+                let action = self
+                    .game_over_dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_activation_up(GameOverActivationKey::Confirm));
+                let sounds = self
+                    .game_over_dialog
+                    .as_mut()
+                    .map(GameOverState::take_sound_events)
+                    .unwrap_or_default();
+                self.play_game_over_sound_events(sounds);
+                if let Some(action) = action {
+                    self.handle_game_over_action(action)?;
+                }
+                Ok(())
+            }
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
@@ -32374,23 +32476,30 @@ impl GameApp {
                 button: ControlButton::Left,
                 state: ElementState::Pressed,
                 ..
-            } => Err(classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::GameOverFocusTraversal(
-                    ClassicGameOverFocusDirection::Backward,
-                ),
-            ))),
+            } => {
+                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    dialog.advance_focus(true);
+                }
+                Ok(())
+            }
             GamepadEvent::Direction {
                 button: ControlButton::Right,
                 state: ElementState::Pressed,
                 ..
-            } => Err(classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::GameOverFocusTraversal(
-                    ClassicGameOverFocusDirection::Forward,
-                ),
-            ))),
+            } => {
+                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    dialog.advance_focus(false);
+                }
+                Ok(())
+            }
+            GamepadEvent::Clear { .. } => {
+                if let Some(dialog) = self.game_over_dialog.as_mut() {
+                    dialog.cancel_interaction();
+                }
+                Ok(())
+            }
             GamepadEvent::Direction { .. }
             | GamepadEvent::Button { .. }
-            | GamepadEvent::Clear { .. }
             | GamepadEvent::GuiButton { .. }
             | GamepadEvent::Action { .. } => Ok(()),
         }
@@ -33321,6 +33430,8 @@ impl GameApp {
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             let surface = self.graphics.surface();
             dialog.handle_pointer_move(point.x, point.y, surface.width(), surface.height());
+            let sounds = dialog.take_sound_events();
+            self.play_game_over_sound_events(sounds);
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -37560,6 +37671,12 @@ impl GameApp {
                     }
                     ElementState::Released => dialog.handle_pointer_up(width, height),
                 });
+            let sounds = self
+                .game_over_dialog
+                .as_mut()
+                .map(GameOverState::take_sound_events)
+                .unwrap_or_default();
+            self.play_game_over_sound_events(sounds);
             if let Some(action) = action {
                 self.handle_game_over_action(action)?;
             }
@@ -38299,20 +38416,27 @@ impl GameApp {
                     dialog.handle_pointer_move(position.x, position.y, width, height);
                 }
             }
+            let mut action = None;
             if phase == TouchPhase::Started {
                 if let Some(dialog) = self.game_over_dialog.as_mut() {
                     dialog.handle_pointer_down(width, height);
                 }
             } else if phase == TouchPhase::Ended {
-                let action = self
+                action = self
                     .game_over_dialog
                     .as_mut()
                     .and_then(|dialog| dialog.handle_pointer_up(width, height));
-                if let Some(action) = action {
-                    self.handle_game_over_action(action)?;
-                }
             } else if phase == TouchPhase::Cancelled {
                 self.pointer_left_unchecked();
+            }
+            let sounds = self
+                .game_over_dialog
+                .as_mut()
+                .map(GameOverState::take_sound_events)
+                .unwrap_or_default();
+            self.play_game_over_sound_events(sounds);
+            if let Some(action) = action {
+                self.handle_game_over_action(action)?;
             }
             return Ok(());
         }
@@ -38726,6 +38850,8 @@ impl GameApp {
         }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             dialog.pointer_left();
+            let sounds = dialog.take_sound_events();
+            self.play_game_over_sound_events(sounds);
             return;
         }
         match self.mode {
@@ -52726,6 +52852,15 @@ impl GameApp {
         }
     }
 
+    fn play_game_over_sound_events(&mut self, events: Vec<GameOverSound>) {
+        for event in events {
+            self.play_ui_sound(match event {
+                GameOverSound::ArrowHit => "ArrowHit",
+                GameOverSound::Click => "Click",
+            });
+        }
+    }
+
     fn handle_game_over_action(&mut self, action: GameOverAction) -> Result<(), EngineError> {
         // Drain any DoDlgShow issued while the exclusive evaluation dialog was
         // open before Continue can dismiss it. Such a request was suppressed
@@ -52845,6 +52980,35 @@ impl GameApp {
                     .map(definition_menu_picture)
             },
         );
+        for (action, label_key, label, description_key, description) in [
+            (
+                GameOverAction::End,
+                "IDS_BTN_ENDROUND",
+                "&End game",
+                "IDS_DESC_ENDTHEROUND",
+                "End the round.",
+            ),
+            (
+                GameOverAction::Continue,
+                "IDS_BTN_CONTINUEGAME",
+                "&Continue playing",
+                "IDS_DESC_CONTINUETHEROUNDWITHNOFUR",
+                "Continue playing this round (with no further evaluation).",
+            ),
+            (
+                GameOverAction::Restart,
+                "IDS_BTN_RESTART",
+                "&Restart",
+                "IDS_DESC_RESTART",
+                "Play this scenario again.",
+            ),
+        ] {
+            dialog.set_button_content(
+                action,
+                self.runtime_resource_text(label_key, label),
+                self.runtime_resource_text(description_key, description),
+            );
+        }
         dialog.configure_classic_fonts(self.assets.clonk_fonts.as_deref());
         let status_message = if dialog.subtitle().is_empty() {
             format!("{scenario_title} complete")
@@ -58009,8 +58173,9 @@ impl GameApp {
             }
         }
 
-        let runtime_client_list_above_game_over =
-            self.runtime_client_list_above_game_over && self.game_over_dialog.is_some();
+        let runtime_client_list_above_game_over = self.runtime_client_list_owns_game_over();
+        let game_over_mouse_active = self.game_over_dialog_is_mouse_active();
+        let game_over_active = self.game_over_dialog_is_active();
         if !runtime_client_list_above_game_over {
             self.render_runtime_client_list_layer(&frame_gamma, ordered_native)?;
         }
@@ -58022,11 +58187,13 @@ impl GameApp {
                 .assets
                 .game_over_classic_resources(hud.as_ref())
                 .expect("game-over resources were preflighted before rendering");
-            dialog.render_with_gamma(
+            dialog.render_with_gamma_active(
                 self.graphics.surface_mut(),
                 font.as_ref(),
                 Some(classic),
                 Some(&frame_gamma),
+                game_over_active,
+                game_over_mouse_active,
             );
             if ordered_native {
                 self.next_pending_native_overlay();
@@ -95510,13 +95677,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.show_main_menu();
         app.handle_game_over()
             .expect("forge stale menu evaluation state");
-        let error = app
-            .handle_key(VirtualKeyCode::A, ElementState::Pressed)
-            .expect_err("game-over mnemonic owner precedes the startup dialog");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
-        );
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("exclusive game-over owner swallows unmatched startup mnemonics");
+        assert!(app.game_over_dialog.is_some());
         assert_eq!(app.startup_view, StartupView::MainMenu);
     }
 
@@ -139669,34 +139832,6 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(native.iter().all(|byte| *byte == 0x47));
     }
 
-    fn expect_game_over_key_boundary(
-        app: &mut GameApp,
-        key: VirtualKeyCode,
-        modifiers: ModifiersState,
-        expected: ClassicParityBoundary,
-    ) {
-        app.handle_modifiers_changed(modifiers)
-            .expect("set keyboard modifiers");
-        let expected = expected.to_string();
-        let error = app
-            .handle_key(key, ElementState::Pressed)
-            .expect_err("unported game-over child must fail typed");
-        assert!(matches!(
-            &error,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
-        assert!(
-            error.to_string().contains(&expected),
-            "missing `{expected}` in `{error}`"
-        );
-        assert!(
-            app.game_over_dialog.is_some(),
-            "a child boundary must retain the evaluation dialog"
-        );
-        app.handle_key(key, ElementState::Released)
-            .expect("game-over key releases are consumed without callbacks");
-    }
-
     #[derive(Debug, PartialEq, Eq)]
     struct RuntimeGlobalUiSnapshot {
         menu_render_version: u64,
@@ -139707,6 +139842,7 @@ func ControlDig() { dig_count = 1; return(1); }
         message_dialogs: Vec<(String, String)>,
         game_over_open: bool,
         game_over_hovered_action: Option<GameOverAction>,
+        game_over_focus: Option<GameOverFocus>,
         ingame_page: Option<ingame_menu::MenuPage>,
         object_menu_open: bool,
         engine_menu_style: Option<i32>,
@@ -139748,6 +139884,10 @@ func ControlDig() { dig_count = 1; return(1); }
                 .game_over_dialog
                 .as_ref()
                 .and_then(GameOverState::hovered_action),
+            game_over_focus: app
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
             ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
             object_menu_open: app.object_menu.is_some(),
             engine_menu_style: app
@@ -140175,13 +140315,16 @@ func ControlDig() { dig_count = 1; return(1); }
         dialog_press
             .handle_game_over()
             .expect("show exclusive dialog before raw press");
-        let error = dialog_press
+        dialog_press
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect_err("exclusive dialog owns the initial raw press");
-        assert!(matches!(
-            error,
-            EngineError::ClassicMenuParityBoundary { .. }
-        ));
+            .expect("exclusive dialog owns the initial raw press");
+        assert_eq!(
+            dialog_press
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            Some(GameOverFocus::Close)
+        );
         assert!(dialog_press.scoreboard_tab_raw_pressed);
         assert!(!dialog_press
             .pressed_engine_keys
@@ -140263,11 +140406,18 @@ func ControlDig() { dig_count = 1; return(1); }
         game_over
             .handle_game_over()
             .expect("show game-over focus dialog");
-        expect_game_over_key_boundary(
-            &mut game_over,
-            VirtualKeyCode::Tab,
-            ModifiersState::empty(),
-            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Forward),
+        game_over
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("game-over owns Tab focus traversal");
+        game_over
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("game-over owns the Tab release");
+        assert_eq!(
+            game_over
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            Some(GameOverFocus::Close)
         );
         assert!(game_over.scoreboard_dialog.is_none());
 
@@ -140700,83 +140850,79 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn game_over_chat_shortcuts_fail_typed_with_exact_modes() {
-        let mut app = new_game_over_keyboard_app();
-        for (key, modifiers, mode) in [
-            (
-                VirtualKeyCode::Return,
-                ModifiersState::empty(),
-                ClassicChatMode::All,
-            ),
-            (
-                VirtualKeyCode::F2,
-                ModifiersState::empty(),
-                ClassicChatMode::All,
-            ),
-            (
-                VirtualKeyCode::Return,
-                ModifiersState::SHIFT,
-                ClassicChatMode::Allies,
-            ),
-            (
-                VirtualKeyCode::Return,
-                ModifiersState::LOGO,
-                ClassicChatMode::All,
-            ),
+    fn game_over_chat_and_mnemonics_use_exact_modes_and_priority() {
+        for (key, modifiers, expected_text) in [
+            (VirtualKeyCode::Return, ModifiersState::empty(), ""),
+            (VirtualKeyCode::F2, ModifiersState::empty(), ""),
+            (VirtualKeyCode::Return, ModifiersState::SHIFT, "/team "),
+            (VirtualKeyCode::Return, ModifiersState::LOGO, ""),
             (
                 VirtualKeyCode::Return,
                 ModifiersState::LOGO | ModifiersState::SHIFT,
-                ClassicChatMode::Allies,
+                "/team ",
             ),
         ] {
-            expect_game_over_key_boundary(
-                &mut app,
-                key,
-                modifiers,
-                ClassicParityBoundary::GameOverChat(mode),
-            );
+            let mut app = new_game_over_keyboard_app();
+            app.handle_modifiers_changed(modifiers)
+                .expect("set chat shortcut modifiers");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("open the real running-chat controller");
+            assert_eq!(app.running_chat_text(), Some(expected_text));
+            assert!(app.game_over_dialog.is_some());
         }
 
-        for (key, modifiers, mask) in [
-            (
-                VirtualKeyCode::Return,
-                ModifiersState::ALT,
-                ClassicGameOverMnemonicMask::Alt,
-            ),
-            (
-                VirtualKeyCode::Return,
-                ModifiersState::LOGO | ModifiersState::ALT,
-                ClassicGameOverMnemonicMask::Alt,
-            ),
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::LOGO | ModifiersState::ALT,
+        ] {
+            let mut app = new_game_over_keyboard_app();
+            app.handle_modifiers_changed(modifiers)
+                .expect("set mnemonic modifiers");
+            app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+                .expect("localized Continue mnemonic activates directly");
+            assert!(app.game_over_dialog.is_none());
+            assert_eq!(app.mode, AppMode::Running);
+            assert!(!app
+                .ui_sound_log
+                .iter()
+                .any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
+        }
+
+        let mut say = new_game_over_keyboard_app();
+        say.game_over_dialog
+            .as_mut()
+            .expect("evaluation dialog")
+            .set_button_content(
+                GameOverAction::Restart,
+                "Play again".to_string(),
+                "Restart without an R mnemonic".to_string(),
+            );
+        say.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set Say modifiers");
+        say.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("unmatched Alt+Return falls through to Say chat");
+        assert_eq!(say.running_chat_text(), Some("\""));
+        assert!(say.game_over_dialog.is_some());
+
+        for (key, modifiers) in [
             (
                 VirtualKeyCode::Return,
                 ModifiersState::ALT | ModifiersState::SHIFT,
-                ClassicGameOverMnemonicMask::AltShift,
             ),
-            (
-                VirtualKeyCode::Escape,
-                ModifiersState::ALT,
-                ClassicGameOverMnemonicMask::Alt,
-            ),
-            (
-                VirtualKeyCode::Tab,
-                ModifiersState::ALT | ModifiersState::SHIFT,
-                ClassicGameOverMnemonicMask::AltShift,
-            ),
-            (
-                VirtualKeyCode::Left,
-                ModifiersState::ALT,
-                ClassicGameOverMnemonicMask::Alt,
-            ),
+            (VirtualKeyCode::Escape, ModifiersState::ALT),
         ] {
-            expect_game_over_key_boundary(
-                &mut app,
-                key,
-                modifiers,
-                ClassicParityBoundary::GameOverMnemonic(mask),
-            );
+            say.handle_modifiers_changed(modifiers)
+                .expect("set an unmatched active-chat hotkey");
+            say.handle_key(key, ElementState::Pressed)
+                .expect("active chat keeps the evaluation callbacks inactive");
+            say.handle_key(key, ElementState::Released)
+                .expect("active chat owns the matching release");
+            assert!(say.game_over_dialog.is_some());
+            assert_eq!(say.running_chat_text(), Some("\""));
         }
 
+        let mut app = new_game_over_keyboard_app();
         for modifiers in [
             ModifiersState::CTRL,
             ModifiersState::CTRL | ModifiersState::SHIFT,
@@ -140809,6 +140955,109 @@ func ControlDig() { dig_count = 1; return(1); }
         app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Released)
             .expect("keypad Enter release is consumed");
         assert!(app.game_over_dialog.is_some());
+    }
+
+    #[test]
+    fn game_over_mnemonics_use_active_language_resources() {
+        let user_data = tempdir().expect("localized game-over user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "General", "LanguageEx", "DE")
+            .expect("select German resources");
+        let mut app = new_running_sandbox_app();
+        app.app_paths = Some(paths);
+        app.handle_game_over()
+            .expect("show localized evaluation dialog");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::W, ElementState::Pressed)
+            .expect("German &Weiterspielen mnemonic invokes Continue");
+
+        assert_eq!(app.mode, AppMode::Running);
+        assert!(app.game_over_dialog.is_none());
+        assert!(app.running_chat_text().is_none());
+        assert!(!app
+            .ui_sound_log
+            .iter()
+            .any(|sound| matches!(sound.as_str(), "ArrowHit" | "Click")));
+    }
+
+    #[test]
+    fn game_over_tab_moves_real_focus_and_controls_activate_or_open_chat() {
+        let mut list_focus = new_game_over_keyboard_app();
+        for _ in 0..2 {
+            list_focus
+                .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("advance to the player list");
+            list_focus
+                .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release focus traversal key");
+        }
+        assert_eq!(
+            list_focus
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            Some(GameOverFocus::PlayerList(0))
+        );
+        list_focus
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("player-list Return falls through to All chat");
+        assert_eq!(list_focus.running_chat_text(), Some(""));
+        assert!(list_focus.game_over_dialog.is_some());
+
+        let mut keyboard = new_game_over_keyboard_app();
+        for _ in 0..4 {
+            keyboard
+                .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("advance to Continue");
+            keyboard
+                .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release focus traversal key");
+        }
+        assert_eq!(
+            keyboard
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused_action),
+            Some(GameOverAction::Continue)
+        );
+        keyboard
+            .handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("depress focused Continue");
+        assert!(keyboard.game_over_dialog.is_some());
+        keyboard
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("any shared activation-key release activates Continue");
+        assert!(keyboard.game_over_dialog.is_none());
+        assert!(keyboard.ui_sound_log.iter().any(|sound| sound == "ArrowHit"));
+        assert!(keyboard.ui_sound_log.iter().any(|sound| sound == "Click"));
+
+        let mut gamepad = new_game_over_keyboard_app();
+        for _ in 0..4 {
+            gamepad
+                .process_gamepad_event_batch([GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                }])
+                .expect("advance gamepad focus to Continue");
+        }
+        gamepad
+            .process_gamepad_event_batch([GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            }])
+            .expect("depress focused Continue with gamepad Low");
+        assert!(gamepad.game_over_dialog.is_some());
+        gamepad
+            .process_gamepad_event_batch([GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            }])
+            .expect("activate focused Continue with gamepad Low");
+        assert!(gamepad.game_over_dialog.is_none());
     }
 
     #[test]
@@ -141012,8 +141261,7 @@ func ControlDig() { dig_count = 1; return(1); }
         )
         .expect("open message over evaluation");
 
-        let error = app
-            .process_gamepad_event_batch([
+        app.process_gamepad_event_batch([
                 GamepadEvent::GuiButton {
                     slot: GamepadSlot::new(0),
                     class: GuiButtonClass::High,
@@ -141030,17 +141278,18 @@ func ControlDig() { dig_count = 1; return(1); }
                     state: ElementState::Pressed,
                 },
             ])
-            .expect_err("a later raw direction begins a new receiver cluster");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Backward),
-        );
+            .expect("a later raw direction begins a new receiver cluster");
         assert!(app.message_dialogs.is_empty());
-        assert!(app.game_over_dialog.is_some());
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            Some(GameOverFocus::Button(2))
+        );
     }
 
     #[test]
-    fn context_pass_through_and_post_close_clusters_reach_game_over() {
+    fn context_fences_game_over_until_a_post_close_cluster() {
         let open_context = |app: &mut GameApp| {
             app.open_context_menu_at(
                 vec![ContextMenuEntry::<AppContextMenuCommand>::new(
@@ -141080,25 +141329,35 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("axis release and opposite press re-resolve separate receivers");
         assert!(axis_transition.context_menu.is_some());
         assert!(axis_transition.game_over_dialog.is_some());
+        assert_eq!(
+            axis_transition
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            None
+        );
 
         let mut pass_through = new_game_over_keyboard_app();
         open_context(&mut pass_through);
-        let error = pass_through
+        pass_through
             .process_gamepad_event_batch([GamepadEvent::Direction {
                 slot: GamepadSlot::new(0),
                 button: ControlButton::Left,
                 state: ElementState::Pressed,
             }])
-            .expect_err("root context Left passes through to Dialog traversal");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Backward),
-        );
+            .expect("root context Left remains fenced from Dialog traversal");
         assert!(pass_through.context_menu.is_some());
+        assert_eq!(
+            pass_through
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            None
+        );
 
         let mut closed = new_game_over_keyboard_app();
         open_context(&mut closed);
-        let error = closed
+        closed
             .process_gamepad_event_batch([
                 GamepadEvent::GuiButton {
                     slot: GamepadSlot::new(0),
@@ -141116,17 +141375,19 @@ func ControlDig() { dig_count = 1; return(1); }
                     state: ElementState::Pressed,
                 },
             ])
-            .expect_err("a later raw cluster outlives the closed context menu");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Forward),
-        );
+            .expect("a later raw cluster outlives the closed context menu");
         assert!(closed.context_menu.is_none());
-        assert!(closed.game_over_dialog.is_some());
+        assert_eq!(
+            closed
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            Some(GameOverFocus::Close)
+        );
     }
 
     #[test]
-    fn game_over_raw_low_opens_all_chat_boundary_for_south_and_east_aliases() {
+    fn game_over_raw_low_opens_all_chat_for_south_and_east_aliases() {
         for (source, action, button) in [
             (
                 "South",
@@ -141142,10 +141403,7 @@ func ControlDig() { dig_count = 1; return(1); }
             let mut app = new_game_over_keyboard_app();
             hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
             assert_game_over_fixture_has_no_sound_activity(&app);
-            let before = runtime_global_ui_snapshot(&app);
-
-            let error = app
-                .process_gamepad_event_batch([
+            app.process_gamepad_event_batch([
                     GamepadEvent::GuiButton {
                         slot: GamepadSlot::new(0),
                         class: GuiButtonClass::Low,
@@ -141162,40 +141420,36 @@ func ControlDig() { dig_count = 1; return(1); }
                         state: ElementState::Pressed,
                     },
                 ])
-                .expect_err("raw Low must enter the classic all-chat child");
-            assert_engine_parity_boundary(
-                error,
-                ClassicParityBoundary::GameOverChat(ClassicChatMode::All),
-            );
-            assert_only_gamepad_dirty_mark_changed(before, &app);
+                .expect("raw Low opens the classic all-chat child");
+            assert_eq!(app.running_chat_text(), Some(""));
             assert!(
                 app.game_over_dialog.is_some(),
                 "{source} is Low/chat even when its abstract alias is Cancel"
             );
+            assert_game_over_fixture_has_no_sound_activity(&app);
         }
     }
 
     #[test]
-    fn game_over_raw_left_and_right_reach_exact_focus_boundaries() {
-        for (button, direction) in [
-            (ControlButton::Left, ClassicGameOverFocusDirection::Backward),
-            (ControlButton::Right, ClassicGameOverFocusDirection::Forward),
+    fn game_over_raw_left_and_right_reach_exact_focus_targets() {
+        for (button, expected) in [
+            (ControlButton::Left, GameOverFocus::Button(2)),
+            (ControlButton::Right, GameOverFocus::Close),
         ] {
             let mut app = new_game_over_keyboard_app();
             hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
-            let before = runtime_global_ui_snapshot(&app);
-            let error = app
-                .process_gamepad_event_batch([GamepadEvent::Direction {
+            app.process_gamepad_event_batch([GamepadEvent::Direction {
                     slot: GamepadSlot::new(0),
                     button,
                     state: ElementState::Pressed,
                 }])
-                .expect_err("horizontal D-pad traversal is an unported child");
-            assert_engine_parity_boundary(
-                error,
-                ClassicParityBoundary::GameOverFocusTraversal(direction),
+                .expect("horizontal D-pad traverses native focus");
+            assert_eq!(
+                app.game_over_dialog
+                    .as_ref()
+                    .and_then(GameOverState::focused),
+                Some(expected)
             );
-            assert_only_gamepad_dirty_mark_changed(before, &app);
         }
     }
 
@@ -141298,6 +141552,46 @@ func ControlDig() { dig_count = 1; return(1); }
         }
         assert_eq!(runtime_global_ui_snapshot(&app), direct_before);
         assert_game_over_fixture_has_no_sound_activity(&app);
+
+        let mut cancelled = new_game_over_keyboard_app();
+        for _ in 0..4 {
+            cancelled
+                .process_gamepad_event_batch([GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                }])
+                .expect("focus Continue before cancellation");
+        }
+        cancelled
+            .process_gamepad_event_batch([GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            }])
+            .expect("depress focused Continue");
+        assert_eq!(
+            cancelled
+                .ui_sound_log
+                .iter()
+                .filter(|sound| sound.as_str() == "ArrowHit")
+                .count(),
+            1
+        );
+        cancelled
+            .process_gamepad_event_batch([GamepadEvent::Clear {
+                slot: GamepadSlot::new(0),
+            }])
+            .expect("Clear cancels the retained button latch");
+        cancelled
+            .process_gamepad_event_batch([GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            }])
+            .expect("the post-Clear release cannot activate Continue");
+        assert!(cancelled.game_over_dialog.is_some());
+        assert!(!cancelled.ui_sound_log.iter().any(|sound| sound == "Click"));
     }
 
     #[test]
@@ -141572,27 +141866,27 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn game_over_tab_and_escape_use_exact_modifier_masks() {
-        let mut app = new_game_over_keyboard_app();
-        for (modifiers, direction) in [
-            (
-                ModifiersState::empty(),
-                ClassicGameOverFocusDirection::Forward,
-            ),
-            (
-                ModifiersState::SHIFT,
-                ClassicGameOverFocusDirection::Backward,
-            ),
-            (ModifiersState::LOGO, ClassicGameOverFocusDirection::Forward),
+        for (modifiers, expected) in [
+            (ModifiersState::empty(), GameOverFocus::Close),
+            (ModifiersState::SHIFT, GameOverFocus::Button(2)),
+            (ModifiersState::LOGO, GameOverFocus::Close),
             (
                 ModifiersState::LOGO | ModifiersState::SHIFT,
-                ClassicGameOverFocusDirection::Backward,
+                GameOverFocus::Button(2),
             ),
         ] {
-            expect_game_over_key_boundary(
-                &mut app,
-                VirtualKeyCode::Tab,
-                modifiers,
-                ClassicParityBoundary::GameOverFocusTraversal(direction),
+            let mut app = new_game_over_keyboard_app();
+            app.handle_modifiers_changed(modifiers)
+                .expect("set focus modifiers");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("traverse native evaluation focus");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release evaluation traversal key");
+            assert_eq!(
+                app.game_over_dialog
+                    .as_ref()
+                    .and_then(GameOverState::focused),
+                Some(expected)
             );
         }
         for modifiers in [
@@ -141601,12 +141895,19 @@ func ControlDig() { dig_count = 1; return(1); }
             ModifiersState::CTRL | ModifiersState::SHIFT,
             ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
         ] {
+            let mut app = new_game_over_keyboard_app();
             app.handle_modifiers_changed(modifiers)
                 .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
                 .expect("other-modified Tab has no exact C++ focus binding");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
                 .expect("other-modified Tab release is consumed");
+            assert_eq!(
+                app.game_over_dialog
+                    .as_ref()
+                    .and_then(GameOverState::focused),
+                None
+            );
         }
 
         for modifiers in [
@@ -141615,6 +141916,7 @@ func ControlDig() { dig_count = 1; return(1); }
             ModifiersState::CTRL | ModifiersState::ALT,
             ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
         ] {
+            let mut app = new_game_over_keyboard_app();
             app.handle_modifiers_changed(modifiers)
                 .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
@@ -145492,6 +145794,47 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(game_over.game_over_dialog.is_some());
         assert!(game_over.runtime_client_list_above_game_over);
         game_over
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("client list keeps evaluation traversal inactive");
+        game_over
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("client list owns the traversal release");
+        game_over
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt over the client list");
+        game_over
+            .handle_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("client list keeps the Restart mnemonic inactive");
+        game_over
+            .handle_key(VirtualKeyCode::R, ElementState::Released)
+            .expect("client list owns the mnemonic release");
+        game_over
+            .handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+        game_over
+            .process_gamepad_event_batch([
+                GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::GuiButton {
+                    slot: GamepadSlot::new(0),
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect("client-list gamepad input cannot reach evaluation");
+        assert_eq!(
+            game_over
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::focused),
+            None
+        );
+        assert!(game_over.running_chat_text().is_none());
+        assert!(game_over.runtime_client_list.is_some());
+        game_over
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("active client-list Escape closes only the client list");
         assert!(game_over.runtime_client_list.is_none());
@@ -146052,23 +146395,31 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
-        for key in [
-            VirtualKeyCode::C,
-            VirtualKeyCode::F1,
-            VirtualKeyCode::F4,
-            VirtualKeyCode::Pause,
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::LOGO | ModifiersState::ALT,
         ] {
-            for modifiers in [
-                ModifiersState::ALT,
-                ModifiersState::LOGO | ModifiersState::ALT,
-            ] {
+            let mut app = new_game_over_keyboard_app();
+            app.handle_modifiers_changed(modifiers)
+                .expect("set mnemonic modifiers");
+            app.handle_key(VirtualKeyCode::C, ElementState::Pressed)
+                .expect("Continue mnemonic precedes the runtime Alt+C owner");
+            assert!(app.game_over_dialog.is_none());
+            assert_eq!(app.mode, AppMode::Running);
+            assert!(app.running_chat_text().is_none());
+        }
+
+        for key in [VirtualKeyCode::F1, VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+            for modifiers in [ModifiersState::ALT, ModifiersState::LOGO | ModifiersState::ALT] {
                 let mut app = new_game_over_keyboard_app();
-                expect_game_over_key_boundary(
-                    &mut app,
-                    key,
-                    modifiers,
-                    ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
-                );
+                app.handle_modifiers_changed(modifiers)
+                    .expect("set unmatched mnemonic modifiers");
+                app.handle_key(key, ElementState::Pressed)
+                    .expect("exclusive evaluation swallows lower runtime globals");
+                assert!(app.game_over_dialog.is_some());
+                assert!(app.running_chat_text().is_none());
+                assert!(!app.runtime_help_visible);
+                assert!(app.runtime_client_list.is_none());
             }
         }
     }
