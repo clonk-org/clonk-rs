@@ -40,10 +40,12 @@ debug = "line-tables-only"
 opt-level = 3
 
 # Simulation-heavy integration tests spend most of their time in workspace
-# crates. A small optimization bump cuts their warm runtime substantially
-# while retaining the checks that make the test profile useful.
+# crates. Full optimization keeps their warm runtime low, while explicitly
+# disabling thin-local LTO avoids repeating an expensive whole-crate codegen
+# pass across the large test harnesses.
 [profile.test]
-opt-level = 2
+opt-level = 3
+lto = "off"
 # Full DWARF dominates codegen, linking, and disk use for the very large test
 # harnesses. Line tables retain source locations in failures and backtraces.
 debug = "line-tables-only"

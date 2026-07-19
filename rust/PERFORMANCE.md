@@ -83,6 +83,22 @@ samples. Always retain sample counts and raw samples; a single mean hides stalls
 There is no portable measured CI baseline yet. Do not turn timings from an
 arbitrary laptop or a shared hosted runner into a blocking threshold.
 
+On 2026-07-19, a same-checkout profile A/B used fresh target directories on
+the Apple M4 Max reference machine with Rust 1.87.0. Both builds used
+`cargo test --workspace --no-run --locked --offline --timings`; execution used
+the full nextest workspace gate. Explicitly disabling thin-local LTO while
+raising workspace test optimization from level 2 to level 3 produced the best
+compile/runtime balance:
+
+| Test profile | Cold build | Compiler user CPU | Full suite | Build + suite | Target size |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| opt 2, implicit thin-local LTO | 213.40s | 1523.80s | 86.238s | 299.638s | 4.6 GiB |
+| opt 3, LTO off | 107.41s | 1121.22s | 90.552s | 197.962s | 3.7 GiB |
+
+This is a 49.7% cold-build reduction and a 33.9% end-to-end reduction on that
+machine, with a 4.3s warm-suite cost. Re-measure rather than extrapolating the
+result to a different toolchain or runner.
+
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
 Apple M4 Max. The representative command was:
