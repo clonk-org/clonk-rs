@@ -60,7 +60,7 @@ struct Cli {
 }
 
 fn main() {
-    lc_core::logging::init();
+    lc_logging::init();
 
     if let Err(error) = run() {
         tracing::error!(error = ?error, "lc-game encountered an error");

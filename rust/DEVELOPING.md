@@ -40,7 +40,7 @@ Use a focused crate test when its name is already known:
 
 ```sh
 cargo test -p lc-engine --lib test_name
-cargo test -p lc-engine --test unit test_name
+cargo test -p lc-engine-unit-tests --test unit test_name
 cargo test -p lc-engine --test it module_name::test_name
 ```
 

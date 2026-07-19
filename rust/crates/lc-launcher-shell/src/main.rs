@@ -38,7 +38,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 
 fn main() -> Result<()> {
-    lc_core::logging::init();
+    lc_logging::init();
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()

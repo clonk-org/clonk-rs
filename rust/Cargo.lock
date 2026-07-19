@@ -2041,6 +2041,7 @@ dependencies = [
  "lc-frontend",
  "lc-graphics",
  "lc-gui",
+ "lc-logging",
  "lc-network",
  "lc-platform",
  "lc-resources",
@@ -2085,7 +2086,6 @@ dependencies = [
  "rand 0.8.5",
  "tempfile",
  "tracing",
- "tracing-subscriber",
  "windows-sys 0.52.0",
 ]
 
@@ -2122,6 +2122,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lc-engine-unit-tests"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "lc-engine",
+ "lc-resources",
+ "lc-script",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lc-frontend"
 version = "0.1.0"
 dependencies = [
@@ -2146,6 +2158,7 @@ dependencies = [
  "clap",
  "lc-core",
  "lc-launcher",
+ "lc-logging",
  "lc-platform",
  "serde",
  "serde_json",
@@ -2192,11 +2205,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
- "lc-core",
  "lc-graphics",
  "lc-gui",
  "lc-launcher",
  "lc-launcher-ui",
+ "lc-logging",
  "lc-platform",
  "pixels",
  "rfd",
@@ -2216,6 +2229,13 @@ dependencies = [
  "lc-launcher",
  "lc-platform",
  "tempfile",
+]
+
+[[package]]
+name = "lc-logging"
+version = "0.1.0"
+dependencies = [
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5316,8 +5336,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "lc-core",
  "lc-engine",
+ "lc-logging",
  "lc-resources",
  "tracing",
  "walkdir",

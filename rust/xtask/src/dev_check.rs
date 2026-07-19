@@ -654,7 +654,13 @@ fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
         CheckKind::Unit,
         CheckCwd::Workspace,
         "cargo",
-        &["test", "-p", "lc-engine", "--test", "unit"],
+        &[
+            "test",
+            "-p",
+            "lc-engine-unit-tests",
+            "--test",
+            "unit",
+        ],
         reason,
     );
     let file = path.rsplit('/').next().unwrap_or("");
@@ -1657,7 +1663,13 @@ mod tests {
         assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe);
         assert_eq!(plan.commands[2].kind, CheckKind::Hygiene);
         assert!(plan.has_args(&["test", "-p", "lc-engine", "--lib"]));
-        assert!(plan.has_args(&["test", "-p", "lc-engine", "--test", "unit"]));
+        assert!(plan.has_args(&[
+            "test",
+            "-p",
+            "lc-engine-unit-tests",
+            "--test",
+            "unit",
+        ]));
         assert!(plan.has_args(&[
             "test",
             "-p",

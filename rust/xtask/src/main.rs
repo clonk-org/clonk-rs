@@ -16,7 +16,7 @@ use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 fn main() -> Result<()> {
-    lc_core::logging::init();
+    lc_logging::init();
 
     let mut args = env::args().skip(1);
     match args.next().as_deref() {

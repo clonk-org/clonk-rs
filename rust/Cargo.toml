@@ -1,9 +1,11 @@
 [workspace]
 members = [
     "crates/lc-core",
+    "crates/lc-logging",
     "crates/lc-resources",
     "crates/lc-script",
     "crates/lc-engine",
+    "crates/lc-engine-unit-tests",
     "crates/lc-engine-core",
     "crates/lc-app",
     "crates/lc-graphics",
@@ -60,9 +62,21 @@ overflow-checks = true
 opt-level = 3
 debug = false
 
+# The main application test harness is the largest final link in the workspace.
+# Assertions already report source locations, so skip its remaining line tables
+# to reduce cold codegen, link input, and target-directory growth.
+[profile.test.package.lc-app]
+debug = false
+
 # The large async lc-network harness is a cold-build tail, while its complete
 # suite remains only a few seconds without LLVM optimization. Skip optimization
 # and line tables for this crate's test-profile copy to shorten that tail.
 [profile.test.package.lc-network]
+opt-level = 0
+debug = false
+
+# Keep the simulation engine optimized while avoiding LLVM optimization and
+# line-table generation for its 72k-line integration-test harness.
+[profile.test.package.lc-engine-unit-tests]
 opt-level = 0
 debug = false

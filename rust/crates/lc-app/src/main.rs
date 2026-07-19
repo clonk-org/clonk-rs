@@ -5783,7 +5783,7 @@ fn parse_test_input_spec(spec: &str) -> Result<Vec<(u32, ControlEvent)>> {
 }
 
 fn main() -> Result<()> {
-    lc_core::logging::init();
+    lc_logging::init();
 
     let cli = Cli::parse();
     let app_paths = cached_app_paths().ok();
@@ -92002,7 +92002,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn menu_dump_writes_main_menu_png_at_1280x720() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         let dir = tempdir().expect("tempdir");
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -92388,7 +92388,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn menu_music_runs_in_menu_cycle() {
-        lc_core::logging::init();
+        lc_logging::init();
         assert_eq!(GAME_MUSIC_FADE_OUT_MS, 2_000);
 
         // Music discovery reads process env; hold the env lock so the
@@ -106643,7 +106643,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn menu_render_replays_cached_frame_for_unchanged_state() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         let mut app = new_real_classic_menu_app(320, 200);
         let len = 320 * 200 * 4;
@@ -107011,7 +107011,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn menu_input_invalidates_cached_frame() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         let mut app = new_real_classic_menu_app(320, 200);
         let mut frame = vec![0u8; 320 * 200 * 4];
@@ -107031,7 +107031,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn menu_backdrop_restore_matches_full_recomposition() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         let mut app = new_real_classic_menu_app(320, 200);
         let len = 320 * 200 * 4;
@@ -107061,7 +107061,7 @@ ScenInfoArea=70,5,25,90
 
     #[test]
     fn menu_resize_renders_at_new_dimensions() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         let mut app = new_real_classic_menu_app(320, 200);
         let mut frame = vec![0u8; 320 * 200 * 4];
@@ -121182,7 +121182,7 @@ protected func InputCallback(string answer, int player)
 
     #[test]
     fn offline_player_info_control_rechecks_teams_before_joining_unjoined_script_player() {
-        let mut app = new_state_only_running_sandbox_app();
+        let mut app = new_state_only_synthetic_crew_running_sandbox_app();
         let existing_info_id = app
             .engine
             .player(app.local_owner)
@@ -135385,7 +135385,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // 983-995), while C4Player::InCom converts raw controls before
         // gameplay (C4Player.cpp:1502-1513). This is the app half of the
         // mandatory Dragon Rock difficulty/type menu path.
-        lc_core::logging::init();
+        lc_logging::init();
         let mut app = new_running_sandbox_app();
         let cursor = app
             .engine
@@ -135543,7 +135543,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // C4Viewport draws that engine-owned menu and C4Player::InCom routes
         // navigation to it before gameplay (C4Object.cpp:1961-1980,
         // 2044-2062; C4Viewport.cpp:983-995; C4Player.cpp:1502-1513).
-        lc_core::logging::init();
+        lc_logging::init();
         let mut app = new_running_sandbox_app();
         let cursor = app
             .engine
@@ -135590,7 +135590,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
-        lc_core::logging::init();
+        lc_logging::init();
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
         let cursor = app
@@ -135656,7 +135656,7 @@ func ControlDig() { dig_count = 1; return(1); }
         // C4MenuItem::MouseEnter selects a selectable item, left-up enters
         // it, and Dialog's Ico_Close queues COM_MenuClose
         // (C4Menu.cpp:213-242, 1237-1262; C4ObjectMenu.cpp:461-478).
-        lc_core::logging::init();
+        lc_logging::init();
         let mut app = new_running_sandbox_app();
         let cursor = app
             .engine
@@ -142996,7 +142996,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn l002_bare_escape_opens_abort_confirmation_without_exiting() {
-        lc_core::logging::init();
+        lc_logging::init();
         let mut app = new_running_sandbox_app();
         app.status_text.clear();
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
@@ -143211,7 +143211,7 @@ func ControlDig() { dig_count = 1; return(1); }
     // C4MainMenu.cpp:577).
     #[test]
     fn escape_in_submenu_returns_to_main_menu() {
-        lc_core::logging::init();
+        lc_logging::init();
         let mut app = new_running_sandbox_app();
         app.open_ingame_menu().expect("open player menu directly");
         app.apply_ingame_menu_action(MenuAction::ActivateOptions)
@@ -143235,7 +143235,7 @@ func ControlDig() { dig_count = 1; return(1); }
     // the surrendered player counts as inactive for the game-over check).
     #[test]
     fn surrender_from_menu_ends_local_round() {
-        lc_core::logging::init();
+        lc_logging::init();
         let mut app = new_running_sandbox_app();
         app.apply_ingame_menu_action(MenuAction::Surrender)
             .expect("surrender");
@@ -144420,7 +144420,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn quick_save_round_trips_state() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         reset_cached_app_paths();
         {
@@ -144507,7 +144507,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn quick_save_persists_across_sessions() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         reset_cached_app_paths();
 
@@ -145303,7 +145303,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn start_real_scenario_loads_from_disk() {
-        lc_core::logging::init();
+        lc_logging::init();
 
         let fixture = tempdir().unwrap();
         let user_dir = fixture.path().join("user-data");
@@ -145881,7 +145881,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn install_definition_resolver_handles_case_insensitive_paths() {
-        lc_core::logging::init();
+        lc_logging::init();
         let _env_lock = crate::tests::env_lock().lock();
         reset_cached_app_paths();
 
@@ -145959,7 +145959,7 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn load_install_definitions_discovers_mixed_case_objects_group() {
-        lc_core::logging::init();
+        lc_logging::init();
         reset_cached_app_paths();
 
         let install_dir = tempdir().unwrap();

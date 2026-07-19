@@ -18,11 +18,13 @@
 )]
 
 // lc-engine's former inline unit tests (lib.rs `mod tests`). Kept in their own
-// test binary (not folded into tests/it) so a test-only edit here recompiles
-// just this leaf crate — measured ~10s -> ~2s versus editing the inline module,
-// which dirtied lib.rs and cascaded through every downstream crate. The glob
-// re-export lets the module body keep its original `use super::*;`; the
-// submodule `pub use`s below cover items the glob (root-only) doesn't reach.
+// test-only package (not folded into tests/it) so this large harness can compile
+// at a lower optimization level while lc-engine remains fully optimized. A
+// test-only edit here also recompiles just this leaf crate — measured ~10s ->
+// ~2s versus editing the inline module, which dirtied lib.rs and cascaded
+// through every downstream crate. The glob re-export lets the module body keep
+// its original `use super::*;`; the submodule `pub use`s below cover items the
+// glob (root-only) doesn't reach.
 #[allow(unused_imports)]
 pub use lc_engine::*;
 #[allow(unused_imports)]
