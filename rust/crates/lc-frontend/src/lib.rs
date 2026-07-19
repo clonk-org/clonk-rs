@@ -3094,6 +3094,33 @@ impl GraphicsSystem {
         true
     }
 
+    /// Draw the missing-image construction fallback without allowing its
+    /// centered cursor cell to escape the originating split-screen viewport.
+    pub fn draw_construction_cursor_fallback(
+        &mut self,
+        viewport_clip: SurfaceRect,
+        screen: GuiPoint,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let previous_clip = self.surface.clip();
+        let clip = previous_clip
+            .and_then(|clip| clip.intersection(viewport_clip))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    SurfaceRect::new(0, 0, 0, 0)
+                } else {
+                    viewport_clip
+                }
+            });
+        self.surface.set_clip(clip);
+        let drawn = self.draw_mouse_cursor(MouseCursorPhase::Construct, screen, gamma);
+        match previous_clip {
+            Some(clip) => self.surface.set_clip(clip),
+            None => self.surface.clear_clip(),
+        }
+        drawn
+    }
+
     /// Returns the selected construction cursor cell's centered native
     /// hotspot. The offset is in source pixels and is applied before the
     /// inverse presentation transform, just like C4MouseControl's `iOffset`.
@@ -3122,6 +3149,7 @@ impl GraphicsSystem {
     /// scaling (src/C4MouseControl.cpp:366-403).
     pub fn draw_construction_add_marker(
         &mut self,
+        viewport_clip: SurfaceRect,
         screen: GuiPoint,
         primary_offset: GuiPoint,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -3154,6 +3182,17 @@ impl GraphicsSystem {
             ),
             GuiSize::new(cell as f32 * inverse_scale, cell as f32 * inverse_scale),
         );
+        let previous_clip = self.surface.clip();
+        let clip = previous_clip
+            .and_then(|clip| clip.intersection(viewport_clip))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    SurfaceRect::new(0, 0, 0, 0)
+                } else {
+                    viewport_clip
+                }
+            });
+        self.surface.set_clip(clip);
         draw_image_region(
             &mut self.surface,
             &destination,
@@ -3166,6 +3205,10 @@ impl GraphicsSystem {
             gamma,
             None,
         );
+        match previous_clip {
+            Some(clip) => self.surface.set_clip(clip),
+            None => self.surface.clear_clip(),
+        }
         true
     }
 
@@ -3175,6 +3218,7 @@ impl GraphicsSystem {
     pub fn draw_construction_drag_preview(
         &mut self,
         image: &ImageData,
+        viewport_clip: SurfaceRect,
         bottom_center: GuiPoint,
         valid: bool,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -3199,6 +3243,17 @@ impl GraphicsSystem {
             ),
             GuiSize::new(width as f32, height as f32),
         );
+        let previous_clip = self.surface.clip();
+        let clip = previous_clip
+            .and_then(|clip| clip.intersection(viewport_clip))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    SurfaceRect::new(0, 0, 0, 0)
+                } else {
+                    viewport_clip
+                }
+            });
+        self.surface.set_clip(clip);
         draw_image_region(
             &mut self.surface,
             &destination,
@@ -3219,6 +3274,10 @@ impl GraphicsSystem {
             gamma,
             None,
         );
+        match previous_clip {
+            Some(clip) => self.surface.set_clip(clip),
+            None => self.surface.clear_clip(),
+        }
         true
     }
 
@@ -19377,7 +19436,12 @@ mod tests {
             .construction_cursor_primary_offset()
             .expect("selected Construct cell");
         assert_eq!(cursor_offset, GuiPoint::new(2.0, 2.0));
-        assert!(graphics.draw_construction_add_marker(screen, cursor_offset, None));
+        assert!(graphics.draw_construction_add_marker(
+            SurfaceRect::new(0, 0, 24, 24),
+            screen,
+            cursor_offset,
+            None,
+        ));
         assert_eq!(
             marker_points(&graphics),
             vec![(13, 13), (14, 13), (13, 14), (14, 14)],
@@ -19386,12 +19450,30 @@ mod tests {
 
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         let drag_image_offset = GuiPoint::new(4.0, 6.0); // 8x6 drag image
-        assert!(graphics.draw_construction_add_marker(screen, drag_image_offset, None));
+        assert!(graphics.draw_construction_add_marker(
+            SurfaceRect::new(13, 11, 1, 2),
+            screen,
+            drag_image_offset,
+            None,
+        ));
         assert_eq!(
             marker_points(&graphics),
-            vec![(12, 11), (13, 11), (12, 12), (13, 12)],
-            "(cursor*2 - (DragImage.Wdt/2, DragImage.Hgt) + 8px) / 2",
+            vec![(13, 11), (13, 12)],
+            "the marker keeps its native offset but stays inside the viewport clip",
         );
+
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        let fallback = Color::opaque(32, 72, 200);
+        assert!(graphics.draw_construction_cursor_fallback(
+            SurfaceRect::new(10, 9, 1, 2),
+            screen,
+            None,
+        ));
+        let fallback_points = (0..24)
+            .flat_map(|y| (0..24).map(move |x| (x, y)))
+            .filter(|&(x, y)| graphics.surface().get_pixel(x, y) == Some(fallback))
+            .collect::<Vec<_>>();
+        assert_eq!(fallback_points, vec![(10, 9), (10, 10)]);
     }
 
     #[test]
@@ -19411,6 +19493,7 @@ mod tests {
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         assert!(graphics.draw_construction_drag_preview(
             &image,
+            SurfaceRect::new(0, 0, 3, 2),
             GuiPoint::new(1.0, 1.0),
             true,
             None,
@@ -19424,6 +19507,7 @@ mod tests {
         graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         assert!(graphics.draw_construction_drag_preview(
             &image,
+            SurfaceRect::new(0, 0, 3, 2),
             GuiPoint::new(1.0, 1.0),
             false,
             None,
@@ -19455,18 +19539,20 @@ mod tests {
 
         assert!(graphics.draw_construction_drag_preview(
             &image,
+            SurfaceRect::new(1, 0, 1, 3),
             GuiPoint::new(1.0, 1.0),
             true,
             Some(&gamma),
         ));
 
         // Wdt/2 and Hgt place the 4x3 image at (-1,-2). Only its last row,
-        // columns 1..=3, remains on the logical surface; presentation scale
-        // does not alter this output-space UI primitive.
+        // columns 1..=3, remains on the logical surface, and the originating
+        // viewport clips that further to x=1. Presentation scale does not
+        // alter this output-space UI primitive.
         let modulated = gamma_encode_fragment(Color::opaque(1, 255, 1), &gamma);
         for y in 0..3 {
             for x in 0..4 {
-                let expected = if y == 0 && x < 3 {
+                let expected = if y == 0 && x == 1 {
                     modulated
                 } else {
                     background
@@ -19481,6 +19567,7 @@ mod tests {
 
         assert!(!graphics.draw_construction_drag_preview(
             &ImageData::new(0, 0, Vec::new()),
+            SurfaceRect::new(0, 0, 4, 3),
             GuiPoint::new(1.0, 1.0),
             true,
             None,

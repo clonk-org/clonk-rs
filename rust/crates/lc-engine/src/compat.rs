@@ -36138,11 +36138,6 @@ fn construction_check(
         return Ok(true);
     };
 
-    let landscape_width = landscape.width() as i32;
-    if rect_left < 0 || rect_right > landscape_width {
-        return Ok(false);
-    }
-
     // ConstructionCheck uses AreaSolidCount over the actual pixel plane;
     // column surface heights are not equivalent in caves or below a closed
     // roof (C4Landscape.cpp:1090-1098,2125-2158).
@@ -74303,6 +74298,50 @@ public func SeedFull()
             Some(["WOOD".to_owned()].as_slice())
         );
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_construction_uses_open_side_border_pixels_for_site_checks() {
+        let mut landscape = Landscape::flat(64, 50);
+        landscape.set_border_open(60, 0, true, false);
+        let definitions = HashMap::from([(
+            DefinitionId::from("WORK"),
+            DefinitionMetadata {
+                category: crate::CATEGORY_STRUCTURE,
+                constructable: true,
+                shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
+                ..DefinitionMetadata::default()
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let args = [
+            Value::C4Id("WORK".into()),
+            Value::Int(5),
+            Value::Int(50),
+            Value::Int(1),
+            Value::Int(50),
+            Value::Bool(false),
+            Value::Bool(true),
+        ];
+
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || create_construction(&args));
+
+        assert_eq!(
+            result.expect("open side permits the partial construction rectangle"),
+            object_reference_value(ObjectId::new(1))
+        );
+        assert_eq!(outcome.spawns.len(), 1);
+        assert_eq!(outcome.spawns[0].position, Vector2::new(5, 50));
     }
 
     #[test]

@@ -9644,6 +9644,7 @@ enum ConstructionMenuDrag {
         owner: i32,
         definition_id: String,
         definition_c4id: i32,
+        viewport_index: Option<usize>,
         pointer: Option<ViewportPointer>,
         site_valid: bool,
     },
@@ -30363,6 +30364,7 @@ impl GameApp {
                     owner,
                     definition_id,
                     definition_c4id,
+                    viewport_index: None,
                     pointer: None,
                     site_valid: false,
                 });
@@ -30392,10 +30394,10 @@ impl GameApp {
         // MouseControl::Execute repeats Move(VpX, VpY), so a stationary OS
         // cursor follows the viewport's current ViewX/ViewY instead of
         // retaining the world coordinate from the last platform event.
-        let pointer = match self
+        let retained_viewport = self
             .ingame_viewport_mouse
-            .filter(|retained| !retained.observer && retained.owner == owner)
-        {
+            .filter(|retained| !retained.observer && retained.owner == owner);
+        let pointer = match retained_viewport {
             Some(retained) => self
                 .graphics
                 .active_viewport_projections()
@@ -30416,15 +30418,18 @@ impl GameApp {
         self.ingame_pointer = pointer;
         let site_valid = pointer.is_some_and(|pointer| {
             let site = ingame_pointer_world_pixel(pointer);
-            self.engine.construction_site_visible(owner, site)
+            self.ingame_viewport_region(owner, pointer.screen).is_none()
+                && self.engine.construction_site_visible(owner, site)
                 && self.engine.construction_site_valid(&definition_id, site)
         });
         if let Some(ConstructionMenuDrag::Active {
+            viewport_index: stored_viewport_index,
             pointer: stored_pointer,
             site_valid: stored_valid,
             ..
         }) = self.construction_menu_drag.as_mut()
         {
+            *stored_viewport_index = pointer.and(retained_viewport.map(|mouse| mouse.viewport_index));
             *stored_pointer = pointer;
             *stored_valid = site_valid;
         }
@@ -30444,7 +30449,9 @@ impl GameApp {
         else {
             return Ok(false);
         };
-        if site_valid
+        if self.mouse_control
+            && self.local_controls.mouse_owner() == Some(owner)
+            && site_valid
             && self.engine.player(owner).is_some()
             && !self.engine.is_owner_eliminated(owner)
         {
@@ -30599,11 +30606,11 @@ impl GameApp {
             // A fallible script-menu region lookup must never leave a prior
             // border direction armed after this new pointer position.
             self.ingame_edge_scroll = None;
-            let target_region = !self.ingame_construction_drag_active()
-                && (self
-                    .ingame_viewport_region(pointer.owner, pointer.screen)
-                    .is_some()
-                    || self
+            let target_region = self
+                .ingame_viewport_region(pointer.owner, pointer.screen)
+                .is_some()
+                || (!self.ingame_construction_drag_active()
+                    && self
                         .script_menu_pointer_target_for_owner(pointer.owner, point)?
                         .is_some());
             self.ingame_edge_scroll = if target_region {
@@ -30692,7 +30699,8 @@ impl GameApp {
         {
             return Ok(None);
         }
-        if self.handle_runtime_client_list_pointer_move(gui_point) {
+        let construction_drag_active = self.ingame_construction_drag_active();
+        if !construction_drag_active && self.handle_runtime_client_list_pointer_move(gui_point) {
             return Ok(None);
         }
 
@@ -30740,16 +30748,17 @@ impl GameApp {
         else {
             return Ok(None);
         };
-        let target_region = !self.ingame_construction_drag_active()
+        let gui_target = !construction_drag_active
             && (self.scoreboard_close_pointer_capture
                 || self.scoreboard_pointer_target(gui_point)?.is_some()
                 || self.ingame_menu_pointer_target(gui_point).is_some()
                 || self
-                    .ingame_viewport_region(viewport.owner, screen)
-                    .is_some()
-                || self
                     .script_menu_pointer_target_for_owner(viewport.owner, gui_point)?
                     .is_some());
+        let target_region = gui_target
+            || self
+                .ingame_viewport_region(viewport.owner, screen)
+                .is_some();
         if target_region {
             return Ok(None);
         }
@@ -47756,47 +47765,73 @@ impl GameApp {
             .and_then(|drag| match drag {
                 ConstructionMenuDrag::Active {
                     definition_id,
+                    viewport_index: Some(viewport_index),
                     pointer: Some(pointer),
                     site_valid,
                     ..
-                } => Some((definition_id, *pointer, *site_valid)),
+                } => Some((definition_id, *viewport_index, *pointer, *site_valid)),
                 _ => None,
             });
-        let construction_preview =
-            construction_cursor.and_then(|(definition_id, pointer, site_valid)| {
+        let construction_preview = construction_cursor.and_then(
+            |(definition_id, viewport_index, pointer, site_valid)| {
                 self.engine
                     .definition_construction_drag_image(definition_id)
-                    .map(|image| (definition_menu_picture(image), pointer, site_valid))
+                    .map(|image| {
+                        (
+                            definition_menu_picture(image),
+                            viewport_index,
+                            pointer,
+                            site_valid,
+                        )
+                    })
+            },
+        );
+        let construction_viewport_clip =
+            construction_cursor.and_then(|(_, viewport_index, _, _)| {
+                self.graphics
+                    .active_viewport_projections()
+                    .into_iter()
+                    .find(|viewport| viewport.index == viewport_index)
+                    .map(|viewport| viewport.rect)
             });
         let construction_primary_offset = construction_preview
             .as_ref()
-            .map(|(image, _, _)| {
+            .map(|(image, _, _, _)| {
                 GuiPoint::new((image.width() / 2) as f32, image.height() as f32)
             })
             .or_else(|| self.graphics.construction_cursor_primary_offset());
-        let construction_cursor_drawn = if let Some((image, pointer, valid)) =
-            construction_preview.as_ref()
-        {
-            self.graphics.draw_construction_drag_preview(
-                image,
-                pointer.screen,
-                *valid,
-                Some(&frame_gamma),
-            )
-        } else {
-            construction_cursor.is_some_and(|(_, pointer, _)| {
-                self.graphics.draw_mouse_cursor(
-                    lc_frontend::MouseCursorPhase::Construct,
+        let construction_cursor_drawn = match (
+            construction_preview.as_ref(),
+            construction_viewport_clip,
+        ) {
+            (Some((image, _, pointer, valid)), Some(viewport_clip)) => {
+                self.graphics.draw_construction_drag_preview(
+                    image,
+                    viewport_clip,
                     pointer.screen,
+                    *valid,
                     Some(&frame_gamma),
                 )
-            })
+            }
+            (None, Some(viewport_clip)) =>
+                construction_cursor.is_some_and(|(_, _, pointer, _)| {
+                    self.graphics.draw_construction_cursor_fallback(
+                        viewport_clip,
+                        pointer.screen,
+                        Some(&frame_gamma),
+                    )
+                }),
+            _ => false,
         };
         if construction_cursor_drawn && self.mouse_control && self.keyboard_modifiers.shift() {
-            if let (Some((_, pointer, _)), Some(primary_offset)) =
-                (construction_cursor, construction_primary_offset)
+            if let (Some((_, _, pointer, _)), Some(primary_offset), Some(viewport_clip)) = (
+                construction_cursor,
+                construction_primary_offset,
+                construction_viewport_clip,
+            )
             {
                 self.graphics.draw_construction_add_marker(
+                    viewport_clip,
                     pointer.screen,
                     primary_offset,
                     Some(&frame_gamma),
@@ -115600,6 +115635,13 @@ protected func InputCallback(string answer, int player)
         let retained = app
             .ingame_viewport_mouse
             .expect("construction drag retains native VpX/VpY");
+        assert!(matches!(
+            app.construction_menu_drag.as_ref(),
+            Some(ConstructionMenuDrag::Active {
+                viewport_index: Some(index),
+                ..
+            }) if *index == retained.viewport_index
+        ));
 
         app.engine
             .player_mut(owner)
@@ -115699,6 +115741,88 @@ protected func InputCallback(string answer, int player)
         assert!(commands.is_empty());
         assert!(selections.is_empty());
         assert!(app.construction_menu_drag.is_none());
+    }
+
+    #[test]
+    fn construction_drop_requires_the_original_live_mouse_assignment() {
+        for remove_assignment in [false, true] {
+            let (mut app, owner, menu_point, valid_point, _invalid, _world, _c4id) =
+                construction_drag_fixture();
+            let (manager, _events, mut network_commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(7);
+            app.network = Some(manager);
+            begin_construction_drag(&mut app, menu_point, valid_point);
+
+            if remove_assignment {
+                app.local_controls.remove(owner);
+                assert_eq!(app.local_controls.mouse_owner(), None);
+            } else {
+                app.mouse_control = false;
+            }
+            app.handle_mouse_button(ElementState::Released)
+                .expect("release cached-valid construction drag");
+
+            let (controls, commands, selections) =
+                network_commands.take_submitted_player_inputs();
+            assert!(controls.is_empty());
+            assert!(commands.is_empty());
+            assert!(selections.is_empty());
+            assert!(app.construction_menu_drag.is_none());
+        }
+    }
+
+    #[test]
+    fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
+        let (mut app, owner, menu_point, _valid, _invalid, _world, _c4id) =
+            construction_drag_fixture();
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let mut item =
+            Definition::from_script("B33I", "HUD item", "#strict\n").expect("item compiles");
+        item.set_category(lc_engine::CATEGORY_OBJECT);
+        item.set_collectible(true);
+        app.engine.register_definition(item).expect("item registers");
+        let carried = app
+            .engine
+            .spawn_object(SpawnConfig::new("B33I").with_container(cursor))
+            .expect("inventory item spawns");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render inventory HUD region");
+
+        let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
+        let hud_point = GuiPoint::new(
+            (viewport.x + lc_frontend::hud::SYMBOL_BORDER + lc_frontend::hud::SYMBOL_SIZE / 2)
+                as f32,
+            (viewport.y + viewport.height as i32
+                - lc_frontend::hud::SYMBOL_BORDER
+                - lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
+        );
+        assert_eq!(
+            app.ingame_viewport_region(owner, hud_point),
+            Some(IngameViewportRegion::Inventory(carried))
+        );
+        let world = app
+            .graphics
+            .viewport_output_point_at(hud_point)
+            .map(ingame_pointer_world_pixel)
+            .expect("HUD output retains a world point");
+        let mut landscape = Landscape::flat(480, world.y);
+        landscape.set_world_height(world.y.saturating_add(40));
+        app.engine.set_landscape(landscape);
+        assert!(
+            app.engine.construction_site_valid("BLD1", world),
+            "terrain behind the HUD is otherwise a valid construction site"
+        );
+
+        begin_construction_drag(&mut app, menu_point, hud_point);
+        assert!(matches!(
+            app.construction_menu_drag.as_ref(),
+            Some(ConstructionMenuDrag::Active {
+                pointer: Some(_),
+                site_valid: false,
+                ..
+            })
+        ));
     }
 
     #[test]
