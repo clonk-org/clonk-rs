@@ -552,6 +552,14 @@ impl AboutDlgState {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<AboutDlgAction> {
+        self.handle_key_down_with_tab_direction(key, false)
+    }
+
+    pub fn handle_key_down_with_tab_direction(
+        &mut self,
+        key: KeyCode,
+        backwards: bool,
+    ) -> Vec<AboutDlgAction> {
         match key {
             // Unlike the Back button, both dialog overrides leave directly,
             // including from the license page (C4StartupAboutDlg.h:36-39).
@@ -561,7 +569,7 @@ impl AboutDlgState {
             }
             KeyCode::Tab => {
                 self.pressed = None;
-                self.advance_focus();
+                self.advance_focus(backwards);
                 Vec::new()
             }
             KeyCode::Up | KeyCode::Down
@@ -691,25 +699,34 @@ impl AboutDlgState {
         }
     }
 
-    fn advance_focus(&mut self) {
-        let mut visible: Vec<_> = AboutButton::ALL
-            .iter()
-            .copied()
-            .filter(|button| self.is_visible(*button))
-            .map(AboutFocus::Button)
-            .collect();
-        if self.page == AboutPage::Licenses {
-            visible.push(AboutFocus::LicenseTabs);
-        }
-        if visible.is_empty() {
-            self.focused = None;
-            return;
-        }
-        self.focused = self
+    fn advance_focus(&mut self, backwards: bool) {
+        const ORDER: [AboutFocus; 4] = [
+            AboutFocus::Button(AboutButton::Back),
+            AboutFocus::Button(AboutButton::Update),
+            AboutFocus::Button(AboutButton::Licenses),
+            AboutFocus::LicenseTabs,
+        ];
+        let current = self
             .focused
-            .and_then(|focused| visible.iter().position(|candidate| *candidate == focused))
-            .map(|index| visible[(index + 1) % visible.len()])
-            .or_else(|| visible.first().copied());
+            .and_then(|focused| ORDER.iter().position(|candidate| *candidate == focused));
+        for offset in 0..ORDER.len() {
+            let index = match (current, backwards) {
+                (Some(index), false) => (index + 1 + offset) % ORDER.len(),
+                (Some(index), true) => (index + ORDER.len() - 1 - offset) % ORDER.len(),
+                (None, false) => offset,
+                (None, true) => ORDER.len() - 1 - offset,
+            };
+            let candidate = ORDER[index];
+            let visible = match candidate {
+                AboutFocus::Button(button) => self.is_visible(button),
+                AboutFocus::LicenseTabs => self.page == AboutPage::Licenses,
+            };
+            if visible {
+                self.focused = Some(candidate);
+                return;
+            }
+        }
+        self.focused = None;
     }
 
     fn hit_test_button(&self, point: GuiPoint) -> Option<AboutButton> {
@@ -1702,6 +1719,54 @@ mod tests {
             vec![AboutDlgAction::PageChanged(AboutPage::Licenses)]
         );
         assert_eq!(state.handle_key_down(crate::KeyCode::Escape), vec![AboutDlgAction::Back]);
+    }
+
+    #[test]
+    fn shift_tab_reverses_visible_focus_order_across_about_pages() {
+        let mut state = AboutDlgState::default();
+        assert!(state
+            .handle_key_down_with_tab_direction(crate::KeyCode::Tab, true)
+            .is_empty());
+        assert_eq!(
+            state.focused,
+            Some(AboutFocus::Button(AboutButton::Licenses))
+        );
+        assert!(state
+            .handle_key_down_with_tab_direction(crate::KeyCode::Tab, true)
+            .is_empty());
+        assert_eq!(state.focused, Some(AboutFocus::Button(AboutButton::Update)));
+        assert!(state
+            .handle_key_down_with_tab_direction(crate::KeyCode::Tab, true)
+            .is_empty());
+        assert_eq!(state.focused, Some(AboutFocus::Button(AboutButton::Back)));
+        assert!(state
+            .handle_key_down_with_tab_direction(crate::KeyCode::Tab, true)
+            .is_empty());
+        assert_eq!(
+            state.focused,
+            Some(AboutFocus::Button(AboutButton::Licenses))
+        );
+
+        assert!(state.handle_key_down(crate::KeyCode::Space).is_empty());
+        assert_eq!(
+            state.handle_key_up(crate::KeyCode::Space),
+            vec![AboutDlgAction::PageChanged(AboutPage::Licenses)]
+        );
+        assert_eq!(state.current_page(), AboutPage::Licenses);
+        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty());
+        assert_eq!(state.focused, Some(AboutFocus::LicenseTabs));
+        assert!(state
+            .handle_key_down_with_tab_direction(crate::KeyCode::Tab, true)
+            .is_empty());
+        assert_eq!(state.focused, Some(AboutFocus::Button(AboutButton::Update)));
+        assert!(state
+            .handle_key_down_with_tab_direction(crate::KeyCode::Tab, true)
+            .is_empty());
+        assert_eq!(state.focused, Some(AboutFocus::Button(AboutButton::Back)));
+        assert!(state
+            .handle_key_down_with_tab_direction(crate::KeyCode::Tab, true)
+            .is_empty());
+        assert_eq!(state.focused, Some(AboutFocus::LicenseTabs));
     }
 
     // Renders the dialog at 1280x720 and dumps a PPM for the manual diff

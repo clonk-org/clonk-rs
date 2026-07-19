@@ -1553,6 +1553,14 @@ impl PlrSelController {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<PlrSelAction> {
+        self.handle_key_down_with_tab_direction(key, false)
+    }
+
+    pub fn handle_key_down_with_tab_direction(
+        &mut self,
+        key: KeyCode,
+        backwards: bool,
+    ) -> Vec<PlrSelAction> {
         match key {
             // StartupPlrSelBack binds Back, Left and Escape at override
             // priority (C4StartupPlrSelDlg.cpp:596-605).
@@ -1563,7 +1571,7 @@ impl PlrSelController {
                     vec![PlrSelAction::Back]
                 }
             }
-            KeyCode::Tab => self.advance_focus(),
+            KeyCode::Tab => self.move_focus(backwards),
             KeyCode::Up if self.focus == PlrSelControl::PlayerList => self.move_selection(-1),
             KeyCode::Down if self.focus == PlrSelControl::PlayerList => self.move_selection(1),
             KeyCode::Right if !self.is_crew_mode() => self
@@ -1661,10 +1669,6 @@ impl PlrSelController {
         let layout = self.layout();
         let index = self.list_item_at(point)?;
         (point.x < (layout.list_client.x + layout.item_height) as f32).then_some(index)
-    }
-
-    fn advance_focus(&mut self) -> Vec<PlrSelAction> {
-        self.move_focus(false)
     }
 
     pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<PlrSelAction> {
@@ -3546,6 +3550,30 @@ mod tests {
         assert_eq!(
             controller.handle_gamepad_horizontal(false),
             vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
+    }
+
+    #[test]
+    fn shift_tab_reverses_player_and_crew_focus_order() {
+        let mut controller = PlrSelController::new(1);
+        assert_eq!(
+            controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Crew)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::PlayerList)]
+        );
+
+        assert!(controller.enter_crew_mode(0, "Ada", vec![true]));
+        assert_eq!(controller.focused_control(), PlrSelControl::PlayerList);
+        assert_eq!(
+            controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Rename)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::PlayerList)]
         );
     }
 

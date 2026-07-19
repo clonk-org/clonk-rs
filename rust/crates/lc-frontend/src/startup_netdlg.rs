@@ -886,6 +886,14 @@ impl NetDlgController {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<NetDlgAction> {
+        self.handle_key_down_with_tab_direction(key, false)
+    }
+
+    pub fn handle_key_down_with_tab_direction(
+        &mut self,
+        key: KeyCode,
+        backwards: bool,
+    ) -> Vec<NetDlgAction> {
         match key {
             KeyCode::Escape => vec![NetDlgAction::Back],
             // StartupNetBack binds Left, but an edit/chat input consumes it
@@ -898,7 +906,7 @@ impl NetDlgController {
             {
                 vec![NetDlgAction::Back]
             }
-            KeyCode::Tab => self.advance_focus(),
+            KeyCode::Tab => self.move_focus(backwards),
             KeyCode::Up if self.focus == NetDlgControl::GameList => {
                 self.move_game_selection(false);
                 Vec::new()
@@ -971,10 +979,6 @@ impl NetDlgController {
         buttons
             .into_iter()
             .find_map(|(control, rect)| contains(rect, point).then_some(control))
-    }
-
-    fn advance_focus(&mut self) -> Vec<NetDlgAction> {
-        self.move_focus(false)
     }
 
     pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<NetDlgAction> {
@@ -2148,6 +2152,37 @@ mod tests {
         assert!(hidden_join_focus
             .handle_key_up(crate::KeyCode::Space)
             .is_empty());
+    }
+
+    #[test]
+    fn shift_tab_reverses_game_list_focus_order() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        assert_eq!(controller.focused_control(), NetDlgControl::GameList);
+        assert_eq!(
+            controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::ChatButton)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::GameList)]
+        );
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::Internet)]
+        );
+        assert_eq!(
+            controller.handle_key_down_with_tab_direction(crate::KeyCode::Tab, true),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::Internet)]
+        );
     }
 
     #[test]

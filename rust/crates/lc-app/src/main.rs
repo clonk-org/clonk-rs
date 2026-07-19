@@ -21358,6 +21358,70 @@ impl GameApp {
         Ok(true)
     }
 
+    fn handle_startup_tab_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || key != VirtualKeyCode::Tab
+            || !matches!(
+                self.startup_view,
+                StartupView::NetworkGame | StartupView::PlayerSelection | StartupView::About
+            )
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let backwards = if modifiers.is_empty() {
+            false
+        } else if modifiers == ModifiersState::SHIFT {
+            true
+        } else {
+            // C4GUI binds only exact Tab and Shift+Tab. Consume every other
+            // modified Tab before the modifier-blind KeyCode mapping.
+            return Ok(true);
+        };
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        match self.startup_view {
+            StartupView::NetworkGame => {
+                let actions = self
+                    .startup_network_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.handle_key_down_with_tab_direction(KeyCode::Tab, backwards)
+                    })
+                    .unwrap_or_default();
+                self.process_network_dialog_actions(actions)?;
+            }
+            StartupView::PlayerSelection => {
+                let actions = self
+                    .startup_player_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.handle_key_down_with_tab_direction(KeyCode::Tab, backwards)
+                    })
+                    .unwrap_or_default();
+                self.process_player_dialog_actions(actions)?;
+            }
+            StartupView::About => {
+                let actions = self
+                    .startup_about_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.handle_key_down_with_tab_direction(KeyCode::Tab, backwards)
+                    })
+                    .unwrap_or_default();
+                self.process_about_dialog_actions(actions)?;
+            }
+            _ => unreachable!("startup Tab view checked above"),
+        }
+        Ok(true)
+    }
+
     fn options_modified_gui_key_is_inert(&self, key: VirtualKeyCode) -> bool {
         if self.mode != AppMode::Menu
             || self.startup_view != StartupView::Options
@@ -23379,6 +23443,9 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_options_tab_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_startup_tab_key(key, state)? {
             return Ok(());
         }
         if self.options_modified_gui_key_is_inert(key) {
@@ -79301,6 +79368,208 @@ public func Grant(password) { return GainMissionAccess(password); }
             assert!(app.message_dialogs.is_empty());
             assert_eq!(app.startup_view, StartupView::About);
         }
+    }
+
+    #[test]
+    fn l034_network_tab_and_shift_tab_are_inverse_and_wrap() {
+        use lc_frontend::startup_netdlg::{
+            NetDlgConfig, NetDlgControl, NetDlgController, NetDlgFontMetrics,
+        };
+
+        let mut app = new_classic_menu_app(640, 480);
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let mut dialog = NetDlgController::new(
+            NetDlgConfig::default(),
+            NetDlgFontMetrics::from_fonts(fonts),
+        );
+        dialog.resize(640, 480);
+        app.startup_network_dialog = Some(dialog);
+        app.replace_startup_view(StartupView::NetworkGame);
+
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("plain Tab advances network focus");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release plain Tab");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .focused_control(),
+            NetDlgControl::JoinAddress
+        );
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab reverses network focus");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release Shift+Tab");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .focused_control(),
+            NetDlgControl::GameList
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab wraps network focus");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release wrapped Shift+Tab");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .focused_control(),
+            NetDlgControl::ChatButton
+        );
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("plain Tab wraps forward");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release wrapped plain Tab");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .focused_control(),
+            NetDlgControl::GameList
+        );
+
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold unsupported Tab modifier");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Ctrl+Tab is inert in the network dialog");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release inert Ctrl+Tab");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("network dialog")
+                .focused_control(),
+            NetDlgControl::GameList
+        );
+    }
+
+    #[test]
+    fn l034_player_shift_tab_wraps_and_continues_backwards() {
+        use lc_frontend::startup_plrsel::{PlrSelControl, PlrSelController};
+
+        let mut app = new_classic_menu_app(640, 480);
+        let mut dialog = PlrSelController::new(1);
+        dialog.resize(640, 480);
+        app.startup_player_dialog = Some(dialog);
+        app.replace_startup_view(StartupView::PlayerSelection);
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab wraps player focus");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release wrapped Shift+Tab");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::Crew
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("second Shift+Tab continues backwards");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release second Shift+Tab");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::Properties
+        );
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("plain Tab keeps the established forward order");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release plain Tab");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::Crew
+        );
+    }
+
+    #[test]
+    fn l034_about_shift_tab_reverses_buttons_and_license_tabs() {
+        use lc_frontend::startup_about_dlg::AboutPage;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_about_dialog();
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab focuses the last About control");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release Shift+Tab");
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("press focused Licenses button");
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("open Licenses page");
+        assert_eq!(
+            app.startup_about_dialog
+                .as_ref()
+                .expect("About dialog")
+                .current_page(),
+            AboutPage::Licenses
+        );
+
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("plain Tab advances from hidden Licenses to LicenseTabs");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release plain Tab");
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift on Licenses page");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab reverses from LicenseTabs to Update");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release Licenses Shift+Tab");
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press focused Update button");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("activate focused Update button");
+        assert_eq!(app.message_dialogs.len(), 1);
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss update hand-off");
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift after Update");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab reverses from Update to Back");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release final Shift+Tab");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press focused Back button");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("return from Licenses to Credits");
+        assert_eq!(
+            app.startup_about_dialog
+                .as_ref()
+                .expect("About dialog")
+                .current_page(),
+            AboutPage::Credits
+        );
+        assert_eq!(app.startup_view, StartupView::About);
     }
 
     #[test]
