@@ -7,7 +7,7 @@
 //! widgets it instantiates. All geometry uses C++ integer math; all blits go
 //! through the CStdDDraw-faithful helpers in this crate.
 
-use crate::clonk_fonts::ClonkFontSet;
+use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use anyhow::{Context, Result};
@@ -1672,6 +1672,52 @@ impl PlrSelController {
             }
         }
         Vec::new()
+    }
+
+    /// Dispatches a caption mnemonic through the currently visible bottom
+    /// buttons. The bundled C++ LanguageUS captions contain no `&` markers
+    /// here, so the current controller returns `None` for every
+    /// alphanumeric key instead of inventing first-letter shortcuts.
+    pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<PlrSelAction>> {
+        let character = character.to_ascii_uppercase();
+        if !character.is_ascii_alphanumeric() {
+            return None;
+        }
+        let activated = self.selected.and_then(|index| {
+            if self.is_crew_mode() {
+                self.crew_participations.get(index).copied()
+            } else {
+                self.player_activations.get(index).copied()
+            }
+        });
+        let activate_label = if activated == Some(true) {
+            "Deactivate"
+        } else {
+            "Activate"
+        };
+        let player_buttons = [
+            (PlrSelControl::Back, "Back"),
+            (PlrSelControl::NewPlayer, "New"),
+            (PlrSelControl::Activate, activate_label),
+            (PlrSelControl::Delete, "Delete"),
+            (PlrSelControl::Properties, "Properties"),
+            (PlrSelControl::Crew, "Crew"),
+        ];
+        let crew_buttons = [
+            (PlrSelControl::Back, "Back"),
+            (PlrSelControl::Activate, activate_label),
+            (PlrSelControl::Delete, "Delete"),
+            (PlrSelControl::Rename, "Rename"),
+        ];
+        let buttons: &[(PlrSelControl, &str)] = if self.is_crew_mode() {
+            &crew_buttons
+        } else {
+            &player_buttons
+        };
+        buttons
+            .iter()
+            .find(|(_, label)| expand_hotkey_markup(label).1 == Some(character))
+            .map(|(control, _)| self.activate(*control))
     }
 
     pub fn handle_key_down_with_tab_direction(
@@ -3475,6 +3521,25 @@ mod tests {
             click(&mut controller, layout.buttons[5]),
             vec![PlrSelAction::ShowCrew(1)]
         );
+    }
+
+    #[test]
+    fn l046_player_buttons_do_not_invent_absent_cpp_mnemonics() {
+        let mut controller = PlrSelController::new(1);
+        for character in ['N', 'A', 'D', 'P', 'C'] {
+            assert_eq!(
+                controller.handle_hotkey(character),
+                None,
+                "LanguageUS has no '&' marker for {character}"
+            );
+        }
+        controller.set_player_activations(vec![true]);
+        assert_eq!(
+            controller.handle_hotkey('A'),
+            None,
+            "Deactivate is unmarked too"
+        );
+        assert_eq!(controller.handle_hotkey('-'), None);
     }
 
     // ListBox uses half-open item rects and one-pixel row spacing. Clicking

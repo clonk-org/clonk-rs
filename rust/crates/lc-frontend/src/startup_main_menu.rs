@@ -425,6 +425,25 @@ impl StartupMainMenu {
         }
     }
 
+    /// Dispatches a dialog mnemonic through the visible button order.
+    ///
+    /// C++ expands each button caption's first `&` marker when the text is
+    /// assigned, then `Container::OnHotkey` visits the buttons in insertion
+    /// order and skips disabled matches (`C4GuiContainers.cpp:194-202`,
+    /// `C4GuiButton.cpp:55-78`). `Some` means the key was consumed.
+    pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<MainMenuAction>> {
+        let character = character.to_ascii_uppercase();
+        if !character.is_ascii_alphanumeric() {
+            return None;
+        }
+        self.buttons
+            .iter()
+            .find(|button| {
+                button.enabled && expand_hotkey_markup(button.label).1 == Some(character)
+            })
+            .map(|button| vec![MainMenuAction::Activate(button.item)])
+    }
+
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
         self.pointer_position = Some(position);
         // The mouse only hovers; it does not move the keyboard focus
@@ -1200,6 +1219,32 @@ mod tests {
         assert!(menu.handle_key_down(KeyCode::Enter).is_empty());
         menu.pointer_left();
         assert!(menu.handle_key_up(KeyCode::Enter).is_empty());
+    }
+
+    #[test]
+    fn l046_main_menu_mnemonics_follow_caption_markers_and_enabled_state() {
+        let cases = [
+            ('S', MainMenuItem::LocalGame),
+            ('N', MainMenuItem::NetworkGame),
+            ('P', MainMenuItem::PlayerSelection),
+            ('O', MainMenuItem::Options),
+            ('A', MainMenuItem::About),
+            ('X', MainMenuItem::Quit),
+        ];
+        for (character, item) in cases {
+            let mut menu = main_menu();
+            assert_eq!(
+                menu.handle_hotkey(character.to_ascii_lowercase()),
+                Some(vec![MainMenuAction::Activate(item)]),
+                "{character} must dispatch the marked caption"
+            );
+        }
+
+        let mut menu = main_menu();
+        menu.set_item_enabled(MainMenuItem::LocalGame, false);
+        assert_eq!(menu.handle_hotkey('S'), None);
+        assert_eq!(menu.handle_hotkey('-'), None);
+        assert_eq!(menu.handle_hotkey('Q'), None);
     }
 
     #[test]

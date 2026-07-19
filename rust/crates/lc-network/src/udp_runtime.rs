@@ -1145,6 +1145,21 @@ mod tests {
         SocketAddr::new(Ipv4Addr::new(192, 0, 2, last).into(), port)
     }
 
+    async fn next_driver_events(
+        driver: &mut ReliableUdpSocketDriver,
+    ) -> Vec<ReliableUdpEvent> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = driver.poll().await.unwrap();
+                if !events.is_empty() {
+                    return events;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     #[test]
     fn puncher_routes_keep_ipv4_and_ipv6_slots_independent() {
         let ipv4 = ReliableUdpPuncherRoute {
@@ -1993,19 +2008,6 @@ mod tests {
 
     #[tokio::test]
     async fn dual_stack_socket_driver_uses_mapped_ipv4_and_delivers_one_packet() {
-        async fn next_events(driver: &mut ReliableUdpSocketDriver) -> Vec<ReliableUdpEvent> {
-            tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let events = driver.poll().await.unwrap();
-                    if !events.is_empty() {
-                        return events;
-                    }
-                }
-            })
-            .await
-            .unwrap()
-        }
-
         let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
         let mut a = ReliableUdpSocketDriver::bind(wildcard).unwrap();
         let mut b = ReliableUdpSocketDriver::bind(wildcard).unwrap();
@@ -2015,11 +2017,11 @@ mod tests {
         assert!(a.connect(b_address).await.unwrap().is_empty());
         assert!(b.poll().await.unwrap().is_empty());
         assert!(matches!(
-            next_events(&mut a).await.as_slice(),
+            next_driver_events(&mut a).await.as_slice(),
             [ReliableUdpEvent::Connected { .. }]
         ));
         assert!(matches!(
-            next_events(&mut b).await.as_slice(),
+            next_driver_events(&mut b).await.as_slice(),
             [ReliableUdpEvent::Connected { .. }]
         ));
 
@@ -2027,7 +2029,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            next_events(&mut b).await.as_slice(),
+            next_driver_events(&mut b).await.as_slice(),
             [ReliableUdpEvent::Packet { payload, .. }] if payload == b"hello over reliable udp"
         ));
         assert_eq!(
@@ -2049,7 +2051,7 @@ mod tests {
         assert_eq!(a.core().peer_status(b_address), None);
         assert!(a.close_peer(b_address).await.unwrap().is_empty());
         assert_eq!(
-            next_events(&mut b).await,
+            next_driver_events(&mut b).await,
             vec![ReliableUdpEvent::Disconnected {
                 peer: a_address,
                 reason: ReliableUdpDisconnectReason::ClosedByPeer,
@@ -2127,7 +2129,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            driver.poll().await.unwrap().as_slice(),
+            next_driver_events(&mut driver).await.as_slice(),
             [ReliableUdpEvent::Connected { peer, .. }] if *peer == spy_address
         ));
         let (connect_ok_length, _) =

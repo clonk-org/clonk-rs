@@ -9959,6 +9959,8 @@ struct GameApp {
     /// `None` means the process-startup Graphics.c4g bundle is active.
     active_game_graphics: Option<GameGraphicsResources>,
     audio: Option<AudioContext>,
+    #[cfg(test)]
+    ui_sound_log: Vec<String>,
     /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
     /// from persisted RXMusic while a game is running.
     runtime_music_enabled: bool,
@@ -19536,6 +19538,8 @@ impl GameApp {
             active_definition_load: None,
             active_game_graphics: None,
             audio,
+            #[cfg(test)]
+            ui_sound_log: Vec::new(),
             runtime_music_enabled: false,
             resume_frontend_music_after_fade: false,
             frontend_music_attempted_for_entry: false,
@@ -22113,6 +22117,75 @@ impl GameApp {
         Ok(true)
     }
 
+    fn handle_startup_hotkey(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.game_over_dialog.is_some()
+            || !matches!(
+                self.startup_view,
+                StartupView::MainMenu | StartupView::PlayerSelection | StartupView::About
+            )
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if modifiers != ModifiersState::ALT
+            && modifiers != (ModifiersState::ALT | ModifiersState::SHIFT)
+        {
+            return Ok(modifiers.alt() && map_key_code(key).is_some());
+        }
+        // Plain dialog bindings compare the same exact modifier mask, so an
+        // unmatched Alt key must not fall through to modifier-blind Rust
+        // navigation. Key-up has no C++ mnemonic callback either.
+        let suppress_plain_gui_key = map_key_code(key).is_some();
+        if state != ElementState::Pressed {
+            return Ok(suppress_plain_gui_key);
+        }
+        let Some(character) = startup_dialog_hotkey(key) else {
+            return Ok(suppress_plain_gui_key);
+        };
+        let captured = match self.startup_view {
+            StartupView::MainMenu => {
+                let Some(actions) = self.main_menu_state.menu.handle_hotkey(character) else {
+                    return Ok(suppress_plain_gui_key);
+                };
+                // Button::OnHotkey calls OnPress directly, bypassing the
+                // SetDown/SetUp sounds used by pointer and focus activation.
+                self.process_main_menu_actions_with_sound(actions, false)?;
+                true
+            }
+            StartupView::PlayerSelection => {
+                let Some(actions) = self
+                    .startup_player_dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_hotkey(character))
+                else {
+                    return Ok(suppress_plain_gui_key);
+                };
+                self.process_player_dialog_actions(actions)?;
+                true
+            }
+            StartupView::About => {
+                let Some(actions) = self
+                    .startup_about_dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.handle_hotkey(character))
+                else {
+                    return Ok(suppress_plain_gui_key);
+                };
+                // See the Button::OnHotkey sound rule above.
+                self.process_about_dialog_actions_with_sound(actions, false)?;
+                true
+            }
+            _ => unreachable!("startup mnemonic view checked above"),
+        };
+        Ok(captured || suppress_plain_gui_key)
+    }
+
     fn options_modified_gui_key_is_inert(&self, key: VirtualKeyCode) -> bool {
         if self.mode != AppMode::Menu
             || self.startup_view != StartupView::Options
@@ -24306,6 +24379,9 @@ impl GameApp {
         // Modal/context owners above the startup dialog remain active. Only
         // the fading base dialogs mirror Dialog::IsActive(false).
         if self.startup_dialog_fade_active() {
+            return Ok(());
+        }
+        if self.handle_startup_hotkey(key, state)? {
             return Ok(());
         }
         if self.handle_options_tab_key(key, state)? {
@@ -35329,6 +35405,14 @@ impl GameApp {
         &mut self,
         actions: Vec<MainMenuAction>,
     ) -> Result<(), EngineError> {
+        self.process_main_menu_actions_with_sound(actions, true)
+    }
+
+    fn process_main_menu_actions_with_sound(
+        &mut self,
+        actions: Vec<MainMenuAction>,
+        play_activation_sound: bool,
+    ) -> Result<(), EngineError> {
         if self.game_over_dialog.is_some() {
             return Ok(());
         }
@@ -35338,7 +35422,9 @@ impl GameApp {
                     self.play_ui_sound("Command");
                 }
                 MainMenuAction::Activate(item) => {
-                    self.play_ui_sound("Click");
+                    if play_activation_sound {
+                        self.play_ui_sound("Click");
+                    }
                     self.handle_main_menu_activation(item)?;
                 }
             }
@@ -40989,6 +41075,14 @@ impl GameApp {
         &mut self,
         actions: Vec<lc_frontend::startup_about_dlg::AboutDlgAction>,
     ) -> Result<(), EngineError> {
+        self.process_about_dialog_actions_with_sound(actions, true)
+    }
+
+    fn process_about_dialog_actions_with_sound(
+        &mut self,
+        actions: Vec<lc_frontend::startup_about_dlg::AboutDlgAction>,
+        play_activation_sound: bool,
+    ) -> Result<(), EngineError> {
         use lc_frontend::startup_about_dlg::AboutDlgAction;
 
         for action in actions {
@@ -40998,7 +41092,10 @@ impl GameApp {
                     self.show_main_menu();
                 }
                 AboutDlgAction::CheckForUpdates => self.open_launcher_update_dialog()?,
-                AboutDlgAction::PageChanged(_) => self.play_ui_sound("Click"),
+                AboutDlgAction::PageChanged(_) if play_activation_sound => {
+                    self.play_ui_sound("Click");
+                }
+                AboutDlgAction::PageChanged(_) => {}
                 AboutDlgAction::LicenseChanged(_) => self.play_ui_sound("Command"),
             }
         }
@@ -54971,6 +55068,8 @@ impl GameApp {
 
     fn play_ui_sound(&mut self, name: &str) {
         let game_running = matches!(self.mode, AppMode::Running);
+        #[cfg(test)]
+        self.ui_sound_log.push(name.to_owned());
         if let Some(audio) = self.audio.as_mut() {
             audio.play_ui_sound(name, game_running);
         }
@@ -58363,6 +58462,117 @@ fn context_menu_hotkey(code: VirtualKeyCode) -> Option<char> {
         VirtualKeyCode::Key9 => Some('9'),
         _ => None,
     }
+}
+
+/// First ASCII character of
+/// `SDL_GetKeyName(SDL_GetKeyFromScancode(scancode))`, as used by
+/// `C4GUI::Dialog::KeyHotkey`. The winit route currently retains the virtual
+/// key rather than the raw SDL scancode, so this mirrors SDL's US key names
+/// for every corresponding winit key.
+fn startup_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
+    context_menu_hotkey(code).or_else(|| {
+        Some(match code {
+            // SDL names these Application, Audio*, or AC *.
+            VirtualKeyCode::Apps
+            | VirtualKeyCode::MediaStop
+            | VirtualKeyCode::Mute
+            | VirtualKeyCode::NavigateBackward
+            | VirtualKeyCode::NavigateForward
+            | VirtualKeyCode::NextTrack
+            | VirtualKeyCode::PlayPause
+            | VirtualKeyCode::PrevTrack
+            | VirtualKeyCode::WebBack
+            | VirtualKeyCode::WebFavorites
+            | VirtualKeyCode::WebForward
+            | VirtualKeyCode::WebHome
+            | VirtualKeyCode::WebRefresh
+            | VirtualKeyCode::WebSearch
+            | VirtualKeyCode::WebStop => 'A',
+            VirtualKeyCode::Back => 'B',
+            VirtualKeyCode::Calculator
+            | VirtualKeyCode::Capital
+            | VirtualKeyCode::Copy
+            | VirtualKeyCode::Cut
+            | VirtualKeyCode::MyComputer => 'C',
+            VirtualKeyCode::Delete | VirtualKeyCode::Down => 'D',
+            VirtualKeyCode::End | VirtualKeyCode::Escape => 'E',
+            VirtualKeyCode::F1
+            | VirtualKeyCode::F2
+            | VirtualKeyCode::F3
+            | VirtualKeyCode::F4
+            | VirtualKeyCode::F5
+            | VirtualKeyCode::F6
+            | VirtualKeyCode::F7
+            | VirtualKeyCode::F8
+            | VirtualKeyCode::F9
+            | VirtualKeyCode::F10
+            | VirtualKeyCode::F11
+            | VirtualKeyCode::F12
+            | VirtualKeyCode::F13
+            | VirtualKeyCode::F14
+            | VirtualKeyCode::F15
+            | VirtualKeyCode::F16
+            | VirtualKeyCode::F17
+            | VirtualKeyCode::F18
+            | VirtualKeyCode::F19
+            | VirtualKeyCode::F20
+            | VirtualKeyCode::F21
+            | VirtualKeyCode::F22
+            | VirtualKeyCode::F23
+            | VirtualKeyCode::F24 => 'F',
+            VirtualKeyCode::Home => 'H',
+            VirtualKeyCode::Insert => 'I',
+            // SDL names every numeric-keypad scancode "Keypad ...".
+            VirtualKeyCode::Numpad0
+            | VirtualKeyCode::Numpad1
+            | VirtualKeyCode::Numpad2
+            | VirtualKeyCode::Numpad3
+            | VirtualKeyCode::Numpad4
+            | VirtualKeyCode::Numpad5
+            | VirtualKeyCode::Numpad6
+            | VirtualKeyCode::Numpad7
+            | VirtualKeyCode::Numpad8
+            | VirtualKeyCode::Numpad9
+            | VirtualKeyCode::NumpadAdd
+            | VirtualKeyCode::NumpadComma
+            | VirtualKeyCode::NumpadDecimal
+            | VirtualKeyCode::NumpadDivide
+            | VirtualKeyCode::NumpadEnter
+            | VirtualKeyCode::NumpadEquals
+            | VirtualKeyCode::NumpadMultiply
+            | VirtualKeyCode::NumpadSubtract => 'K',
+            VirtualKeyCode::LAlt
+            | VirtualKeyCode::LControl
+            | VirtualKeyCode::Left
+            | VirtualKeyCode::LShift
+            | VirtualKeyCode::LWin => 'L',
+            VirtualKeyCode::Mail | VirtualKeyCode::MediaSelect => 'M',
+            VirtualKeyCode::Numlock => 'N',
+            VirtualKeyCode::PageDown
+            | VirtualKeyCode::PageUp
+            | VirtualKeyCode::Paste
+            | VirtualKeyCode::Pause
+            | VirtualKeyCode::Power
+            | VirtualKeyCode::Snapshot => 'P',
+            VirtualKeyCode::RAlt
+            | VirtualKeyCode::RControl
+            | VirtualKeyCode::Return
+            | VirtualKeyCode::Right
+            | VirtualKeyCode::RShift
+            | VirtualKeyCode::RWin => 'R',
+            VirtualKeyCode::Scroll
+            | VirtualKeyCode::Sleep
+            | VirtualKeyCode::Space
+            | VirtualKeyCode::Stop
+            | VirtualKeyCode::Sysrq => 'S',
+            VirtualKeyCode::Tab => 'T',
+            VirtualKeyCode::Up => 'U',
+            VirtualKeyCode::VolumeDown | VirtualKeyCode::VolumeUp => 'V',
+            VirtualKeyCode::Wake => 'W',
+            // SDL_GetKeyName returns punctuation or an empty name for these.
+            _ => return None,
+        })
+    })
 }
 
 fn message_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
@@ -84614,6 +84824,135 @@ public func Grant(password) { return GainMissionAccess(password); }
             assert!(app.message_dialogs.is_empty());
             assert_eq!(app.startup_view, StartupView::About);
         }
+    }
+
+    #[test]
+    fn l046_dialog_hotkeys_use_the_first_sdl_key_name_character() {
+        for (key, expected) in [
+            (VirtualKeyCode::A, Some('A')),
+            (VirtualKeyCode::Key7, Some('7')),
+            (VirtualKeyCode::Space, Some('S')),
+            (VirtualKeyCode::Up, Some('U')),
+            (VirtualKeyCode::Left, Some('L')),
+            (VirtualKeyCode::Return, Some('R')),
+            (VirtualKeyCode::Escape, Some('E')),
+            (VirtualKeyCode::PageUp, Some('P')),
+            (VirtualKeyCode::Snapshot, Some('P')),
+            (VirtualKeyCode::Numpad1, Some('K')),
+            (VirtualKeyCode::Apps, Some('A')),
+            (VirtualKeyCode::WebBack, Some('A')),
+            (VirtualKeyCode::Minus, None),
+            (VirtualKeyCode::Apostrophe, None),
+            (VirtualKeyCode::OEM102, None),
+        ] {
+            assert_eq!(startup_dialog_hotkey(key), expected, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn l046_startup_alt_mnemonics_route_before_plain_gui_keys_and_lower_owners() {
+        let mut app = new_classic_menu_app(640, 480);
+
+        app.handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::ALT)
+            .expect("hold unsupported Ctrl+Alt mask");
+        for key in [
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Return,
+            VirtualKeyCode::Space,
+            VirtualKeyCode::Escape,
+        ] {
+            app.handle_key(key, ElementState::Pressed)
+                .expect("Ctrl+Alt GUI key down is inert");
+            app.handle_key(key, ElementState::Released)
+                .expect("Ctrl+Alt GUI key up is inert");
+        }
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("Ctrl+Alt does not dispatch a mnemonic");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(!app.exit_requested);
+
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
+            .expect("hold Alt+Shift");
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("dispatch shifted About mnemonic");
+        assert_eq!(app.startup_view, StartupView::About);
+        assert!(app.ui_sound_log.is_empty());
+        app.show_main_menu();
+
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        for key in [
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Return,
+            VirtualKeyCode::Escape,
+        ] {
+            app.handle_key(key, ElementState::Pressed)
+                .expect("unmatched Alt GUI key down is inert");
+            app.handle_key(key, ElementState::Released)
+                .expect("unmatched Alt GUI key up is inert");
+        }
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(!app.exit_requested);
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("arm retained Start focus");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("activate retained Start focus");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(app.ui_sound_log.iter().any(|sound| sound == "Click"));
+        app.ui_sound_log.clear();
+        app.show_main_menu();
+
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("focus Network");
+        app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+            .expect("release focus key");
+        app.ui_sound_log.clear();
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("SDL Space mnemonic dispatches Start");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(
+            !app.ui_sound_log.iter().any(|sound| sound == "Click"),
+            "mnemonic dispatch must bypass the button Click sound: {:?}",
+            app.ui_sound_log
+        );
+
+        app.show_main_menu();
+        app.open_about_dialog();
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("SDL Left mnemonic opens Licenses");
+        assert_eq!(
+            app.startup_about_dialog
+                .as_ref()
+                .expect("About dialog")
+                .current_page(),
+            lc_frontend::startup_about_dlg::AboutPage::Licenses
+        );
+        assert!(app.ui_sound_log.is_empty());
+        app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("SDL Up mnemonic requests updates");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Updates");
+        assert!(app.ui_sound_log.is_empty());
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss update handoff");
+
+        app.show_main_menu();
+        app.handle_game_over()
+            .expect("forge stale menu evaluation state");
+        let error = app
+            .handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect_err("game-over mnemonic owner precedes the startup dialog");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
+        );
+        assert_eq!(app.startup_view, StartupView::MainMenu);
     }
 
     #[test]

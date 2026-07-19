@@ -555,6 +555,20 @@ impl AboutDlgState {
         self.handle_key_down_with_tab_direction(key, false)
     }
 
+    /// Dispatches an Alt mnemonic through the visible controls in their C++
+    /// insertion order. `Some` means a button matched and consumed the key.
+    pub fn handle_hotkey(&mut self, character: char) -> Option<Vec<AboutDlgAction>> {
+        let character = character.to_ascii_uppercase();
+        if !character.is_ascii_alphanumeric() {
+            return None;
+        }
+        AboutButton::ALL
+            .into_iter()
+            .filter(|button| self.is_visible(*button))
+            .find(|button| expand_hotkey_markup(BUTTON_LABELS[button.index()]).1 == Some(character))
+            .map(|button| self.activate(button))
+    }
+
     pub fn handle_key_down_with_tab_direction(
         &mut self,
         key: KeyCode,
@@ -1719,6 +1733,32 @@ mod tests {
             vec![AboutDlgAction::PageChanged(AboutPage::Licenses)]
         );
         assert_eq!(state.handle_key_down(crate::KeyCode::Escape), vec![AboutDlgAction::Back]);
+    }
+
+    #[test]
+    fn l046_about_mnemonics_follow_visible_caption_markers() {
+        let mut state = AboutDlgState::new();
+        assert_eq!(
+            state.handle_hotkey('u'),
+            Some(vec![AboutDlgAction::CheckForUpdates])
+        );
+        assert_eq!(
+            state.handle_hotkey('L'),
+            Some(vec![AboutDlgAction::PageChanged(AboutPage::Licenses)])
+        );
+        assert_eq!(state.current_page(), AboutPage::Licenses);
+        assert_eq!(
+            state.handle_hotkey('L'),
+            None,
+            "hidden controls are skipped"
+        );
+        assert_eq!(
+            state.handle_hotkey('U'),
+            Some(vec![AboutDlgAction::CheckForUpdates]),
+            "Update remains visible on the licenses page"
+        );
+        assert_eq!(state.handle_hotkey('B'), None, "Back has no marker");
+        assert_eq!(state.handle_hotkey('-'), None);
     }
 
     #[test]
