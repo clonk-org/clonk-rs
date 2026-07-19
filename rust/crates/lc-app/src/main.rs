@@ -2363,6 +2363,28 @@ fn generated_team_name_template(table: &RuntimeLanguageTable) -> LegacyCString {
         })
 }
 
+fn format_two_legacy_string_arguments(
+    template: &[u8],
+    first: &[u8],
+    second: &[u8],
+) -> Option<Vec<u8>> {
+    let first_marker = template.windows(2).position(|window| window == b"%s")?;
+    let after_first = first_marker + 2;
+    let second_marker = template[after_first..]
+        .windows(2)
+        .position(|window| window == b"%s")?
+        + after_first;
+    let mut formatted = Vec::with_capacity(
+        template.len() - 4 + first.len() + second.len(),
+    );
+    formatted.extend_from_slice(&template[..first_marker]);
+    formatted.extend_from_slice(first);
+    formatted.extend_from_slice(&template[after_first..second_marker]);
+    formatted.extend_from_slice(second);
+    formatted.extend_from_slice(&template[second_marker + 2..]);
+    Some(formatted)
+}
+
 fn runtime_help_raw_table_value<'a>(bytes: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
     let mut remaining = bytes;
     while let Some(equals) = remaining.iter().position(|byte| *byte == b'=') {
@@ -4010,6 +4032,46 @@ impl FrontendAssets {
             button_highlight,
             checkbox: self.startup_dialog_images.get("GUICheckbox.png")?,
         })
+    }
+
+    fn network_start_wait_resources(
+        &self,
+    ) -> Result<lc_frontend::network_start_wait::NetworkStartWaitResources<'_>> {
+        let caption = self
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .context("GUICaption.png is unavailable")?;
+        let button = self
+            .startup_dialog_images
+            .get("GUIButton.png")
+            .context("GUIButton.png is unavailable")?;
+        let button_down = self
+            .startup_dialog_images
+            .get("GUIButtonDown.png")
+            .context("GUIButtonDown.png is unavailable")?;
+        let button_highlight = self
+            .game_over_button_highlight
+            .as_ref()
+            .context("GUIButtonHighlight.png is unavailable")?;
+        let fonts = self
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful GUI fonts are unavailable")?;
+        let icons = self
+            .startup_dialog_images
+            .get("GUIIcons.png")
+            .context("GUIIcons.png is unavailable")?;
+        lc_frontend::network_start_wait::NetworkStartWaitResources::new(
+            lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(button_highlight),
+            ),
+            fonts,
+            icons,
+            button_highlight,
+        )
     }
 
     fn definition_sel_resources(
@@ -5927,6 +5989,7 @@ struct AudioContext {
     music_load_pending: Arc<AtomicU64>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
+    lobby_elevator_channel: Option<ChannelId>,
     next_sound_instance_order: u64,
     resolver: SoundResolver,
     music_resolver: MusicResolver,
@@ -5946,6 +6009,7 @@ impl AudioContext {
             music_load_pending: Arc::new(AtomicU64::new(0)),
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
+            lobby_elevator_channel: None,
             next_sound_instance_order: 1,
             resolver: SoundResolver::new(),
             music_resolver: MusicResolver::discover(),
@@ -6093,6 +6157,7 @@ impl AudioContext {
     }
 
     fn reset_sfx(&mut self) {
+        self.stop_lobby_elevator();
         for info in self.active_channels.values() {
             if let Some(channel) = info.channel {
                 self.system.halt_channel(channel);
@@ -6269,6 +6334,37 @@ impl AudioContext {
             Err(err) => {
                 tracing::error!(sound = %name, error = %err, "failed to play ui sound");
             }
+        }
+    }
+
+    fn start_lobby_elevator(&mut self) {
+        if self.lobby_elevator_channel.is_some() || !self.options.menu_sound_enabled {
+            return;
+        }
+        let handle = match self.ensure_sound("Elevator") {
+            Ok(Some(handle)) => handle,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::error!(%error, "failed to load lobby countdown loop");
+                return;
+            }
+        };
+        match self.system.play_sound(&handle, true) {
+            Ok(channel) => {
+                self.system.channel_set_volume_and_pan(
+                    channel,
+                    self.options.sound_volume,
+                    0.0,
+                );
+                self.lobby_elevator_channel = Some(channel);
+            }
+            Err(error) => tracing::error!(%error, "failed to start lobby countdown loop"),
+        }
+    }
+
+    fn stop_lobby_elevator(&mut self) {
+        if let Some(channel) = self.lobby_elevator_channel.take() {
+            self.system.halt_channel(channel);
         }
     }
 
@@ -8014,6 +8110,7 @@ enum MessageDialogContinuation {
     NetworkRuntimeJoin {
         reference: lc_network::NetworkGameReference,
     },
+    ClassicLobbyStart { countdown_seconds: i32 },
     DeleteStartupPlayer { path: PathBuf },
     DeleteStartupCrew {
         player_path: PathBuf,
@@ -8153,6 +8250,13 @@ struct ClassicHostLobbyState {
     controller: ClassicGameLobby,
     pointer: Option<GuiPoint>,
     chat_history_index: i32,
+}
+
+struct NetworkStartWaitDialogState {
+    controller: lc_frontend::network_start_wait::NetworkStartWaitState,
+    expected_status: lc_network::NetworkStatus,
+    visible: bool,
+    pointer: Option<GuiPoint>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9095,9 +9199,14 @@ struct GameApp {
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
     classic_host_lobby: Option<ClassicHostLobbyState>,
+    network_start_wait: Option<NetworkStartWaitDialogState>,
     /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
     /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
     host_lobby_countdown: Option<HostLobbyCountdown>,
+    /// The live host session surfaces its locally submitted countdown once
+    /// after broadcasting it. C++ instead applies that packet directly and
+    /// excludes the host from the broadcast, so suppress exactly those echoes.
+    pending_local_lobby_countdown_echoes: VecDeque<lc_network::LobbyCountdownPacket>,
     lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
     control_messages: ControlMessageState,
     league_votes: LeagueVoteState,
@@ -10795,6 +10904,14 @@ fn classic_game_lobby_child_error(child: ClassicGameLobbyChild) -> EngineError {
     ))
 }
 
+fn classic_game_lobby_model_engine_error(detail: impl Into<String>) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
+            detail: detail.into(),
+        }),
+    ))
+}
+
 fn classic_ingame_menu_child_error(child: ClassicIngameMenuChild) -> EngineError {
     classic_parity_engine_error(report_classic_parity_boundary(
         ClassicParityBoundary::IngameMenuChild(child),
@@ -11311,14 +11428,21 @@ struct HostLobbyCountdown {
 
 impl HostLobbyCountdown {
     fn new() -> Self {
+        Self::with_seconds(DEFAULT_LOBBY_COUNTDOWN_SECONDS)
+    }
+
+    fn with_seconds(seconds: i32) -> Self {
         Self {
-            remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            remaining: seconds.max(0),
         }
     }
 
-    fn advance(&mut self) -> i32 {
+    fn advance(&mut self) -> (i32, bool) {
         self.remaining = (self.remaining - 1).max(0);
-        self.remaining
+        let broadcast = self.remaining <= ALMOST_START_LOBBY_COUNTDOWN_SECONDS
+            || (self.remaining <= 600 && self.remaining % 10 == 0)
+            || self.remaining % 60 == 0;
+        (self.remaining, broadcast)
     }
 }
 
@@ -17397,6 +17521,25 @@ fn legacy_message_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+fn legacy_sscanf_decimal_prefix(value: &[u8]) -> Option<i32> {
+    let value = value
+        .iter()
+        .position(|byte| !legacy_message_whitespace(*byte))
+        .map(|start| &value[start..])?;
+    let sign = usize::from(matches!(value.first(), Some(b'+' | b'-')));
+    let digits = value[sign..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    std::str::from_utf8(&value[..sign + digits])
+        .ok()?
+        .parse()
+        .ok()
+}
+
 fn legacy_prefix_no_case(value: &[u8], prefix: &[u8]) -> bool {
     value
         .get(..prefix.len())
@@ -18015,7 +18158,9 @@ impl GameApp {
             network_mode,
             network_lobby,
             classic_host_lobby: None,
+            network_start_wait: None,
             host_lobby_countdown: None,
+            pending_local_lobby_countdown_echoes: VecDeque::new(),
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
             control_messages,
             league_votes: LeagueVoteState::default(),
@@ -18196,6 +18341,10 @@ impl GameApp {
 
     fn can_defer_native_loader_text(&self, scale: f32) -> bool {
         self.mode == AppMode::Loading
+            && !self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
             && scale > 1.0
             && self
                 .loader_render_config
@@ -19826,6 +19975,24 @@ impl GameApp {
             self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        if let Some(layout) = self.network_start_wait_layout() {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let scrolled = self.network_start_wait.as_mut().is_some_and(|wait| {
+                wait.pointer.is_some_and(|point| {
+                    wait.controller
+                        .handle_wheel(point, native_delta, &layout)
+                })
+            });
+            if scrolled {
+                self.mark_menu_dirty();
+            }
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -21618,6 +21785,9 @@ impl GameApp {
         let input_dialog_release_latched =
             state == ElementState::Released && self.game_option_input_consumed_keys.remove(&key);
         if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_network_start_wait_key(key, state)? {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -25981,7 +26151,13 @@ impl GameApp {
                 // C4GameControlNetwork::HandleControlPkt executes synchronized
                 // controls immediately while network control is frozen in the
                 // lobby (src/C4GameControlNetwork.cpp:558-588).
-                let frozen_lobby = self.network_lobby.is_some() || self.classic_host_lobby_active();
+                let frozen_lobby = self.network_lobby.is_some()
+                    || self.classic_host_lobby_active()
+                    || (self.mode == AppMode::Loading
+                        && self
+                            .loading_state
+                            .as_ref()
+                            .is_some_and(|loading| loading.prepared_go.is_some()));
                 if frozen_lobby && matches!(&event, NetworkEvent::ScheduledSync { .. }) {
                     let NetworkEvent::ScheduledSync { tick, controls } = event else {
                         unreachable!("ScheduledSync was matched above");
@@ -26005,11 +26181,30 @@ impl GameApp {
                         );
                         continue;
                     }
+                    if matches!(
+                        &event,
+                        NetworkEvent::PeerConnected { client_id: 0, .. }
+                    ) {
+                        continue;
+                    }
                     let player_info_event = matches!(
                         &event,
                         NetworkEvent::PlayerInfoUpdateRequest { .. }
                             | NetworkEvent::PreexecutedPlayerInfoEcho { .. }
                             | NetworkEvent::DirectControl(NetworkControl::PlayerInfo(_))
+                    );
+                    let supported_classic_event = matches!(
+                        &event,
+                        NetworkEvent::ReadyCheck(_)
+                            | NetworkEvent::HostStatusAck { .. }
+                            | NetworkEvent::LobbyCountdown(_)
+                            | NetworkEvent::PeerConnected { .. }
+                            | NetworkEvent::PeerDisconnected { .. }
+                            | NetworkEvent::ResourceAction(_)
+                            | NetworkEvent::ResourceComplete { .. }
+                            | NetworkEvent::ResourceLoadFailed { .. }
+                            | NetworkEvent::ResourceDeriveUnsupported { .. }
+                            | NetworkEvent::DirectControl(NetworkControl::ClientJoin(_))
                     );
                     if let NetworkEvent::DirectControl(NetworkControl::Message(control)) = &event {
                         self.execute_message_control(control.clone());
@@ -26022,31 +26217,31 @@ impl GameApp {
                         NetworkEvent::JoinData(_) => Some("join data"),
                         NetworkEvent::LeagueRoundResults(_) => Some("league round results"),
                         NetworkEvent::LeagueUpdate(_) => Some("league update"),
-                        NetworkEvent::ReadyCheck(_) => Some("ready check"),
+                        NetworkEvent::ReadyCheck(_) => None,
+                        NetworkEvent::HostStatusAck { .. } => None,
                         NetworkEvent::StatusRequested(_) => Some("status request"),
                         NetworkEvent::StatusCommitted(_) => Some("status commit"),
-                        NetworkEvent::LobbyCountdown(_) => Some("lobby countdown"),
+                        NetworkEvent::LobbyCountdown(_) => None,
                         NetworkEvent::ActivationRequest { .. } => Some("activation request"),
                         NetworkEvent::PlayerInfoUpdateRequest { .. } => None,
                         NetworkEvent::PreexecutedPlayerInfoEcho { .. } => None,
                         NetworkEvent::ReadyTick { .. } => Some("ready control tick"),
                         NetworkEvent::ScheduledSync { .. } => Some("scheduled control"),
                         NetworkEvent::DirectControl(NetworkControl::PlayerInfo(_)) => None,
+                        NetworkEvent::DirectControl(NetworkControl::ClientJoin(_)) => None,
                         NetworkEvent::DirectControl(_) => Some("direct player/resource control"),
-                        NetworkEvent::PeerConnected { .. } => Some("remote client row"),
-                        NetworkEvent::PeerDisconnected { .. } => Some("client removal"),
+                        NetworkEvent::PeerConnected { .. } => None,
+                        NetworkEvent::PeerDisconnected { .. } => None,
                         NetworkEvent::PeerConnectionFailed { .. } => {
                             Some("client connection failure")
                         }
                         NetworkEvent::NetpuncherStateChanged { .. } => unreachable!(
                             "netpuncher state is applied before the classic-lobby boundary"
                         ),
-                        NetworkEvent::ResourceAction(_) => Some("resource action"),
-                        NetworkEvent::ResourceComplete { .. } => Some("resource completion"),
-                        NetworkEvent::ResourceLoadFailed { .. } => Some("resource load failure"),
-                        NetworkEvent::ResourceDeriveUnsupported { .. } => {
-                            Some("resource derivation")
-                        }
+                        NetworkEvent::ResourceAction(_) => None,
+                        NetworkEvent::ResourceComplete { .. } => None,
+                        NetworkEvent::ResourceLoadFailed { .. } => None,
+                        NetworkEvent::ResourceDeriveUnsupported { .. } => None,
                         NetworkEvent::Error(_) => Some("network error presentation"),
                     };
                     if let Some(boundary) = boundary {
@@ -26054,7 +26249,7 @@ impl GameApp {
                             ClassicGameLobbyChild::NetworkEvent(boundary),
                         ));
                     }
-                    if !player_info_event {
+                    if !player_info_event && !supported_classic_event {
                         continue;
                     }
                 }
@@ -26065,12 +26260,56 @@ impl GameApp {
                         }
                     }
                     NetworkEvent::HostStatusChanged(status) => {
+                        self.retarget_network_start_wait(status);
                         if let Some(clock) = self.network_control_clock.as_mut() {
                             clock.set_target_tick(Some(status.target_tick));
+                        }
+                        let rereach_prepared_host = self
+                            .loading_state
+                            .as_mut()
+                            .and_then(|loading| loading.prepared_go.as_mut())
+                            .is_some_and(|pending| {
+                                let rereach = pending.local_reached
+                                    && matches!(self.network_mode, Some(NetworkMode::Host(_)));
+                                pending.local_reached = false;
+                                pending.status = status;
+                                rereach
+                            });
+                        if rereach_prepared_host {
+                            match self
+                                .network
+                                .as_ref()
+                                .map(NetworkManager::status_reached_current)
+                            {
+                                Some(Ok(())) => {
+                                    if let Some(pending) = self
+                                        .loading_state
+                                        .as_mut()
+                                        .and_then(|loading| loading.prepared_go.as_mut())
+                                    {
+                                        pending.local_reached = true;
+                                    }
+                                }
+                                Some(Err(error)) => {
+                                    self.status_text = format!(
+                                        "Unable to reach retargeted network Go barrier: {error}"
+                                    );
+                                }
+                                None => {}
+                            }
+                        } else if let Some(pending) = self
+                            .loading_state
+                            .as_mut()
+                            .and_then(|loading| loading.prepared_go.as_mut())
+                        {
+                            pending.status = status;
                         }
                         if self.mode == AppMode::Running {
                             self.arm_runtime_network_status_barrier(status);
                         }
+                    }
+                    NetworkEvent::HostStatusAck { client_id, status } => {
+                        self.update_network_start_wait_ack(client_id, status);
                     }
                     NetworkEvent::JoinData(join_data) => {
                         // Game.Parameters is the authoritative client/player
@@ -26169,26 +26408,40 @@ impl GameApp {
                             if self.control_clients.clear_nonhost_lobby_ready() {
                                 self.publish_updated_host_join_snapshot();
                             }
+                            self.sync_classic_lobby_client_rows();
                             self.handle_lobby_ready_check_request(packet)?;
                         } else {
+                            self.append_remote_lobby_ready_log(packet);
                             let ready_state_changed = self
                                 .control_clients
                                 .set_lobby_ready(packet.client_id, packet.data.is_ready());
-                            let changed_client_id = self
+                            let lobby_changed_client_id = self
                                 .network_lobby
                                 .as_mut()
                                 .and_then(|lobby| lobby.apply_ready_check(packet));
                             if ready_state_changed {
                                 self.publish_updated_host_join_snapshot();
                             }
+                            self.sync_classic_lobby_client_rows();
+                            let changed_client_id = ready_state_changed
+                                .then(|| ClientId::try_from(packet.client_id).ok())
+                                .flatten()
+                                .or(lobby_changed_client_id);
                             if let Some(changed_client_id) = changed_client_id {
                                 self.on_lobby_client_ready_state_change(changed_client_id)?;
                             }
                         }
                     }
                     NetworkEvent::LobbyCountdown(packet) => {
-                        if let Some(lobby) = self.network_lobby.as_mut() {
-                            lobby.apply_lobby_countdown(packet);
+                        let local_echo = matches!(self.network_mode, Some(NetworkMode::Host(_)))
+                            && self
+                                .pending_local_lobby_countdown_echoes
+                                .front()
+                                .is_some_and(|pending| *pending == packet);
+                        if local_echo {
+                            self.pending_local_lobby_countdown_echoes.pop_front();
+                        } else {
+                            self.apply_lobby_countdown_presentation(packet);
                         }
                     }
                     NetworkEvent::StatusRequested(status) => {
@@ -26221,7 +26474,14 @@ impl GameApp {
                         );
                     }
                     NetworkEvent::StatusCommitted(status) => {
+                        let closes_start_wait = self
+                            .network_start_wait
+                            .as_ref()
+                            .is_some_and(|wait| wait.expected_status == status);
                         self.handle_status_committed(status)?;
+                        if closes_start_wait && self.mode == AppMode::Running {
+                            self.network_start_wait = None;
+                        }
                     }
                     NetworkEvent::ActivationRequest {
                         client_id,
@@ -26339,6 +26599,7 @@ impl GameApp {
                                         .reset_client(join.core.client_id);
                                     self.publish_updated_host_join_snapshot();
                                 }
+                                self.sync_classic_lobby_client_rows();
                             }
                             NetworkControl::SyncCheck(packet) => {
                                 self.handle_sync_check(packet);
@@ -26354,6 +26615,7 @@ impl GameApp {
                                         tracing::error!(%error, "failed to broadcast updated PlayerInfo follow-up");
                                     }
                                 }
+                                self.sync_classic_lobby_client_rows();
                             }
                             NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
                             NetworkControl::Set(set) => self.execute_control_set(set),
@@ -26371,26 +26633,51 @@ impl GameApp {
                         kind,
                     } => {
                         tracing::info!(%client_id, %name, ?kind, "network client connected");
+                        let already_local_classic = self.classic_host_lobby_active()
+                            && self
+                                .network
+                                .as_ref()
+                                .is_some_and(|network| network.local_client_id() == client_id);
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.register_peer(client_id, name.clone(), kind);
                         }
-                        self.status_text = format!("{name} joined the lobby");
+                        if !already_local_classic {
+                            self.add_classic_lobby_peer(client_id, name.clone(), kind);
+                        }
+                        if let (Ok(client_id), Some(wait)) =
+                            (i32::try_from(client_id), self.network_start_wait.as_mut())
+                        {
+                            wait.controller.update_client(
+                                lc_frontend::network_start_wait::NetworkStartWaitClient::new(
+                                    client_id,
+                                    name.clone(),
+                                    lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading,
+                                ),
+                            );
+                        }
+                        if !already_local_classic {
+                            self.status_text = format!("{name} joined the lobby");
+                        }
                     }
                     NetworkEvent::PeerDisconnected { client_id, reason } => {
                         let abort_countdown_for_disconnected_client = matches!(
                             self.network_mode,
                             Some(NetworkMode::Host(_))
-                        ) && self.network_lobby.as_ref().is_some_and(|lobby| {
+                        ) && (self.network_lobby.as_ref().is_some_and(|lobby| {
                             lobby.countdown.is_some_and(|remaining| {
                                 remaining <= ALMOST_START_LOBBY_COUNTDOWN_SECONDS
                             })
-                        })
+                        }) || self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                            lobby.controller.countdown().is_locked()
+                        }))
                             && i32::try_from(client_id).ok().is_some_and(|client_id| {
                                 !self.control_player_infos.client_info_ids(client_id).is_empty()
                             });
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.unregister_peer(client_id);
                         }
+                        self.remove_classic_lobby_peer(client_id);
+                        self.mark_network_start_wait_client_kick(client_id);
                         if abort_countdown_for_disconnected_client {
                             self.abort_network_lobby_countdown();
                         }
@@ -26448,6 +26735,7 @@ impl GameApp {
                         // rather than silently treating loadable cores as
                         // available.
                         tracing::debug!(?action, "network resource backend action pending");
+                        self.sync_classic_lobby_resource_ready();
                     }
                     NetworkEvent::ResourceComplete {
                         resource_id,
@@ -26464,10 +26752,12 @@ impl GameApp {
                             "network resource received"
                         );
                         self.prepare_client_network_scenario_if_ready();
+                        self.sync_classic_lobby_resource_ready();
                     }
                     NetworkEvent::ResourceLoadFailed { resource_id } => {
                         self.admission_resources.mark_failed(resource_id);
                         tracing::warn!(resource_id, "network resource load failed");
+                        self.sync_classic_lobby_resource_ready();
                     }
                     NetworkEvent::ResourceDeriveUnsupported { core } => {
                         tracing::warn!(
@@ -26475,6 +26765,7 @@ impl GameApp {
                             parent_resource_id = core.derived_id,
                             "network resource derivation is not implemented"
                         );
+                        self.sync_classic_lobby_resource_ready();
                     }
                     NetworkEvent::Error(message) => {
                         tracing::error!(message = %message, "network error");
@@ -27083,7 +27374,15 @@ impl GameApp {
                 self.handle_gamepad_button(slot, button, state)?;
             }
             GamepadEvent::Clear { .. } => {
-                if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
+                if self
+                    .network_start_wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.visible)
+                {
+                    if let Some(wait) = self.network_start_wait.as_mut() {
+                        wait.controller.cancel_interaction();
+                    }
+                } else if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                     pending.controller.pointer_left();
                 } else if self.classic_host_lobby_active() {
                     self.cancel_classic_host_lobby_interaction();
@@ -27103,7 +27402,30 @@ impl GameApp {
                 }
             }
             GamepadEvent::GuiButton { class, state, .. } => {
-                if self.startup_player_properties_dialog.is_some() {
+                if self
+                    .network_start_wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.visible)
+                {
+                    let actions = self
+                        .network_start_wait
+                        .as_mut()
+                        .map(|wait| match (class, state) {
+                            (GuiButtonClass::Low, ElementState::Pressed) => {
+                                wait.controller.handle_gamepad_low_down()
+                            }
+                            (GuiButtonClass::Low, ElementState::Released) => {
+                                wait.controller.handle_gamepad_low_up()
+                            }
+                            (GuiButtonClass::High, ElementState::Pressed) => {
+                                wait.controller.handle_gamepad_high_down()
+                            }
+                            (GuiButtonClass::High, ElementState::Released) => Vec::new(),
+                        })
+                        .unwrap_or_default();
+                    self.process_network_start_wait_actions(actions)?;
+                    self.mark_menu_dirty();
+                } else if self.startup_player_properties_dialog.is_some() {
                     let key = match class {
                         GuiButtonClass::Low => KeyCode::Enter,
                         GuiButtonClass::High => KeyCode::Escape,
@@ -27173,6 +27495,13 @@ impl GameApp {
         if !self.message_dialogs.is_empty() {
             return Ok(());
         }
+        if self
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| wait.visible)
+        {
+            return Ok(());
+        }
         if self.startup_player_properties_dialog.is_some() {
             return Ok(());
         }
@@ -27221,6 +27550,20 @@ impl GameApp {
                 button,
                 state,
             });
+        }
+        if self
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| wait.visible)
+        {
+            if state == ElementState::Pressed {
+                let backwards = matches!(button, ControlButton::Left | ControlButton::Up);
+                if let Some(wait) = self.network_start_wait.as_mut() {
+                    wait.controller.handle_gamepad_horizontal(backwards);
+                }
+                self.mark_menu_dirty();
+            }
+            return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
             let key = match button {
@@ -27627,6 +27970,14 @@ impl GameApp {
             self.main_menu_state.note_pointer_position(Some(point));
         }
         if self.handle_message_dialog_pointer_move(point) {
+            return Ok(());
+        }
+        if let Some(layout) = self.network_start_wait_layout() {
+            if let Some(wait) = self.network_start_wait.as_mut() {
+                wait.pointer = Some(point);
+                wait.controller.handle_pointer_move(point, &layout);
+            }
+            self.play_network_start_wait_sounds();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -28978,6 +29329,24 @@ impl GameApp {
         if self.handle_message_dialog_pointer_button(button_state)? {
             return Ok(());
         }
+        if let Some(layout) = self.network_start_wait_layout() {
+            let actions = self
+                .network_start_wait
+                .as_mut()
+                .and_then(|wait| {
+                    wait.pointer.map(|point| match button_state {
+                        ElementState::Pressed => {
+                            wait.controller.handle_pointer_down(point, &layout)
+                        }
+                        ElementState::Released => {
+                            wait.controller.handle_pointer_up(point, &layout)
+                        }
+                    })
+                })
+                .unwrap_or_default();
+            self.process_network_start_wait_actions(actions)?;
+            return Ok(());
+        }
         if self.startup_player_properties_dialog.is_some() {
             let point = self
                 .startup_player_properties_dialog
@@ -29491,6 +29860,34 @@ impl GameApp {
             }
             return Ok(());
         }
+        if let Some(layout) = self.network_start_wait_layout() {
+            self.mark_menu_dirty();
+            let actions = self
+                .network_start_wait
+                .as_mut()
+                .map(|wait| {
+                    wait.pointer = (!matches!(phase, TouchPhase::Cancelled)).then_some(position);
+                    match phase {
+                        TouchPhase::Started => {
+                            wait.controller.handle_pointer_down(position, &layout)
+                        }
+                        TouchPhase::Moved => {
+                            wait.controller.handle_pointer_move(position, &layout);
+                            Vec::new()
+                        }
+                        TouchPhase::Ended => {
+                            wait.controller.handle_pointer_up(position, &layout)
+                        }
+                        TouchPhase::Cancelled => {
+                            wait.controller.cancel_pointer_capture();
+                            Vec::new()
+                        }
+                    }
+                })
+                .unwrap_or_default();
+            self.process_network_start_wait_actions(actions)?;
+            return Ok(());
+        }
         if self.startup_player_properties_dialog.is_some() {
             self.mark_menu_dirty();
             let actions = self
@@ -29948,6 +30345,18 @@ impl GameApp {
             dialog.state.pointer_left();
             let sounds = dialog.state.take_sound_events();
             self.play_message_dialog_sound_events(sounds);
+            return;
+        }
+        if self
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| wait.visible)
+        {
+            if let Some(wait) = self.network_start_wait.as_mut() {
+                wait.pointer = None;
+                wait.controller.pointer_left();
+            }
+            self.play_network_start_wait_sounds();
             return;
         }
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
@@ -31122,11 +31531,12 @@ impl GameApp {
             staged.lobby.max_players,
             staged.lobby.has_teams,
             false,
-            false,
+            self.admission_resources.lobby_ready_available(),
             false,
             staged.lobby.countdown_seconds,
             rows,
         );
+        controller.set_league_mode(initial_network_is_league(Some(mode)));
         let mut values = staged.options.clone();
         values.lobby_is_league = initial_network_is_league(Some(mode));
         values.selector_fair_crew_constraint = FairCrewConstraint::Free;
@@ -31470,6 +31880,7 @@ impl GameApp {
                     self.network_lobby = Some(lobby);
                     self.classic_host_lobby = None;
                     self.host_lobby_countdown = None;
+                    self.pending_local_lobby_countdown_echoes.clear();
                     self.mode = AppMode::Menu;
                     self.open_network_lobby();
                     return;
@@ -33836,6 +34247,7 @@ impl GameApp {
             self.status_text = "Only the host can start the game".to_string();
             return Ok(());
         }
+        let classic_start = self.classic_host_lobby.is_some();
         let prepared = self.network_mode.as_ref().and_then(|mode| match mode {
             NetworkMode::Host(HostSettings {
                 prepared: Some(prepared),
@@ -33881,20 +34293,8 @@ impl GameApp {
             // (src/C4Network2.cpp:510-530;
             // src/C4GameLobby.cpp:442-472). Reopening the source here
             // would diverge from the JoinData already sent to peers.
-            let Some(lobby) = self.network_lobby.as_ref() else {
+            let Some(scenario) = self.network_start_scenario() else {
                 return Ok(());
-            };
-            let Some(identifier) = lobby.selected_identifier() else {
-                self.status_text = "Select a scenario before starting".to_string();
-                return Ok(());
-            };
-            let scenario = match self.scenario_catalog.get(identifier).cloned() {
-                Some(scenario) => scenario,
-                None => {
-                    self.status_text =
-                        format!("Scenario `{identifier}` is not available in the catalog");
-                    return Ok(());
-                }
             };
             let scenario_data = match prepared.claim_scenario() {
                 Ok(scenario) => scenario,
@@ -33921,10 +34321,12 @@ impl GameApp {
             if let Some(clock) = self.network_control_clock.as_mut() {
                 clock.set_target_tick(Some(target_tick));
             }
-            self.play_ui_sound("Click");
+            if !classic_start {
+                self.play_ui_sound("Click");
+            }
             self.fade_out_game_music();
             self.status_text.clear();
-            self.loading_state = Some(ScenarioLoadingState::from_loaded(
+            let mut loading = ScenarioLoadingState::from_loaded(
                 scenario,
                 scenario_data,
                 status,
@@ -33936,7 +34338,21 @@ impl GameApp {
                 allow_debug,
                 team_configuration,
                 team_registry,
-            ));
+            );
+            if let Some(staged) = self.staged_network_host_scenario.take() {
+                loading.refreshed_resources = Some(staged.loader_refreshed_resources);
+                loading.refreshed_tooltip_font = staged.loader_refreshed_tooltip_font;
+                loading.refreshed_native_font_source = staged.loader_refreshed_native_font_source;
+                loading.refreshed_global_gui_overrides =
+                    Some(staged.pending_global_gui_overrides);
+                loading.refresh_requested = true;
+            }
+            self.loading_state = Some(loading);
+            self.begin_network_start_wait(status);
+            self.host_lobby_countdown = None;
+            self.pending_local_lobby_countdown_echoes.clear();
+            self.classic_host_lobby = None;
+            self.network_lobby = None;
             self.mode = AppMode::Loading;
             return Ok(());
         }
@@ -33955,9 +34371,142 @@ impl GameApp {
                 return Ok(());
             }
         };
-        self.play_ui_sound("Click");
+        if !classic_start {
+            self.play_ui_sound("Click");
+        }
         self.start_scenario(scenario)?;
         Ok(())
+    }
+
+    fn network_start_scenario(&mut self) -> Option<FrontendScenario> {
+        if let Some(staged) = self.staged_network_host_scenario.as_ref() {
+            return Some(staged.frontend.clone());
+        }
+        let Some(lobby) = self.network_lobby.as_ref() else {
+            self.status_text = "Network lobby state is unavailable".to_string();
+            return None;
+        };
+        let Some(identifier) = lobby.selected_identifier() else {
+            self.status_text = "Select a scenario before starting".to_string();
+            return None;
+        };
+        match self.scenario_catalog.get(identifier).cloned() {
+            Some(scenario) => Some(scenario),
+            None => {
+                self.status_text =
+                    format!("Scenario `{identifier}` is not available in the catalog");
+                None
+            }
+        }
+    }
+
+    fn begin_network_start_wait(&mut self, status: lc_network::NetworkStatus) {
+        let clients = self.control_clients.snapshot().into_iter().filter_map(|client| {
+            (client.client_id != 0).then(|| {
+                let name = client.name.to_string_lossy().into_owned();
+                lc_frontend::network_start_wait::NetworkStartWaitClient::new(
+                    client.client_id,
+                    if name.is_empty() {
+                        format!("Client {}", client.client_id)
+                    } else {
+                        name
+                    },
+                    lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading,
+                )
+            })
+        });
+        self.network_start_wait = Some(NetworkStartWaitDialogState {
+            controller:
+                lc_frontend::network_start_wait::NetworkStartWaitState::with_clients(clients),
+            expected_status: status,
+            visible: false,
+            pointer: None,
+        });
+    }
+
+    fn retarget_network_start_wait(&mut self, status: lc_network::NetworkStatus) {
+        let Some(wait) = self.network_start_wait.as_mut() else {
+            return;
+        };
+        if wait.expected_status == status {
+            return;
+        }
+        wait.expected_status = status;
+        let clients = wait.controller.clients().to_vec();
+        for client in clients {
+            if client.status
+                != lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Kick
+            {
+                wait.controller.update_client_status(
+                    client.client_id,
+                    lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading,
+                );
+            }
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn update_network_start_wait_ack(
+        &mut self,
+        client_id: ClientId,
+        status: lc_network::NetworkStatus,
+    ) {
+        let Ok(client_id) = i32::try_from(client_id) else {
+            return;
+        };
+        let Some(wait) = self.network_start_wait.as_mut() else {
+            return;
+        };
+        if status.state != wait.expected_status.state
+            || status.target_tick < wait.expected_status.target_tick
+        {
+            return;
+        }
+        if status.target_tick > wait.expected_status.target_tick {
+            wait.expected_status.target_tick = status.target_tick;
+            let clients = wait.controller.clients().to_vec();
+            for client in clients {
+                if client.status
+                    != lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Kick
+                {
+                    wait.controller.update_client_status(
+                        client.client_id,
+                        lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading,
+                    );
+                }
+            }
+            if let Some(pending) = self
+                .loading_state
+                .as_mut()
+                .and_then(|loading| loading.prepared_go.as_mut())
+            {
+                pending.status.target_tick = status.target_tick;
+            }
+        }
+        if wait.controller.update_client_status(
+            client_id,
+            lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Ready,
+        ) {
+            self.mark_menu_dirty();
+        }
+    }
+
+    fn mark_network_start_wait_client_kick(&mut self, client_id: ClientId) {
+        let Ok(client_id) = i32::try_from(client_id) else {
+            return;
+        };
+        if self
+            .network_start_wait
+            .as_mut()
+            .is_some_and(|wait| {
+                wait.controller.update_client_status(
+                    client_id,
+                    lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Kick,
+                )
+            })
+        {
+            self.mark_menu_dirty();
+        }
     }
 
     fn network_game_start_guard_passes(&mut self) -> bool {
@@ -33976,7 +34525,11 @@ impl GameApp {
                 "Unable to start prepared host: initial JoinData is missing".to_string();
             return false;
         }
+        if self.staged_network_host_scenario.is_some() || self.classic_host_lobby.is_some() {
+            return true;
+        }
         let Some(lobby) = self.network_lobby.as_ref() else {
+            self.status_text = "Network lobby state is unavailable".to_string();
             return false;
         };
         let Some(identifier) = lobby.selected_identifier() else {
@@ -33991,6 +34544,32 @@ impl GameApp {
     }
 
     fn start_network_lobby_countdown(&mut self) -> Result<(), EngineError> {
+        self.start_network_lobby_countdown_with(DEFAULT_LOBBY_COUNTDOWN_SECONDS)
+    }
+
+    fn start_network_lobby_countdown_with(
+        &mut self,
+        countdown_seconds: i32,
+    ) -> Result<(), EngineError> {
+        if self.classic_host_lobby.is_some() {
+            if let Some(overrides) = self
+                .staged_network_host_scenario
+                .as_ref()
+                .map(|staged| &staged.pending_global_gui_overrides)
+            {
+                self.assets
+                    .require_classic_global_gui_bootstrap_resources(overrides)
+                    .map_err(report_classic_parity_boundary)
+                    .map_err(classic_parity_engine_error)?;
+            }
+            self.assets.network_start_wait_resources().map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                        detail: format!("network start-wait dialog is unavailable: {error}"),
+                    }),
+                ))
+            })?;
+        }
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             self.network_game_start_guard_passes();
             return Ok(());
@@ -34001,17 +34580,12 @@ impl GameApp {
         if !self.network_game_start_guard_passes() {
             return Ok(());
         }
-        let Some(network) = self.network.as_ref() else {
+        if countdown_seconds <= 0 || self.network.is_none() {
             return self.start_network_game_now();
-        };
-        self.host_lobby_countdown = Some(HostLobbyCountdown::new());
-        let packet = lc_network::LobbyCountdownPacket::new(DEFAULT_LOBBY_COUNTDOWN_SECONDS);
-        if let Err(error) = network.submit_lobby_countdown(packet) {
-            tracing::error!(%error, "failed to submit host lobby countdown");
         }
-        if let Some(lobby) = self.network_lobby.as_mut() {
-            lobby.apply_lobby_countdown(packet);
-        }
+        self.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(countdown_seconds));
+        let packet = lc_network::LobbyCountdownPacket::new(countdown_seconds);
+        self.submit_and_apply_lobby_countdown(packet);
         Ok(())
     }
 
@@ -34020,17 +34594,73 @@ impl GameApp {
             return false;
         }
         let packet = lc_network::LobbyCountdownPacket::new(lc_network::LobbyCountdownPacket::ABORT);
-        if let Some(Err(error)) = self
-            .network
-            .as_ref()
-            .map(|network| network.submit_lobby_countdown(packet))
-        {
-            tracing::error!(%error, "failed to abort host lobby countdown");
+        self.submit_and_apply_lobby_countdown(packet);
+        true
+    }
+
+    fn submit_and_apply_lobby_countdown(&mut self, packet: lc_network::LobbyCountdownPacket) {
+        if let Some(network) = self.network.as_ref() {
+            match network.submit_lobby_countdown(packet) {
+                Ok(()) => self.pending_local_lobby_countdown_echoes.push_back(packet),
+                Err(error) => {
+                    tracing::error!(%error, "failed to submit host lobby countdown");
+                }
+            }
         }
+        self.apply_lobby_countdown_presentation(packet);
+    }
+
+    fn apply_lobby_countdown_presentation(
+        &mut self,
+        packet: lc_network::LobbyCountdownPacket,
+    ) {
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.apply_lobby_countdown(packet);
         }
-        true
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| {
+                lobby.controller.apply_countdown_packet(if packet.is_abort() {
+                    lc_frontend::game_lobby::LobbyCountdownPacket::Abort
+                } else {
+                    lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(packet.countdown())
+                })
+            })
+            .unwrap_or_default();
+        for action in actions {
+            match action {
+                ClassicLobbyAction::CountdownChanged(state) => {
+                    self.scenario_game_options.set_countdown(state.is_locked());
+                }
+                ClassicLobbyAction::NotifyUserIfInactive => {
+                    self.request_control_message_attention();
+                }
+                ClassicLobbyAction::AppendLog(line) => {
+                    let removed_frontend_copy = self
+                        .classic_host_lobby
+                        .as_mut()
+                        .is_some_and(|lobby| {
+                            let mut logs = lobby.controller.logs().to_vec();
+                            if logs.last() != Some(&line) {
+                                return false;
+                            }
+                            logs.pop();
+                            lobby.controller.set_logs(logs);
+                            true
+                        });
+                    if removed_frontend_copy {
+                        let color = (u32::from(line.color[0]) << 16)
+                            | (u32::from(line.color[1]) << 8)
+                            | u32::from(line.color[2]);
+                        self.append_control_message_log(line.text, color, None);
+                    }
+                }
+                _ => unreachable!("countdown presentation emitted a non-countdown action"),
+            }
+        }
+        self.play_classic_lobby_sounds();
+        self.mark_menu_dirty();
     }
 
     fn request_lobby_ready_check_at(&mut self, now: Instant) -> Result<bool, EngineError> {
@@ -34053,6 +34683,7 @@ impl GameApp {
         if self.control_clients.clear_nonhost_lobby_ready() {
             self.publish_updated_host_join_snapshot();
         }
+        self.sync_classic_lobby_client_rows();
         if let Some(Err(error)) = self
             .network
             .as_ref()
@@ -34061,6 +34692,39 @@ impl GameApp {
             tracing::error!(%error, "failed to submit lobby ready check request");
         }
         Ok(true)
+    }
+
+    fn append_remote_lobby_ready_log(&mut self, packet: lc_network::ReadyCheckPacket) {
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        if local_client_id == Some(packet.client_id) {
+            return;
+        }
+        let Some(client) = self.control_clients.state(packet.client_id) else {
+            return;
+        };
+        let client_name = legacy_presentation_text(client.name.as_bytes());
+        let key = if packet.data.is_ready() {
+            "IDS_NET_CLIENT_READY"
+        } else {
+            "IDS_NET_CLIENT_UNREADY"
+        };
+        let fallback = if packet.data.is_ready() {
+            "Client %s ready."
+        } else {
+            "Client %s not ready."
+        };
+        let template = load_runtime_language_table(self.app_paths.as_ref())
+            .ok()
+            .and_then(|table| table.entries.get(key).cloned())
+            .unwrap_or_else(|| fallback.to_string());
+        let text = template
+            .split_once("%s")
+            .map(|(prefix, suffix)| format!("{prefix}{client_name}{suffix}"))
+            .unwrap_or(template);
+        self.append_control_message_log(text, CONTROL_LOG_COLOR, None);
     }
 
     fn handle_lobby_ready_check_request(
@@ -34120,18 +34784,37 @@ impl GameApp {
             return Ok(());
         }
         let player_infos = &self.control_player_infos;
-        let first_relevant_unready = self.network_lobby.as_ref().and_then(|lobby| {
-            lobby
-                .participants
-                .iter()
-                .find_map(|(client_id, participant)| {
-                    let relevant = *client_id == 0
-                        || i32::try_from(*client_id).ok().is_some_and(|client_id| {
-                            !player_infos.client_info_ids(client_id).is_empty()
-                        });
-                    (relevant && !participant.ready).then_some(*client_id)
-                })
-        });
+        let clients = self.control_clients.snapshot();
+        let first_unready_control_client = || {
+            clients.iter().find_map(|client| {
+                let relevant = client.client_id == 0
+                    || !player_infos.client_info_ids(client.client_id).is_empty();
+                (relevant && !client.lobby_ready)
+                    .then(|| ClientId::try_from(client.client_id).ok())
+                    .flatten()
+            })
+        };
+        let first_unready_generic_lobby_client = || {
+            self.network_lobby.as_ref().and_then(|lobby| {
+                lobby
+                    .participants
+                    .iter()
+                    .find_map(|(client_id, participant)| {
+                        let relevant = *client_id == 0
+                            || i32::try_from(*client_id).ok().is_some_and(|client_id| {
+                                !player_infos.client_info_ids(client_id).is_empty()
+                            });
+                        (relevant && !participant.ready).then_some(*client_id)
+                    })
+            })
+        };
+        let first_relevant_unready = if self.classic_host_lobby_active() {
+            first_unready_control_client()
+        } else if self.network_lobby.is_some() {
+            first_unready_generic_lobby_client()
+        } else {
+            first_unready_control_client()
+        };
         if let Some(unready_client_id) = first_relevant_unready {
             if unready_client_id == changed_client_id {
                 self.abort_network_lobby_countdown();
@@ -34139,7 +34822,31 @@ impl GameApp {
             return Ok(());
         }
         if self.host_lobby_countdown.is_none() {
-            self.start_network_lobby_countdown()?;
+            let countdown_seconds = self
+                .staged_network_host_scenario
+                .as_ref()
+                .map(|staged| {
+                    let configured = if staged.lobby.countdown_seconds < 0 {
+                        DEFAULT_LOBBY_COUNTDOWN_SECONDS
+                    } else {
+                        staged.lobby.countdown_seconds
+                    };
+                    if self.network_is_league {
+                        configured.max(5)
+                    } else {
+                        configured
+                    }
+                })
+                .unwrap_or(DEFAULT_LOBBY_COUNTDOWN_SECONDS);
+            if self.classic_host_lobby_active() {
+                self.request_classic_lobby_start(
+                    countdown_seconds,
+                    true,
+                    self.classic_lobby_has_unassociated_savegame_players(),
+                )?;
+            } else {
+                self.start_network_lobby_countdown_with(countdown_seconds)?;
+            }
         }
         Ok(())
     }
@@ -34365,15 +35072,24 @@ impl GameApp {
             .map(|state| state.controller.take_sounds())
             .unwrap_or_default();
         for sound in sounds {
-            self.play_ui_sound(match sound {
-                LobbySound::ArrowHit => "ArrowHit",
-                LobbySound::Click => "Click",
-                LobbySound::Command => "Command",
-                LobbySound::Fuse => "Fuse",
-                LobbySound::StartElevatorLoop | LobbySound::StopElevatorLoop => "Elevator",
-                LobbySound::Pshshsh => "Pshshsh",
-                LobbySound::Blast3 => "Blast3",
-            });
+            match sound {
+                LobbySound::StartElevatorLoop => {
+                    if let Some(audio) = self.audio.as_mut() {
+                        audio.start_lobby_elevator();
+                    }
+                }
+                LobbySound::StopElevatorLoop => {
+                    if let Some(audio) = self.audio.as_mut() {
+                        audio.stop_lobby_elevator();
+                    }
+                }
+                LobbySound::ArrowHit => self.play_ui_sound("ArrowHit"),
+                LobbySound::Click => self.play_ui_sound("Click"),
+                LobbySound::Command => self.play_ui_sound("Command"),
+                LobbySound::Fuse => self.play_ui_sound("Fuse"),
+                LobbySound::Pshshsh => self.play_ui_sound("Pshshsh"),
+                LobbySound::Blast3 => self.play_ui_sound("Blast3"),
+            }
         }
         let option_sounds = self.scenario_game_options.take_sound_events();
         self.play_game_option_sound_events(option_sounds);
@@ -34590,6 +35306,13 @@ impl GameApp {
                     .map_err(report_classic_parity_boundary)
                     .map_err(classic_parity_engine_error)?;
             }
+            self.assets.network_start_wait_resources().map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                        detail: format!("network start-wait dialog is unavailable: {error}"),
+                    }),
+                ))
+            })?;
         }
         let mut pending: VecDeque<ClassicLobbyAction> = actions.into();
         while let Some(action) = pending.pop_front() {
@@ -34622,16 +35345,28 @@ impl GameApp {
                     self.begin_frontend_music_entry();
                     return Ok(());
                 }
-                ClassicLobbyAction::StartRequested { .. } => {
-                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Start));
+                ClassicLobbyAction::StartRequested {
+                    countdown_seconds,
+                    check_league_rules,
+                    confirm_unassociated_savegame_players,
+                } => {
+                    // C4GUI::Button queues Click before MainDlg::OnRunBtn;
+                    // preserve that ordering before Start tears the lobby down.
+                    self.play_classic_lobby_sounds();
+                    self.request_classic_lobby_start(
+                        countdown_seconds,
+                        check_league_rules,
+                        confirm_unassociated_savegame_players,
+                    )?;
+                    if !self.classic_host_lobby_active() {
+                        return Ok(());
+                    }
                 }
                 ClassicLobbyAction::AbortCountdownRequested => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::AbortCountdown,
-                    ));
+                    self.abort_network_lobby_countdown();
                 }
-                ClassicLobbyAction::ReadyChanged(_) => {
-                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Ready));
+                ClassicLobbyAction::ReadyChanged(ready) => {
+                    self.apply_classic_lobby_ready_change(ready)?;
                 }
                 ClassicLobbyAction::TabContextRequested { .. } => {
                     return Err(classic_game_lobby_child_error(
@@ -34659,17 +35394,588 @@ impl GameApp {
                 ClassicLobbyAction::Chat(request) => {
                     self.process_classic_lobby_chat_request(request)?;
                 }
-                ClassicLobbyAction::CountdownChanged(_)
-                | ClassicLobbyAction::NotifyUserIfInactive
-                | ClassicLobbyAction::AppendLog(_) => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::NetworkEvent("lobby countdown"),
-                    ));
+                ClassicLobbyAction::CountdownChanged(state) => {
+                    self.scenario_game_options.set_countdown(state.is_locked());
+                }
+                ClassicLobbyAction::NotifyUserIfInactive => {
+                    self.request_control_message_attention();
+                }
+                ClassicLobbyAction::AppendLog(_) => {
+                    // The frontend owns and has already appended this line.
                 }
             }
         }
         self.play_classic_lobby_sounds();
         Ok(())
+    }
+
+    fn request_classic_lobby_start(
+        &mut self,
+        countdown_seconds: i32,
+        check_league_rules: bool,
+        confirm_unassociated_savegame_players: bool,
+    ) -> Result<(), EngineError> {
+        if check_league_rules && !self.check_classic_lobby_league_rules_start()? {
+            return Ok(());
+        }
+        if confirm_unassociated_savegame_players {
+            let table = load_runtime_language_table(self.app_paths.as_ref()).ok();
+            let message = table
+                .as_ref()
+                .and_then(|table| table.entries.get("IDS_MSG_NOTALLSAVEGAMEPLAYERSHAVE"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    "Not all savegame players have been associated with a local player!|Any unassociated savegame players will be removed from the game. Unassociated local players will join as new players.|Start anyway?".to_string()
+                });
+            let caption = table
+                .as_ref()
+                .and_then(|table| table.entries.get("IDS_MSG_FREESAVEGAMEPLRS"))
+                .cloned()
+                .unwrap_or_else(|| "Player assignment".to_string());
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::new(
+                    message,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                    lc_frontend::message_dialog::MessageDialogIcon::Standard(12),
+                    lc_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
+                ),
+                MessageDialogContinuation::ClassicLobbyStart { countdown_seconds },
+            )?;
+            return Ok(());
+        }
+        self.start_network_lobby_countdown_with(countdown_seconds)
+    }
+
+    fn check_classic_lobby_league_rules_start(&mut self) -> Result<bool, EngineError> {
+        if !self.network_is_league {
+            return Ok(true);
+        }
+        let teams_custom = self
+            .network_team_assignment
+            .as_ref()
+            .map(NetworkTeamAssignmentState::teams)
+            .map(|teams| teams.custom)
+            .ok_or_else(|| {
+                classic_game_lobby_model_engine_error(
+                    "league start validation has no retained pregame team list",
+                )
+            })?;
+        let melee = if teams_custom {
+            false
+        } else {
+            let scenario = self
+                .staged_network_host_scenario
+                .as_ref()
+                .map(|staged| &staged.scenario)
+                .ok_or_else(|| {
+                    classic_game_lobby_model_engine_error(
+                        "league start validation has no retained staged scenario",
+                    )
+                })?;
+            let metadata = scenario.initial_network_scenario_metadata().map_err(|error| {
+                classic_game_lobby_model_engine_error(format!(
+                    "league start validation cannot read scenario goals: {error}"
+                ))
+            })?;
+            ["MELE", "MEL2"].into_iter().any(|wanted| {
+                metadata
+                    .goals
+                    .iter()
+                    .find(|entry| entry.id == wanted)
+                    .is_some_and(|entry| entry.count != 0)
+            })
+        };
+        let table = load_runtime_language_table(self.app_paths.as_ref()).ok();
+        let template = table
+            .as_ref()
+            .and_then(|table| table.entries.get("IDS_MSG_NOSPLITSCREENINLEAGUE"))
+            .map(String::as_str)
+            .unwrap_or(
+                "Players %s and %s would be playing against each other in split-screen. This is disallowed in league games!",
+            );
+        let charset = table
+            .as_ref()
+            .map(|table| table.charset)
+            .unwrap_or(RuntimeHelpCharset::Windows1252);
+        let template_bytes = match charset {
+            RuntimeHelpCharset::Windows1252 => template
+                .chars()
+                .map(runtime_cp1252_byte)
+                .collect::<Result<Vec<_>>>()
+                .map_err(|error| {
+                    classic_game_lobby_model_engine_error(format!(
+                        "league split-screen template cannot be encoded: {error}"
+                    ))
+                })?,
+            RuntimeHelpCharset::Utf8 => template.as_bytes().to_vec(),
+        };
+        let caption = table
+            .as_ref()
+            .and_then(|table| table.entries.get("IDS_NET_ERR_LEAGUE"))
+            .cloned()
+            .unwrap_or_else(|| "League error".to_string());
+        let (_, clients) = self.control_player_infos.retained_rows_snapshot();
+        let mut removals = Vec::new();
+        let mut blocking_reason = None;
+        for (client_id, _, players) in clients {
+            let mut users = players
+                .iter()
+                .filter(|player| player.player_type == lc_engine::PLAYER_INFO_TYPE_USER);
+            let Some(first) = users.next() else {
+                continue;
+            };
+            for player in users {
+                if !((!teams_custom && melee) || player.team != first.team) {
+                    continue;
+                }
+                let first_name = legacy_presentation_text(first.name.as_bytes());
+                let second_name = legacy_presentation_text(player.name.as_bytes());
+                let mut pieces = template.splitn(3, "%s");
+                let prefix = pieces.next().unwrap_or_default();
+                let middle = pieces.next().unwrap_or_default();
+                let suffix = pieces.next().unwrap_or_default();
+                let reason = format!("{prefix}{first_name}{middle}{second_name}{suffix}");
+                let reason_bytes = format_two_legacy_string_arguments(
+                    &template_bytes,
+                    first.name.as_bytes(),
+                    player.name.as_bytes(),
+                )
+                .ok_or_else(|| {
+                    classic_game_lobby_model_engine_error(
+                        "league split-screen template has fewer than two %s arguments",
+                    )
+                })?;
+                let reason_wire = LegacyCString::from_bytes(reason_bytes).ok_or_else(|| {
+                    classic_game_lobby_model_engine_error(
+                        "league split-screen reason contains an embedded NUL",
+                    )
+                })?;
+                let known_nonhost = client_id != 0 && self.control_clients.contains(client_id);
+                if known_nonhost {
+                    removals.push(lc_engine::ClientRemoveControlData {
+                        client_id,
+                        reason: reason_wire,
+                        by_client: 0,
+                    });
+                } else {
+                    blocking_reason = Some(reason);
+                }
+            }
+        }
+        for remove in removals {
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_client_remove(remove))
+            {
+                tracing::error!(%error, "failed to remove split-screen league client");
+            }
+        }
+        let Some(reason) = blocking_reason else {
+            return Ok(true);
+        };
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                reason,
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(46),
+            ),
+            MessageDialogContinuation::None,
+        )?;
+        Ok(false)
+    }
+
+    fn apply_classic_lobby_ready_change(&mut self, ready: bool) -> Result<(), EngineError> {
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .map(NetworkManager::local_client_id)
+        else {
+            self.status_text = "Network lobby ready state is unavailable".to_string();
+            return Ok(());
+        };
+        let Ok(local_client_id_i32) = i32::try_from(local_client_id) else {
+            self.status_text = "Local client ID exceeds the ready-check wire field".to_string();
+            return Ok(());
+        };
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_ready(ready);
+        }
+        if self
+            .control_clients
+            .set_lobby_ready(local_client_id_i32, ready)
+        {
+            self.publish_updated_host_join_snapshot();
+        }
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_ready_check(if ready {
+                lc_network::ReadyCheckData::Ready
+            } else {
+                lc_network::ReadyCheckData::NotReady
+            }))
+        {
+            tracing::error!(%error, "failed to submit classic lobby ready state");
+        }
+        self.sync_classic_lobby_client_rows();
+        self.on_lobby_client_ready_state_change(local_client_id)?;
+        Ok(())
+    }
+
+    fn network_start_wait_layout(
+        &self,
+    ) -> Option<lc_frontend::network_start_wait::NetworkStartWaitLayout> {
+        let wait = self.network_start_wait.as_ref().filter(|wait| wait.visible)?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(wait.controller.layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+        ))
+    }
+
+    fn play_network_start_wait_sounds(&mut self) {
+        let sounds = self
+            .network_start_wait
+            .as_mut()
+            .map(|wait| wait.controller.take_sound_events())
+            .unwrap_or_default();
+        for sound in sounds {
+            self.play_ui_sound(match sound {
+                lc_frontend::network_start_wait::NetworkStartWaitSound::ArrowHit => "ArrowHit",
+                lc_frontend::network_start_wait::NetworkStartWaitSound::Click => "Click",
+            });
+        }
+    }
+
+    fn process_network_start_wait_actions(
+        &mut self,
+        actions: Vec<lc_frontend::network_start_wait::NetworkStartWaitAction>,
+    ) -> Result<(), EngineError> {
+        self.play_network_start_wait_sounds();
+        let Some(action) = actions.into_iter().next() else {
+            return Ok(());
+        };
+        self.network_start_wait = None;
+        match action {
+            lc_frontend::network_start_wait::NetworkStartWaitAction::Restart => {
+                self.restart_current_network_scenario();
+            }
+            lc_frontend::network_start_wait::NetworkStartWaitAction::Cancel => {
+                self.return_to_menu();
+            }
+        }
+        Ok(())
+    }
+
+    fn restart_current_network_scenario(&mut self) {
+        let Some(scenario) = self.active_scenario.clone() else {
+            self.return_to_menu();
+            return;
+        };
+        let definition_load = self
+            .active_definition_load
+            .clone()
+            .unwrap_or_else(|| self.scenario_seed_definition_load());
+        let mut values = self.scenario_game_options.values().clone();
+        values.countdown = false;
+        values.lobby_is_league = false;
+        self.return_to_menu();
+        self.scenario_game_options =
+            GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
+        self.scenario_selector_mode = ScenarioSelectorMode::NetworkHost;
+        self.stage_network_host_scenario(scenario, definition_load);
+    }
+
+    fn handle_network_start_wait_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self
+            .network_start_wait
+            .as_ref()
+            .is_none_or(|wait| !wait.visible)
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let actions = if state == ElementState::Pressed
+            && modifiers.alt()
+            && !modifiers.ctrl()
+            && key == VirtualKeyCode::R
+        {
+            self.network_start_wait
+                .as_mut()
+                .map(|wait| wait.controller.handle_hotkey('R'))
+                .unwrap_or_default()
+        } else if let Some(gui_key) = map_key_code(key) {
+            self.network_start_wait
+                .as_mut()
+                .map(|wait| match state {
+                    ElementState::Pressed => wait.controller.handle_key_down_with_tab_direction(
+                        gui_key,
+                        self.keyboard_modifiers.shift(),
+                    ),
+                    ElementState::Released => wait.controller.handle_key_up(gui_key),
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.process_network_start_wait_actions(actions)?;
+        self.mark_menu_dirty();
+        Ok(true)
+    }
+
+    fn sync_classic_lobby_client_rows(&mut self) {
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return;
+        };
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(0);
+        let clients = self.control_clients.snapshot();
+        let mut rows = lobby.controller.rows().to_vec();
+        for client in &clients {
+            let status = if client.client_id == 0 {
+                LobbyClientStatus::Host
+            } else if client.observer {
+                LobbyClientStatus::Observer
+            } else if client.lobby_ready {
+                LobbyClientStatus::Ready
+            } else {
+                LobbyClientStatus::Client
+            };
+            if let Some(LobbyRosterRow::Client(row)) = rows.iter_mut().find(|row| {
+                matches!(row, LobbyRosterRow::Client(row) if row.id == client.client_id)
+            }) {
+                row.name = client.name.to_string_lossy().into_owned();
+                row.nick = client.nick.to_string_lossy().into_owned();
+                if !matches!(row.status, LobbyClientStatus::Sound | LobbyClientStatus::MutedSound)
+                {
+                    row.status = status;
+                }
+                row.local = client.client_id == local_client_id;
+                row.connected = !row.local;
+            } else {
+                rows.push(LobbyRosterRow::Client(LobbyClientRow {
+                    id: client.client_id,
+                    name: client.name.to_string_lossy().into_owned(),
+                    nick: client.nick.to_string_lossy().into_owned(),
+                    color: [255, 255, 255, 255],
+                    status,
+                    local: client.client_id == local_client_id,
+                    connected: client.client_id != local_client_id,
+                    resource_progress: None,
+                    ping_ms: None,
+                }));
+            }
+        }
+        if let Some(local) = clients
+            .iter()
+            .find(|client| client.client_id == local_client_id)
+        {
+            lobby.controller.set_ready(local.lobby_ready);
+        }
+        lobby.controller.set_rows(rows);
+        lobby.controller.set_player_count(
+            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX),
+            i32::try_from(self.network_max_players).unwrap_or(i32::MAX),
+        );
+        self.mark_menu_dirty();
+    }
+
+    fn sync_classic_lobby_resource_ready(&mut self) {
+        let ready = self.admission_resources.lobby_ready_available();
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| lobby.controller.set_resources_loaded(ready))
+            .unwrap_or_default();
+        for action in actions {
+            if let ClassicLobbyAction::FocusChanged(control) = action {
+                self.scenario_game_options.set_focused_button(match control {
+                    LobbyControl::GameOption(button) => Some(button),
+                    _ => None,
+                });
+            }
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn add_classic_lobby_peer(
+        &mut self,
+        client_id: ClientId,
+        name: String,
+        kind: ParticipantKind,
+    ) {
+        let Ok(client_id) = i32::try_from(client_id) else {
+            return;
+        };
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return;
+        };
+        let mut rows = lobby.controller.rows().to_vec();
+        if rows
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Client(row) if row.id == client_id))
+        {
+            return;
+        }
+        rows.push(LobbyRosterRow::Client(LobbyClientRow {
+            id: client_id,
+            name,
+            nick: String::new(),
+            color: [255, 255, 255, 255],
+            status: if matches!(kind, ParticipantKind::Observer) {
+                LobbyClientStatus::Observer
+            } else {
+                LobbyClientStatus::Client
+            },
+            local: false,
+            connected: true,
+            resource_progress: None,
+            ping_ms: None,
+        }));
+        lobby.controller.set_rows(rows);
+        self.mark_menu_dirty();
+    }
+
+    fn remove_classic_lobby_peer(&mut self, client_id: ClientId) {
+        let Ok(client_id) = i32::try_from(client_id) else {
+            return;
+        };
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return;
+        };
+        let mut rows = lobby.controller.rows().to_vec();
+        rows.retain(|row| {
+            !matches!(row, LobbyRosterRow::Client(row) if row.id == client_id)
+                && !matches!(row, LobbyRosterRow::Player(row) if row.client_id == client_id)
+        });
+        lobby.controller.set_rows(rows);
+        self.mark_menu_dirty();
+    }
+
+    fn classic_lobby_has_unassociated_savegame_players(&self) -> bool {
+        self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            lobby.controller.rows().iter().any(|row| {
+                matches!(
+                    row,
+                    LobbyRosterRow::Header(lc_frontend::game_lobby::LobbyHeaderRow {
+                        kind: lc_frontend::game_lobby::LobbyRosterHeader::UnassignedSavegamePlayers,
+                        ..
+                    })
+                )
+            })
+        })
+    }
+
+    fn append_classic_lobby_error(&mut self, message: String) {
+        self.play_ui_sound("Error");
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.push_log(LobbyLogLine {
+                text: message,
+                color: [255, 31, 31, 255],
+            });
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn classic_lobby_resource_text(&self, key: &str, fallback: &str) -> String {
+        load_runtime_language_table(self.app_paths.as_ref())
+            .ok()
+            .and_then(|table| table.entries.get(key).cloned())
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn process_classic_lobby_host_command(&mut self, text: &str) -> Result<bool, EngineError> {
+        let raw = lc_script::c4_string_bytes(text);
+        if raw.first() != Some(&b'/') {
+            return Ok(false);
+        }
+        let (command, parameter) = raw
+            .iter()
+            .position(|byte| *byte == b' ')
+            .map_or((raw.as_slice(), &[][..]), |space| {
+                (&raw[..space], &raw[space + 1..])
+            });
+        let host = matches!(self.network_mode, Some(NetworkMode::Host(_)));
+        if command.eq_ignore_ascii_case(b"/start") {
+            if !host {
+                let message =
+                    self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
+                self.append_classic_lobby_error(message);
+                return Ok(true);
+            }
+            let configured = self
+                .staged_network_host_scenario
+                .as_ref()
+                .map(|staged| staged.lobby.countdown_seconds)
+                .unwrap_or(DEFAULT_LOBBY_COUNTDOWN_SECONDS);
+            let requested = if parameter.is_empty() {
+                configured
+            } else if let Some(seconds) = legacy_sscanf_decimal_prefix(parameter)
+                .filter(|seconds| *seconds >= 0)
+            {
+                seconds
+            } else {
+                let message = self.classic_lobby_resource_text(
+                    "IDS_MSG_CMD_START_USAGE",
+                    "Usage: /start [timer]",
+                );
+                self.append_classic_lobby_error(message);
+                return Ok(true);
+            };
+            let countdown_seconds = if requested < 0 {
+                DEFAULT_LOBBY_COUNTDOWN_SECONDS
+            } else if self.network_is_league {
+                requested.max(5)
+            } else {
+                requested
+            };
+            self.abort_network_lobby_countdown();
+            self.request_classic_lobby_start(
+                countdown_seconds,
+                true,
+                self.classic_lobby_has_unassociated_savegame_players(),
+            )?;
+            return Ok(true);
+        }
+        if command.eq_ignore_ascii_case(b"/abort") {
+            if !host {
+                let message =
+                    self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
+                self.append_classic_lobby_error(message);
+            } else if !self.abort_network_lobby_countdown() {
+                let message = self.classic_lobby_resource_text(
+                    "IDS_MSG_CMD_ABORT_NOCOUNTDOWN",
+                    "Not in countdown!",
+                );
+                self.append_classic_lobby_error(message);
+            }
+            return Ok(true);
+        }
+        if command.eq_ignore_ascii_case(b"/readycheck") {
+            if !host {
+                let message =
+                    self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
+                self.append_classic_lobby_error(message);
+            } else if !self.request_lobby_ready_check_at(Instant::now())? {
+                let message = std::mem::take(&mut self.status_text);
+                self.append_classic_lobby_error(message);
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn process_classic_lobby_chat_request(
@@ -34765,6 +36071,9 @@ impl GameApp {
                 if let Some(lobby) = self.classic_host_lobby.as_mut() {
                     lobby.chat_history_index = -1;
                     lobby.controller.set_chat_draft("");
+                }
+                if self.process_classic_lobby_host_command(&text)? {
+                    return Ok(());
                 }
                 if self.process_control_message_local_command(&text) {
                     return Ok(());
@@ -35705,6 +37014,9 @@ impl GameApp {
     }
 
     fn show_main_menu(&mut self) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.stop_lobby_elevator();
+        }
         self.restore_startup_fonts();
         self.active_global_gui_overrides.clear();
         self.running_chat = None;
@@ -35737,7 +37049,10 @@ impl GameApp {
             self.control_messages.clear_clients();
             self.network_lobby = None;
             self.classic_host_lobby = None;
+            self.network_start_wait = None;
             self.staged_network_host_scenario = None;
+            self.host_lobby_countdown = None;
+            self.pending_local_lobby_countdown_echoes.clear();
             self.loader_screen = None;
             self.network = None;
             self.network_mode = None;
@@ -35975,7 +37290,9 @@ impl GameApp {
         self.host_reference_paused = false;
         self.host_join_snapshot = None;
         self.network_lobby = None;
+        self.network_start_wait = None;
         self.host_lobby_countdown = None;
+        self.pending_local_lobby_countdown_echoes.clear();
         self.network_control_clock = None;
         self.network_ticks.clear();
         self.network_sync.clear();
@@ -36781,6 +38098,9 @@ impl GameApp {
                             self.remove_runtime_players_at_client(remove.client_id, true);
                         }
                         if self.control_clients.apply_remove(&remove) {
+                            if let Some(wait) = self.network_start_wait.as_mut() {
+                                wait.controller.remove_client(remove.client_id);
+                            }
                             self.network_client_activity.remove_client(remove.client_id);
                             self.control_messages.remove_client(remove.client_id);
                             let had_player_info = self
@@ -37815,7 +39135,7 @@ impl GameApp {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return false;
         }
-        let Some(next) = self
+        let Some((next, broadcast)) = self
             .host_lobby_countdown
             .as_mut()
             .map(HostLobbyCountdown::advance)
@@ -37825,16 +39145,8 @@ impl GameApp {
         if next == 0 {
             self.host_lobby_countdown = None;
         }
-        let packet = lc_network::LobbyCountdownPacket::new(next);
-        if let Some(Err(error)) = self
-            .network
-            .as_ref()
-            .map(|network| network.submit_lobby_countdown(packet))
-        {
-            tracing::error!(%error, "failed to advance host lobby countdown");
-        }
-        if let Some(lobby) = self.network_lobby.as_mut() {
-            lobby.apply_lobby_countdown(packet);
+        if broadcast {
+            self.submit_and_apply_lobby_countdown(lc_network::LobbyCountdownPacket::new(next));
         }
         if next == 0 {
             if let Err(error) = self.start_network_game_now() {
@@ -37842,7 +39154,7 @@ impl GameApp {
                 self.status_text = format!("Unable to start network game: {error}");
             }
         }
-        true
+        broadcast
     }
 
     fn handle_menu_requests(&mut self) -> Result<(), EngineError> {
@@ -38213,6 +39525,7 @@ impl GameApp {
                         self.active_global_gui_overrides.clear();
                         self.status_text = message;
                         self.loading_state = None;
+                        self.network_start_wait = None;
                         self.mode = AppMode::Menu;
                         self.restore_startup_fonts();
                         self.begin_frontend_music_entry();
@@ -38269,6 +39582,12 @@ impl GameApp {
                                         pending.status.target_tick = current_control_tick;
                                     }
                                 }
+                                if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+                                    if let Some(wait) = self.network_start_wait.as_mut() {
+                                        wait.visible = true;
+                                    }
+                                    self.mark_menu_dirty();
+                                }
                             }
                             Some(Err(error)) => {
                                 self.status_text =
@@ -38287,6 +39606,7 @@ impl GameApp {
                     self.active_global_gui_overrides.clear();
                     self.status_text = message;
                     self.loading_state = None;
+                    self.network_start_wait = None;
                     self.mode = AppMode::Menu;
                     self.restore_startup_fonts();
                     self.begin_frontend_music_entry();
@@ -38895,6 +40215,13 @@ impl GameApp {
                 self.activate_network_reference_join(reference)?;
             }
             MessageDialogContinuation::NetworkRuntimeJoin { .. } => {}
+            MessageDialogContinuation::ClassicLobbyStart { countdown_seconds }
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes
+                    && self.classic_host_lobby_active() =>
+            {
+                self.start_network_lobby_countdown_with(countdown_seconds)?;
+            }
+            MessageDialogContinuation::ClassicLobbyStart { .. } => {}
             MessageDialogContinuation::LobbyReadyCheck { .. } => {
                 self.complete_lobby_ready_check_response(
                     result == lc_frontend::message_dialog::MessageDialogResult::Yes,
@@ -40192,7 +41519,13 @@ impl GameApp {
         let config = self
             .loader_render_config
             .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
-        if config.application_scale() > 1.0 && !defer_native_text {
+        if config.application_scale() > 1.0
+            && !defer_native_text
+            && !self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
+        {
             return Err(self.loader_boundary(
                 "scale-native loader fonts are unavailable for the configured scale",
             ));
@@ -40223,6 +41556,22 @@ impl GameApp {
             loader.render_with_config(&mut surface, config, self.loader_gamma.as_ref())
         };
         render.map_err(|error| self.loader_boundary(error.to_string()))?;
+        if self
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| wait.visible)
+        {
+            let resources = self
+                .assets
+                .network_start_wait_resources()
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            self.network_start_wait
+                .as_ref()
+                .expect("visibility was checked above")
+                .controller
+                .render(&mut surface, &resources, true, self.loader_gamma.as_ref())
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+        }
         frame.copy_from_slice(surface.pixels());
         Ok(())
     }
@@ -42229,11 +43578,16 @@ impl GameApp {
     fn return_to_menu(&mut self) {
         // C4Game::Clear starts the fade before tearing down game state.
         self.fade_out_game_music();
+        if let Some(audio) = self.audio.as_mut() {
+            audio.stop_lobby_elevator();
+        }
         self.active_game_graphics = None;
         self.ingame_menu_gfx = None;
         self.active_global_gui_overrides.clear();
         self.close_context_menu_silently();
+        self.network_start_wait = None;
         self.host_lobby_countdown = None;
+        self.pending_local_lobby_countdown_echoes.clear();
         self.finish_recording();
         self.recording_template = None;
         self.control_playback = None;
@@ -63235,19 +64589,6 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn classic_host_lobby_children_are_typed_fail_fast() {
         let cases = vec![
             (
-                ClassicLobbyAction::StartRequested {
-                    countdown_seconds: 5,
-                    check_league_rules: true,
-                    confirm_unassociated_savegame_players: false,
-                },
-                "Start",
-            ),
-            (
-                ClassicLobbyAction::AbortCountdownRequested,
-                "AbortCountdown",
-            ),
-            (ClassicLobbyAction::ReadyChanged(true), "Ready"),
-            (
                 ClassicLobbyAction::SheetRequested(LobbySheet::Resources),
                 "Resources",
             ),
@@ -63294,6 +64635,536 @@ public func Grant(password) { return GainMissionAccess(password); }
             LobbySheet::Players,
         )])
         .expect("already-visible Players sheet is a safe no-op");
+    }
+
+    fn install_classic_host_network_stub(
+        app: &mut GameApp,
+    ) -> (mpsc::Sender<NetworkEvent>, network::TestNetworkCommands) {
+        install_test_classic_host_lobby(app);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, events, commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        (events, commands)
+    }
+
+    #[test]
+    fn classic_host_configured_countdown_uses_sparse_packets_and_abort_unlocks_options() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 12,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("start configured classic countdown");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(12)]
+        );
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .countdown(),
+            lc_frontend::game_lobby::LobbyCountdownState::Long { seconds: 12 }
+        );
+        assert!(!app.scenario_game_options.values().countdown);
+
+        assert!(!app.tick_network_lobby_countdown());
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.tick_network_lobby_countdown());
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(10)]
+        );
+        assert!(app.scenario_game_options.values().countdown);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::AbortCountdownRequested])
+            .expect("abort configured classic countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(-1)]
+        );
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .countdown(),
+            lc_frontend::game_lobby::LobbyCountdownState::None
+        );
+        assert!(!app.scenario_game_options.values().countdown);
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Game start aborted.")
+        );
+    }
+
+    #[test]
+    fn classic_host_start_honors_the_league_split_screen_gate() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_team_lobby(&mut app);
+        app.network_is_league = true;
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 5,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("league rule violation opens the native warning");
+
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+        let warning = app.message_dialogs.last().expect("league warning dialog");
+        assert_eq!(warning.state.caption(), "League error");
+        assert_eq!(
+            warning.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(46)
+        );
+        assert!(warning.state.message().contains("Chooser"));
+        assert!(warning.state.message().contains("Companion"));
+    }
+
+    #[test]
+    fn classic_league_start_removes_a_known_remote_split_screen_client() {
+        let mut app = new_menu_app(640, 480);
+        let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+        app.control_player_infos.replace_snapshot(
+            8,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![
+                    chooser,
+                    lc_engine::ControlPlayerInfoEntry {
+                        player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        team: 4,
+                        ..Default::default()
+                    },
+                    companion,
+                ],
+                by_client: 0,
+            }],
+        );
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Exact Host"),
+            message_client(7, b"Remote"),
+        ]);
+        app.network_is_league = true;
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 5,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("remote league violation is removed before starting");
+
+        assert_eq!(
+            commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: LegacyCString::from_bytes(b"Players Chooser and Companion would be playing against each other in split-screen. This is disallowed in league games!".to_vec()).unwrap(),
+                by_client: 0,
+            }]
+        );
+        assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown::new()));
+        assert!(app.message_dialogs.is_empty());
+    }
+
+    #[test]
+    fn classic_host_start_waits_for_unassociated_savegame_confirmation() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 5,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: true,
+        }])
+        .expect("open savegame assignment warning");
+
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+        let warning = app.message_dialogs.last().expect("savegame warning dialog");
+        assert_eq!(warning.state.caption(), "Player assignment");
+        assert_eq!(
+            warning.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(12)
+        );
+        assert!(matches!(
+            warning.continuation,
+            MessageDialogContinuation::ClassicLobbyStart {
+                countdown_seconds: 5
+            }
+        ));
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("confirm classic host start");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown::new()));
+    }
+
+    #[test]
+    fn classic_host_zero_countdown_enters_go_without_a_countdown_packet() {
+        let _lock = env_lock().lock();
+        let mut app = new_menu_app(640, 480);
+        let scenario = app
+            .scenario_catalog
+            .values()
+            .find(|scenario| {
+                scenario
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.ends_with("Tutorial.c4f/Tutorial01.c4s"))
+            })
+            .cloned()
+            .expect("Tutorial01 is in the startup catalog");
+        let prepared = build_network_host_preparation(&app, &scenario)
+            .expect("build prepared host inputs")
+            .prepare()
+            .expect("prepare retained host scenario");
+        let expected_go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: prepared.host_config().initial_status.control_mode,
+            target_tick: 0,
+        };
+        app.host_join_snapshot = prepared.host_config().initial_join_snapshot.clone();
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: Some(prepared),
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let mut generic_lobby = NetworkLobbyState::new(0, "Exact Host".to_string(), true);
+        generic_lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(generic_lobby);
+        install_test_classic_host_lobby(&mut app);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 0,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("start prepared host immediately");
+
+        assert_eq!(
+            commands.take_lobby_start_commands(),
+            vec![network::TestLobbyStartCommand::Status(expected_go)]
+        );
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.classic_host_lobby.is_none());
+        assert!(app
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| !wait.visible));
+    }
+
+    #[test]
+    fn classic_ready_packets_update_roster_and_start_when_relevant_clients_are_ready() {
+        let mut app = new_menu_app(640, 480);
+        let (events, mut commands) = install_classic_host_network_stub(&mut app);
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Exact Host"),
+            message_client(7, b"Remote"),
+        ]);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        app.sync_classic_lobby_client_rows();
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::ReadyChanged(true)])
+            .expect("submit local host ready state");
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Ready,
+            }]
+        );
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .ready());
+        assert!(app.host_lobby_countdown.is_none());
+
+        events
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue remote ready state");
+        app.process_network_events()
+            .expect("apply remote ready state");
+
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == 7 && client.status == LobbyClientStatus::Ready)));
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown::new()));
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .logs()
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Client Remote ready.",
+                "The game will start in 5 seconds."
+            ]
+        );
+
+        events
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue duplicate remote ready state");
+        app.process_network_events()
+            .expect("log duplicate remote ready state");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some("Client Remote ready.")
+        );
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+    }
+
+    #[test]
+    fn classic_lobby_system_logs_honor_timestamps() {
+        let mut app = new_menu_app(640, 480);
+        app.show_log_timestamps = true;
+        let (events, _commands) = install_classic_host_network_stub(&mut app);
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Exact Host"),
+            message_client(7, b"Remote"),
+        ]);
+
+        events
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue timestamped ready state");
+        app.process_network_events()
+            .expect("append timestamped ready state");
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 12,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("append timestamped countdown");
+
+        let logs = app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .logs();
+        assert_eq!(logs.len(), 2);
+        assert!(logs[0].text.ends_with(" Client Remote ready."));
+        assert_ne!(logs[0].text, "Client Remote ready.");
+        assert!(logs[1]
+            .text
+            .ends_with(" The game will start in 12 seconds."));
+        assert_ne!(logs[1].text, "The game will start in 12 seconds.");
+    }
+
+    #[test]
+    fn classic_host_chat_start_abort_and_readycheck_use_live_lobby_actions() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/start 12".to_string(),
+        ))
+        .expect("start countdown from chat");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(12)]
+        );
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/start 3".to_string(),
+        ))
+        .expect("replace countdown from chat");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![
+                lc_network::LobbyCountdownPacket::new(-1),
+                lc_network::LobbyCountdownPacket::new(3),
+            ]
+        );
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/abort".to_string()))
+            .expect("abort countdown from chat");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(-1)]
+        );
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/abort".to_string()))
+            .expect("report missing countdown in chat");
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .logs()
+                .last()
+                .map(|line| (&*line.text, line.color)),
+            Some(("Not in countdown!", [255, 31, 31, 255]))
+        );
+
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
+            "/readycheck".to_string(),
+        ))
+        .expect("request ready check from chat");
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }]
+        );
+    }
+
+    #[test]
+    fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
+        let mut app = new_menu_app(640, 480);
+        app.control_clients.replace_snapshot([
+            message_client(0, b"Exact Host"),
+            message_client(7, b"Remote"),
+            message_client(8, b"Other"),
+        ]);
+        let expected = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 4,
+        };
+        app.begin_network_start_wait(expected);
+        app.update_network_start_wait_ack(7, lc_network::NetworkStatus {
+            target_tick: 3,
+            ..expected
+        });
+        assert!(app.network_start_wait.as_ref().unwrap().controller.clients().iter().all(
+            |client| client.status
+                == lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading
+        ));
+
+        app.update_network_start_wait_ack(7, expected);
+        let clients = app.network_start_wait.as_ref().unwrap().controller.clients();
+        assert_eq!(
+            clients.iter().find(|client| client.client_id == 7).unwrap().status,
+            lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Ready
+        );
+        assert_eq!(
+            clients.iter().find(|client| client.client_id == 8).unwrap().status,
+            lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading
+        );
+
+        let retargeted = lc_network::NetworkStatus {
+            target_tick: 9,
+            ..expected
+        };
+        app.update_network_start_wait_ack(8, retargeted);
+        let wait = app.network_start_wait.as_ref().unwrap();
+        assert_eq!(wait.expected_status, retargeted);
+        assert_eq!(
+            wait.controller
+                .clients()
+                .iter()
+                .find(|client| client.client_id == 7)
+                .unwrap()
+                .status,
+            lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading
+        );
+        assert_eq!(
+            wait.controller
+                .clients()
+                .iter()
+                .find(|client| client.client_id == 8)
+                .unwrap()
+                .status,
+            lc_frontend::network_start_wait::NetworkStartWaitClientStatus::Ready
+        );
+
+        app.apply_synchronized_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 7,
+                    reason: LegacyCString::default(),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("apply authoritative client removal");
+        assert!(app
+            .network_start_wait
+            .as_ref()
+            .unwrap()
+            .controller
+            .clients()
+            .iter()
+            .all(|client| client.client_id != 7));
     }
 
     #[test]
@@ -63872,7 +65743,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn classic_host_lobby_network_events_are_typed_before_generic_state_changes() {
+    fn classic_host_lobby_network_events_update_supported_live_state() {
         let mut app = new_menu_app(640, 480);
         install_test_classic_host_lobby(&mut app);
         let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
@@ -63985,14 +65856,19 @@ public func Grant(password) { return GainMissionAccess(password); }
                 name: "Remote".to_string(),
                 kind: ParticipantKind::Player,
             })
-            .expect("queue unsupported remote row");
-        let error = app
-            .process_network_events()
-            .expect_err("remote row must reach the typed child boundary");
-        assert!(error.to_string().contains("remote client row"));
-        assert!(app.status_text.is_empty());
+            .expect("queue remote row");
+        app.process_network_events()
+            .expect("remote row updates the exact classic roster");
+        assert_eq!(app.status_text, "Remote joined the lobby");
         assert!(app.network_lobby.is_none());
-        assert!(app.classic_host_lobby.is_some());
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .expect("classic lobby remains")
+            .controller
+            .rows()
+            .iter()
+            .any(|row| matches!(row, LobbyRosterRow::Client(client) if client.id == 1 && client.name == "Remote")));
     }
 
     #[test]
@@ -74575,8 +76451,13 @@ ScenInfoArea=70,5,25,90
         };
         let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
-        app.process_lobby_action(LobbyAction::StartGame)
-            .expect("prepared host starts the C++ countdown");
+        install_test_classic_host_lobby(&mut app);
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("prepared classic host starts the C++ countdown");
         for _ in 0..DEFAULT_LOBBY_COUNTDOWN_SECONDS {
             assert!(
                 app.sec1_timer().expect("advance global second timer"),
@@ -74614,6 +76495,10 @@ ScenInfoArea=70,5,25,90
         );
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());
+        assert!(app
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| !wait.visible));
         // C4GameParameters chooses the host seed before InitNetworkHost and
         // the same Parameters.RandomSeed is serialized to every client. The
         // retained host scenario must therefore enter InitGame with that
@@ -74653,6 +76538,10 @@ ScenInfoArea=70,5,25,90
         assert_eq!(commands.take_status_reached(), 1);
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());
+        assert!(app
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| wait.visible));
         events
             .send(NetworkEvent::StatusRequested(expected_go))
             .expect("queue the host session's delayed self-echo");
@@ -74696,6 +76585,7 @@ ScenInfoArea=70,5,25,90
             .expect("apply the committed Go barrier");
         assert!(matches!(app.mode, AppMode::Running));
         assert!(app.loading_state.is_none());
+        assert!(app.network_start_wait.is_none());
         assert!(
             app.network_game_advertiser.is_some(),
             "native keeps the reference listener alive during play"

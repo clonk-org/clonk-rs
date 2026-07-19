@@ -1644,6 +1644,10 @@ pub enum NetworkEvent {
         round_trip_ms: i32,
     },
     HostStatusChanged(NetworkStatus),
+    HostStatusAck {
+        client_id: ClientId,
+        status: NetworkStatus,
+    },
     JoinData(lc_network::JoinDataEnvelope),
     LeagueRoundResults(lc_network::LeagueRoundResultsPacket),
     LeagueUpdate(lc_network::LeagueUpdateResponse),
@@ -4250,7 +4254,9 @@ async fn handle_host_event(
         HostEvent::StatusCommitted(status) => {
             let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
         }
-        HostEvent::StatusAck { .. } => {}
+        HostEvent::StatusAck { client_id, status } => {
+            let _ = event_tx.send(NetworkEvent::HostStatusAck { client_id, status });
+        }
         HostEvent::ActivationRequest {
             client_id,
             tick,
@@ -8151,6 +8157,35 @@ mod tests {
         assert_eq!(
             event_rx.recv().expect("status event"),
             NetworkEvent::HostStatusChanged(status)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_status_ack_is_forwarded_to_the_app_with_client_identity() {
+        let client_id = 7;
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 23,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
+
+        handle_host_event(
+            HostEvent::StatusAck { client_id, status },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
+        )
+        .await
+        .expect("forward client status acknowledgement");
+
+        assert_eq!(
+            event_rx.recv().expect("status acknowledgement event"),
+            NetworkEvent::HostStatusAck { client_id, status }
         );
     }
 

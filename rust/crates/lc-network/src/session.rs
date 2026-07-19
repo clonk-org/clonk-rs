@@ -5699,10 +5699,15 @@ async fn handle_client_message(
                 .await;
         }
         ControlMessage::StatusAck(status) => {
-            let _ = state
-                .event_tx
-                .send(HostEvent::StatusAck { client_id, status })
-                .await;
+            let accepted = state
+                .status_barrier
+                .remote_ack_changes_state(client_id, status);
+            if accepted {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::StatusAck { client_id, status })
+                    .await;
+            }
             let effects = state.status_barrier.remote_ack(client_id, status);
             apply_barrier_effects(effects, state).await;
         }
