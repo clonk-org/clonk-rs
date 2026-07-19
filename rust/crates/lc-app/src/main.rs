@@ -9754,6 +9754,14 @@ struct GameApp {
     startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
+    /// Process-local `C4Startup::eLastDlgID`. The network lobby and staged
+    /// loader are game states rather than startup dialogs, so they must not
+    /// displace the dialog reopened after the round ends.
+    last_startup_dialog: StartupDialog,
+    /// The one retained dialog that native `SDID_Back` may reuse. A dialog
+    /// rebuilt by `DoStartup` after a round has no such history, so Back from
+    /// that fresh selector goes to Main instead of inventing a NetDlg.
+    startup_scenario_back_dialog: Option<StartupDialog>,
     startup_view_flags: StartupViewFlags,
     scenario_selector_mode: ScenarioSelectorMode,
     scenario_game_options: GameOptionButtons,
@@ -11971,6 +11979,16 @@ enum StartupView {
     Options,
     About,
     /// C4StartupPlrSelDlg — the player selection dialog.
+    PlayerSelection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupDialog {
+    MainMenu,
+    ScenarioBrowser(ScenarioSelectorMode),
+    NetworkGame,
+    Options,
+    About,
     PlayerSelection,
 }
 
@@ -19064,6 +19082,8 @@ impl GameApp {
             startup_options_dialog: None,
             startup_about_dialog: None,
             startup_view: StartupView::MainMenu,
+            last_startup_dialog: StartupDialog::MainMenu,
+            startup_scenario_back_dialog: None,
             startup_view_flags: StartupViewFlags {
                 fair_crew: load_fair_crew_flag(paths),
                 record: load_recording_flag(paths),
@@ -26022,7 +26042,7 @@ impl GameApp {
             return Ok(());
         };
         let definition_load = self.active_definition_load.clone();
-        self.return_to_menu();
+        self.return_to_menu_for_relaunch();
         let start_result = match definition_load {
             Some(definition_load) => {
                 self.start_scenario_with_definition_load(scenario, definition_load)
@@ -40092,7 +40112,7 @@ impl GameApp {
         let mut values = self.scenario_game_options.values().clone();
         values.countdown = false;
         values.lobby_is_league = false;
-        self.return_to_menu();
+        self.return_to_menu_for_relaunch();
         self.scenario_game_options =
             GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
         self.scenario_selector_mode = ScenarioSelectorMode::NetworkHost;
@@ -41184,9 +41204,16 @@ impl GameApp {
     fn close_scenario_browser(&mut self) {
         self.menu_state.abort_renaming();
         self.scensel_rename_pointer_focus = None;
-        match self.scenario_selector_mode {
-            ScenarioSelectorMode::Local => self.show_main_menu(),
-            ScenarioSelectorMode::NetworkHost => {
+        match self.startup_scenario_back_dialog.take() {
+            Some(StartupDialog::MainMenu) => {
+                // `SDID_Back` reuses the retained Main dialog, so the
+                // remembered ID remains the selector until a later explicit
+                // switch replaces it.
+                let remembered = self.last_startup_dialog;
+                self.show_main_menu();
+                self.last_startup_dialog = remembered;
+            }
+            Some(StartupDialog::NetworkGame) => {
                 self.close_context_menu_silently();
                 self.game_option_input_dialog = None;
                 self.game_option_input_consumed_keys.clear();
@@ -41200,6 +41227,11 @@ impl GameApp {
                 }
                 self.status_text.clear();
                 self.mark_menu_dirty();
+            }
+            _ => {
+                // `DoStartup` recreated the selector without `pLastDlg`.
+                // Native normalizes Back in that state to an explicit Main.
+                self.show_main_menu();
             }
         }
     }
@@ -41401,6 +41433,32 @@ impl GameApp {
         self.startup_view = view;
     }
 
+    fn replace_startup_dialog(&mut self, view: StartupView, dialog: StartupDialog) {
+        self.last_startup_dialog = dialog;
+        self.replace_startup_view(view);
+    }
+
+    fn restore_startup_dialog(&mut self, dialog: StartupDialog) {
+        if !matches!(dialog, StartupDialog::MainMenu) {
+            // `show_main_menu` is also the teardown hub and may have opened
+            // its first-player prompt. Native DoStartup constructs only the
+            // remembered non-Main dialog, so that Main-only child must not
+            // leak above the restored screen.
+            self.startup_player_properties_dialog = None;
+        }
+        match dialog {
+            StartupDialog::MainMenu => {}
+            StartupDialog::ScenarioBrowser(mode) => {
+                self.open_scenario_browser_with_mode(mode);
+                self.startup_scenario_back_dialog = None;
+            }
+            StartupDialog::NetworkGame => self.open_network_game_dialog(),
+            StartupDialog::Options => self.open_options_menu(),
+            StartupDialog::About => self.open_about_dialog(),
+            StartupDialog::PlayerSelection => self.open_player_selection_dialog(),
+        }
+    }
+
     fn open_network_host_scenario_browser(&mut self) {
         self.open_scenario_browser_with_mode(ScenarioSelectorMode::NetworkHost);
     }
@@ -41415,13 +41473,20 @@ impl GameApp {
         self.game_option_pointer_capture = false;
         self.game_option_consumed_keys.clear();
         self.scenario_selector_mode = selector_mode;
+        self.startup_scenario_back_dialog = Some(match selector_mode {
+            ScenarioSelectorMode::Local => StartupDialog::MainMenu,
+            ScenarioSelectorMode::NetworkHost => StartupDialog::NetworkGame,
+        });
         let values = load_scenario_game_option_values(self.app_paths.as_ref());
         self.startup_view_flags.fair_crew = values.fair_crew;
         self.startup_view_flags.record = values.record;
         self.recording_enabled = values.record && self.recordings_dir.is_some();
         self.scenario_game_options =
             GameOptionButtons::new(selector_mode.game_option_context(), values);
-        self.replace_startup_view(StartupView::ScenarioBrowser);
+        self.replace_startup_dialog(
+            StartupView::ScenarioBrowser,
+            StartupDialog::ScenarioBrowser(selector_mode),
+        );
         self.menu_state.set_pointer_position(None);
         self.menu_state.scensel_title_present = true;
         self.menu_state.scensel_title_topmost = false;
@@ -41521,7 +41586,7 @@ impl GameApp {
             }
         };
         self.startup_network_dialog = Some(dialog);
-        self.replace_startup_view(StartupView::NetworkGame);
+        self.replace_startup_dialog(StartupView::NetworkGame, StartupDialog::NetworkGame);
         self.startup_network_last_refresh = Some(Instant::now());
         if self.startup_game_search.is_some() {
             self.status_text = "Querying game infos…".to_string();
@@ -41562,7 +41627,10 @@ impl GameApp {
         );
         self.startup_player_dialog = Some(dialog);
         self.plrsel_last_click = None;
-        self.replace_startup_view(StartupView::PlayerSelection);
+        self.replace_startup_dialog(
+            StartupView::PlayerSelection,
+            StartupDialog::PlayerSelection,
+        );
         self.status_text.clear();
     }
 
@@ -41592,7 +41660,7 @@ impl GameApp {
             );
         }
         self.startup_options_dialog = Some(dialog);
-        self.replace_startup_view(StartupView::Options);
+        self.replace_startup_dialog(StartupView::Options, StartupDialog::Options);
         self.status_text.clear();
     }
 
@@ -41655,7 +41723,7 @@ impl GameApp {
             );
         }
         self.startup_about_dialog = Some(dialog);
-        self.replace_startup_view(StartupView::About);
+        self.replace_startup_dialog(StartupView::About, StartupDialog::About);
         self.status_text.clear();
     }
 
@@ -41739,7 +41807,8 @@ impl GameApp {
             );
             self.sync_scenario_game_option_bounds();
         }
-        self.replace_startup_view(StartupView::MainMenu);
+        self.startup_scenario_back_dialog = None;
+        self.replace_startup_dialog(StartupView::MainMenu, StartupDialog::MainMenu);
         self.scenario_selector_mode = ScenarioSelectorMode::Local;
         self.main_menu_state.pointer_left();
         if let Some(lobby) = self.network_lobby.as_mut() {
@@ -44074,7 +44143,7 @@ impl GameApp {
                     self.status_text = format!("Next scenario is unavailable: {path}");
                     return Ok(());
                 };
-                self.return_to_menu();
+                self.return_to_menu_for_relaunch();
                 match definition_load {
                     Some(definition_load) => {
                         self.start_scenario_with_definition_load(scenario, definition_load)?;
@@ -49150,6 +49219,15 @@ impl GameApp {
     }
 
     fn return_to_menu(&mut self) {
+        self.return_to_menu_with_dialog_restore(true);
+    }
+
+    fn return_to_menu_for_relaunch(&mut self) {
+        self.return_to_menu_with_dialog_restore(false);
+    }
+
+    fn return_to_menu_with_dialog_restore(&mut self, restore_dialog: bool) {
+        let last_startup_dialog = self.last_startup_dialog;
         // C4Game::Clear starts the fade before tearing down game state.
         self.fade_out_game_music();
         if let Some(audio) = self.audio.as_mut() {
@@ -49300,6 +49378,14 @@ impl GameApp {
 
         self.mode = AppMode::Menu;
         self.show_main_menu();
+        if restore_dialog {
+            self.restore_startup_dialog(last_startup_dialog);
+        } else {
+            // Restart/Next Mission immediately opens another game. Retain the
+            // eventual startup destination without constructing a dialog (or
+            // starting network discovery) behind that new round.
+            self.last_startup_dialog = last_startup_dialog;
+        }
         self.begin_frontend_music_entry();
     }
 
@@ -88488,6 +88574,190 @@ ScenInfoArea=70,5,25,90
         click_main_button(&mut app, 5);
         assert!(app.take_exit_request(), "Exit button requests shutdown");
         reset_cached_app_paths();
+    }
+
+    fn l038_running_browser_sandbox(selector_mode: ScenarioSelectorMode) -> GameApp {
+        let scenarios = sample_scenarios();
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("build L038 scenario menu");
+        let mut app = new_menu_app(640, 480);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser_with_mode(selector_mode);
+        app.enter_scenario_folder("folder_missions");
+        assert_eq!(app.menu_state.stack.len(), 2);
+        if selector_mode == ScenarioSelectorMode::Local {
+            app.handle_menu_input(|_| {
+                vec![StartupMenuAction::StartScenario(
+                    lc_frontend::ScenarioSummary {
+                        identifier: "scenario_alpha".to_string(),
+                        title: "Alpha".to_string(),
+                        kind: ScenarioKind::Scenario,
+                    },
+                )]
+            })
+            .expect("start L038 round through the scenario browser");
+        } else {
+            // A pathless fixture cannot enter the real prepared-host pipeline;
+            // this branch isolates the startup-dialog memory across the
+            // otherwise transient lobby view.
+            app.start_sandbox_scenario(FrontendScenario::fallback())
+                .expect("start hosted L038 state probe");
+        }
+        wait_for_running(&mut app);
+        app
+    }
+
+    fn assert_l038_browser_return(app: &GameApp, selector_mode: ScenarioSelectorMode) {
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(app.scenario_selector_mode, selector_mode);
+        assert_eq!(
+            app.last_startup_dialog,
+            StartupDialog::ScenarioBrowser(selector_mode)
+        );
+        assert_eq!(app.startup_scenario_back_dialog, None);
+        assert_eq!(
+            app.menu_state.stack.len(),
+            1,
+            "native rebuilds the remembered scenario dialog at its root"
+        );
+        assert_eq!(app.scenario_label, app.menu_state.label_path());
+    }
+
+    #[test]
+    fn l038_local_round_abort_and_evaluation_end_restore_fresh_browser() {
+        let mut aborted = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
+        aborted
+            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
+            .expect("abort local L038 round");
+        assert_l038_browser_return(&aborted, ScenarioSelectorMode::Local);
+
+        let mut evaluated = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
+        evaluated
+            .handle_game_over()
+            .expect("open local L038 evaluation dialog");
+        assert!(evaluated.game_over_dialog.is_some());
+        evaluated
+            .handle_game_over_action(GameOverAction::End)
+            .expect("end evaluated local L038 round");
+        assert_l038_browser_return(&evaluated, ScenarioSelectorMode::Local);
+    }
+
+    #[test]
+    fn l038_network_lobby_does_not_displace_join_or_host_startup_dialog() {
+        let mut joined = new_menu_app(640, 480);
+        joined.open_network_game_dialog();
+        joined.open_network_lobby();
+        joined
+            .start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start joined L038 sandbox round");
+        joined
+            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
+            .expect("leave joined L038 round");
+        assert!(matches!(joined.mode, AppMode::Menu));
+        assert_eq!(joined.startup_view, StartupView::NetworkGame);
+        assert_eq!(joined.last_startup_dialog, StartupDialog::NetworkGame);
+
+        let mut hosted = l038_running_browser_sandbox(ScenarioSelectorMode::NetworkHost);
+        hosted.open_network_lobby();
+        hosted
+            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
+            .expect("leave hosted L038 round");
+        assert_l038_browser_return(&hosted, ScenarioSelectorMode::NetworkHost);
+        hosted
+            .scensel_do_back()
+            .expect("fresh hosted selector has no retained NetDlg");
+        assert_eq!(hosted.startup_view, StartupView::MainMenu);
+        assert_eq!(hosted.last_startup_dialog, StartupDialog::MainMenu);
+
+        let mut reused = new_menu_app(640, 480);
+        reused.open_network_game_dialog();
+        reused.open_network_host_scenario_browser();
+        reused
+            .scensel_do_back()
+            .expect("reuse the retained network dialog");
+        assert_eq!(reused.startup_view, StartupView::NetworkGame);
+        assert_eq!(
+            reused.last_startup_dialog,
+            StartupDialog::ScenarioBrowser(ScenarioSelectorMode::NetworkHost)
+        );
+        reused.open_network_lobby();
+        reused
+            .start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start joined round after backing out of host selection");
+        reused
+            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
+            .expect("leave joined round with reused Back history");
+        assert_l038_browser_return(&reused, ScenarioSelectorMode::NetworkHost);
+    }
+
+    #[test]
+    fn l038_back_history_and_fresh_app_match_native_dialog_memory() {
+        let mut backed_out = new_menu_app(640, 480);
+        backed_out.open_scenario_browser();
+        backed_out
+            .scensel_do_back()
+            .expect("leave root scenario browser");
+        assert_eq!(backed_out.startup_view, StartupView::MainMenu);
+        assert_eq!(
+            backed_out.last_startup_dialog,
+            StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local)
+        );
+        backed_out
+            .start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start round after reusing the retained Main dialog");
+        backed_out
+            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
+            .expect("leave round after reusing the retained Main dialog");
+        assert_l038_browser_return(&backed_out, ScenarioSelectorMode::Local);
+        backed_out
+            .scensel_do_back()
+            .expect("fresh restored selector backs to explicit Main");
+        assert_eq!(backed_out.startup_view, StartupView::MainMenu);
+        assert_eq!(backed_out.last_startup_dialog, StartupDialog::MainMenu);
+
+        let mut previous_session = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
+        previous_session
+            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
+            .expect("restore previous session browser");
+        assert_l038_browser_return(&previous_session, ScenarioSelectorMode::Local);
+        drop(previous_session);
+
+        let mut fresh = new_menu_app(640, 480);
+        assert_eq!(fresh.startup_view, StartupView::MainMenu);
+        assert_eq!(fresh.last_startup_dialog, StartupDialog::MainMenu);
+        fresh
+            .start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start fresh-session L038 sandbox round");
+        fresh
+            .handle_game_over_action(GameOverAction::End)
+            .expect("end fresh-session L038 round");
+        assert_eq!(fresh.startup_view, StartupView::MainMenu);
+        assert_eq!(fresh.last_startup_dialog, StartupDialog::MainMenu);
+    }
+
+    #[test]
+    fn l038_immediate_relaunch_retains_destination_without_background_discovery() {
+        let mut app = new_menu_app(640, 480);
+        app.open_network_game_dialog();
+        app.open_network_lobby();
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start network-origin L038 relaunch probe");
+
+        app.restart_current_scenario()
+            .expect("restart network-origin L038 probe");
+
+        assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(app.last_startup_dialog, StartupDialog::NetworkGame);
+        assert!(
+            app.startup_game_search.is_none(),
+            "restart must not leave startup discovery behind the new round"
+        );
+        app.apply_ingame_menu_action(MenuAction::AbortConfirmed)
+            .expect("leave restarted L038 probe");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(app.last_startup_dialog, StartupDialog::NetworkGame);
     }
 
     #[test]
