@@ -22558,6 +22558,31 @@ impl GameApp {
         Ok(true)
     }
 
+    fn runtime_client_row_network_state(
+        local: bool,
+        state: Option<&network::RuntimeNetworkClientState>,
+    ) -> (
+        lc_frontend::runtime_client_list::RuntimeClientStatusIcon,
+        Option<i32>,
+    ) {
+        use lc_frontend::runtime_client_list::RuntimeClientStatusIcon;
+
+        let Some(state) = state else {
+            return (RuntimeClientStatusIcon::Ready, None);
+        };
+        let icon = match state.status {
+            lc_network::RemoteBarrierState::Joining
+            | lc_network::RemoteBarrierState::Chasing
+            | lc_network::RemoteBarrierState::NotReady => RuntimeClientStatusIcon::Loading,
+            lc_network::RemoteBarrierState::Ready if !state.control_ready => {
+                RuntimeClientStatusIcon::NetWait
+            }
+            lc_network::RemoteBarrierState::Ready => RuntimeClientStatusIcon::Ready,
+            lc_network::RemoteBarrierState::Removing => RuntimeClientStatusIcon::Kick,
+        };
+        (icon, (!local).then_some(state.wait_ms))
+    }
+
     fn runtime_client_list_snapshot(
         &mut self,
     ) -> (
@@ -22599,6 +22624,19 @@ impl GameApp {
             .transpose()
             .unwrap_or_else(|error| {
                 tracing::debug!(%error, "runtime connection details are not available");
+                None
+            })
+            .unwrap_or_default();
+        let runtime_client_states = u32::try_from(status.tick)
+            .ok()
+            .and_then(|tick| {
+                self.network
+                    .as_ref()
+                    .map(|network| network.runtime_client_states(tick))
+            })
+            .transpose()
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "runtime client states are not available");
                 None
             })
             .unwrap_or_default();
@@ -22660,6 +22698,11 @@ impl GameApp {
                 }));
                 addresses.sort();
                 addresses.dedup();
+                let client_state = runtime_client_states.iter().find(|state| {
+                    i32::try_from(state.client_id).ok() == Some(client.client_id)
+                });
+                let (status, wait_ms) =
+                    Self::runtime_client_row_network_state(local, client_state);
                 lc_frontend::runtime_client_list::RuntimeClientRow {
                     client_id: client.client_id,
                     name: legacy_presentation_text(client.name.as_bytes()),
@@ -22672,11 +22715,11 @@ impl GameApp {
                     has_players: !player_names.is_empty(),
                     player_names,
                     addresses,
-                    // Every synchronized runtime core has completed joining.
-                    // Per-client control readiness is intentionally not
-                    // inferred from the global buffered-control count.
-                    status: lc_frontend::runtime_client_list::RuntimeClientStatusIcon::Ready,
-                    wait_ms: None,
+                    // Lifecycle, raw per-client control readiness, and wait
+                    // come from the live network worker rather than the
+                    // aggregate buffered-control count.
+                    status,
+                    wait_ms,
                     connections,
                     can_moderate: can_moderate && client.client_id != 0,
                 }
@@ -24210,6 +24253,9 @@ impl GameApp {
         // packets received while stopped are not promoted before the node
         // reaches and acknowledges the Go barrier.
         if self.check_runtime_network_status_reached() == RuntimeStatusReachOutcome::NotReached {
+            if let Some(network) = self.network.as_ref() {
+                network.reset_client_performance();
+            }
             self.network_control_running = true;
         }
         true
@@ -26642,6 +26688,9 @@ impl GameApp {
                 self.loading_state = None;
                 self.pending_client_start_status = None;
                 self.mode = AppMode::Running;
+            }
+            if let Some(network) = self.network.as_ref() {
+                network.reset_client_performance();
             }
             self.network_control_running = true;
             self.publish_running_host_reference();
@@ -42832,6 +42881,9 @@ impl GameApp {
                         let sync_controls = self.network_sync.take_exact(tick);
                         if !sync_controls.is_empty() {
                             self.apply_synchronized_controls(tick, sync_controls)?;
+                            if let Some(network) = self.network.as_ref() {
+                                network.reset_client_performance();
+                            }
                         }
 
                         // Network mode mirrors C4Game::Execute's Prepare gate:
@@ -42850,6 +42902,19 @@ impl GameApp {
                         else {
                             return Ok(());
                         };
+                        // C++ CalcPerformance runs in GetControl, before the
+                        // decoded controls execute. Freeze the receiver-local
+                        // wait sample at the same consumption boundary.
+                        let active_client_ids = self
+                            .control_clients
+                            .activated_client_ids()
+                            .into_iter()
+                            .filter_map(|client_id| ClientId::try_from(client_id).ok())
+                            .collect();
+                        let Some(network) = self.network.as_ref() else {
+                            return Ok(());
+                        };
+                        network.control_tick_consumed(tick, active_client_ids);
                         self.apply_ready_controls(tick, controls)?;
                         // A client mismatch disconnects and returns to the menu.
                         // Do not execute one extra simulation frame after the
@@ -118503,6 +118568,59 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
+    fn runtime_client_list_maps_native_lifecycle_readiness_and_wait() {
+        use lc_frontend::runtime_client_list::RuntimeClientStatusIcon;
+
+        let state = |status, control_ready, wait_ms| network::RuntimeNetworkClientState {
+            client_id: 7,
+            status,
+            control_ready,
+            wait_ms,
+        };
+        for lifecycle in [
+            lc_network::RemoteBarrierState::Joining,
+            lc_network::RemoteBarrierState::Chasing,
+            lc_network::RemoteBarrierState::NotReady,
+        ] {
+            assert_eq!(
+                GameApp::runtime_client_row_network_state(
+                    false,
+                    Some(&state(lifecycle, true, -12)),
+                ),
+                (RuntimeClientStatusIcon::Loading, Some(-12))
+            );
+        }
+        assert_eq!(
+            GameApp::runtime_client_row_network_state(
+                false,
+                Some(&state(lc_network::RemoteBarrierState::Ready, false, 9)),
+            ),
+            (RuntimeClientStatusIcon::NetWait, Some(9))
+        );
+        assert_eq!(
+            GameApp::runtime_client_row_network_state(
+                false,
+                Some(&state(lc_network::RemoteBarrierState::Ready, true, 4)),
+            ),
+            (RuntimeClientStatusIcon::Ready, Some(4))
+        );
+        assert_eq!(
+            GameApp::runtime_client_row_network_state(
+                false,
+                Some(&state(lc_network::RemoteBarrierState::Removing, true, 2)),
+            ),
+            (RuntimeClientStatusIcon::Kick, Some(2))
+        );
+        assert_eq!(
+            GameApp::runtime_client_row_network_state(
+                true,
+                Some(&state(lc_network::RemoteBarrierState::Ready, false, 99)),
+            ),
+            (RuntimeClientStatusIcon::NetWait, None)
+        );
+    }
+
+    #[test]
     fn runtime_f4_toggles_only_live_network_dialog_and_consumes_edges() {
         for (role, opens) in [
             (RuntimeNetworkRole::Offline, false),
@@ -118858,6 +118976,15 @@ func ControlDig() { dig_count = 1; return(1); }
         let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
         app.control_clients
             .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
+        app.network
+            .as_ref()
+            .expect("network stub")
+            .set_test_runtime_client_states([network::RuntimeNetworkClientState {
+                client_id: 7,
+                status: lc_network::RemoteBarrierState::Joining,
+                control_ready: true,
+                wait_ms: -12,
+            }]);
         let mut clock = NetworkControlClock::new(40, 4);
         clock.observe_round_trip_ms(6_000);
         clock.complete_control_frame();
@@ -118886,8 +119013,32 @@ func ControlDig() { dig_count = 1; return(1); }
                 .status_text(),
             initial.to_string()
         );
+        let initial_remote = app
+            .runtime_client_list
+            .as_ref()
+            .expect("dialog open")
+            .rows()
+            .iter()
+            .find(|row| row.client_id == 7)
+            .expect("remote row");
+        assert_eq!(
+            (initial_remote.status, initial_remote.wait_ms),
+            (
+                lc_frontend::runtime_client_list::RuntimeClientStatusIcon::Loading,
+                Some(-12)
+            )
+        );
 
         app.network_control_clock = Some(NetworkControlClock::new(50, 2));
+        app.network
+            .as_ref()
+            .expect("network stub")
+            .set_test_runtime_client_states([network::RuntimeNetworkClientState {
+                client_id: 7,
+                status: lc_network::RemoteBarrierState::Ready,
+                control_ready: false,
+                wait_ms: 9,
+            }]);
         assert_eq!(
             app.runtime_client_list
                 .as_ref()
@@ -118895,6 +119046,22 @@ func ControlDig() { dig_count = 1; return(1); }
                 .status(),
             initial,
             "the visible status is a one-second snapshot"
+        );
+        let stale_remote = app
+            .runtime_client_list
+            .as_ref()
+            .expect("dialog remains open")
+            .rows()
+            .iter()
+            .find(|row| row.client_id == 7)
+            .expect("remote row");
+        assert_eq!(
+            (stale_remote.status, stale_remote.wait_ms),
+            (
+                lc_frontend::runtime_client_list::RuntimeClientStatusIcon::Loading,
+                Some(-12)
+            ),
+            "client rows are also one-second snapshots"
         );
         assert!(app
             .sec1_timer()
@@ -118914,6 +119081,47 @@ func ControlDig() { dig_count = 1; return(1); }
             (50, 2, 1, 0)
         );
         assert!(refreshed.to_string().contains("Behind "));
+        let waiting_remote = app
+            .runtime_client_list
+            .as_ref()
+            .expect("dialog remains open")
+            .rows()
+            .iter()
+            .find(|row| row.client_id == 7)
+            .expect("remote row");
+        assert_eq!(
+            (waiting_remote.status, waiting_remote.wait_ms),
+            (
+                lc_frontend::runtime_client_list::RuntimeClientStatusIcon::NetWait,
+                Some(9)
+            )
+        );
+
+        app.network
+            .as_ref()
+            .expect("network stub")
+            .set_test_runtime_client_states([network::RuntimeNetworkClientState {
+                client_id: 7,
+                status: lc_network::RemoteBarrierState::Removing,
+                control_ready: true,
+                wait_ms: 4,
+            }]);
+        assert!(app.sec1_timer().expect("refresh removing client row"));
+        let removing_remote = app
+            .runtime_client_list
+            .as_ref()
+            .expect("dialog remains open")
+            .rows()
+            .iter()
+            .find(|row| row.client_id == 7)
+            .expect("remote row");
+        assert_eq!(
+            (removing_remote.status, removing_remote.wait_ms),
+            (
+                lc_frontend::runtime_client_list::RuntimeClientStatusIcon::Kick,
+                Some(4)
+            )
+        );
     }
 
     #[test]

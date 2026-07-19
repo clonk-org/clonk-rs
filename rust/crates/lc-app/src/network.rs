@@ -29,7 +29,7 @@ use lc_network::{
 };
 #[cfg(test)]
 use lc_network::start_host;
-pub use lc_network::RuntimeNetworkConnection;
+pub use lc_network::{RuntimeNetworkClientState, RuntimeNetworkConnection};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -936,6 +936,8 @@ pub struct NetworkManager {
     league_start_response: Option<lc_network::LeagueStartResponse>,
     league_runtime_available: bool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
+    #[cfg(test)]
+    test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1895,6 +1897,11 @@ enum NetworkCommand {
     InspectRuntimeConnections {
         completion: Sender<std::result::Result<Vec<RuntimeNetworkConnection>, String>>,
     },
+    InspectRuntimeClientStates {
+        tick: Tick,
+        probe: Option<ControlTickProbe>,
+        completion: Sender<std::result::Result<Vec<RuntimeNetworkClientState>, String>>,
+    },
     DisconnectRuntimeConnection {
         connection_id: u32,
         completion: Sender<std::result::Result<(), String>>,
@@ -1997,6 +2004,12 @@ enum NetworkCommand {
     FinalizeTick {
         tick: Tick,
     },
+    ControlTickConsumed {
+        tick: Tick,
+        consumed_at: tokio::time::Instant,
+        client_ids: Vec<ClientId>,
+    },
+    ResetClientPerformance,
     ChangeStatus(NetworkStatus),
     StatusReachedCurrent,
     StatusReached {
@@ -2192,6 +2205,8 @@ impl NetworkManager {
             league_start_response: ready.league_start_response,
             league_runtime_available,
             league_record_runtime: ready.league_record_runtime,
+            #[cfg(test)]
+            test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -2216,6 +2231,44 @@ impl NetworkManager {
             .recv()
             .map_err(|_| anyhow!("network worker ended before returning live connections"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    pub fn runtime_client_states(&self, tick: Tick) -> Result<Vec<RuntimeNetworkClientState>> {
+        #[cfg(test)]
+        if self.worker.is_none() {
+            return Ok(self.test_runtime_client_states.lock().clone());
+        }
+        if self.worker.is_none() {
+            return Err(anyhow!(
+                "runtime client-state inspection is unavailable without a network worker"
+            ));
+        }
+        let probe = self
+            .control_tick_probe
+            .lock()
+            .as_ref()
+            .copied()
+            .filter(|probe| probe.tick == tick);
+        let (completion, inspected) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::InspectRuntimeClientStates {
+                tick,
+                probe,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting client-state inspection"))?;
+        inspected
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before returning live client states"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_runtime_client_states(
+        &self,
+        states: impl IntoIterator<Item = RuntimeNetworkClientState>,
+    ) {
+        *self.test_runtime_client_states.lock() = states.into_iter().collect();
     }
 
     pub fn disconnect_runtime_connection(&self, connection_id: u32) -> Result<()> {
@@ -2887,10 +2940,34 @@ impl NetworkManager {
         let _ = self.command_tx.blocking_send(command);
     }
 
-    pub fn control_tick_reached(&self, tick: Tick, control_rate: i32) {
-        if self.role != NetworkRole::Host {
+    pub fn control_tick_consumed(&self, tick: Tick, client_ids: Vec<ClientId>) {
+        #[cfg(test)]
+        if self.worker.is_none() {
             return;
         }
+        let _ = self
+            .command_tx
+            .blocking_send(NetworkCommand::ControlTickConsumed {
+                tick,
+                consumed_at: tokio::time::Instant::now(),
+                client_ids,
+            });
+    }
+
+    pub fn reset_client_performance(&self) {
+        #[cfg(test)]
+        if self.worker.is_none() {
+            return;
+        }
+        if self.worker.is_none() {
+            return;
+        }
+        let _ = self
+            .command_tx
+            .blocking_send(NetworkCommand::ResetClientPerformance);
+    }
+
+    pub fn control_tick_reached(&self, tick: Tick, control_rate: i32) {
         let mut probe = self.control_tick_probe.lock();
         if probe.as_ref().is_none_or(|probe| probe.tick != tick) {
             *probe = Some(ControlTickProbe {
@@ -3130,6 +3207,7 @@ impl NetworkManager {
                 league_start_response: None,
                 league_runtime_available: false,
                 league_record_runtime: None,
+                test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             },
             event_tx,
         )
@@ -3158,6 +3236,7 @@ impl NetworkManager {
                 league_start_response: None,
                 league_runtime_available: false,
                 league_record_runtime: None,
+                test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             },
             event_tx,
         )
@@ -3210,6 +3289,7 @@ impl NetworkManager {
                 league_start_response: None,
                 league_runtime_available: false,
                 league_record_runtime: None,
+                test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             },
             event_tx,
             TestNetworkCommands { command_rx },
@@ -3760,6 +3840,7 @@ async fn run_worker(
                 settings,
                 local_owner,
                 &mut command_rx,
+                &mut control_tick_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -4001,17 +4082,26 @@ async fn run_host_worker(
     let mut host_events = host.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(HOST_CLIENT_ID);
     let mut player_info_echo_provenance = VecDeque::new();
+    let mut reset_client_performance_pending = false;
 
     let worker_result: Result<()> = async {
         loop {
             tokio::select! {
                 Some(probe) = control_tick_rx.recv() => {
-                    host.control_tick_reached(
-                        probe.tick,
-                        probe.control_rate,
-                        probe.reached_at,
+                    await_host_operation_while_forwarding_events(
+                        host.control_tick_reached(
+                            probe.tick,
+                            probe.control_rate,
+                            probe.reached_at,
+                        ),
+                        &mut host_events,
+                        local_owner,
+                        &event_tx,
+                        &telemetry_tx,
+                        &mut player_info_echo_provenance,
+                        &netpuncher_state,
                     )
-                    .await
+                    .await?
                     .map_err(|error| anyhow!("host control-tick stamp failed: {error}"))?;
                 }
                 maybe_event = host_events.recv() => {
@@ -4032,10 +4122,69 @@ async fn run_host_worker(
                 Some(command) = command_rx.recv() => {
                     match command {
                     NetworkCommand::InspectRuntimeConnections { completion } => {
-                        let result = host
-                            .runtime_connections()
-                            .await
-                            .map_err(|error| error.to_string());
+                        let result = await_host_operation_while_forwarding_events(
+                            host.runtime_connections(),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::InspectRuntimeClientStates {
+                        tick,
+                        probe,
+                        completion,
+                    } => {
+                        // Probes are normally carried on a dedicated
+                        // nonblocking channel. Drain its FIFO before the
+                        // bundled current-tick probe so inspection cannot
+                        // leapfrog an earlier completed tick's EWMA sample.
+                        let reset_performance =
+                            std::mem::take(&mut reset_client_performance_pending);
+                        let inspection = async {
+                            while let Ok(queued_probe) = control_tick_rx.try_recv() {
+                                host.control_tick_reached(
+                                    queued_probe.tick,
+                                    queued_probe.control_rate,
+                                    queued_probe.reached_at,
+                                )
+                                .await
+                                .map_err(|error| {
+                                    format!(
+                                        "host queued client-state cadence stamp failed: {error}"
+                                    )
+                                })?;
+                            }
+                            if let Some(probe) = probe {
+                                host.control_tick_reached(
+                                    probe.tick,
+                                    probe.control_rate,
+                                    probe.reached_at,
+                                )
+                                .await
+                                .map_err(|error| {
+                                    format!("host client-state cadence stamp failed: {error}")
+                                })?;
+                            }
+                            host.runtime_client_states(tick, reset_performance)
+                                .await
+                                .map_err(|error| error.to_string())
+                        };
+                        let result = await_host_operation_while_forwarding_events(
+                            inspection,
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?;
                         let _ = completion.send(result);
                     }
                     NetworkCommand::DisconnectRuntimeConnection {
@@ -4302,6 +4451,35 @@ async fn run_host_worker(
                             send_frame_to_host(&host, frame, &event_tx).await?;
                         }
                     }
+                    NetworkCommand::ControlTickConsumed {
+                        tick,
+                        consumed_at,
+                        client_ids,
+                    } => {
+                        let reset_performance =
+                            std::mem::take(&mut reset_client_performance_pending);
+                        await_host_operation_while_forwarding_events(
+                            host.control_tick_consumed(
+                                tick,
+                                consumed_at,
+                                client_ids,
+                                reset_performance,
+                            ),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| {
+                            anyhow!("host control-tick consumption failed: {error}")
+                        })?;
+                    }
+                    NetworkCommand::ResetClientPerformance => {
+                        reset_client_performance_pending = true;
+                    }
                     NetworkCommand::SetJoinAllowed {
                         allowed,
                         completion,
@@ -4386,6 +4564,39 @@ async fn run_host_worker(
     }
     host.shutdown().await.ok();
     worker_result
+}
+
+async fn await_host_operation_while_forwarding_events<F>(
+    operation: F,
+    host_events: &mut tokio_mpsc::Receiver<HostEvent>,
+    local_owner: i32,
+    event_tx: &Sender<NetworkEvent>,
+    telemetry_tx: &SyncSender<NetworkEvent>,
+    player_info_echo_provenance: &mut VecDeque<PlayerInfoEchoProvenance>,
+    netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
+) -> Result<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            output = &mut operation => return Ok(output),
+            maybe_event = host_events.recv() => {
+                match maybe_event {
+                    Some(event) => handle_host_event(
+                        event,
+                        local_owner,
+                        event_tx,
+                        telemetry_tx,
+                        player_info_echo_provenance,
+                        netpuncher_state,
+                    ).await?,
+                    None => return Err(anyhow!("host event stream ended")),
+                }
+            }
+        }
+    }
 }
 
 async fn handle_host_event(
@@ -4565,6 +4776,7 @@ async fn run_client_worker(
     settings: ClientSettings,
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
+    control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
     event_tx: Sender<NetworkEvent>,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
@@ -4643,66 +4855,48 @@ async fn run_client_worker(
     client_status.receive_request(initial_status);
     let mut client_activation = ClientActivationState::default();
     let mut rebase_pending_on_activation = false;
+    let mut reset_client_performance_pending = false;
 
     loop {
         let activation_retry_at = client_activation.next_retry_at();
         tokio::select! {
+            Some(probe) = control_tick_rx.recv() => {
+                await_client_operation_while_forwarding_events(
+                    client.control_tick_reached(probe.tick, probe.reached_at),
+                    &mut client_events,
+                    &mut client_status,
+                    &mut client_activation,
+                    &mut client_events_open,
+                    local_owner,
+                    client_id,
+                    &event_tx,
+                    &telemetry_tx,
+                    &netpuncher_state,
+                )
+                .await?
+                .map_err(|error| anyhow!("client control-tick stamp failed: {error}"))?;
+            }
             maybe_event = client_events.recv(), if client_events_open => {
-                match maybe_event {
-                    Some(ClientEvent::Status(status)) => {
-                        if client_status.receive_request(status) {
-                            client_activation.status_requested();
-                        }
-                        handle_client_event(
-                            ClientEvent::Status(status),
-                            local_owner,
-                            client_id,
-                            &event_tx,
-                            &telemetry_tx,
-                        ).await?;
-                    }
-                    Some(ClientEvent::StatusAck(status)) => {
-                        if client_status.commit(status) {
-                            handle_client_event(
-                                ClientEvent::StatusAck(status),
-                                local_owner,
-                                client_id,
-                                &event_tx,
-                                &telemetry_tx,
-                            ).await?;
-                        }
-                    }
-                    Some(event) => {
-                        if let ClientEvent::LocalAddressesChanged { local_addresses } = &event {
-                            netpuncher_state.lock().local_addresses = local_addresses.clone();
-                        }
-                        let disconnected = matches!(&event, ClientEvent::Disconnected { .. });
-                        handle_client_event(
-                            event,
-                            local_owner,
-                            client_id,
-                            &event_tx,
-                            &telemetry_tx,
-                        ).await?;
-                        if disconnected {
-                            // Preserve only the command bridge required for
-                            // the app's synchronous ReportDisconnect call.
-                            client_events_open = false;
-                        }
-                    }
-                    None => {
-                        // Keep the command bridge alive long enough for the
-                        // app to synchronously report the lost host, then let
-                        // ChangeToLocal drop this manager and send Shutdown.
-                        client_events_open = false;
-                    }
-                }
+                handle_client_worker_event(
+                    maybe_event,
+                    &mut client_status,
+                    &mut client_activation,
+                    &mut client_events_open,
+                    local_owner,
+                    client_id,
+                    &event_tx,
+                    &telemetry_tx,
+                    &netpuncher_state,
+                ).await?;
             }
             Some(command) = command_rx.recv() => {
                 if !client_events_open {
                     let unavailable = "network client is disconnected".to_string();
                     match command {
                         NetworkCommand::InspectRuntimeConnections { completion } => {
+                            let _ = completion.send(Err(unavailable.clone()));
+                        }
+                        NetworkCommand::InspectRuntimeClientStates { completion, .. } => {
                             let _ = completion.send(Err(unavailable.clone()));
                         }
                         NetworkCommand::DisconnectRuntimeConnection { completion, .. } => {
@@ -4759,10 +4953,69 @@ async fn run_client_worker(
                 }
                 match command {
                     NetworkCommand::InspectRuntimeConnections { completion } => {
-                        let result = client
-                            .runtime_connections()
-                            .await
-                            .map_err(|error| error.to_string());
+                        let result = await_client_operation_while_forwarding_events(
+                            client.runtime_connections(),
+                            &mut client_events,
+                            &mut client_status,
+                            &mut client_activation,
+                            &mut client_events_open,
+                            local_owner,
+                            client_id,
+                            &event_tx,
+                            &telemetry_tx,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::InspectRuntimeClientStates {
+                        tick,
+                        probe,
+                        completion,
+                    } => {
+                        let reset_performance =
+                            std::mem::take(&mut reset_client_performance_pending);
+                        let inspection = async {
+                            while let Ok(queued_probe) = control_tick_rx.try_recv() {
+                                client
+                                    .control_tick_reached(
+                                        queued_probe.tick,
+                                        queued_probe.reached_at,
+                                    )
+                                    .await
+                                    .map_err(|error| {
+                                        format!(
+                                            "queued client-state cadence stamp failed: {error}"
+                                        )
+                                    })?;
+                            }
+                            if let Some(probe) = probe {
+                                client
+                                    .control_tick_reached(probe.tick, probe.reached_at)
+                                    .await
+                                    .map_err(|error| {
+                                        format!("client-state cadence stamp failed: {error}")
+                                    })?;
+                            }
+                            client
+                                .runtime_client_states(tick, reset_performance)
+                                .await
+                                .map_err(|error| error.to_string())
+                        };
+                        let result = await_client_operation_while_forwarding_events(
+                            inspection,
+                            &mut client_events,
+                            &mut client_status,
+                            &mut client_activation,
+                            &mut client_events_open,
+                            local_owner,
+                            client_id,
+                            &event_tx,
+                            &telemetry_tx,
+                            &netpuncher_state,
+                        )
+                        .await?;
                         let _ = completion.send(result);
                     }
                     NetworkCommand::DisconnectRuntimeConnection {
@@ -5049,6 +5302,38 @@ async fn run_client_worker(
                             send_frame_to_client(&client, frame, &event_tx).await?;
                         }
                     }
+                    NetworkCommand::ControlTickConsumed {
+                        tick,
+                        consumed_at,
+                        client_ids,
+                    } => {
+                        let reset_performance =
+                            std::mem::take(&mut reset_client_performance_pending);
+                        await_client_operation_while_forwarding_events(
+                            client.control_tick_consumed(
+                                tick,
+                                consumed_at,
+                                client_ids,
+                                reset_performance,
+                            ),
+                            &mut client_events,
+                            &mut client_status,
+                            &mut client_activation,
+                            &mut client_events_open,
+                            local_owner,
+                            client_id,
+                            &event_tx,
+                            &telemetry_tx,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| {
+                            anyhow!("client control-tick consumption failed: {error}")
+                        })?;
+                    }
+                    NetworkCommand::ResetClientPerformance => {
+                        reset_client_performance_pending = true;
+                    }
                     NetworkCommand::SetJoinAllowed { completion, .. } => {
                         let message =
                             "client attempted to change host join admission".to_string();
@@ -5221,6 +5506,101 @@ fn initial_client_status(join_data: &lc_network::JoinDataEnvelope) -> NetworkSta
     NetworkStatus {
         target_tick: join_data.start_control_tick,
         ..join_data.status
+    }
+}
+
+async fn handle_client_worker_event(
+    maybe_event: Option<ClientEvent>,
+    client_status: &mut ClientStatusState,
+    client_activation: &mut ClientActivationState,
+    client_events_open: &mut bool,
+    local_owner: i32,
+    client_id: ClientId,
+    event_tx: &Sender<NetworkEvent>,
+    telemetry_tx: &SyncSender<NetworkEvent>,
+    netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
+) -> Result<()> {
+    match maybe_event {
+        Some(ClientEvent::Status(status)) => {
+            if client_status.receive_request(status) {
+                client_activation.status_requested();
+            }
+            handle_client_event(
+                ClientEvent::Status(status),
+                local_owner,
+                client_id,
+                event_tx,
+                telemetry_tx,
+            )
+            .await?;
+        }
+        Some(ClientEvent::StatusAck(status)) => {
+            if client_status.commit(status) {
+                handle_client_event(
+                    ClientEvent::StatusAck(status),
+                    local_owner,
+                    client_id,
+                    event_tx,
+                    telemetry_tx,
+                )
+                .await?;
+            }
+        }
+        Some(event) => {
+            if let ClientEvent::LocalAddressesChanged { local_addresses } = &event {
+                netpuncher_state.lock().local_addresses = local_addresses.clone();
+            }
+            let disconnected = matches!(&event, ClientEvent::Disconnected { .. });
+            handle_client_event(event, local_owner, client_id, event_tx, telemetry_tx).await?;
+            if disconnected {
+                // Preserve only the command bridge required for the app's
+                // synchronous ReportDisconnect call.
+                *client_events_open = false;
+            }
+        }
+        None => {
+            // Keep the command bridge alive long enough for the app to
+            // synchronously report the lost host, then let ChangeToLocal drop
+            // this manager and send Shutdown.
+            *client_events_open = false;
+        }
+    }
+    Ok(())
+}
+
+async fn await_client_operation_while_forwarding_events<F>(
+    operation: F,
+    client_events: &mut tokio_mpsc::Receiver<ClientEvent>,
+    client_status: &mut ClientStatusState,
+    client_activation: &mut ClientActivationState,
+    client_events_open: &mut bool,
+    local_owner: i32,
+    client_id: ClientId,
+    event_tx: &Sender<NetworkEvent>,
+    telemetry_tx: &SyncSender<NetworkEvent>,
+    netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
+) -> Result<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            output = &mut operation => return Ok(output),
+            maybe_event = client_events.recv(), if *client_events_open => {
+                handle_client_worker_event(
+                    maybe_event,
+                    client_status,
+                    client_activation,
+                    client_events_open,
+                    local_owner,
+                    client_id,
+                    event_tx,
+                    telemetry_tx,
+                    netpuncher_state,
+                ).await?;
+            }
+        }
     }
 }
 
@@ -5604,6 +5984,85 @@ mod tests {
 
     fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[tokio::test]
+    async fn event_pumps_unblock_inner_commands_when_event_channels_are_full() {
+        let (host_event_tx, mut host_events) = tokio_mpsc::channel(1);
+        host_event_tx
+            .send(HostEvent::UnhandledPacket {
+                client_id: None,
+                packet_type: 0x41,
+            })
+            .await
+            .unwrap();
+        let blocked_host_event_tx = host_event_tx.clone();
+        let host_operation = async move {
+            blocked_host_event_tx
+                .send(HostEvent::UnhandledPacket {
+                    client_id: None,
+                    packet_type: 0x42,
+                })
+                .await
+                .unwrap();
+            7
+        };
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(1);
+        let mut provenance = VecDeque::new();
+        let netpuncher_state = test_netpuncher_state();
+        let host_result = tokio::time::timeout(
+            Duration::from_secs(1),
+            await_host_operation_while_forwarding_events(
+                host_operation,
+                &mut host_events,
+                0,
+                &event_tx,
+                &telemetry_tx,
+                &mut provenance,
+                &netpuncher_state,
+            ),
+        )
+        .await
+        .expect("host event pump should release the blocked operation")
+        .unwrap();
+        assert_eq!(host_result, 7);
+
+        let (client_event_tx, mut client_events) = tokio_mpsc::channel(1);
+        client_event_tx
+            .send(ClientEvent::PingMeasured { round_trip_ms: 1 })
+            .await
+            .unwrap();
+        let blocked_client_event_tx = client_event_tx.clone();
+        let client_operation = async move {
+            blocked_client_event_tx
+                .send(ClientEvent::PingMeasured { round_trip_ms: 2 })
+                .await
+                .unwrap();
+            9
+        };
+        let mut client_status = ClientStatusState::default();
+        let mut client_activation = ClientActivationState::default();
+        let mut client_events_open = true;
+        let client_result = tokio::time::timeout(
+            Duration::from_secs(1),
+            await_client_operation_while_forwarding_events(
+                client_operation,
+                &mut client_events,
+                &mut client_status,
+                &mut client_activation,
+                &mut client_events_open,
+                0,
+                1,
+                &event_tx,
+                &telemetry_tx,
+                &netpuncher_state,
+            ),
+        )
+        .await
+        .expect("client event pump should release the blocked operation")
+        .unwrap();
+        assert_eq!(client_result, 9);
     }
 
     fn serve_one_league_record_upload() -> (String, thread::JoinHandle<Vec<u8>>) {
@@ -6399,6 +6858,7 @@ mod tests {
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -6460,6 +6920,7 @@ mod tests {
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -6672,6 +7133,7 @@ mod tests {
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -6777,6 +7239,7 @@ mod tests {
                 settings,
                 3,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -6985,6 +7448,7 @@ mod tests {
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,

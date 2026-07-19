@@ -78,6 +78,198 @@ pub struct RuntimeNetworkConnection {
     pub ping_ms: i32,
 }
 
+/// Receiver-side state used by the in-game network client list.
+///
+/// `wait_ms` mirrors `C4GameControlClient::getPerfStat`: it is the signed
+/// control-arrival EWMA for this client, not a transport round-trip time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeNetworkClientState {
+    pub client_id: ClientId,
+    pub status: RemoteBarrierState,
+    pub control_ready: bool,
+    pub wait_ms: i32,
+}
+
+/// Local receive timestamps and the scaled C++ `ClientPerfStat` accumulator.
+///
+/// Native packets stamp `iTime` in the receiving process' packet constructor,
+/// while `iWaitStart` is the first cadence at which that control tick is
+/// attempted. Keeping both timestamps local preserves signed early/late
+/// values without trusting a serialized clock or substituting route ping.
+#[derive(Debug)]
+struct ClientPerformanceStats {
+    tick_limit: usize,
+    arrivals: BTreeMap<Tick, BTreeMap<ClientId, tokio::time::Instant>>,
+    cadences: BTreeMap<Tick, tokio::time::Instant>,
+    consumed_at: BTreeMap<Tick, tokio::time::Instant>,
+    consumed_clients: BTreeMap<Tick, BTreeSet<ClientId>>,
+    sampled: BTreeSet<(Tick, ClientId)>,
+    scaled_wait_ms: BTreeMap<ClientId, i32>,
+}
+
+impl ClientPerformanceStats {
+    fn new(tick_limit: usize) -> Self {
+        Self {
+            tick_limit,
+            arrivals: BTreeMap::new(),
+            cadences: BTreeMap::new(),
+            consumed_at: BTreeMap::new(),
+            consumed_clients: BTreeMap::new(),
+            sampled: BTreeSet::new(),
+            scaled_wait_ms: BTreeMap::new(),
+        }
+    }
+
+    fn record_arrival(
+        &mut self,
+        client_id: ClientId,
+        tick: Tick,
+        arrived_at: tokio::time::Instant,
+    ) {
+        if client_id == BROADCAST_CLIENT_ID
+            || self
+                .consumed_at
+                .get(&tick)
+                .is_some_and(|consumed_at| arrived_at > *consumed_at)
+            || self
+                .consumed_clients
+                .get(&tick)
+                .is_some_and(|clients| !clients.contains(&client_id))
+        {
+            return;
+        }
+        self.arrivals
+            .entry(tick)
+            .or_default()
+            .entry(client_id)
+            .or_insert(arrived_at);
+        self.sample(tick, client_id);
+        self.trim();
+    }
+
+    fn mark_consumed(
+        &mut self,
+        tick: Tick,
+        consumed_at: tokio::time::Instant,
+        client_ids: impl IntoIterator<Item = ClientId>,
+    ) {
+        self.consumed_at.entry(tick).or_insert(consumed_at);
+        let client_ids = self
+            .consumed_clients
+            .entry(tick)
+            .or_insert_with(|| client_ids.into_iter().collect())
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        for client_id in client_ids {
+            self.sample(tick, client_id);
+        }
+        self.trim();
+    }
+
+    fn reset_accumulators(&mut self) {
+        self.sampled.extend(
+            self.consumed_clients
+                .iter()
+                .flat_map(|(tick, clients)| clients.iter().map(|client_id| (*tick, *client_id))),
+        );
+        self.scaled_wait_ms.clear();
+    }
+
+    fn record_cadence(&mut self, tick: Tick, reached_at: tokio::time::Instant) {
+        self.cadences.entry(tick).or_insert(reached_at);
+        let client_ids = self
+            .arrivals
+            .get(&tick)
+            .map(|arrivals| arrivals.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for client_id in client_ids {
+            self.sample(tick, client_id);
+        }
+        self.trim();
+    }
+
+    fn wait_ms(&self, client_id: ClientId) -> i32 {
+        self.scaled_wait_ms.get(&client_id).copied().unwrap_or(0) / 100
+    }
+
+    fn sample(&mut self, tick: Tick, client_id: ClientId) {
+        if self.sampled.contains(&(tick, client_id)) {
+            return;
+        }
+        let Some(arrived_at) = self
+            .arrivals
+            .get(&tick)
+            .and_then(|arrivals| arrivals.get(&client_id))
+            .copied()
+        else {
+            return;
+        };
+        let Some(consumed_at) = self.consumed_at.get(&tick).copied() else {
+            return;
+        };
+        if !self
+            .consumed_clients
+            .get(&tick)
+            .is_some_and(|clients| clients.contains(&client_id))
+        {
+            return;
+        }
+        if arrived_at > consumed_at {
+            return;
+        }
+        let Some(reached_at) = self.cadences.get(&tick).copied() else {
+            return;
+        };
+        self.sampled.insert((tick, client_id));
+
+        let wait_ms = signed_instant_millis(arrived_at, reached_at);
+        let scaled = self.scaled_wait_ms.entry(client_id).or_default();
+        // C4GameControlClient::AddPerf, including signed integer truncation.
+        *scaled += wait_ms
+            .saturating_mul(100)
+            .saturating_sub(*scaled)
+            / 100;
+    }
+
+    fn trim(&mut self) {
+        if self.tick_limit == 0 {
+            return;
+        }
+        let mut ticks = self
+            .arrivals
+            .keys()
+            .chain(self.cadences.keys())
+            .chain(self.consumed_at.keys())
+            .chain(self.consumed_clients.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        while ticks.len() > self.tick_limit {
+            let Some(tick) = ticks.pop_first() else {
+                break;
+            };
+            self.arrivals.remove(&tick);
+            self.cadences.remove(&tick);
+            self.consumed_at.remove(&tick);
+            self.consumed_clients.remove(&tick);
+            self.sampled
+                .retain(|(sampled_tick, _)| *sampled_tick != tick);
+        }
+    }
+}
+
+fn signed_instant_millis(
+    arrived_at: tokio::time::Instant,
+    reached_at: tokio::time::Instant,
+) -> i32 {
+    let signed = if arrived_at >= reached_at {
+        i128::try_from(arrived_at.duration_since(reached_at).as_millis()).unwrap_or(i128::MAX)
+    } else {
+        -i128::try_from(reached_at.duration_since(arrived_at).as_millis()).unwrap_or(i128::MAX)
+    };
+    signed.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32
+}
+
 fn runtime_connection_usage(message: bool, data: bool) -> Option<String> {
     match (message, data) {
         (true, true) => Some("Data/Msg".to_string()),
@@ -515,6 +707,12 @@ pub enum HostCommand {
         control_rate: i32,
         reached_at: tokio::time::Instant,
     },
+    ControlTickConsumed {
+        tick: Tick,
+        consumed_at: tokio::time::Instant,
+        client_ids: Vec<ClientId>,
+        reset_performance: bool,
+    },
     StatusReachedCurrent,
     StatusReached {
         status: NetworkStatus,
@@ -549,6 +747,11 @@ pub enum HostCommand {
     SetJoinAllowed {
         allowed: bool,
         completion: oneshot::Sender<()>,
+    },
+    InspectRuntimeClientStates {
+        tick: Tick,
+        reset_performance: bool,
+        completion: oneshot::Sender<Vec<RuntimeNetworkClientState>>,
     },
     InspectRuntimeConnections {
         completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
@@ -658,6 +861,24 @@ impl HostHandle {
                 tick,
                 control_rate,
                 reached_at,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn control_tick_consumed(
+        &self,
+        tick: Tick,
+        consumed_at: tokio::time::Instant,
+        client_ids: Vec<ClientId>,
+        reset_performance: bool,
+    ) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::ControlTickConsumed {
+                tick,
+                consumed_at,
+                client_ids,
+                reset_performance,
             })
             .await
             .map_err(|_| HostError::HostLoopGone)
@@ -793,6 +1014,23 @@ impl HostHandle {
         let (completion, inspected) = oneshot::channel();
         self.command_tx
             .send(HostCommand::InspectRuntimeConnections { completion })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        inspected.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn runtime_client_states(
+        &self,
+        tick: Tick,
+        reset_performance: bool,
+    ) -> Result<Vec<RuntimeNetworkClientState>, HostError> {
+        let (completion, inspected) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::InspectRuntimeClientStates {
+                tick,
+                reset_performance,
+                completion,
+            })
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         inspected.await.map_err(|_| HostError::HostLoopGone)
@@ -2898,6 +3136,21 @@ pub enum ClientCommand {
     GracefulPart {
         completion: oneshot::Sender<Result<(), String>>,
     },
+    ControlTickReached {
+        tick: Tick,
+        reached_at: tokio::time::Instant,
+    },
+    ControlTickConsumed {
+        tick: Tick,
+        consumed_at: tokio::time::Instant,
+        client_ids: Vec<ClientId>,
+        reset_performance: bool,
+    },
+    InspectRuntimeClientStates {
+        tick: Tick,
+        reset_performance: bool,
+        completion: oneshot::Sender<Vec<RuntimeNetworkClientState>>,
+    },
     InspectRuntimeConnections {
         completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
     },
@@ -3072,6 +3325,54 @@ impl ClientHandle {
             .send(ClientCommand::ExecSync { control_tick })
             .await
             .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    /// Stamps the first local cadence at which the game attempts this control
+    /// tick. It is paired only with receiver-local packet arrival instants.
+    pub async fn control_tick_reached(
+        &self,
+        tick: Tick,
+        reached_at: tokio::time::Instant,
+    ) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::ControlTickReached { tick, reached_at })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn control_tick_consumed(
+        &self,
+        tick: Tick,
+        consumed_at: tokio::time::Instant,
+        client_ids: Vec<ClientId>,
+        reset_performance: bool,
+    ) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::ControlTickConsumed {
+                tick,
+                consumed_at,
+                client_ids,
+                reset_performance,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn runtime_client_states(
+        &self,
+        tick: Tick,
+        reset_performance: bool,
+    ) -> Result<Vec<RuntimeNetworkClientState>, ClientError> {
+        let (completion, inspected) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::InspectRuntimeClientStates {
+                tick,
+                reset_performance,
+                completion,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        inspected.await.map_err(|_| ClientError::ClientLoopGone)
     }
 
     pub async fn runtime_connections(&self) -> Result<Vec<RuntimeNetworkConnection>, ClientError> {
@@ -4081,6 +4382,7 @@ struct HostState {
     config: HostConfig,
     coordinator: ControlCoordinator,
     backlog: ControlBacklog,
+    client_performance: ClientPerformanceStats,
     local_control_backlog: ControlBacklog,
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
@@ -4144,6 +4446,9 @@ fn invalidate_pending_client_routes(client_id: ClientId, state: &mut HostState) 
 
 fn mark_client_removing(client_id: ClientId, state: &mut HostState) {
     state.removing_clients.insert(client_id);
+    if let Some(remote) = state.status_barrier.remotes.get_mut(&client_id) {
+        *remote = RemoteBarrierState::Removing;
+    }
     invalidate_pending_client_routes(client_id, state);
 }
 
@@ -4223,6 +4528,47 @@ fn host_runtime_connections(state: &HostState) -> Vec<RuntimeNetworkConnection> 
                 packet_loss: 0,
                 ping_ms: route.ping_ms,
             })
+        })
+        .collect()
+}
+
+fn host_runtime_client_states(
+    state: &HostState,
+    tick: Tick,
+) -> Vec<RuntimeNetworkClientState> {
+    let client_ids = std::iter::once(HOST_CLIENT_ID)
+        .chain(state.clients.keys().copied())
+        .chain(
+            state
+                .client_cores
+                .keys()
+                .filter_map(|client_id| ClientId::try_from(*client_id).ok()),
+        )
+        .chain(state.status_barrier.remotes.keys().copied())
+        .chain(state.removing_clients.iter().copied())
+        .collect::<BTreeSet<_>>();
+
+    client_ids
+        .into_iter()
+        .map(|client_id| {
+            let lifecycle = if client_id == HOST_CLIENT_ID {
+                state.status_barrier.local
+            } else if state.removing_clients.contains(&client_id) {
+                RemoteBarrierState::Removing
+            } else if let Some(lifecycle) = state.status_barrier.remotes.get(&client_id) {
+                *lifecycle
+            } else {
+                // A live client without a barrier acknowledgement is joining;
+                // the synchronized client core can also become visible to the
+                // roster before admission installs its transport entry.
+                RemoteBarrierState::Joining
+            };
+            RuntimeNetworkClientState {
+                client_id,
+                status: lifecycle,
+                control_ready: state.backlog.contains_packet(client_id, tick),
+                wait_ms: state.client_performance.wait_ms(client_id),
+            }
         })
         .collect()
 }
@@ -4719,6 +5065,7 @@ async fn run_host(
     let mut state = HostState {
         coordinator,
         backlog: ControlBacklog::new(backlog_limit),
+        client_performance: ClientPerformanceStats::new(backlog_limit),
         local_control_backlog: ControlBacklog::new(backlog_limit),
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
@@ -4969,6 +5316,19 @@ async fn run_host(
                     } => {
                         state.control_tick_reached(tick, control_rate, reached_at);
                     }
+                    HostCommand::ControlTickConsumed {
+                        tick,
+                        consumed_at,
+                        client_ids,
+                        reset_performance,
+                    } => {
+                        if reset_performance {
+                            state.client_performance.reset_accumulators();
+                        }
+                        state
+                            .client_performance
+                            .mark_consumed(tick, consumed_at, client_ids);
+                    }
                     HostCommand::StatusReachedCurrent => {
                         let effects = state.status_barrier.local_reached();
                         apply_barrier_effects(effects, &mut state).await;
@@ -5041,6 +5401,16 @@ async fn run_host(
                     } => {
                         state.admission.set_allow_join(allowed);
                         let _ = completion.send(());
+                    }
+                    HostCommand::InspectRuntimeClientStates {
+                        tick,
+                        reset_performance,
+                        completion,
+                    } => {
+                        if reset_performance {
+                            state.client_performance.reset_accumulators();
+                        }
+                        let _ = completion.send(host_runtime_client_states(&state, tick));
                     }
                     HostCommand::InspectRuntimeConnections { completion } => {
                         let _ = completion.send(host_runtime_connections(&state));
@@ -5742,6 +6112,7 @@ impl HostState {
         control_rate: i32,
         reached_at: tokio::time::Instant,
     ) {
+        self.client_performance.record_cadence(tick, reached_at);
         if tick != self.coordinator.current_tick() {
             return;
         }
@@ -6551,6 +6922,13 @@ async fn ingest_control(packet: ControlPacket, ingress: ControlIngress, state: &
             .await;
         return;
     }
+    if !state.backlog.contains_packet(client_id, packet.tick()) {
+        state.client_performance.record_arrival(
+            client_id,
+            packet.tick(),
+            tokio::time::Instant::now(),
+        );
+    }
     if ingress == ControlIngress::Local {
         state.local_control_backlog.record_packet(&packet);
     }
@@ -6773,6 +7151,20 @@ async fn dispatch_packet(
                     return;
                 }
             };
+            if expected_author == HOST_CLIENT_ID as i32 {
+                if let lc_engine::ControlPacket::ClientRemove(remove) = &control {
+                    if remove.by_client == HOST_CLIENT_ID as i32 {
+                        if let Ok(client_id) = ClientId::try_from(remove.client_id) {
+                            if state.client_cores.contains_key(&remove.client_id)
+                                || state.clients.contains_key(&client_id)
+                                || state.status_barrier.remotes.contains_key(&client_id)
+                            {
+                                mark_client_removing(client_id, state);
+                            }
+                        }
+                    }
+                }
+            }
             // The client that originated a Sync packet deleted its local copy
             // and waits for the host echo, so include every client here
             // (src/C4GameControlNetwork.cpp:181-220,568-572).
@@ -7987,6 +8379,37 @@ impl ClientRouteManager {
             .collect()
     }
 
+    fn runtime_client_states(
+        &self,
+        control_mode: i32,
+        tick: Tick,
+        client_ids: impl IntoIterator<Item = ClientId>,
+        backlog: &ControlBacklog,
+        client_performance: &ClientPerformanceStats,
+    ) -> Vec<RuntimeNetworkClientState> {
+        let central_nonhost = control_mode == 1;
+        client_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|client_id| RuntimeNetworkClientState {
+                client_id,
+                status: RemoteBarrierState::Ready,
+                // C4GameControlNetwork::ClientReady explicitly returns true
+                // for a central non-host because only C4ClientIDAll packets
+                // are delivered to it.
+                control_ready: central_nonhost || backlog.contains_packet(client_id, tick),
+                // ClientPerfStat has the same central/non-host special case
+                // and returns the C++ integer value `true` (1), not route ping.
+                wait_ms: if central_nonhost {
+                    1
+                } else {
+                    client_performance.wait_ms(client_id)
+                },
+            })
+            .collect()
+    }
+
     fn disconnect_runtime_connection(&self, connection_id: u32) -> bool {
         let Some(route) = self
             .routes
@@ -8616,6 +9039,7 @@ async fn run_client_loop_with_routes(
     initial_puncher_addresses_changed: bool,
 ) {
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
+    let mut client_performance = ClientPerformanceStats::new(CLIENT_BACKLOG_LIMIT);
     let mut next_control_request_at = resource_state.next_control_request_at;
     let mut peer_recovery_from_tick = None::<Tick>;
     let mut pending_sync = Vec::<lc_engine::ControlPacket>::new();
@@ -8656,6 +9080,7 @@ async fn run_client_loop_with_routes(
     for packet in std::mem::take(&mut resource_state.initial_controls) {
         let key = (packet.client_id(), packet.tick());
         if received_controls.insert(key) {
+            client_performance.record_arrival(key.0, key.1, tokio::time::Instant::now());
             highest_received_tick =
                 Some(highest_received_tick.map_or(packet.tick(), |tick| tick.max(packet.tick())));
             let backlog_packet = packet.clone();
@@ -9058,6 +9483,11 @@ async fn run_client_loop_with_routes(
                         };
                         match transport.send_message(message).await {
                             Ok(()) => {
+                                client_performance.record_arrival(
+                                    clone.client_id(),
+                                    clone.tick(),
+                                    tokio::time::Instant::now(),
+                                );
                                 backlog.record_packet(&clone);
                                 match resource_state.control.ingest_contribution(clone) {
                                     Ok(ready) => {
@@ -9197,6 +9627,40 @@ async fn run_client_loop_with_routes(
                         .map_err(|error| error.to_string());
                         let _ = completion.send(result);
                         break;
+                    }
+                    ClientCommand::ControlTickReached { tick, reached_at } => {
+                        client_performance.record_cadence(tick, reached_at);
+                    }
+                    ClientCommand::ControlTickConsumed {
+                        tick,
+                        consumed_at,
+                        client_ids,
+                        reset_performance,
+                    } => {
+                        if reset_performance {
+                            client_performance.reset_accumulators();
+                        }
+                        client_performance.mark_consumed(tick, consumed_at, client_ids);
+                    }
+                    ClientCommand::InspectRuntimeClientStates {
+                        tick,
+                        reset_performance,
+                        completion,
+                    } => {
+                        if reset_performance {
+                            client_performance.reset_accumulators();
+                        }
+                        let client_ids = client_cores
+                            .keys()
+                            .filter_map(|client_id| ClientId::try_from(*client_id).ok());
+                        let states = transport.runtime_client_states(
+                            resource_state.control.mode,
+                            tick,
+                            client_ids,
+                            &backlog,
+                            &client_performance,
+                        );
+                        let _ = completion.send(states);
                     }
                     ClientCommand::InspectRuntimeConnections { completion } => {
                         let _ = completion.send(transport.runtime_connections());
@@ -9898,6 +10362,11 @@ async fn run_client_loop_with_routes(
                         if !received_controls.insert(key) {
                             continue;
                         }
+                        client_performance.record_arrival(
+                            key.0,
+                            key.1,
+                            tokio::time::Instant::now(),
+                        );
                         highest_received_tick = Some(
                             highest_received_tick.map_or(packet.tick(), |tick| tick.max(packet.tick())),
                         );
@@ -10464,6 +10933,104 @@ mod tests {
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, timeout_at};
 
+    #[test]
+    fn client_performance_stats_match_signed_cpp_ewma_at_consumption() {
+        let base = tokio::time::Instant::now();
+        let mut stats = ClientPerformanceStats::new(16);
+        let mut expected_scaled = 0_i32;
+        let waits = [100_i32, -100, 37, -12];
+        let consumed_at = base + Duration::from_secs(20);
+
+        for (tick, wait_ms) in waits.into_iter().enumerate() {
+            let tick = tick as Tick;
+            let before_sample = stats.scaled_wait_ms.get(&7).copied();
+            let reached_at = base + Duration::from_secs(u64::from(tick) + 1);
+            let arrived_at = if wait_ms >= 0 {
+                reached_at + Duration::from_millis(wait_ms as u64)
+            } else {
+                reached_at - Duration::from_millis(wait_ms.unsigned_abs() as u64)
+            };
+
+            match tick % 3 {
+                0 => {
+                    stats.record_arrival(7, tick, arrived_at);
+                    stats.record_cadence(tick, reached_at);
+                    assert_eq!(stats.scaled_wait_ms.get(&7).copied(), before_sample);
+                    stats.mark_consumed(tick, consumed_at, [7]);
+                }
+                1 => {
+                    stats.record_arrival(7, tick, arrived_at);
+                    stats.mark_consumed(tick, consumed_at, [7]);
+                    assert_eq!(
+                        stats.scaled_wait_ms.get(&7).copied(),
+                        before_sample
+                    );
+                    stats.record_cadence(tick, reached_at);
+                }
+                _ => {
+                    stats.record_cadence(tick, reached_at);
+                    // The first cadence is authoritative even if a repeated
+                    // stalled-frame probe arrives later.
+                    stats.record_cadence(tick, reached_at + Duration::from_secs(10));
+                    stats.record_arrival(7, tick, arrived_at);
+                    stats.mark_consumed(tick, consumed_at, [7]);
+                }
+            }
+
+            expected_scaled += (wait_ms * 100 - expected_scaled) / 100;
+            assert_eq!(stats.scaled_wait_ms.get(&7), Some(&expected_scaled));
+            assert_eq!(stats.wait_ms(7), expected_scaled / 100);
+
+            // Duplicate observations must not apply the EWMA twice.
+            stats.record_arrival(7, tick, arrived_at + Duration::from_secs(1));
+            stats.mark_consumed(tick, consumed_at, [7]);
+            assert_eq!(stats.scaled_wait_ms.get(&7), Some(&expected_scaled));
+        }
+
+        let consumed_wait = stats.scaled_wait_ms.get(&7).copied();
+        stats.record_cadence(99, base);
+        stats.mark_consumed(99, base + Duration::from_millis(100), [7]);
+        stats.record_arrival(7, 99, base + Duration::from_secs(1));
+        assert_eq!(stats.scaled_wait_ms.get(&7).copied(), consumed_wait);
+        assert!(!stats
+            .arrivals
+            .get(&99)
+            .is_some_and(|arrivals| arrivals.contains_key(&7)));
+
+        // Command scheduling may deliver a pre-cutoff timestamp after the
+        // consumption message; the timestamp, not handler order, is native.
+        stats.mark_consumed(100, base + Duration::from_secs(2), [8]);
+        stats.record_cadence(100, base);
+        stats.record_arrival(8, 100, base + Duration::from_secs(1));
+        assert_eq!(stats.wait_ms(8), 10);
+
+        stats.record_cadence(101, base);
+        stats.record_arrival(9, 101, base + Duration::from_secs(1));
+        stats.mark_consumed(101, base + Duration::from_secs(2), [7]);
+        assert_eq!(stats.wait_ms(9), 0, "inactive clients are not sampled");
+
+        let pre_reset_reached_at = base + Duration::from_secs(30);
+        stats.record_arrival(
+            7,
+            102,
+            pre_reset_reached_at + Duration::from_millis(500),
+        );
+        stats.mark_consumed(102, pre_reset_reached_at + Duration::from_secs(1), [7]);
+        stats.reset_accumulators();
+        stats.record_cadence(102, pre_reset_reached_at);
+        assert_eq!(stats.wait_ms(7), 0);
+        assert_eq!(stats.wait_ms(8), 0);
+        let reset_reached_at = base + Duration::from_secs(31);
+        stats.record_cadence(103, reset_reached_at);
+        stats.record_arrival(
+            7,
+            103,
+            reset_reached_at + Duration::from_millis(500),
+        );
+        stats.mark_consumed(103, reset_reached_at + Duration::from_secs(1), [7]);
+        assert_eq!(stats.wait_ms(7), 5);
+    }
+
     fn tcp_frame(payload: &[u8]) -> Vec<u8> {
         let mut frame = vec![0xff];
         frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
@@ -10727,6 +11294,82 @@ mod tests {
             )
             .is_none());
         receiver
+    }
+
+    #[test]
+    fn client_runtime_states_use_backlog_and_central_nonhost_special_case() {
+        let mut routes = ClientRouteManager::new();
+        let _host_rx = add_test_route_queue(
+            &mut routes,
+            1,
+            HOST_CLIENT_ID,
+            crate::NetworkProtocol::Tcp,
+        );
+        let _peer_rx =
+            add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Udp);
+        let tick = 9;
+        let mut backlog = ControlBacklog::new(16);
+        backlog.record_packet(&legacy_packet(7, tick, 0x21));
+        let mut performance = ClientPerformanceStats::new(16);
+        let reached_at = tokio::time::Instant::now();
+        performance.record_cadence(tick, reached_at);
+        performance.record_arrival(
+            7,
+            tick,
+            reached_at + Duration::from_millis(200),
+        );
+        performance.mark_consumed(
+            tick,
+            reached_at + Duration::from_millis(300),
+            [7],
+        );
+
+        assert_eq!(
+            routes.runtime_client_states(0, tick, [HOST_CLIENT_ID, 7, 9], &backlog, &performance),
+            vec![
+                RuntimeNetworkClientState {
+                    client_id: HOST_CLIENT_ID,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: false,
+                    wait_ms: 0,
+                },
+                RuntimeNetworkClientState {
+                    client_id: 7,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: true,
+                    wait_ms: 2,
+                },
+                RuntimeNetworkClientState {
+                    client_id: 9,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: false,
+                    wait_ms: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            routes.runtime_client_states(1, tick, [HOST_CLIENT_ID, 7, 9], &backlog, &performance),
+            vec![
+                RuntimeNetworkClientState {
+                    client_id: HOST_CLIENT_ID,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: true,
+                    wait_ms: 1,
+                },
+                RuntimeNetworkClientState {
+                    client_id: 7,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: true,
+                    wait_ms: 1,
+                },
+                RuntimeNetworkClientState {
+                    client_id: 9,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: true,
+                    wait_ms: 1,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -11996,8 +12639,46 @@ mod tests {
             .expect("gate acknowledgement");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn host_runtime_wait_uses_local_arrival_after_consumed_tick() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let reached_at = tokio::time::Instant::now();
+        host.control_tick_reached(0, 1, reached_at).await.unwrap();
+        tokio::time::advance(Duration::from_millis(200)).await;
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
+            .await
+            .unwrap();
+        host.control_tick_consumed(
+            0,
+            tokio::time::Instant::now(),
+            vec![HOST_CLIENT_ID],
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            host.runtime_client_states(0, false).await.unwrap(),
+            vec![RuntimeNetworkClientState {
+                client_id: HOST_CLIENT_ID,
+                status: RemoteBarrierState::Ready,
+                control_ready: true,
+                // The first 200ms sample moves a 1%-step scaled EWMA from
+                // zero to 2ms, exactly like C4GameControlClient::AddPerf.
+                wait_ms: 2,
+            }]
+        );
+        assert_eq!(
+            host.runtime_client_states(0, true).await.unwrap()[0].wait_ms,
+            0,
+            "CopyClientList-style resets clear the displayed EWMA"
+        );
+        host.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn runtime_connection_handles_inspect_and_retire_the_live_tcp_route() {
+    async fn runtime_handles_inspect_client_states_and_retire_the_live_tcp_route() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, HostConfig::default()).await.unwrap();
@@ -12007,6 +12688,41 @@ mod tests {
         )
         .await
         .unwrap();
+
+        assert_eq!(
+            host.runtime_client_states(0, false).await.unwrap(),
+            vec![
+                RuntimeNetworkClientState {
+                    client_id: HOST_CLIENT_ID,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: false,
+                    wait_ms: 0,
+                },
+                RuntimeNetworkClientState {
+                    client_id: client.client_id(),
+                    status: RemoteBarrierState::Chasing,
+                    control_ready: false,
+                    wait_ms: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            client.runtime_client_states(0, false).await.unwrap(),
+            vec![
+                RuntimeNetworkClientState {
+                    client_id: HOST_CLIENT_ID,
+                    status: RemoteBarrierState::Ready,
+                    control_ready: false,
+                    wait_ms: 0,
+                },
+                RuntimeNetworkClientState {
+                    client_id: client.client_id(),
+                    status: RemoteBarrierState::Ready,
+                    control_ready: false,
+                    wait_ms: 0,
+                },
+            ]
+        );
 
         let host_connections = host.runtime_connections().await.unwrap();
         assert_eq!(host_connections.len(), 1);
@@ -12062,6 +12778,55 @@ mod tests {
         .await
         .expect("host did not retire its selected route");
         second_client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_queued_client_remove_projects_removing_before_sync_execution() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        config.initial_status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        let host = start_host(listener, config).await.unwrap();
+        let client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
+            lc_engine::ClientRemoveControlData {
+                client_id: i32::try_from(client.client_id()).unwrap(),
+                reason: lc_engine::LegacyCString::from_bytes(b"removed".to_vec()).unwrap(),
+                by_client: HOST_CLIENT_ID as i32,
+            },
+        ))
+        .unwrap();
+        host.submit_packet(ControlDelivery::Sync, remove)
+            .await
+            .unwrap();
+
+        let states = host.runtime_client_states(0, false).await.unwrap();
+        assert_eq!(
+            states
+                .iter()
+                .find(|state| state.client_id == HOST_CLIENT_ID)
+                .map(|state| state.status),
+            Some(RemoteBarrierState::NotReady)
+        );
+        assert_eq!(
+            states
+                .iter()
+                .find(|state| state.client_id == client.client_id())
+                .map(|state| state.status),
+            Some(RemoteBarrierState::Removing)
+        );
+
+        client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
     }
 

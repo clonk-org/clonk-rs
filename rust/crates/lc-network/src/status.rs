@@ -51,6 +51,10 @@ pub enum BarrierEffect {
 pub struct StatusBarrier {
     pub status: NetworkStatus,
     pub phase: BarrierPhase,
+    /// The host's own client-list state. `ResetReady` includes the local
+    /// client, but `AllClientsReady` skips it, so a status change leaves this
+    /// `NotReady` even after the host reaches and commits the barrier.
+    pub local: RemoteBarrierState,
     pub remotes: BTreeMap<ClientId, RemoteBarrierState>,
     local_reached_tick: Option<i32>,
 }
@@ -60,6 +64,7 @@ impl StatusBarrier {
         Self {
             status,
             phase: BarrierPhase::Stable,
+            local: RemoteBarrierState::Ready,
             remotes: BTreeMap::new(),
             local_reached_tick: None,
         }
@@ -76,6 +81,12 @@ impl StatusBarrier {
 
     pub fn change_status(&mut self, status: NetworkStatus) -> Vec<BarrierEffect> {
         self.status = status;
+        if matches!(
+            self.local,
+            RemoteBarrierState::Ready | RemoteBarrierState::NotReady
+        ) {
+            self.local = RemoteBarrierState::NotReady;
+        }
         for state in self.remotes.values_mut() {
             if matches!(
                 *state,
@@ -260,9 +271,11 @@ mod tests {
 
     #[test]
     fn go_requires_local_and_all_waited_remotes() {
-        // ChangeGameStatus resets every waited-for remote. CheckStatusAck may
-        // commit only after the host reaches the target and all such remotes
-        // acknowledge (src/C4Network2.cpp:1994-2014,2062-2110).
+        // ChangeGameStatus resets the local client and every waited-for
+        // remote. CheckStatusAck may commit only after the host reaches the
+        // target and all such remotes acknowledge; AllClientsReady skips the
+        // local list entry, so it deliberately stays NotReady afterward
+        // (src/C4Network2.cpp:1994-2014,2062-2110).
         let mut barrier = StatusBarrier::stable(NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: 1,
@@ -270,6 +283,7 @@ mod tests {
         });
         barrier.set_remote_state(1, RemoteBarrierState::Ready);
         barrier.set_remote_state(2, RemoteBarrierState::Ready);
+        assert_eq!(barrier.local, RemoteBarrierState::Ready);
         let go = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 1,
@@ -284,6 +298,7 @@ mod tests {
                 BarrierEffect::DriveControlTo(10),
             ]
         );
+        assert_eq!(barrier.local, RemoteBarrierState::NotReady);
         assert_eq!(barrier.remote_ack(1, go), Vec::new());
         assert_eq!(barrier.local_reached(), vec![BarrierEffect::StopControl]);
         assert!(!barrier.is_running());
@@ -302,6 +317,7 @@ mod tests {
         );
         assert!(barrier.is_running());
         assert_eq!(barrier.phase, BarrierPhase::Stable);
+        assert_eq!(barrier.local, RemoteBarrierState::NotReady);
     }
 
     #[test]
