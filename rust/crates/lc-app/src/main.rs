@@ -4613,7 +4613,10 @@ impl FrontendAssets {
     fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
         Some(lc_frontend::startup_about_dlg::AboutDlgAssets {
             background: self.dialog_image("LoaderWatercave1.png")?,
+            caption: self.dialog_image("GUICaption.png")?,
             button: self.dialog_image("GUIButton.png")?,
+            button_down: self.dialog_image("GUIButtonDown.png")?,
+            button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             scroll: self.dialog_image("GUIScroll.png")?,
         })
     }
@@ -62479,12 +62482,16 @@ fn render_startup_frame(
                 about_dialog,
             ) {
                 (Some(dlg_assets), Some(fonts), Some(dialog)) => {
-                    lc_frontend::startup_about_dlg::AboutDlgScreen::render_state(
+                    lc_frontend::startup_about_dlg::AboutDlgScreen::render_state_with_draw_focus(
                         surface,
                         &dlg_assets,
                         fonts,
                         dialog,
                         Some(startup_gamma()),
+                        !context_menu_open
+                            && !definition_selector_open
+                            && !game_option_input_open
+                            && !message_dialog_open,
                     );
                     true
                 }

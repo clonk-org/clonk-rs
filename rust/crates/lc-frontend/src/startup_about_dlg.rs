@@ -5,12 +5,13 @@
 //! Dialog: `C4StartupAboutDlg` (C4StartupAboutDlg.cpp). All geometry mirrors
 //! the C++ integer math exactly; see `rust/target/parity-specs/about.md`.
 
-use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::classic_gui::{
-    draw_3d_frame, draw_clipped_text, draw_clipped_text_with_markup, draw_engine_box,
+    blacken_transparent_pixels, draw_3d_frame, draw_clipped_text, draw_clipped_text_with_markup,
+    draw_engine_box, ClassicButtonState, ClassicGuiSkin,
 };
+use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::message_dialog::break_message;
-use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
+use crate::startup_main_menu::{IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{GammaRamp, Surface};
@@ -321,9 +322,18 @@ pub struct AboutDlgAssets {
     /// `LoaderWatercave1.png` — fctAboutBG, stretched over the screen
     /// (C4Startup.cpp:50, C4StartupAboutDlg.cpp:356-359).
     pub background: ImageData,
+    /// `GUICaption.png` — shared classic skin resource. About's buttons use
+    /// the same `ClassicGuiSkin` compositor as sibling startup dialogs.
+    pub caption: ImageData,
     /// `GUIButton.png` — barButton 3-slice for released buttons
     /// (C4Gui.cpp:1089-1090).
     pub button: ImageData,
+    /// `GUIButtonDown.png` — distinct barButtonD 3-slice for pressed buttons
+    /// (C4Gui.cpp:1091-1092).
+    pub button_down: ImageData,
+    /// `GUIButtonHighlight.png` — additive focus/hover overlay
+    /// (C4Gui.cpp:1093, C4GuiButton.cpp:93-99).
+    pub button_highlight: ImageData,
     /// `GUIScroll.png` — sfctScroll arrow/bar/pin slices
     /// (C4Gui.cpp:1098-1099,110-123).
     pub scroll: ImageData,
@@ -1134,6 +1144,15 @@ impl AboutDlgState {
 
     fn is_pressed(&self, button: AboutButton) -> bool {
         matches!(self.pressed, Some(pressed) if pressed == button)
+            && (!self.pointer_down || self.hovered == Some(button))
+    }
+
+    fn button_draw_state(&self, button: AboutButton, draw_focus: bool) -> ClassicButtonState {
+        ClassicButtonState {
+            pressed: self.is_pressed(button),
+            highlighted: draw_focus
+                && (self.hovered == Some(button) || self.focused_button() == Some(button)),
+        }
     }
 
     fn focused_button(&self) -> Option<AboutButton> {
@@ -1710,8 +1729,29 @@ impl AboutDlgScreen {
         state: &AboutDlgState,
         gamma: Option<&GammaRamp>,
     ) {
+        Self::render_state_with_draw_focus(surface, assets, fonts, state, gamma, true);
+    }
+
+    /// Renders the live dialog while respecting whether this About dialog is
+    /// the active, non-fading C4GUI dialog. Inactive dialogs keep their base
+    /// and pressed plank but suppress focus/hover highlighting.
+    pub fn render_state_with_draw_focus(
+        surface: &mut Surface,
+        assets: &AboutDlgAssets,
+        fonts: &ClonkFontSet,
+        state: &AboutDlgState,
+        gamma: Option<&GammaRamp>,
+        draw_focus: bool,
+    ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
         let layout = about_layout(w, h);
+        let button_highlight = blacken_transparent_pixels(&assets.button_highlight);
+        let button_skin = ClassicGuiSkin::new(
+            &assets.caption,
+            &assets.button,
+            &assets.button_down,
+            Some(&button_highlight),
+        );
 
         // 1. fctAboutBG stretched over screen bounds expanded by 1px
         // (DrawBackground, C4GuiDialogs.cpp:878-887).
@@ -1746,28 +1786,19 @@ impl AboutDlgScreen {
         );
 
         // 4-6. Back / Update / Licenses buttons (Button::DrawElement,
-        // C4GuiButton.cpp:81-109): barButton 3-slice, then the caption in the
-        // largest GUI font fitting Hgt-2 (CaptionFont at 32px), yellow,
-        // centered at ((x0+x1)/2, (y0+y1-lh)/2).
+        // C4GuiButton.cpp:81-109): released/down bar, additive focus/hover
+        // highlight, then the fitted yellow caption with its pressed offset.
         for (index, (rect, label)) in layout.buttons.iter().zip(BUTTON_LABELS).enumerate() {
             let button = AboutButton::ALL[index];
             if !state.is_visible(button) {
                 continue;
             }
-            let bar = GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32);
-            draw_bar(surface, &bar, &assets.button, gamma);
-            let font = fonts.button_font(rect.h);
-            let (caption, _) = expand_hotkey_markup(label);
-            let (x1, y1) = (rect.x + rect.w - 1, rect.y + rect.h - 1);
-            let pressed_offset = i32::from(state.is_pressed(button));
-            font.draw_with_gamma(
+            button_skin.draw_button(
                 surface,
-                (rect.x + x1) / 2 + pressed_offset,
-                (rect.y + y1 - font.line_height) / 2 + pressed_offset,
-                &caption,
-                YELLOW,
-                TextAlign::Center,
-                true,
+                *rect,
+                label,
+                fonts,
+                state.button_draw_state(button, draw_focus),
                 gamma,
             );
         }
@@ -2729,6 +2760,127 @@ mod tests {
         assert_eq!(state.focused, Some(AboutFocus::LicenseTabs));
     }
 
+    #[test]
+    fn l073_about_buttons_render_released_pressed_and_highlight_transitions() {
+        use crate::test_support::{endeavour_font_set, load_graphics_png};
+        use lc_graphics::{Color, PixelFormat};
+
+        let solid_image = |width: u32, height: u32, rgba: [u8; 4]| {
+            ImageData::new(width, height, rgba.repeat((width * height) as usize))
+        };
+        let assets = AboutDlgAssets {
+            background: load_graphics_png("LoaderWatercave1.png"),
+            caption: load_graphics_png("GUICaption.png"),
+            button: solid_image(128, 32, [20, 30, 40, 255]),
+            button_down: solid_image(128, 32, [60, 70, 80, 255]),
+            button_highlight: solid_image(16, 16, [7, 11, 13, 255]),
+            scroll: load_graphics_png("GUIScroll.png"),
+        };
+        let fonts = endeavour_font_set();
+        let layout = about_layout(1280, 720);
+        let back = layout.buttons[AboutButton::Back.index()];
+        let update = layout.buttons[AboutButton::Update.index()];
+        let center = |rect: IntRect| {
+            GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+        };
+        let probe = |surface: &Surface, rect: IntRect| -> Color {
+            surface
+                .get_pixel((rect.x + 8) as u32, (rect.y + 5) as u32)
+                .expect("layout-derived button probe")
+        };
+        let render_probe = |state: &AboutDlgState, rect: IntRect, draw_focus: bool| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            AboutDlgScreen::render_state_with_draw_focus(
+                &mut surface,
+                &assets,
+                &fonts,
+                state,
+                None,
+                draw_focus,
+            );
+            probe(&surface, rect)
+        };
+        let reference_probe = |rect: IntRect, label: &str, state: ClassicButtonState| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            ClassicGuiSkin::new(
+                &assets.caption,
+                &assets.button,
+                &assets.button_down,
+                Some(&assets.button_highlight),
+            )
+            .draw_button(&mut surface, rect, label, &fonts, state, None);
+            probe(&surface, rect)
+        };
+        let released = reference_probe(update, BUTTON_LABELS[1], ClassicButtonState::default());
+        let highlighted = reference_probe(
+            update,
+            BUTTON_LABELS[1],
+            ClassicButtonState {
+                pressed: false,
+                highlighted: true,
+            },
+        );
+        let pressed_highlighted = reference_probe(
+            update,
+            BUTTON_LABELS[1],
+            ClassicButtonState {
+                pressed: true,
+                highlighted: true,
+            },
+        );
+        assert_ne!(released, highlighted, "hover/focus must add the glow");
+        assert_ne!(
+            highlighted, pressed_highlighted,
+            "press must replace the whole plank outside the caption"
+        );
+
+        let mut pointer = AboutDlgState::new();
+        pointer.resize(1280, 720, &fonts);
+        assert_eq!(render_probe(&pointer, update, true), released);
+        assert!(pointer.handle_pointer_move(center(update)).is_empty());
+        assert_eq!(render_probe(&pointer, update, true), highlighted);
+        assert_eq!(render_probe(&pointer, back, true), released);
+        assert!(pointer.handle_pointer_down(center(update)).is_empty());
+        assert_eq!(render_probe(&pointer, update, true), pressed_highlighted);
+        assert!(pointer.handle_pointer_move(GuiPoint::new(0.0, 0.0)).is_empty());
+        assert_eq!(
+            render_probe(&pointer, update, true),
+            released,
+            "dragging off clears both the pointer glow and down plank"
+        );
+        assert!(pointer.handle_pointer_move(center(update)).is_empty());
+        assert_eq!(
+            render_probe(&pointer, update, true),
+            pressed_highlighted,
+            "held re-entry restores the captured button's down plank"
+        );
+        assert!(pointer
+            .handle_pointer_up(GuiPoint::new(0.0, 0.0))
+            .is_empty());
+        assert_eq!(render_probe(&pointer, update, true), released);
+
+        let mut keyboard = AboutDlgState::new();
+        keyboard.resize(1280, 720, &fonts);
+        assert!(keyboard.handle_key_down(KeyCode::Tab).is_empty());
+        assert_eq!(render_probe(&keyboard, back, true), highlighted);
+        assert_eq!(render_probe(&keyboard, update, true), released);
+        assert!(keyboard.handle_key_down(KeyCode::Tab).is_empty());
+        assert_eq!(render_probe(&keyboard, back, true), released);
+        assert_eq!(render_probe(&keyboard, update, true), highlighted);
+        assert_eq!(
+            render_probe(&keyboard, update, false),
+            released,
+            "inactive/fading dialogs suppress retained focus"
+        );
+        assert!(keyboard.handle_key_down(KeyCode::Space).is_empty());
+        assert_eq!(render_probe(&keyboard, update, true), pressed_highlighted);
+        assert_eq!(
+            keyboard.handle_key_up(KeyCode::Space),
+            vec![AboutDlgAction::CheckForUpdates]
+        );
+        assert_eq!(render_probe(&keyboard, update, true), highlighted);
+    }
+
     // Renders the dialog at 1280x720 and dumps a PPM for the manual diff
     // against the C++ F9 reference (build/Screenshots/ref-about.png). CI has
     // no reference image, so this only produces the artifact.
@@ -2741,7 +2893,10 @@ mod tests {
 
         let assets = AboutDlgAssets {
             background: load_graphics_png("LoaderWatercave1.png"),
+            caption: load_graphics_png("GUICaption.png"),
             button: load_graphics_png("GUIButton.png"),
+            button_down: load_graphics_png("GUIButtonDown.png"),
+            button_highlight: load_graphics_png("GUIButtonHighlight.png"),
             scroll: load_graphics_png("GUIScroll.png"),
         };
         let fonts = endeavour_font_set();
