@@ -1,5 +1,5 @@
-//! Pixel-faithful reusable frontend state for the non-chat
-//! `C4GUI::InputDialog`.
+//! Pixel-faithful reusable frontend state for `C4GUI::InputDialog`, including
+//! its compact ordinary-chat layout.
 //!
 //! The controller owns only presentation and input state. Callers translate
 //! [`InputDialogAction::Accepted`] into the C++ callback's side effect and
@@ -64,6 +64,9 @@ impl InputDialogIcon {
 pub enum InputDialogPlacement {
     #[default]
     Centered,
+    /// Free-place chat dialogs use the centered position plus one third of
+    /// the full screen height (`Screen::ShowDialog`).
+    BottomThird,
     /// Shared-mode C++ screens place ordinary dialogs at the preferred
     /// viewport origin plus `(30, 30)`.
     Preferred { x: i32, y: i32 },
@@ -81,6 +84,9 @@ pub enum InputDialogControl {
 pub enum InputDialogAction {
     FocusChanged(InputDialogControl),
     TextChanged(String),
+    /// One complete line from a multiline compact-chat paste. The dialog
+    /// remains open for the remaining clipboard text.
+    SubmittedLine(String),
     ClipboardWrite(String),
     OpenContextMenu(InputDialogContextMenuRequest),
     Accepted(String),
@@ -365,6 +371,7 @@ enum HitTarget {
     Ok,
     Cancel,
     Caption,
+    Message,
     None,
 }
 
@@ -374,7 +381,7 @@ impl HitTarget {
             Self::Close => Some(ButtonTarget::Close),
             Self::Ok => Some(ButtonTarget::Ok),
             Self::Cancel => Some(ButtonTarget::Cancel),
-            Self::Edit | Self::Caption | Self::None => None,
+            Self::Edit | Self::Caption | Self::Message | Self::None => None,
         }
     }
 }
@@ -385,7 +392,7 @@ struct TitleDrag {
     offset: (i32, i32),
 }
 
-/// Pure controller for one regular (non-chat-layout) input dialog.
+/// Pure controller for one classic input dialog, including the compact chat layout.
 #[derive(Clone, Debug)]
 pub struct InputDialogController {
     message: String,
@@ -393,6 +400,7 @@ pub struct InputDialogController {
     icon: InputDialogIcon,
     button_labels: InputDialogButtonLabels,
     close_tooltip: String,
+    chat_tooltip: String,
     caption_scroll: Cell<CaptionScrollState>,
     placement: InputDialogPlacement,
     dialog_offset: (i32, i32),
@@ -410,6 +418,7 @@ pub struct InputDialogController {
     key_pressed: Option<(ButtonTarget, KeyCode)>,
     edit_drag_anchor: Option<usize>,
     title_drag: Option<TitleDrag>,
+    chat_layout: bool,
     last_edit_input: Instant,
     sound_events: Vec<InputDialogSound>,
 }
@@ -426,6 +435,7 @@ impl InputDialogController {
             icon,
             button_labels: InputDialogButtonLabels::default(),
             close_tooltip: "Close".into(),
+            chat_tooltip: String::new(),
             caption_scroll: Cell::new(CaptionScrollState::default()),
             placement: InputDialogPlacement::Centered,
             dialog_offset: (0, 0),
@@ -443,9 +453,23 @@ impl InputDialogController {
             key_pressed: None,
             edit_drag_anchor: None,
             title_drag: None,
+            chat_layout: false,
             last_edit_input: Instant::now(),
             sound_events: Vec::new(),
         }
+    }
+
+    /// Ordinary `C4ChatInputDialog` passes a null title and selects
+    /// `InputDialog`'s compact chat branch: an inline wooden label and edit,
+    /// without title, close icon, or OK/Cancel buttons.
+    pub fn new_chat(message: impl Into<String>, initial_text: &str) -> Self {
+        let mut controller = Self::new(message, "", InputDialogIcon::None)
+            .with_placement(InputDialogPlacement::BottomThird);
+        controller.chat_layout = true;
+        controller.text = truncate_utf8(initial_text, controller.payload_limit()).to_string();
+        controller.caret = controller.text.len();
+        controller.selection = None;
+        controller
     }
 
     pub fn with_placement(mut self, placement: InputDialogPlacement) -> Self {
@@ -460,6 +484,11 @@ impl InputDialogController {
 
     pub fn with_close_tooltip(mut self, tooltip: impl Into<String>) -> Self {
         self.close_tooltip = tooltip.into();
+        self
+    }
+
+    pub fn with_chat_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.chat_tooltip = tooltip.into();
         self
     }
 
@@ -521,6 +550,10 @@ impl InputDialogController {
         self.dialog_offset
     }
 
+    pub const fn is_chat_layout(&self) -> bool {
+        self.chat_layout
+    }
+
     pub fn set_max_text(&mut self, max_text: usize) {
         // C++ does not retroactively truncate an already populated edit.
         self.max_text = max_text;
@@ -531,6 +564,18 @@ impl InputDialogController {
         self.caret = self.text.len();
         self.selection = (!self.text.is_empty()).then_some((0, self.text.len()));
         self.last_edit_input = Instant::now();
+    }
+
+    /// Replaces text through the focused Edit input path, which scrolls the
+    /// new end caret into view before selecting the replacement.
+    pub fn replace_edit_text(
+        &mut self,
+        text: &str,
+        layout: &InputDialogLayout,
+        font: &ClonkFont,
+    ) {
+        self.set_input_text(text);
+        self.ensure_cursor_in_view(layout, font);
     }
 
     pub fn selected_text(&self) -> Option<&str> {
@@ -548,6 +593,62 @@ impl InputDialogController {
         screen_height: i32,
         font: &ClonkFont,
     ) -> InputDialogLayout {
+        if self.chat_layout {
+            let edit_height = (font.line_height + 3).max(MIN_WOOD_BAR_HEIGHT);
+            let width = screen_width * 4 / 5;
+            let height = edit_height + 2;
+            let (base_x, base_y) = match self.placement {
+                InputDialogPlacement::Centered => {
+                    ((screen_width - width) / 2, (screen_height - height) / 2)
+                }
+                InputDialogPlacement::BottomThird => (
+                    (screen_width - width) / 2,
+                    (screen_height - height) / 2 + screen_height / 3,
+                ),
+                InputDialogPlacement::Preferred { x, y } => (x + 30, y + 30),
+            };
+            let x = base_x + self.dialog_offset.0;
+            let y = base_y + self.dialog_offset.1;
+            let label_width = font.measure(&self.message, true).0 + 4;
+            let empty = IntRect {
+                x,
+                y,
+                w: 0,
+                h: 0,
+            };
+            return InputDialogLayout {
+                bounds: IntRect {
+                    x,
+                    y,
+                    w: width,
+                    h: height,
+                },
+                caption: None,
+                client: IntRect {
+                    x,
+                    y,
+                    w: width,
+                    h: height,
+                },
+                close_button: None,
+                icon: empty,
+                message: IntRect {
+                    x: x + 1,
+                    y: y + 1,
+                    w: label_width,
+                    h: edit_height,
+                },
+                message_text: self.message.clone(),
+                edit: IntRect {
+                    x: x + label_width + 1,
+                    y: y + 1,
+                    w: width - label_width - 2,
+                    h: edit_height,
+                },
+                ok_button: empty,
+                cancel_button: empty,
+            };
+        }
         let message_text = break_message(
             font,
             &self.message,
@@ -564,6 +665,10 @@ impl InputDialogController {
             InputDialogPlacement::Centered => (
                 (screen_width - DIALOG_WIDTH) / 2,
                 (screen_height - height) / 2,
+            ),
+            InputDialogPlacement::BottomThird => (
+                (screen_width - DIALOG_WIDTH) / 2,
+                (screen_height - height) / 2 + screen_height / 3,
             ),
             InputDialogPlacement::Preferred { x, y } => (x + 30, y + 30),
         };
@@ -867,6 +972,9 @@ impl InputDialogController {
 
     pub fn handle_hotkey(&mut self, character: char) -> Vec<InputDialogAction> {
         self.pointer_active = false;
+        if self.chat_layout {
+            return Vec::new();
+        }
         let character = character.to_ascii_uppercase();
         let ok_hotkey = expand_hotkey_markup(&self.button_labels.ok).1;
         let cancel_hotkey = expand_hotkey_markup(&self.button_labels.cancel).1;
@@ -877,6 +985,15 @@ impl InputDialogController {
         } else {
             Vec::new()
         }
+    }
+
+    pub fn has_hotkey(&self, character: char) -> bool {
+        if self.chat_layout {
+            return false;
+        }
+        let character = character.to_ascii_uppercase();
+        expand_hotkey_markup(&self.button_labels.ok).1 == Some(character)
+            || expand_hotkey_markup(&self.button_labels.cancel).1 == Some(character)
     }
 
     /// Opens the edit's recursive classic context menu for a right click.
@@ -1118,10 +1235,9 @@ impl InputDialogController {
         &mut self,
         point: GuiPoint,
         layout: &InputDialogLayout,
+        font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
-        self.note_pointer_input(point, true);
-        self.edit_drag_anchor = None;
-        self.title_drag = None;
+        self.stop_pointer_drag_at(point, layout, font);
         let released = hit_target(layout, point).button();
         self.hovered = released;
         let Some(pressed) = self.pointer_pressed.take() else {
@@ -1132,6 +1248,31 @@ impl InputDialogController {
         }
         self.sound_events.push(InputDialogSound::Click);
         self.activate_button(pressed)
+    }
+
+    /// Finish CMouse's retained drag at the button-up coordinate before the
+    /// global drag element is cleared and ordinary screen hit-testing resumes.
+    pub fn stop_pointer_drag_at(
+        &mut self,
+        point: GuiPoint,
+        layout: &InputDialogLayout,
+        font: &ClonkFont,
+    ) {
+        self.note_pointer_input(point, true);
+        if let Some(drag) = self.title_drag {
+            self.dialog_offset = (
+                drag.offset.0 + (point.x - drag.pointer.x) as i32,
+                drag.offset.1 + (point.y - drag.pointer.y) as i32,
+            );
+        }
+        if let Some(anchor) = self.edit_drag_anchor {
+            self.caret = self.character_at(point.x, layout, font);
+            self.selection = Some((anchor, self.caret));
+            self.last_edit_input = Instant::now();
+            self.ensure_cursor_in_view(layout, font);
+        }
+        self.edit_drag_anchor = None;
+        self.title_drag = None;
     }
 
     pub fn handle_pointer_double_click(
@@ -1192,8 +1333,9 @@ impl InputDialogController {
         &mut self,
         point: GuiPoint,
         layout: &InputDialogLayout,
+        font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
-        self.handle_pointer_up(point, layout)
+        self.handle_pointer_up(point, layout, font)
     }
 
     pub fn handle_touch_cancel(&mut self) {
@@ -1203,11 +1345,37 @@ impl InputDialogController {
         self.title_drag = None;
     }
 
+    /// Whether this controller currently owns CMouse's drag element.
+    /// Labels and other inert client-area hits deliberately do not capture.
+    pub const fn has_pointer_capture(&self) -> bool {
+        self.pointer_pressed.is_some()
+            || self.edit_drag_anchor.is_some()
+            || self.title_drag.is_some()
+    }
+
+    pub const fn has_positional_pointer_drag(&self) -> bool {
+        self.edit_drag_anchor.is_some() || self.title_drag.is_some()
+    }
+
     pub fn pointer_left(&mut self) {
         let was_down = self.pointer_button_is_down();
         self.pointer = None;
         self.pointer_active = false;
         self.hovered = None;
+        if was_down {
+            self.sound_events.push(InputDialogSound::ArrowHit);
+        }
+    }
+
+    /// Mirror `CMouse::ReleaseElements` without disturbing keyboard state.
+    pub fn release_pointer_elements(&mut self) {
+        let was_down = self.pointer_button_is_down();
+        self.pointer = None;
+        self.pointer_active = false;
+        self.hovered = None;
+        self.pointer_pressed = None;
+        self.edit_drag_anchor = None;
+        self.title_drag = None;
         if was_down {
             self.sound_events.push(InputDialogSound::ArrowHit);
         }
@@ -1225,7 +1393,8 @@ impl InputDialogController {
     }
 
     /// Delayed global tooltip state. Regular input dialogs assign tooltips
-    /// only to the wooden title and its close icon; edit/OK/Cancel do not.
+    /// only to the wooden title and its close icon. Compact chat assigns its
+    /// localized chat tooltip to both the inline label and edit.
     pub fn tooltip_state_at(
         &self,
         now: Instant,
@@ -1245,7 +1414,12 @@ impl InputDialogController {
         let text = match hit_target(layout, pointer) {
             HitTarget::Close => &self.close_tooltip,
             HitTarget::Caption => &self.caption,
-            HitTarget::Edit | HitTarget::Ok | HitTarget::Cancel | HitTarget::None => return None,
+            HitTarget::Edit | HitTarget::Message if self.chat_layout => &self.chat_tooltip,
+            HitTarget::Edit
+            | HitTarget::Ok
+            | HitTarget::Cancel
+            | HitTarget::Message
+            | HitTarget::None => return None,
         };
         (!text.is_empty()).then(|| InputDialogTooltip {
             pointer,
@@ -1343,6 +1517,26 @@ impl InputDialogController {
             &resources.fonts.text,
         );
         resources.skin.draw_dialog(surface, layout.bounds, gamma);
+        if self.chat_layout {
+            resources.skin.draw_caption(
+                surface,
+                layout.message,
+                &layout.message_text,
+                &resources.fonts.text,
+                WHITE,
+                TextAlign::Center,
+                gamma,
+            );
+            self.render_edit(
+                surface,
+                layout.edit,
+                &resources.fonts.text,
+                active,
+                cursor_visible,
+                gamma,
+            );
+            return Ok(());
+        }
         if let Some(caption) = layout.caption {
             let scroll = self.caption_scroll_offset_at(now, &resources.fonts.text);
             resources.skin.draw_caption_scrolled(
@@ -1608,6 +1802,9 @@ impl InputDialogController {
         font: &ClonkFont,
     ) -> Vec<InputDialogAction> {
         let transformed = clipboard.replace('|', "\u{a6}");
+        if self.chat_layout {
+            return self.paste_chat_text(&transformed, layout, font);
+        }
         let old_text = self.text.clone();
         let mut rest = transformed.as_str();
         while let Some(line_break) = rest.find(['\r', '\n']) {
@@ -1638,6 +1835,48 @@ impl InputDialogController {
         } else {
             Vec::new()
         }
+    }
+
+    fn paste_chat_text(
+        &mut self,
+        clipboard: &str,
+        layout: &InputDialogLayout,
+        font: &ClonkFont,
+    ) -> Vec<InputDialogAction> {
+        let mut actions = Vec::new();
+        let mut rest = clipboard;
+        while let Some(line_break) = rest.find(['\r', '\n']) {
+            if line_break == 0 {
+                let skip = rest.chars().next().map_or(0, char::len_utf8);
+                rest = &rest[skip..];
+                continue;
+            }
+            let old_text = self.text.clone();
+            self.insert_raw_text(&rest[..line_break]);
+            self.last_edit_input = Instant::now();
+            self.ensure_cursor_in_view(layout, font);
+            if self.text != old_text {
+                actions.push(InputDialogAction::TextChanged(self.text.clone()));
+            }
+            rest = &rest[line_break + 1..];
+            if rest.is_empty() {
+                actions.push(InputDialogAction::Accepted(self.text.clone()));
+                return actions;
+            }
+            actions.push(InputDialogAction::SubmittedLine(self.text.clone()));
+            self.caret = self.text.len();
+            self.selection = (!self.text.is_empty()).then_some((0, self.text.len()));
+        }
+        if !rest.is_empty() {
+            let old_text = self.text.clone();
+            self.insert_raw_text(rest);
+            self.last_edit_input = Instant::now();
+            self.ensure_cursor_in_view(layout, font);
+            if self.text != old_text {
+                actions.push(InputDialogAction::TextChanged(self.text.clone()));
+            }
+        }
+        actions
     }
 
     fn insert_raw_text(&mut self, text: &str) {
@@ -1752,6 +1991,9 @@ impl InputDialogController {
     }
 
     fn advance_focus(&mut self, backwards: bool) -> Vec<InputDialogAction> {
+        if self.chat_layout {
+            return self.set_focus(InputDialogControl::Edit);
+        }
         const WITH_CLOSE: [InputDialogControl; 4] = [
             InputDialogControl::Close,
             InputDialogControl::Edit,
@@ -1853,6 +2095,8 @@ fn hit_target(layout: &InputDialogLayout, point: GuiPoint) -> HitTarget {
         HitTarget::Cancel
     } else if layout.caption.is_some_and(|rect| contains(rect, point)) {
         HitTarget::Caption
+    } else if contains(layout.message, point) {
+        HitTarget::Message
     } else {
         HitTarget::None
     }
@@ -2136,6 +2380,152 @@ mod tests {
     }
 
     #[test]
+    fn compact_chat_layout_uses_bottom_third_label_edit_and_no_title_or_buttons() {
+        let fonts = endeavour_font_set();
+        let mut state = InputDialogController::new_chat("Chat:", "alpha beta")
+            .with_chat_tooltip("Enter chat messages here and send them with enter.");
+        let layout = state.layout(1280, 720, &fonts.text);
+        let edit_height = (fonts.text.line_height + 3).max(MIN_WOOD_BAR_HEIGHT);
+        let label_width = fonts.text.measure("Chat:", true).0 + 4;
+
+        assert!(state.is_chat_layout());
+        assert!(!state.has_hotkey('C'));
+        assert_eq!(state.focused_control(), InputDialogControl::Edit);
+        assert_eq!(state.caret(), "alpha beta".len());
+        assert_eq!(state.selection(), None);
+        assert_eq!(
+            layout.bounds,
+            IntRect {
+                x: 128,
+                y: 586,
+                w: 1024,
+                h: edit_height + 2,
+            }
+        );
+        assert_eq!(layout.caption, None);
+        assert_eq!(layout.close_button, None);
+        assert_eq!(
+            layout.message,
+            IntRect {
+                x: 129,
+                y: 587,
+                w: label_width,
+                h: edit_height,
+            }
+        );
+        assert_eq!(
+            layout.edit,
+            IntRect {
+                x: 129 + label_width,
+                y: 587,
+                w: 1024 - label_width - 2,
+                h: edit_height,
+            }
+        );
+
+        let label = point_in(layout.message);
+        state.handle_pointer_down(label, &layout, &fonts.text);
+        assert!(!state.has_pointer_capture());
+        state.handle_pointer_move(
+            GuiPoint::new(label.x + 20.0, label.y - 10.0),
+            &layout,
+            &fonts.text,
+        );
+        state.handle_pointer_up(label, &layout, &fonts.text);
+        assert_eq!(
+            state.dialog_offset(),
+            (0, 0),
+            "the inline label is not a title drag target"
+        );
+        assert_eq!(
+            state
+                .tooltip_state_at(state.tooltip_since + TOOLTIP_DELAY, &layout, true)
+                .expect("chat label tooltip")
+                .text,
+            "Enter chat messages here and send them with enter."
+        );
+        assert!(state
+            .handle_key_down(KeyCode::Tab, false, &layout, &fonts.text)
+            .is_empty());
+        assert_eq!(state.focused_control(), InputDialogControl::Edit);
+
+        let start = GuiPoint::new((layout.edit.x + 5) as f32, point_in(layout.edit).y);
+        let end = GuiPoint::new((layout.edit.x + 30) as f32, point_in(layout.edit).y);
+        state.handle_pointer_move(start, &layout, &fonts.text);
+        assert_eq!(
+            state
+                .tooltip_state_at(state.tooltip_since + TOOLTIP_DELAY, &layout, true)
+                .expect("chat edit tooltip")
+                .text,
+            "Enter chat messages here and send them with enter."
+        );
+        state.handle_pointer_down(start, &layout, &fonts.text);
+        assert!(state.has_pointer_capture());
+        state.handle_pointer_up(end, &layout, &fonts.text);
+        assert!(!state.has_pointer_capture());
+        assert!(state.selected_text().is_some_and(|text| !text.is_empty()));
+        let outcome = state.request_context_menu_at(
+            end,
+            &layout,
+            true,
+            &InputDialogContextLabels::default(),
+        );
+        let InputDialogAction::OpenContextMenu(request) = &outcome.actions[0] else {
+            panic!("chat edit context menu request");
+        };
+        assert_eq!(
+            request.items.iter().map(|item| item.command).collect::<Vec<_>>(),
+            vec![
+                InputDialogContextCommand::Cut,
+                InputDialogContextCommand::Copy,
+                InputDialogContextCommand::Paste,
+                InputDialogContextCommand::Clear,
+                InputDialogContextCommand::SelectAll,
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_chat_multiline_paste_submits_complete_lines_and_keeps_remainder() {
+        let fonts = endeavour_font_set();
+        let mut state = InputDialogController::new_chat("Chat:", "");
+        let layout = state.layout(1280, 720, &fonts.text);
+        assert_eq!(
+            state.apply_context_command(
+                InputDialogContextCommand::Paste,
+                Some("one\r\ntwo\nthree"),
+                &layout,
+                &fonts.text,
+            ),
+            vec![
+                InputDialogAction::TextChanged("one".into()),
+                InputDialogAction::SubmittedLine("one".into()),
+                InputDialogAction::TextChanged("two".into()),
+                InputDialogAction::SubmittedLine("two".into()),
+                InputDialogAction::TextChanged("three".into()),
+            ]
+        );
+        assert_eq!(state.text(), "three");
+        assert_eq!(state.caret(), "three".len());
+        assert_eq!(state.selection(), None);
+
+        let mut trailing = InputDialogController::new_chat("Chat:", "");
+        let layout = trailing.layout(1280, 720, &fonts.text);
+        assert_eq!(
+            trailing.apply_context_command(
+                InputDialogContextCommand::Paste,
+                Some("final\n"),
+                &layout,
+                &fonts.text,
+            ),
+            vec![
+                InputDialogAction::TextChanged("final".into()),
+                InputDialogAction::Accepted("final".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn wrapping_grows_the_dialog_and_preferred_placement_uses_cpp_offset() {
         let fonts = endeavour_font_set();
         let state = InputDialogController::new(
@@ -2213,12 +2603,12 @@ mod tests {
         assert!(state.selection().is_some());
         state.handle_pointer_double_click(point_in(layout.edit), &layout, &fonts.text);
         assert!(state.selected_text().is_some());
-        state.handle_pointer_up(point_in(layout.edit), &layout);
+        state.handle_pointer_up(point_in(layout.edit), &layout, &fonts.text);
 
         state.handle_pointer_down(point_in(layout.cancel_button), &layout, &fonts.text);
         assert_eq!(state.take_sound_events(), vec![InputDialogSound::ArrowHit]);
         assert_eq!(
-            state.handle_pointer_up(point_in(layout.cancel_button), &layout),
+            state.handle_pointer_up(point_in(layout.cancel_button), &layout, &fonts.text),
             vec![InputDialogAction::Cancelled]
         );
         assert_eq!(state.take_sound_events(), vec![InputDialogSound::Click]);
@@ -2267,6 +2657,9 @@ mod tests {
             .with_button_labels(InputDialogButtonLabels::new("&Ja", "&Abbrechen"))
             .with_input_text("pw");
         let layout = state.layout(1280, 720, &fonts.text);
+        assert!(state.has_hotkey('j'));
+        assert!(state.has_hotkey('A'));
+        assert!(!state.has_hotkey('c'));
         assert_eq!(
             state.handle_hotkey('j'),
             vec![InputDialogAction::Accepted("pw".into())]
@@ -2363,7 +2756,7 @@ mod tests {
             &layout,
             &fonts.text,
         );
-        state.handle_pointer_up(point_in(layout.edit), &layout);
+        state.handle_pointer_up(point_in(layout.edit), &layout, &fonts.text);
         assert!(state
             .handle_edit_key_down(
                 InputDialogEditKey::Backspace,
@@ -2396,6 +2789,14 @@ mod tests {
         state.set_input_text("replacement");
         assert_eq!(state.horizontal_scroll, scrolled);
         assert_eq!(state.selection, Some((0, "replacement".len())));
+        state.replace_edit_text("history", &layout, &fonts.text);
+        assert_eq!(
+            state.horizontal_scroll,
+            fonts.text.measure("history", false).0
+                + fonts.text.measure("\u{a6}", false).0 / 2
+                - EDIT_SCROLL_OFFSET
+        );
+        assert_eq!(state.selection, Some((0, "history".len())));
     }
 
     #[test]
@@ -2655,6 +3056,39 @@ mod tests {
             .expect("render input dialog");
         assert_ne!(surface.get_pixel(490, 265), Some(Color::opaque(13, 17, 19)));
         assert_ne!(surface.get_pixel(520, 315), Some(Color::opaque(13, 17, 19)));
+
+        let chat = InputDialogController::new_chat("Chat:", "hello");
+        let chat_layout = chat.layout(1280, 720, &fonts.text);
+        let mut chat_surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        for y in 0..chat_surface.height() {
+            for x in 0..chat_surface.width() {
+                chat_surface
+                    .set_pixel(x, y, Color::opaque(13, 17, 19))
+                    .expect("chat surface coordinate");
+            }
+        }
+        chat.render_with_cursor(
+            &mut chat_surface,
+            &resources,
+            true,
+            true,
+            Some(standard_gamma()),
+        )
+        .expect("render compact chat input dialog");
+        assert_ne!(
+            chat_surface.get_pixel(
+                (chat_layout.message.x + chat_layout.message.w / 2) as u32,
+                (chat_layout.message.y + chat_layout.message.h / 2) as u32,
+            ),
+            Some(Color::opaque(13, 17, 19))
+        );
+        assert_ne!(
+            chat_surface.get_pixel(
+                (chat_layout.edit.x + chat_layout.edit.w / 2) as u32,
+                (chat_layout.edit.y + chat_layout.edit.h / 2) as u32,
+            ),
+            Some(Color::opaque(13, 17, 19))
+        );
         let invalid_icons = ImageData::new(40, 40, vec![0; 40 * 40 * 4]);
         let error = InputDialogResources::new(
             skin,

@@ -449,6 +449,16 @@ impl MessageDialogState {
             .map(MessageDialogButton::result)
     }
 
+    pub fn has_hotkey(&self, character: char) -> bool {
+        let character = character.to_ascii_uppercase();
+        self.checkbox
+            .as_ref()
+            .is_some_and(|checkbox| checkbox.hotkey == Some(character))
+            || self.buttons.ordered().into_iter().any(|button| {
+                expand_hotkey_markup(self.button_label(button)).1 == Some(character)
+            })
+    }
+
     pub fn layout(
         &self,
         screen_width: i32,
@@ -646,18 +656,52 @@ impl MessageDialogState {
         }
     }
 
+    /// Route a button-down at its event coordinate. A dialog can be inserted
+    /// beneath a stationary cursor, so its cached pointer position is not
+    /// necessarily initialized before the first click reaches it.
+    pub fn handle_pointer_down_at(&mut self, point: GuiPoint, layout: &MessageDialogLayout) {
+        self.pointer = Some(point);
+        self.hovered = hit_target(layout, point);
+        self.handle_pointer_down(layout);
+    }
+
     pub fn handle_pointer_up(
         &mut self,
         layout: &MessageDialogLayout,
     ) -> Option<MessageDialogResult> {
+        let was_down = self.pointer_target_is_down();
         let released = self.pointer.and_then(|point| hit_target(layout, point));
+        self.finish_pointer_up(released, was_down)
+    }
+
+    /// Route a button-up at its event coordinate without synthesizing a
+    /// preceding move. This matters after CMouse cleared `pDragElement`: a
+    /// button left earlier must not re-arm merely because release hit it,
+    /// while a checkbox still toggles from the LeftUp coordinate alone.
+    pub fn handle_pointer_up_at(
+        &mut self,
+        point: GuiPoint,
+        layout: &MessageDialogLayout,
+    ) -> Option<MessageDialogResult> {
+        let was_down = self.pointer_target_is_down();
+        let released = hit_target(layout, point);
+        self.pointer = Some(point);
+        self.hovered = released;
+        self.finish_pointer_up(released, was_down)
+    }
+
+    fn finish_pointer_up(
+        &mut self,
+        released: Option<DialogTarget>,
+        was_down: bool,
+    ) -> Option<MessageDialogResult> {
         if released == Some(DialogTarget::Checkbox) {
             self.pointer_pressed = None;
             self.toggle_checkbox();
             return None;
         }
         let pressed = self.pointer_pressed.take()?;
-        (released == Some(pressed)).then(|| {
+        (was_down && released == Some(pressed)).then(|| {
             self.sound_events.push(MessageDialogSound::Click);
             self.target_result(pressed)
         })
@@ -672,6 +716,10 @@ impl MessageDialogState {
     /// do not retain the pointer at all.
     pub const fn has_pointer_capture(&self) -> bool {
         self.pointer_pressed.is_some()
+    }
+
+    pub const fn has_pointer_hover(&self) -> bool {
+        self.hovered.is_some()
     }
 
     /// Clear a retained button press when shared-screen release hit-testing
@@ -707,7 +755,8 @@ impl MessageDialogState {
         &self,
         surface: &mut Surface,
         resources: MessageDialogResources<'_>,
-        active: bool,
+        keyboard_active: bool,
+        mouse_active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
         resources.validate()?;
@@ -773,9 +822,8 @@ impl MessageDialogState {
                 true,
                 gamma,
             );
-            if active
-                && (self.focus == Some(DialogTarget::Checkbox)
-                    || self.hovered == Some(DialogTarget::Checkbox))
+            if keyboard_active && self.focus == Some(DialogTarget::Checkbox)
+                || mouse_active && self.hovered == Some(DialogTarget::Checkbox)
             {
                 let highlight_size = checkbox_layout.square.h / 2;
                 crate::draw_image_bilinear_additive(
@@ -799,17 +847,17 @@ impl MessageDialogState {
                 self.button_label(button.button),
                 resources.fonts,
                 ClassicButtonState {
-                    pressed: active && self.target_pressed(target),
-                    highlighted: active
-                        && (self.focus == Some(target) || self.hovered == Some(target)),
+                    pressed: self.target_pressed(target),
+                    highlighted: keyboard_active && self.focus == Some(target)
+                        || mouse_active && self.hovered == Some(target),
                 },
                 gamma,
             );
         }
         if let Some(close) = layout.close_button {
             let target = DialogTarget::Close;
-            let highlighted =
-                active && (self.focus == Some(target) || self.hovered == Some(target));
+            let highlighted = keyboard_active && self.focus == Some(target)
+                || mouse_active && self.hovered == Some(target);
             if highlighted {
                 crate::draw_image_bilinear_additive(
                     surface,
@@ -831,7 +879,7 @@ impl MessageDialogState {
                 resources.icons_extended,
                 gamma,
             )?;
-            if active && self.target_pressed(target) {
+            if self.target_pressed(target) {
                 crate::draw_image_bilinear_additive(
                     surface,
                     &GuiRect::new(
@@ -1799,6 +1847,37 @@ mod tests {
         );
         dialog.handle_pointer_down(&layout);
         dialog.handle_pointer_move(GuiPoint::new(0.0, 0.0), &layout);
+        assert_eq!(
+            dialog.handle_pointer_up_at(
+                GuiPoint::new((button.x + 1) as f32, (button.y + 1) as f32),
+                &layout,
+            ),
+            None,
+            "release hit-testing does not synthesize a re-entry move"
+        );
+
+        dialog.cancel_pointer_capture();
+        dialog.handle_pointer_move(GuiPoint::new(0.0, 0.0), &layout);
+        dialog.handle_pointer_down_at(
+            GuiPoint::new((button.x + 1) as f32, (button.y + 1) as f32),
+            &layout,
+        );
+        assert!(dialog.has_pointer_capture());
+        assert_eq!(
+            dialog.handle_pointer_up_at(
+                GuiPoint::new((button.x + 1) as f32, (button.y + 1) as f32),
+                &layout,
+            ),
+            Some(MessageDialogResult::Ok),
+            "button-down uses the current event coordinate, not stale hover state"
+        );
+
+        dialog.handle_pointer_move(
+            GuiPoint::new((button.x + 1) as f32, (button.y + 1) as f32),
+            &layout,
+        );
+        dialog.handle_pointer_down(&layout);
+        dialog.handle_pointer_move(GuiPoint::new(0.0, 0.0), &layout);
         dialog.handle_pointer_move(
             GuiPoint::new((button.x + 2) as f32, (button.y + 2) as f32),
             &layout,
@@ -1830,9 +1909,9 @@ mod tests {
             button_highlight: &highlight,
             checkbox: &checkbox,
         };
-        let dialog = ok_dialog("message");
+        let mut dialog = ok_dialog("message");
         dialog
-            .render(&mut surface, resources, true, Some(standard_gamma()))
+            .render(&mut surface, resources, true, true, Some(standard_gamma()))
             .expect("render valid classic resources");
         assert_eq!(surface.get_pixel(0, 0).expect("corner"), before);
         assert_ne!(surface.get_pixel(400, 300).expect("dialog center"), before);
@@ -1840,12 +1919,47 @@ mod tests {
         let mut inactive = Surface::new(800, 600, PixelFormat::Rgba8888);
         inactive.fill(Color::opaque(17, 29, 43));
         dialog
-            .render(&mut inactive, resources, false, Some(standard_gamma()))
+            .render(
+                &mut inactive,
+                resources,
+                false,
+                false,
+                Some(standard_gamma()),
+            )
             .expect("render inactive stacked dialog");
         assert_ne!(
             surface.pixels(),
             inactive.pixels(),
             "only the active stack entry draws its focus highlight"
+        );
+
+        let layout = dialog.layout(800, 600, &fonts.text);
+        let button = layout.buttons.first().expect("OK layout").rect;
+        dialog.handle_pointer_move(
+            GuiPoint::new((button.x + 2) as f32, (button.y + 2) as f32),
+            &layout,
+        );
+        let mut shared_hover = Surface::new(800, 600, PixelFormat::Rgba8888);
+        shared_hover.fill(Color::opaque(17, 29, 43));
+        dialog
+            .render(&mut shared_hover, resources, false, true, None)
+            .expect("render mouse-active shared dialog");
+        assert_ne!(
+            shared_hover.pixels(),
+            inactive.pixels(),
+            "shared dialogs retain mouse hover without keyboard focus"
+        );
+
+        dialog.handle_pointer_down(&layout);
+        let mut pressed_without_focus = Surface::new(800, 600, PixelFormat::Rgba8888);
+        pressed_without_focus.fill(Color::opaque(17, 29, 43));
+        dialog
+            .render(&mut pressed_without_focus, resources, false, false, None)
+            .expect("render pressed inactive dialog");
+        assert_ne!(
+            pressed_without_focus.pixels(),
+            inactive.pixels(),
+            "button down frame is independent of keyboard and mouse activity"
         );
     }
 
@@ -2081,7 +2195,7 @@ mod tests {
         };
         let mut surface = Surface::new(800, 600, PixelFormat::Rgba8888);
         let error = ok_dialog("message")
-            .render(&mut surface, resources, true, None)
+            .render(&mut surface, resources, true, true, None)
             .expect_err("undersized icon sheet must fail");
         assert!(error.to_string().contains("GUIIcons.png"));
 
@@ -2096,7 +2210,7 @@ mod tests {
             checkbox: &malformed_checkbox,
         };
         let error = ok_dialog("message")
-            .render(&mut surface, resources, true, None)
+            .render(&mut surface, resources, true, true, None)
             .expect_err("malformed checkbox sheet must fail");
         assert!(error.to_string().contains("GUICheckbox.png"));
 
@@ -2114,7 +2228,7 @@ mod tests {
             MessageDialogIcon::Standard(u16::MAX),
         );
         let error = dialog
-            .render(&mut surface, resources, true, None)
+            .render(&mut surface, resources, true, true, None)
             .expect_err("out-of-range phase must fail");
         assert!(error.to_string().contains("phase 65535"));
     }

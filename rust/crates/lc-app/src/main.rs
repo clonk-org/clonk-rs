@@ -8434,6 +8434,7 @@ enum PendingCrewInputAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingInputDialogPurpose {
     GameOption(GameOptionInputKind),
+    RunningChat,
     NetworkJoinPassword,
     OptionsGraphicsScale,
     OptionsNetwork(lc_frontend::startup_options_network::NetworkTextField),
@@ -10092,6 +10093,9 @@ struct GameApp {
     /// pointer leaves the exact clamped viewport border.
     ingame_edge_scroll: Option<ActiveViewportEdgeScroll>,
     running_pointer_position: Option<GuiPoint>,
+    /// Physical primary-button state (`CMouse::LDown`), independent of any
+    /// control that installed itself as `pDragElement`.
+    primary_pointer_left_down: bool,
     mouse_state: Option<IngameButtonMouseState>,
     ingame_right_mouse_state: Option<IngameButtonMouseState>,
     /// C4Menu's retained drag element begins in GUI coordinates and becomes
@@ -10146,9 +10150,16 @@ struct GameApp {
     scoreboard_dialog: Option<ScoreboardPresentationRequest>,
     scoreboard_initial_reconcile_pending: bool,
     scoreboard_close_pointer_capture: bool,
-    /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
-    /// the top entry; every entry is rendered bottom-to-top without a scrim.
+    /// App-owned classic dialogs, in C4GUI z-order. Pointer hit-testing starts
+    /// at the top; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
+    /// Keyboard-active z=+1 dialog. This can differ from the visual top while
+    /// a z=+2 chat exists: inserting another message below chat does not call
+    /// `Screen::ActivateDialog`.
+    message_dialog_active_index: Option<usize>,
+    /// Dialog whose button owns `CMouse::pDragElement`. A newer z=+1 dialog
+    /// may be inserted above it while z=+2 chat keeps the old dialog active.
+    message_dialog_pointer_capture_index: Option<usize>,
     /// The modal C4DefinitionSelDlg opened from the scenario book's
     /// "Choose definitions" checkbox. Its nested error message is kept in
     /// `message_dialogs`, so this controller remains alive underneath it.
@@ -10157,8 +10168,8 @@ struct GameApp {
     pending_definition_selection: Option<PendingDefinitionSelection>,
     /// Local-client target and path/wire-name map for C4PlayerSelDlg.
     pending_lobby_player_selection: Option<PendingLobbyPlayerSelection>,
-    /// Classic non-chat input dialog opened by Password/Comment in the
-    /// scenario selector's embedded C4GameOptionButtons.
+    /// Classic input dialog shared by startup prompts, game options, and the
+    /// compact running-chat layout.
     game_option_input_dialog: Option<PendingGameOptionInputDialog>,
     /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
     /// tree. The first caller is a startup player row; the chassis is shared
@@ -11179,8 +11190,8 @@ enum RunningChatMode {
 
 #[derive(Clone, Debug)]
 struct RunningChatState {
-    edit: LobbyChatEditView,
     history_index: i32,
+    active: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12212,6 +12223,9 @@ struct IngameMouseState {
     /// Region drag eligibility is fixed when the pointer first crosses the
     /// drag threshold, matching C4MouseControl::DragNone.
     region_drag_started: bool,
+    /// World carryable/vehicle eligibility is likewise latched at the first
+    /// threshold crossing so opening a GUI cannot manufacture a moving drag.
+    world_drag_started: bool,
     /// DragMoving refreshes this fully resolved cursor on later pointer
     /// updates; button up consumes it without re-running DragMoving.
     region_drag_cursor: Option<IngameRegionDragCursor>,
@@ -13093,6 +13107,7 @@ impl IngameMouseState {
             down_region: None,
             selection_cancelled_by_region: false,
             region_drag_started: false,
+            world_drag_started: false,
             region_drag_cursor: None,
         }
     }
@@ -19535,6 +19550,7 @@ impl GameApp {
             ingame_viewport_mouse: None,
             ingame_edge_scroll: None,
             running_pointer_position: None,
+            primary_pointer_left_down: false,
             mouse_state: None,
             ingame_right_mouse_state: None,
             construction_menu_drag: None,
@@ -19558,6 +19574,8 @@ impl GameApp {
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
             message_dialogs: Vec::new(),
+            message_dialog_active_index: None,
+            message_dialog_pointer_capture_index: None,
             definition_selector: None,
             pending_definition_selection: None,
             pending_lobby_player_selection: None,
@@ -19704,6 +19722,7 @@ impl GameApp {
             && self.runtime_client_list.is_none()
             && self.scoreboard_dialog.is_none()
             && self.game_over_dialog.is_none()
+            && self.game_option_input_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none()
             && self
@@ -20208,6 +20227,7 @@ impl GameApp {
         // clears CMouse's owned hover element. A retained screen coordinate
         // must not acquire whichever control moves underneath it.
         self.startup_tooltip.pointer_left();
+        self.release_message_dialog_pointer_elements();
         self.menu_frame_cache = None;
         self.context_menu_pointer_capture = None;
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
@@ -20732,7 +20752,7 @@ impl GameApp {
         if self.startup_network_transition_active() {
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && !self.running_chat_active() {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -20747,7 +20767,10 @@ impl GameApp {
             self.mark_menu_dirty();
             return Ok(());
         }
-        if self.game_option_input_dialog.is_some() && self.context_menu.is_none() {
+        if self.game_option_input_dialog.is_some()
+            && self.context_menu.is_none()
+            && (self.running_chat_controller().is_none() || self.running_chat_active())
+        {
             let Some(layout) = self.game_option_input_layout() else {
                 return Ok(());
             };
@@ -20775,13 +20798,6 @@ impl GameApp {
             // C4GUI::Screen routes text to pContext before the focused
             // control. ContextMenu::CharIn itself does not dispatch hotkeys;
             // those come from the KEY_Any key binding on physical key-down.
-            return Ok(());
-        }
-        if let Some(chat) = self.running_chat.as_mut() {
-            if !character.is_control() {
-                let mut encoded = [0_u8; 4];
-                lobby_chat_insert_text(&mut chat.edit, character.encode_utf8(&mut encoded));
-            }
             return Ok(());
         }
         if self.mode != AppMode::Menu || character.is_control() {
@@ -21378,7 +21394,7 @@ impl GameApp {
         if self.startup_network_transition_active() {
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if let Some(layout) = self.network_start_wait_layout() {
@@ -22032,6 +22048,9 @@ impl GameApp {
         if self.game_option_input_dialog.is_none() {
             return Ok(false);
         }
+        if self.running_chat_controller().is_some() && !self.running_chat_active() {
+            return Ok(false);
+        }
         if self.context_menu.is_some() {
             return Ok(true);
         }
@@ -22046,13 +22065,38 @@ impl GameApp {
             shift: self.keyboard_modifiers.shift(),
             control: self.keyboard_modifiers.ctrl(),
         };
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let hotkey_modifiers = c4_modifiers == ModifiersState::ALT
+            || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+        let dialog_hotkey = hotkey_modifiers
+            .then(|| context_menu_hotkey(key))
+            .flatten();
+        if hotkey_modifiers && dialog_hotkey.is_none() {
+            return Ok(false);
+        }
+        if let Some(hotkey) = dialog_hotkey {
+            if state == ElementState::Released {
+                return Ok(false);
+            }
+            if !self
+                .game_option_input_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.controller.has_hotkey(hotkey))
+            {
+                return Ok(false);
+            }
+        }
         let clipboard_text = || {
             arboard::Clipboard::new()
                 .and_then(|mut clipboard| clipboard.get_text())
                 .ok()
         };
         let mut capture_release = false;
-        let actions = if state == ElementState::Pressed && key == VirtualKeyCode::Apps {
+        let actions = if state == ElementState::Pressed
+            && key == VirtualKeyCode::Apps
+            && c4_modifiers.is_empty()
+        {
             self.game_option_input_dialog
                 .as_mut()
                 .map(|dialog| {
@@ -22067,7 +22111,16 @@ impl GameApp {
                     outcome.actions
                 })
                 .unwrap_or_default()
-        } else if state == ElementState::Pressed && modifiers.control {
+        } else if state == ElementState::Pressed
+            && c4_modifiers == ModifiersState::CTRL
+            && matches!(
+                key,
+                VirtualKeyCode::A
+                    | VirtualKeyCode::C
+                    | VirtualKeyCode::V
+                    | VirtualKeyCode::X
+            )
+        {
             let shortcut = match key {
                 VirtualKeyCode::C => Some(InputDialogClipboardShortcut::Copy),
                 VirtualKeyCode::X => Some(InputDialogClipboardShortcut::Cut),
@@ -22075,76 +22128,86 @@ impl GameApp {
                 VirtualKeyCode::A => Some(InputDialogClipboardShortcut::SelectAll),
                 _ => None,
             };
-            if let Some(shortcut) = shortcut {
-                let clipboard = matches!(shortcut, InputDialogClipboardShortcut::Paste)
-                    .then(clipboard_text)
-                    .flatten();
-                self.game_option_input_dialog
-                    .as_mut()
-                    .map(|dialog| {
-                        dialog.controller.handle_clipboard_shortcut(
-                            shortcut,
-                            clipboard.as_deref(),
-                            &layout,
-                            &fonts.text,
-                        )
-                    })
-                    .map(|outcome| {
-                        capture_release = outcome.capture_release;
-                        outcome.actions
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            }
+            let shortcut = shortcut.expect("guarded classic edit shortcut");
+            let clipboard = matches!(shortcut, InputDialogClipboardShortcut::Paste)
+                .then(clipboard_text)
+                .flatten();
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| {
+                    dialog.controller.handle_clipboard_shortcut(
+                        shortcut,
+                        clipboard.as_deref(),
+                        &layout,
+                        &fonts.text,
+                    )
+                })
+                .map(|outcome| {
+                    capture_release = outcome.capture_release;
+                    outcome.actions
+                })
+                .unwrap_or_default()
         } else if state == ElementState::Pressed {
-            let edit_key = match key {
-                VirtualKeyCode::Back => Some(InputDialogEditKey::Backspace),
-                VirtualKeyCode::Delete => Some(InputDialogEditKey::Delete),
-                VirtualKeyCode::Home => Some(InputDialogEditKey::Home),
-                VirtualKeyCode::End => Some(InputDialogEditKey::End),
-                VirtualKeyCode::Left => Some(InputDialogEditKey::Left),
-                VirtualKeyCode::Right => Some(InputDialogEditKey::Right),
-                _ => None,
-            };
-            if let Some(edit_key) = edit_key {
-                self.game_option_input_dialog
-                    .as_mut()
-                    .map(|dialog| {
-                        dialog.controller.handle_edit_key_down(
-                            edit_key,
-                            modifiers,
-                            &layout,
-                            &fonts.text,
-                        )
-                    })
-                    .unwrap_or_default()
-            } else if self.keyboard_modifiers.alt() {
-                context_menu_hotkey(key)
-                    .and_then(|hotkey| {
-                        self.game_option_input_dialog
-                            .as_mut()
-                            .map(|dialog| dialog.controller.handle_hotkey(hotkey))
-                    })
-                    .unwrap_or_default()
-            } else if let Some(gui_key) = map_key_code(key) {
-                self.game_option_input_dialog
-                    .as_mut()
-                    .map(|dialog| {
-                        dialog.controller.route_key_down(
-                            gui_key,
-                            modifiers.shift,
-                            &layout,
-                            &fonts.text,
-                        )
-                    })
-                    .map(|outcome| {
-                        capture_release = outcome.capture_release;
-                        outcome.actions
-                    })
-                    .unwrap_or_default()
-            } else {
+            if !c4_modifiers.is_empty()
+                && matches!(
+                    key,
+                    VirtualKeyCode::Return
+                        | VirtualKeyCode::NumpadEnter
+                        | VirtualKeyCode::Escape
+                )
+            {
                 Vec::new()
+            } else {
+                let edit_key = match key {
+                    VirtualKeyCode::Back => Some(InputDialogEditKey::Backspace),
+                    VirtualKeyCode::Delete => Some(InputDialogEditKey::Delete),
+                    VirtualKeyCode::Home => Some(InputDialogEditKey::Home),
+                    VirtualKeyCode::End => Some(InputDialogEditKey::End),
+                    VirtualKeyCode::Left => Some(InputDialogEditKey::Left),
+                    VirtualKeyCode::Right => Some(InputDialogEditKey::Right),
+                    _ => None,
+                };
+                if edit_key.is_some() && c4_modifiers.alt() {
+                    Vec::new()
+                } else if let Some(edit_key) = edit_key {
+                    self.game_option_input_dialog
+                        .as_mut()
+                        .map(|dialog| {
+                            dialog.controller.handle_edit_key_down(
+                                edit_key,
+                                modifiers,
+                                &layout,
+                                &fonts.text,
+                            )
+                        })
+                        .unwrap_or_default()
+                } else if hotkey_modifiers {
+                    dialog_hotkey
+                        .and_then(|hotkey| {
+                            self.game_option_input_dialog
+                                .as_mut()
+                                .map(|dialog| dialog.controller.handle_hotkey(hotkey))
+                        })
+                        .unwrap_or_default()
+                } else if let Some(gui_key) = map_key_code(key) {
+                    self.game_option_input_dialog
+                        .as_mut()
+                        .map(|dialog| {
+                            dialog.controller.route_key_down(
+                                gui_key,
+                                modifiers.shift,
+                                &layout,
+                                &fonts.text,
+                            )
+                        })
+                        .map(|outcome| {
+                            capture_release = outcome.capture_release;
+                            outcome.actions
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
             }
         } else if let Some(gui_key) = map_key_code(key) {
             self.game_option_input_dialog
@@ -22933,6 +22996,7 @@ impl GameApp {
 
     fn local_player_key_binding_in_scope(&self, key: VirtualKeyCode) -> bool {
         self.game_over_dialog.is_none()
+            && self.running_chat_controller().is_none()
             && self.snapshot.hud.local_players.contains(&self.local_owner)
             && self.engine.player(self.local_owner).is_some()
             && self
@@ -23132,6 +23196,7 @@ impl GameApp {
         // input scope while an exclusive dialog has keyboard focus. Ordinary
         // dialogs remain non-exclusive on the shared running Screen.
         self.game_over_dialog.is_none()
+            && self.running_chat_controller().is_none()
             && self.snapshot.hud.local_players.contains(&self.local_owner)
             && self.engine.player(self.local_owner).is_some()
             && ControlBindingId::ALL
@@ -23944,19 +24009,61 @@ impl GameApp {
             return Ok(());
         }
         self.guard_runtime_key_dispatch(key)?;
-        if self.running_chat.is_some() {
+        if self.running_chat_active() && self.context_menu.is_none() {
             let modifiers = self.keyboard_modifiers
                 & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-            let edit_paste = key == VirtualKeyCode::V && modifiers == ModifiersState::CTRL;
-            if modifiers.ctrl()
+            let replacement_mode = match modifiers {
+                ModifiersState::SHIFT => Some(RunningChatMode::Allies),
+                ModifiersState::ALT => Some(RunningChatMode::Say),
+                _ => None,
+            };
+            if key == VirtualKeyCode::Return && replacement_mode.is_some() {
+                if state == ElementState::Pressed
+                    && self.running_chat_text().is_some_and(str::is_empty)
+                {
+                    self.close_running_chat()?;
+                    self.start_running_chat(replacement_mode.expect("checked replacement mode"));
+                }
+                return Ok(());
+            }
+            let edit_priority_key = (modifiers == ModifiersState::CTRL
+                && matches!(
+                    key,
+                    VirtualKeyCode::A
+                        | VirtualKeyCode::C
+                        | VirtualKeyCode::V
+                        | VirtualKeyCode::X
+                ))
+                || (modifiers.ctrl()
+                    && !modifiers.alt()
+                    && matches!(
+                        key,
+                        VirtualKeyCode::Back
+                            | VirtualKeyCode::Delete
+                            | VirtualKeyCode::End
+                            | VirtualKeyCode::Home
+                            | VirtualKeyCode::Left
+                            | VirtualKeyCode::Right
+                    ));
+            if modifiers == ModifiersState::CTRL
                 && !(key == VirtualKeyCode::F9 && modifiers == ModifiersState::CTRL)
-                && !edit_paste
+                && !edit_priority_key
             {
                 self.handle_engine_key(key, state)?;
                 return Ok(());
             }
-            if key == VirtualKeyCode::Tab && modifiers.is_empty() {
-                self.handle_running_chat_key(key, state);
+            let empty_backspace = key == VirtualKeyCode::Back
+                && self.running_chat_text().is_none_or(str::is_empty);
+            if modifiers.is_empty()
+                && (matches!(
+                    key,
+                    VirtualKeyCode::Tab
+                        | VirtualKeyCode::Up
+                        | VirtualKeyCode::Down
+                        | VirtualKeyCode::F2
+                ) || empty_backspace)
+            {
+                self.handle_running_chat_key(key, state)?;
                 return Ok(());
             }
         }
@@ -23975,11 +24082,66 @@ impl GameApp {
         if self.startup_network_transition_active() {
             return Ok(());
         }
+        if state == ElementState::Released
+            && self.game_option_input_dialog.is_none()
+            && self.game_option_input_consumed_keys.remove(&key)
+        {
+            // A context/button action may close the top input dialog on
+            // key-down. Its matching release still belongs to that dialog,
+            // not to a newly exposed message dialog underneath it.
+            return Ok(());
+        }
         let definition_release_latched =
             state == ElementState::Released && self.definition_selector_consumed_keys.remove(&key);
         let input_dialog_release_latched =
             state == ElementState::Released && self.game_option_input_consumed_keys.remove(&key);
+        if self.running_chat_active() {
+            let context_menu_was_open = self.context_menu.is_some();
+            let modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            let context_menu_handled =
+                modifiers.is_empty() && self.handle_context_menu_key(key, state)?;
+            if context_menu_handled || input_dialog_release_latched {
+                return Ok(());
+            }
+            if context_menu_was_open {
+                if self.handle_runtime_irc_drop_key(key, state)? {
+                    return Ok(());
+                }
+                // A popup makes its parent Edit and chat callbacks inactive,
+                // but the lower-priority global chat-open bindings still run.
+                // Reopening is only permitted while the existing input is
+                // empty; Return without a modifier belongs to the popup.
+                let replacement_mode = match (key, modifiers) {
+                    (VirtualKeyCode::F2, modifiers) if modifiers.is_empty() => {
+                        Some(RunningChatMode::All)
+                    }
+                    (VirtualKeyCode::Return, ModifiersState::SHIFT) => {
+                        Some(RunningChatMode::Allies)
+                    }
+                    (VirtualKeyCode::Return, ModifiersState::ALT) => {
+                        Some(RunningChatMode::Say)
+                    }
+                    _ => None,
+                };
+                if state == ElementState::Pressed
+                    && replacement_mode.is_some()
+                    && self.running_chat_text().is_some_and(str::is_empty)
+                {
+                    self.close_running_chat()?;
+                    self.start_running_chat(replacement_mode.expect("checked replacement mode"));
+                }
+                return Ok(());
+            }
+            if self.handle_game_option_input_dialog_key(key, state)? {
+                return Ok(());
+            }
+        }
+        let message_dialog_was_open = !self.message_dialogs.is_empty();
         if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if message_dialog_was_open && self.handle_running_chat_open_key(key, state) {
             return Ok(());
         }
         if self.handle_network_start_wait_key(key, state)? {
@@ -24015,7 +24177,13 @@ impl GameApp {
             return Ok(());
         }
         let context_menu_was_open = self.context_menu.is_some();
-        if self.handle_context_menu_key(key, state)? || context_menu_was_open {
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers.is_empty() && self.handle_context_menu_key(key, state)? {
+            return Ok(());
+        }
+        if context_menu_was_open {
+            self.handle_running_chat_open_key(key, state);
             return Ok(());
         }
         if self.handle_game_option_input_dialog_key(key, state)? {
@@ -24102,7 +24270,7 @@ impl GameApp {
         if self.handle_runtime_irc_drop_key(key, state)? {
             return Ok(());
         }
-        if self.handle_running_chat_key(key, state) {
+        if self.handle_running_chat_key(key, state)? {
             return Ok(());
         }
         if state == ElementState::Pressed {
@@ -24625,6 +24793,7 @@ impl GameApp {
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.primary_pointer_left_down = false;
         // No key-up events are guaranteed after the window loses focus.
         // Release synchronized controls and forget the physical repeat state
         // so the first press after refocus is not discarded.
@@ -24633,9 +24802,10 @@ impl GameApp {
         }
         self.close_context_menu_silently();
         self.context_menu_pointer_capture = None;
-        if let Some(dialog) = self.message_dialogs.last_mut() {
+        for dialog in &mut self.message_dialogs {
             dialog.state.cancel_interaction();
         }
+        self.message_dialog_pointer_capture_index = None;
         if let Some(controller) = self.definition_selector.as_mut() {
             controller.cancel_interaction();
         }
@@ -24658,6 +24828,7 @@ impl GameApp {
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.keyboard_modifiers = ModifiersState::empty();
+        self.running_pointer_position = None;
         self.pointer_left_unchecked();
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -27997,15 +28168,90 @@ impl GameApp {
             RunningChatMode::Allies => "/team ".to_string(),
             RunningChatMode::Say => "\"".to_string(),
         };
+        let raw_label = self.runtime_resource_text("IDS_CTL_CHAT", "Cha&t:");
+        let label = raw_label.replace('&', "");
+        let tooltip = self.runtime_resource_text(
+            "IDS_DLGTIP_CHAT",
+            "Enter chat messages here and send them with enter.",
+        );
+        self.suspend_ingame_pointer_for_gui();
+        self.message_dialog_active_index = None;
         self.running_chat = Some(RunningChatState {
-            edit: LobbyChatEditView {
-                caret: text.len(),
-                text,
-                cursor_visible: true,
-                ..LobbyChatEditView::default()
-            },
             history_index: -1,
+            active: true,
         });
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::RunningChat,
+            controller: InputDialogController::new_chat(label, &text).with_chat_tooltip(tooltip),
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = self.running_pointer_position;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+    }
+
+    fn running_chat_controller(&self) -> Option<&InputDialogController> {
+        self.game_option_input_dialog.as_ref().and_then(|dialog| {
+            (dialog.purpose == PendingInputDialogPurpose::RunningChat)
+                .then_some(&dialog.controller)
+        })
+    }
+
+    fn running_chat_controller_mut(&mut self) -> Option<&mut InputDialogController> {
+        self.game_option_input_dialog.as_mut().and_then(|dialog| {
+            (dialog.purpose == PendingInputDialogPurpose::RunningChat)
+                .then_some(&mut dialog.controller)
+        })
+    }
+
+    fn running_chat_text(&self) -> Option<&str> {
+        self.running_chat_controller().map(InputDialogController::text)
+    }
+
+    fn running_chat_active(&self) -> bool {
+        self.running_chat.as_ref().is_some_and(|chat| chat.active)
+    }
+
+    fn set_running_chat_active(&mut self, active: bool) {
+        if let Some(chat) = self.running_chat.as_mut() {
+            chat.active = active;
+        }
+        if active {
+            self.message_dialog_active_index = None;
+        }
+    }
+
+    fn close_running_chat(&mut self) -> Result<(), EngineError> {
+        self.finalize_running_chat_input()
+    }
+
+    fn finalize_running_chat_input(&mut self) -> Result<(), EngineError> {
+        let was_active = self.running_chat_active();
+        if was_active {
+            self.release_message_dialog_pointer_elements();
+            self.release_game_option_input_pointer_elements();
+        }
+        self.running_chat = None;
+        if self
+            .game_option_input_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.purpose == PendingInputDialogPurpose::RunningChat)
+        {
+            self.game_option_input_dialog = None;
+        }
+        self.close_context_menu_silently();
+        self.game_option_input_last_click = None;
+        if was_active {
+            self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
+        }
+        // Releases swallowed by the modal cannot clear the raw repeat/Tab
+        // trackers. Forget them with the synchronized gameplay controls.
+        self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
+        self.clear_local_controls()?;
+        self.mark_menu_dirty();
+        Ok(())
     }
 
     fn browse_running_chat_history(&mut self, older: bool) {
@@ -28017,21 +28263,27 @@ impl GameApp {
             .ok()
             .and_then(|index| self.message_input_history.get(index))
             .cloned();
-        match text {
-            Some(text) => {
-                chat.edit = LobbyChatEditView {
-                    caret: text.len(),
-                    selection: (!text.is_empty()).then_some((0, text.len())),
-                    text,
-                    cursor_visible: true,
-                    ..LobbyChatEditView::default()
-                };
-            }
+        let text = match text {
+            Some(text) => text,
             None => {
                 chat.history_index = -1;
-                chat.edit = LobbyChatEditView::default();
+                String::new()
+            }
+        };
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        if let Some(controller) = self.running_chat_controller_mut() {
+            if text.is_empty() {
+                // Selecting and deleting the current line does not invoke the
+                // Edit cursor-scroll path, so C++ preserves the old offset.
+                controller.set_input_text(&text);
+            } else if let (Some(layout), Some(fonts)) = (layout.as_ref(), fonts.as_deref()) {
+                controller.replace_edit_text(&text, layout, &fonts.text);
+            } else {
+                controller.set_input_text(&text);
             }
         }
+        self.mark_menu_dirty();
     }
 
     fn store_message_input_history(&mut self, text: &str) {
@@ -28050,10 +28302,12 @@ impl GameApp {
     }
 
     fn complete_running_chat_nick(&mut self) {
-        let Some(chat) = self.running_chat.as_mut() else {
+        let Some(controller) = self.running_chat_controller() else {
             return;
         };
-        let before_cursor = &chat.edit.text[..chat.edit.caret];
+        let text = controller.text().to_string();
+        let caret = controller.caret();
+        let before_cursor = &text[..caret];
         let start = before_cursor
             .char_indices()
             .rev()
@@ -28074,20 +28328,22 @@ impl GameApp {
                 .map(|_| lc_script::c4_string_from_bytes(&name[incomplete.len()..]))
         });
         if let Some(suffix) = suffix {
-            lobby_chat_insert_text(&mut chat.edit, &suffix);
+            let Some(layout) = self.game_option_input_layout() else {
+                return;
+            };
+            let Some(fonts) = self.assets.clonk_fonts.clone() else {
+                return;
+            };
+            if let Some(controller) = self.running_chat_controller_mut() {
+                controller.handle_text_input(&suffix, &layout, &fonts.text);
+            }
+            self.mark_menu_dirty();
         }
     }
 
-    fn submit_running_chat(&mut self) {
-        let Some(chat) = self.running_chat.take() else {
-            return;
-        };
-        self.submit_running_chat_text(chat.edit.text);
-    }
-
-    fn submit_running_chat_text(&mut self, text: String) {
-        self.store_message_input_history(&text);
-        if self.process_control_message_local_command(&text) {
+    fn process_running_chat_text(&mut self, text: &str) {
+        self.store_message_input_history(text);
+        if self.process_control_message_local_command(text) {
             return;
         }
         let player = self
@@ -28098,7 +28354,7 @@ impl GameApp {
             .copied()
             .unwrap_or(-1);
         let control = match parse_running_message_control(
-            &text,
+            text,
             player,
             self.engine.cinematic_film(),
             &self.snapshot,
@@ -28128,26 +28384,55 @@ impl GameApp {
         }
     }
 
-    fn paste_running_chat_text(&mut self, text: &str) {
-        let Some(mut chat) = self.running_chat.take() else {
-            return;
+    fn submit_running_chat_text(&mut self, text: String) -> Result<(), EngineError> {
+        self.finalize_running_chat_input()?;
+        self.process_running_chat_text(&text);
+        Ok(())
+    }
+
+    fn submit_running_chat(&mut self) -> Result<(), EngineError> {
+        let Some(text) = self.running_chat_text().map(str::to_string) else {
+            return Ok(());
         };
-        let outcome = lobby_chat_paste_text(
-            &mut chat.edit,
-            text,
-            LobbyChatPasteMode::Running,
-            |submission| {
-                self.submit_running_chat_text(submission);
-                Ok::<bool, ()>(self.mode == AppMode::Running && self.running_chat.is_none())
-            },
-        )
-        .expect("running-chat paste callback is infallible");
-        if !outcome.close
-            && !outcome.stopped
-            && self.mode == AppMode::Running
-            && self.running_chat.is_none()
-        {
-            self.running_chat = Some(chat);
+        self.submit_running_chat_text(text)
+    }
+
+    fn handle_running_chat_open_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> bool {
+        if !matches!(self.mode, AppMode::Running) || self.running_chat_active() {
+            return false;
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let mode = match (key, modifiers) {
+            (VirtualKeyCode::Return | VirtualKeyCode::F2, modifiers)
+                if modifiers.is_empty() =>
+            {
+                Some(RunningChatMode::All)
+            }
+            (VirtualKeyCode::Return, ModifiersState::SHIFT) => Some(RunningChatMode::Allies),
+            (VirtualKeyCode::Return, ModifiersState::ALT) => Some(RunningChatMode::Say),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            if state == ElementState::Pressed {
+                if self.running_chat.is_some() {
+                    if self.running_chat_text().is_some_and(|text| !text.is_empty()) {
+                        return true;
+                    }
+                    if let Err(error) = self.close_running_chat() {
+                        tracing::error!(%error, "failed to replace inactive empty running chat");
+                        return true;
+                    }
+                }
+                self.start_running_chat(mode);
+            }
+            true
+        } else {
+            false
         }
     }
 
@@ -28155,93 +28440,81 @@ impl GameApp {
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         if !matches!(self.mode, AppMode::Running) {
-            return false;
+            return Ok(false);
         }
-        if self.running_chat.is_none() {
-            let modifiers = self.keyboard_modifiers
-                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-            let mode = match (key, modifiers) {
-                (VirtualKeyCode::Return | VirtualKeyCode::F2, modifiers)
-                    if modifiers.is_empty() =>
-                {
-                    Some(RunningChatMode::All)
-                }
-                (VirtualKeyCode::Return, ModifiersState::SHIFT) => {
-                    Some(RunningChatMode::Allies)
-                }
-                (VirtualKeyCode::Return, ModifiersState::ALT) => Some(RunningChatMode::Say),
-                _ => None,
-            };
-            if let Some(mode) = mode {
-                if state == ElementState::Pressed {
-                    self.start_running_chat(mode);
-                }
-                return true;
-            }
-            return false;
+        if !self.running_chat_active() {
+            let chat_open = self.handle_running_chat_open_key(key, state);
+            return Ok(chat_open || self.running_chat.is_some());
+        }
+        if self.keyboard_modifiers.alt() {
+            return Ok(false);
         }
         if state == ElementState::Released {
-            return true;
-        }
-        let modifiers = self.keyboard_modifiers
-            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if key == VirtualKeyCode::V && modifiers == ModifiersState::CTRL {
-            self.chat_paste_consumed_keys.insert(key);
-            if let Ok(text) =
-                arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
-            {
-                self.paste_running_chat_text(&text);
-            }
-            return true;
+            return Ok(true);
         }
         match key {
-            VirtualKeyCode::Escape | VirtualKeyCode::F2 => self.running_chat = None,
-            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => self.submit_running_chat(),
+            VirtualKeyCode::Escape | VirtualKeyCode::F2 => self.close_running_chat()?,
+            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => {
+                self.submit_running_chat()?
+            }
             VirtualKeyCode::Tab => self.complete_running_chat_nick(),
             VirtualKeyCode::Up => self.browse_running_chat_history(true),
             VirtualKeyCode::Down => self.browse_running_chat_history(false),
             VirtualKeyCode::Back => {
-                let empty = self
-                    .running_chat
-                    .as_ref()
-                    .is_none_or(|chat| chat.edit.text.is_empty());
+                let empty = self.running_chat_text().is_none_or(str::is_empty);
                 if empty {
-                    self.running_chat = None;
-                } else if let Some(chat) = self.running_chat.as_mut() {
-                    lobby_chat_apply_edit_key(
-                        &mut chat.edit,
-                        LobbyChatEditKey::Backspace,
-                        LobbyChatKeyModifiers {
-                            shift: self.keyboard_modifiers.shift(),
-                            control: self.keyboard_modifiers.ctrl(),
-                        },
-                    );
+                    self.close_running_chat()?;
+                } else if let (Some(layout), Some(fonts)) = (
+                    self.game_option_input_layout(),
+                    self.assets.clonk_fonts.clone(),
+                ) {
+                    let modifiers = InputDialogKeyModifiers {
+                        shift: self.keyboard_modifiers.shift(),
+                        control: self.keyboard_modifiers.ctrl(),
+                    };
+                    if let Some(controller) = self.running_chat_controller_mut() {
+                        controller.handle_edit_key_down(
+                            InputDialogEditKey::Backspace,
+                            modifiers,
+                            &layout,
+                            &fonts.text,
+                        );
+                    }
                 }
             }
             key => {
                 let operation = match key {
-                    VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
-                    VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
-                    VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
-                    VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
-                    VirtualKeyCode::End => Some(LobbyChatEditKey::End),
+                    VirtualKeyCode::Delete => Some(InputDialogEditKey::Delete),
+                    VirtualKeyCode::Left => Some(InputDialogEditKey::Left),
+                    VirtualKeyCode::Right => Some(InputDialogEditKey::Right),
+                    VirtualKeyCode::Home => Some(InputDialogEditKey::Home),
+                    VirtualKeyCode::End => Some(InputDialogEditKey::End),
                     _ => None,
                 };
-                if let (Some(operation), Some(chat)) = (operation, self.running_chat.as_mut()) {
-                    lobby_chat_apply_edit_key(
-                        &mut chat.edit,
-                        operation,
-                        LobbyChatKeyModifiers {
-                            shift: self.keyboard_modifiers.shift(),
-                            control: self.keyboard_modifiers.ctrl(),
-                        },
-                    );
+                if let (Some(operation), Some(layout), Some(fonts)) = (
+                    operation,
+                    self.game_option_input_layout(),
+                    self.assets.clonk_fonts.clone(),
+                ) {
+                    let modifiers = InputDialogKeyModifiers {
+                        shift: self.keyboard_modifiers.shift(),
+                        control: self.keyboard_modifiers.ctrl(),
+                    };
+                    if let Some(controller) = self.running_chat_controller_mut() {
+                        controller.handle_edit_key_down(
+                            operation,
+                            modifiers,
+                            &layout,
+                            &fonts.text,
+                        );
+                    }
                 }
             }
         }
-        true
+        self.mark_menu_dirty();
+        Ok(true)
     }
 
     fn note_control_message_sound(&mut self, client_id: i32, muted: bool) {
@@ -29411,6 +29684,7 @@ impl GameApp {
             ContextPending,
             Context,
             Input,
+            Chat,
             GameOver,
             Base,
         }
@@ -29437,18 +29711,26 @@ impl GameApp {
                             == lc_frontend::startup_options_controls::ControlDevice::Gamepad
                 )
             });
-            let mut owner = if game_over_open && !eligible_gamepad_gui {
+            let mut owner = if self.running_chat_active() {
+                if self.context_menu.is_some() {
+                    ClusterOwner::ContextPending
+                } else {
+                    // The z=+2 chat dialog and its raw KEY_Any callback sit
+                    // above default-z runtime dialogs for every gamepad.
+                    ClusterOwner::Chat
+                }
+            } else if game_over_open && !eligible_gamepad_gui {
                 // The exclusive evaluation screen owns the whole GUI stack,
                 // but C++ did not register a receiver for this source.
                 ClusterOwner::Suppressed
             } else if gamepad_capture_open {
                 ClusterOwner::GamepadCapture
+            } else if self.context_menu.is_some() {
+                ClusterOwner::ContextPending
             } else if !self.message_dialogs.is_empty() {
                 ClusterOwner::Message
             } else if self.definition_selector.is_some() {
                 ClusterOwner::Definition
-            } else if self.context_menu.is_some() {
-                ClusterOwner::ContextPending
             } else if self.game_option_input_dialog.is_some() {
                 ClusterOwner::Input
             } else if game_over_open {
@@ -29498,7 +29780,12 @@ impl GameApp {
                             if self.handle_context_menu_gamepad_event(event)? {
                                 owner = ClusterOwner::Context;
                             } else {
-                                owner = if self.game_option_input_dialog.is_some() {
+                                owner = if self.running_chat_active() {
+                                    // An open context makes its parent dialog
+                                    // keyboard-inactive, including the chat's
+                                    // raw gamepad forwarding callback.
+                                    ClusterOwner::Suppressed
+                                } else if self.game_option_input_dialog.is_some() {
                                     ClusterOwner::Input
                                 } else if self.mode == AppMode::Running
                                     && self.game_over_dialog.is_some()
@@ -29514,6 +29801,14 @@ impl GameApp {
                         ClusterOwner::Input => {
                             self.handle_game_option_input_dialog_gamepad_event(event)?;
                         }
+                        ClusterOwner::Chat => match event {
+                            event @ (GamepadEvent::Direction { .. }
+                            | GamepadEvent::Button { .. }
+                            | GamepadEvent::Clear { .. }) => {
+                                self.handle_gamepad_event(event)?;
+                            }
+                            GamepadEvent::GuiButton { .. } | GamepadEvent::Action { .. } => {}
+                        },
                         ClusterOwner::GameOver => {
                             self.handle_game_over_gamepad_event(event)?;
                         }
@@ -29744,12 +30039,15 @@ impl GameApp {
         &mut self,
         event: GamepadEvent,
     ) -> Result<(), EngineError> {
+        let Some(active_index) = self.active_message_dialog_index() else {
+            return Ok(());
+        };
         let result = match event {
             GamepadEvent::Direction {
                 button: button @ (ControlButton::Left | ControlButton::Right),
                 state: ElementState::Pressed,
                 ..
-            } => self.message_dialogs.last_mut().and_then(|dialog| {
+            } => self.message_dialogs.get_mut(active_index).and_then(|dialog| {
                 dialog
                     .state
                     .handle_key_down(KeyCode::Tab, button == ControlButton::Left)
@@ -29760,7 +30058,7 @@ impl GameApp {
                 ..
             } => self
                 .message_dialogs
-                .last_mut()
+                .get_mut(active_index)
                 .and_then(|dialog| match state {
                     ElementState::Pressed => dialog.state.handle_gamepad_low_down(),
                     ElementState::Released => dialog.state.handle_gamepad_low_up(),
@@ -29771,11 +30069,14 @@ impl GameApp {
                 ..
             } => self
                 .message_dialogs
-                .last_mut()
+                .get_mut(active_index)
                 .and_then(|dialog| dialog.state.handle_key_down(KeyCode::Escape, false)),
             GamepadEvent::Clear { .. } => {
-                if let Some(dialog) = self.message_dialogs.last_mut() {
+                if let Some(dialog) = self.message_dialogs.get_mut(active_index) {
                     dialog.state.cancel_interaction();
+                }
+                if self.message_dialog_pointer_capture_index == Some(active_index) {
+                    self.message_dialog_pointer_capture_index = None;
                 }
                 None
             }
@@ -29786,13 +30087,13 @@ impl GameApp {
         };
         let sounds = self
             .message_dialogs
-            .last_mut()
+            .get_mut(active_index)
             .map(|dialog| dialog.state.take_sound_events())
             .unwrap_or_default();
         self.play_message_dialog_sound_events(sounds);
-        self.persist_top_message_dialog_checkbox_changes();
+        self.persist_message_dialog_checkbox_changes(active_index);
         if let Some(result) = result {
-            self.finish_message_dialog(result)?;
+            self.finish_message_dialog_at(active_index, result)?;
         }
         Ok(())
     }
@@ -29880,7 +30181,10 @@ impl GameApp {
                         .map(|dialog| dialog.handle_pointer_left())
                         .unwrap_or_default();
                     self.process_options_dialog_actions(actions)?;
-                } else if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
+                } else if matches!(self.mode, AppMode::Running)
+                    && (self.game_over_dialog.is_none()
+                        || self.running_chat_controller().is_some())
+                {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
@@ -29975,7 +30279,7 @@ impl GameApp {
             }
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && !self.running_chat_active() {
             return Ok(());
         }
         if self
@@ -29991,7 +30295,7 @@ impl GameApp {
         if self.definition_selector.is_some() {
             return Ok(());
         }
-        if self.game_over_dialog.is_some() {
+        if self.game_over_dialog.is_some() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if !matches!(self.mode, AppMode::Running) {
@@ -30027,7 +30331,7 @@ impl GameApp {
         button: ControlButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && !self.running_chat_active() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
                 slot,
                 button,
@@ -30074,7 +30378,7 @@ impl GameApp {
                 state,
             });
         }
-        if self.game_over_dialog.is_some() {
+        if self.game_over_dialog.is_some() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -30285,7 +30589,7 @@ impl GameApp {
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && !self.running_chat_active() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Action {
                 slot,
                 action,
@@ -30455,18 +30759,119 @@ impl GameApp {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
+        self.running_pointer_position = Some(point);
         if self.mode == AppMode::Running {
-            self.running_pointer_position = Some(point);
             self.ingame_gui_pointer = Some(point);
             if self.update_construction_menu_drag(point)? {
                 return Ok(());
             }
-            if self.ingame_region_drag_active() {
+            if self.ingame_moving_drag_active() {
                 self.update_ingame_pointer(point)?;
                 return Ok(());
             }
         }
-        if self.handle_message_dialog_pointer_move(point) {
+        if self.context_menu.is_some()
+            && self
+                .game_option_input_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.controller.has_positional_pointer_drag())
+        {
+            self.game_option_input_pointer_position = Some(point);
+            let layout = self.game_option_input_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let actions = layout
+                .as_ref()
+                .zip(fonts.as_deref())
+                .and_then(|(layout, fonts)| {
+                    self.game_option_input_dialog.as_mut().map(|dialog| {
+                        dialog
+                            .controller
+                            .handle_pointer_move(point, layout, &fonts.text)
+                    })
+                })
+                .unwrap_or_default();
+            self.finish_game_option_input_dialog_actions(actions)?;
+        }
+        if self.running_chat_controller().is_some() {
+            // CMouse retains the original button as pDragElement, but classic
+            // buttons have no DoDragging implementation. Screen hit-testing
+            // still runs top-down; while capture exists, the active dialog is
+            // also a match outside its bounds and therefore blocks lower hits.
+            let lower_capture = self.captured_message_dialog_index();
+            if self.handle_context_menu_pointer_move(point)? {
+                if let Some(controller) = self.running_chat_controller_mut() {
+                    controller.pointer_left();
+                }
+                for index in 0..self.message_dialogs.len() {
+                    self.message_dialog_pointer_left_at(index);
+                }
+                self.suspend_ingame_pointer_for_gui();
+                return Ok(());
+            }
+            let layout = self.game_option_input_layout();
+            let chat_hit = layout.as_ref().is_some_and(|layout| {
+                Self::point_in_input_dialog_bounds(point, layout)
+            }) || self.game_option_input_pointer_capture
+                == Some(ContextMenuPointerButton::Left)
+                || (self.running_chat_active() && lower_capture.is_some());
+            self.game_option_input_pointer_position = Some(point);
+            if chat_hit {
+                if self.primary_pointer_left_down {
+                    self.set_running_chat_active(true);
+                }
+                let fonts = self.assets.clonk_fonts.clone();
+                let actions = layout
+                    .as_ref()
+                    .zip(fonts.as_deref())
+                    .and_then(|(layout, fonts)| {
+                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                            dialog
+                                .controller
+                                .handle_pointer_move(point, layout, &fonts.text)
+                        })
+                    })
+                    .unwrap_or_default();
+                self.finish_game_option_input_dialog_actions(actions)?;
+                for index in 0..self.message_dialogs.len() {
+                    self.message_dialog_pointer_left_at(index);
+                }
+            } else {
+                if let Some(controller) = self.running_chat_controller_mut() {
+                    controller.pointer_left();
+                }
+                self.finish_game_option_input_dialog_actions(Vec::new())?;
+                let active_message = self.active_message_dialog_index();
+                let message_target = (0..self.message_dialogs.len()).rev().find(|index| {
+                    self.message_dialog_layout_at(*index).is_some_and(|layout| {
+                        Self::point_in_message_dialog_bounds(point, &layout)
+                    }) || (lower_capture.is_some() && active_message == Some(*index))
+                });
+                if self.primary_pointer_left_down {
+                    let target_is_hit = message_target.is_some_and(|index| {
+                        self.message_dialog_layout_at(index).is_some_and(|layout| {
+                            Self::point_in_message_dialog_bounds(point, &layout)
+                        })
+                    });
+                    if target_is_hit {
+                        self.set_running_chat_active(false);
+                        self.message_dialog_active_index = message_target;
+                    }
+                }
+                for index in 0..self.message_dialogs.len() {
+                    if Some(index) != message_target {
+                        self.message_dialog_pointer_left_at(index);
+                    }
+                }
+                if let Some(target) = message_target {
+                    self.handle_message_dialog_pointer_move_at(target, point);
+                }
+            }
+            self.suspend_ingame_pointer_for_gui();
+            return Ok(());
+        }
+        if self.running_chat_controller().is_none()
+            && self.handle_message_dialog_pointer_move(point)
+        {
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -30502,6 +30907,11 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_context_menu_pointer_move(point)? {
+            if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+                dialog.controller.pointer_left();
+                let sounds = dialog.controller.take_sound_events();
+                self.play_input_dialog_sound_events(sounds);
+            }
             self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
@@ -30746,6 +31156,18 @@ impl GameApp {
                 .is_some_and(|state| state.motion.region_drag_started)
     }
 
+    fn ingame_moving_drag_active(&self) -> bool {
+        self.mouse_state
+            .is_some_and(|state| {
+                state.motion.region_drag_started || state.motion.world_drag_started
+            })
+            || self
+                .ingame_right_mouse_state
+                .is_some_and(|state| {
+                    state.motion.region_drag_started || state.motion.world_drag_started
+                })
+    }
+
     fn active_ingame_mouse_viewport(&self) -> Option<ActiveViewportProjection> {
         let projections = self.graphics.active_viewport_projections();
         match self.local_controls.mouse_owner() {
@@ -30822,7 +31244,7 @@ impl GameApp {
     }
 
     fn ingame_captured_drag_active(&self) -> bool {
-        self.ingame_region_drag_active() || self.ingame_construction_drag_active()
+        self.ingame_moving_drag_active() || self.ingame_construction_drag_active()
     }
 
     fn construction_menu_drag_captured(&self) -> bool {
@@ -31072,15 +31494,26 @@ impl GameApp {
                 .ingame_right_mouse_state
                 .is_some_and(|state| state.motion.region_drag_started);
             let mut left_region_drag = None;
+            let mut left_world_drag = None;
             if let Some(state) = self.mouse_state.as_mut() {
                 if state.update_with_fog(pointer, fog_blocked) {
                     left_region_drag = state.motion.down_region.and_then(|region| match region {
                         IngameViewportRegion::Inventory(target) => Some(target),
                         IngameViewportRegion::Command(_) => None,
                     });
+                    if !state.down_region && !state.motion.selection_frame {
+                        left_world_drag = state.down_target.map(|target| {
+                            (
+                                state.motion.start.owner,
+                                target,
+                                ingame_pointer_world_pixel(state.motion.start),
+                            )
+                        });
+                    }
                 }
             }
             let mut right_region_drag = None;
+            let mut right_world_drag = None;
             if let Some(state) = self.ingame_right_mouse_state.as_mut() {
                 if state.update_with_fog(pointer, fog_blocked) {
                     right_region_drag =
@@ -31088,6 +31521,15 @@ impl GameApp {
                             IngameViewportRegion::Inventory(target) => Some(target),
                             IngameViewportRegion::Command(_) => None,
                         });
+                    if !state.down_region && !state.motion.selection_frame {
+                        right_world_drag = state.down_target.map(|target| {
+                            (
+                                state.motion.start.owner,
+                                target,
+                                ingame_pointer_world_pixel(state.motion.start),
+                            )
+                        });
+                    }
                 }
             }
             if let Some(target) = left_region_drag {
@@ -31108,6 +31550,24 @@ impl GameApp {
                 }
                 if let Some(state) = self.ingame_right_mouse_state.as_mut() {
                     state.motion.region_drag_started = source.is_some();
+                }
+            }
+            if let Some((owner, target, position)) = left_world_drag {
+                let started = self
+                    .engine
+                    .mouse_world_drag_source(owner, target, position)
+                    .is_some();
+                if let Some(state) = self.mouse_state.as_mut() {
+                    state.motion.world_drag_started = started;
+                }
+            }
+            if let Some((owner, target, position)) = right_world_drag {
+                let started = self
+                    .engine
+                    .mouse_world_drag_source(owner, target, position)
+                    .is_some();
+                if let Some(state) = self.ingame_right_mouse_state.as_mut() {
+                    state.motion.world_drag_started = started;
                 }
             }
             if refresh_left_region_drag || refresh_right_region_drag {
@@ -31732,13 +32192,8 @@ impl GameApp {
             );
         // C4GraphicsSystem bypasses GUI mouse handling only for an active
         // moving/construct drag; ordinary releases over a menu stay GUI-owned.
-        let moving_drag = self.ingame_region_drag_active();
-        if moving_drag
-            && button_state == ElementState::Released
-            && self
-                .mouse_state
-                .is_some_and(|state| state.motion.region_drag_started)
-        {
+        let moving_drag = self.ingame_moving_drag_active();
+        if moving_drag && button_state == ElementState::Released {
             return self.on_ingame_mouse_up();
         }
         let script_menu_target = if moving_drag {
@@ -31891,7 +32346,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -32022,9 +32477,20 @@ impl GameApp {
         if button_state == ElementState::Pressed {
             self.context_menu_pointer_capture = None;
             self.game_option_pointer_capture = false;
+            let chat_hit = self.running_chat_controller().is_some()
+                && self
+                    .game_option_input_pointer_position
+                    .zip(self.game_option_input_layout().as_ref())
+                    .is_some_and(|(point, layout)| {
+                        Self::point_in_input_dialog_bounds(point, layout)
+                    });
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
                 && self.context_menu.is_none()
-                && self.message_dialogs.is_empty())
+                && if self.running_chat_controller().is_some() {
+                    chat_hit
+                } else {
+                    self.message_dialogs.is_empty()
+                })
             .then_some(ContextMenuPointerButton::Other);
         }
         let input_dialog_release_latched = button_state == ElementState::Released
@@ -32037,7 +32503,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -32122,11 +32588,13 @@ impl GameApp {
             }
             return Ok(());
         }
-        let moving_drag = self.ingame_region_drag_active();
+        let moving_drag = self.ingame_moving_drag_active();
         let captured_release = button_state == ElementState::Released
             && self
                 .ingame_right_mouse_state
-                .is_some_and(|state| state.motion.region_drag_started);
+                .is_some_and(|state| {
+                    state.motion.region_drag_started || state.motion.world_drag_started
+                });
         let script_menu_target = if moving_drag {
             None
         } else {
@@ -33018,6 +33486,7 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.primary_pointer_left_down = button_state == ElementState::Pressed;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
@@ -33025,17 +33494,21 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Running
-            && (self.ingame_region_drag_active() || self.construction_menu_drag_captured())
+            && (self.ingame_moving_drag_active() || self.construction_menu_drag_captured())
         {
             return self.handle_ingame_mouse_button(button_state);
         }
         if button_state == ElementState::Pressed {
+            if let Some(captured) = self.captured_message_dialog_index() {
+                self.cancel_message_dialog_pointer_capture_at(captured);
+            }
             self.context_menu_pointer_capture = None;
             // A fresh gesture supersedes any stale modal capture. Only the
             // topmost selector itself may acquire this latch.
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+                && self.running_chat_controller().is_none()
                 && self.context_menu.is_none()
                 && self.message_dialogs.is_empty())
             .then_some(ContextMenuPointerButton::Left);
@@ -33046,12 +33519,77 @@ impl GameApp {
             && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
         if input_dialog_release_latched {
             self.game_option_input_pointer_capture = None;
+            self.stop_game_option_input_pointer_drag_at_current_position();
+            if self.running_chat_controller().is_some() {
+                // CMouse stops and clears pDragElement before ordinary
+                // top-down LeftUp hit-testing. Compact chat captures only its
+                // Edit; releasing elsewhere may therefore reach B/A below.
+                self.release_game_option_input_pointer_elements();
+            }
         }
         if self.consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Left)
         {
+            if input_dialog_release_latched {
+                self.release_game_option_input_pointer_elements();
+            }
             return Ok(());
         }
-        if self.handle_message_dialog_pointer_button(button_state)? {
+        if self.running_chat_controller().is_some() {
+            let lower_capture = self.captured_message_dialog_index();
+            if self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)?
+            {
+                if button_state == ElementState::Released {
+                    if let Some(captured) = lower_capture {
+                        self.cancel_message_dialog_pointer_capture_at(captured);
+                    }
+                }
+                return Ok(());
+            }
+            let point = self.running_pointer_position;
+            let chat_hit = point
+                .zip(self.game_option_input_layout().as_ref())
+                .is_some_and(|(point, layout)| {
+                    Self::point_in_input_dialog_bounds(point, layout)
+                });
+            if chat_hit {
+                if button_state == ElementState::Released {
+                    if let Some(captured) = lower_capture {
+                        self.cancel_message_dialog_pointer_capture_at(captured);
+                    }
+                }
+                if button_state == ElementState::Pressed {
+                    self.set_running_chat_active(true);
+                }
+                self.game_option_input_pointer_position = point;
+                self.handle_game_option_input_primary_pointer(button_state)?;
+                if button_state == ElementState::Pressed {
+                    self.game_option_input_pointer_capture = self
+                        .running_chat_controller()
+                        .is_some_and(InputDialogController::has_pointer_capture)
+                        .then_some(ContextMenuPointerButton::Left);
+                }
+                return Ok(());
+            }
+            let message_hit = point.and_then(|point| self.top_message_dialog_hit_index(point));
+            if self.handle_message_dialog_pointer_button(button_state)? {
+                if button_state == ElementState::Pressed {
+                    self.set_running_chat_active(false);
+                    self.message_dialog_active_index = message_hit;
+                    if let Some(controller) = self.running_chat_controller_mut() {
+                        controller.pointer_left();
+                    }
+                    self.finish_game_option_input_dialog_actions(Vec::new())?;
+                }
+                return Ok(());
+            }
+            // The z=+2 chat keeps the shared screen exclusive even where no
+            // dialog rectangle was hit, so the game world never sees this.
+            return Ok(());
+        }
+        if self.running_chat_controller().is_none()
+            && self.handle_message_dialog_pointer_button(button_state)?
+        {
             return Ok(());
         }
         if let Some(layout) = self.network_start_wait_layout() {
@@ -33147,64 +33685,13 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)? {
+            if input_dialog_release_latched {
+                self.release_game_option_input_pointer_elements();
+            }
             return Ok(());
         }
         if self.game_option_input_dialog.is_some() {
-            let point = self.game_option_input_pointer_position;
-            let layout = self.game_option_input_layout();
-            let fonts = self.assets.clonk_fonts.clone();
-            let clicked_edit = point.zip(layout.as_ref()).is_some_and(|(point, layout)| {
-                let edit = layout.edit;
-                point.x >= edit.x as f32
-                    && point.x < (edit.x + edit.w) as f32
-                    && point.y >= edit.y as f32
-                    && point.y < (edit.y + edit.h) as f32
-            });
-            let actions = point
-                .zip(layout.as_ref())
-                .zip(fonts.as_deref())
-                .and_then(|((point, layout), fonts)| {
-                    self.game_option_input_dialog
-                        .as_mut()
-                        .map(|dialog| match button_state {
-                            ElementState::Pressed => {
-                                dialog
-                                    .controller
-                                    .handle_pointer_down(point, layout, &fonts.text)
-                            }
-                            ElementState::Released => {
-                                dialog.controller.handle_pointer_up(point, layout)
-                            }
-                        })
-                })
-                .unwrap_or_default();
-            self.finish_game_option_input_dialog_actions(actions)?;
-            if button_state == ElementState::Released
-                && clicked_edit
-                && self.game_option_input_dialog.is_some()
-            {
-                let now = Instant::now();
-                let is_double = self
-                    .game_option_input_last_click
-                    .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
-                self.game_option_input_last_click = (!is_double).then_some(now);
-                if is_double {
-                    let actions = point
-                        .zip(layout.as_ref())
-                        .zip(fonts.as_deref())
-                        .and_then(|((point, layout), fonts)| {
-                            self.game_option_input_dialog.as_mut().map(|dialog| {
-                                dialog.controller.handle_pointer_double_click(
-                                    point,
-                                    layout,
-                                    &fonts.text,
-                                )
-                            })
-                        })
-                        .unwrap_or_default();
-                    self.finish_game_option_input_dialog_actions(actions)?;
-                }
-            }
+            self.handle_game_option_input_primary_pointer(button_state)?;
             return Ok(());
         }
         if input_dialog_release_latched {
@@ -33589,7 +34076,7 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
-                if self.ingame_region_drag_active() || self.construction_menu_drag_captured() {
+                if self.ingame_moving_drag_active() || self.construction_menu_drag_captured() {
                     self.handle_ingame_mouse_button(button_state)
                 } else if self.handle_scoreboard_pointer_button(button_state)?
                     || self.handle_ingame_menu_pointer_button(button_state, false)?
@@ -33606,8 +34093,45 @@ impl GameApp {
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        match phase {
+            TouchPhase::Started => self.primary_pointer_left_down = true,
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.primary_pointer_left_down = false;
+            }
+            TouchPhase::Moved => {}
+        }
+        if self.mode == AppMode::Running {
+            self.running_pointer_position = Some(position);
+        }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         if self.startup_network_transition_active() {
+            return Ok(());
+        }
+        if self.running_chat_controller().is_some() {
+            match phase {
+                TouchPhase::Started => {
+                    self.handle_cursor_moved(PhysicalPosition::new(
+                        f64::from(position.x),
+                        f64::from(position.y),
+                    ))?;
+                    self.handle_mouse_button(ElementState::Pressed)?;
+                }
+                TouchPhase::Moved => {
+                    self.handle_cursor_moved(PhysicalPosition::new(
+                        f64::from(position.x),
+                        f64::from(position.y),
+                    ))?;
+                }
+                TouchPhase::Ended => {
+                    self.handle_mouse_button(ElementState::Released)?;
+                }
+                TouchPhase::Cancelled => {
+                    self.context_menu_pointer_capture = None;
+                    self.release_message_dialog_pointer_elements();
+                    self.release_game_option_input_pointer_elements();
+                }
+            }
+            self.mark_menu_dirty();
             return Ok(());
         }
         if phase == TouchPhase::Started {
@@ -33615,7 +34139,7 @@ impl GameApp {
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
             self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
                 && self.context_menu.is_none()
-                && self.message_dialogs.is_empty())
+                && (self.message_dialogs.is_empty() || self.running_chat_controller().is_some()))
             .then_some(ContextMenuPointerButton::Left);
             self.game_option_pointer_capture = false;
         }
@@ -33634,7 +34158,7 @@ impl GameApp {
         if phase == TouchPhase::Cancelled {
             self.context_menu_pointer_capture = None;
         }
-        if !self.message_dialogs.is_empty() {
+        if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             self.mark_menu_dirty();
             if !matches!(phase, TouchPhase::Cancelled) {
                 self.handle_message_dialog_pointer_move(position);
@@ -33647,9 +34171,7 @@ impl GameApp {
                     self.handle_message_dialog_pointer_button(ElementState::Released)?;
                 }
                 TouchPhase::Cancelled => {
-                    if let Some(dialog) = self.message_dialogs.last_mut() {
-                        dialog.state.cancel_interaction();
-                    }
+                    self.release_message_dialog_pointer_elements();
                 }
                 TouchPhase::Moved => {}
             }
@@ -33804,7 +34326,9 @@ impl GameApp {
                                     .handle_touch_move(position, layout, &fonts.text)
                             }
                             TouchPhase::Ended => {
-                                dialog.controller.handle_touch_end(position, layout)
+                                dialog
+                                    .controller
+                                    .handle_touch_end(position, layout, &fonts.text)
                             }
                             TouchPhase::Cancelled => {
                                 dialog.controller.handle_touch_cancel();
@@ -33814,6 +34338,13 @@ impl GameApp {
                 })
                 .unwrap_or_default();
             self.finish_game_option_input_dialog_actions(actions)?;
+            if phase == TouchPhase::Started {
+                self.game_option_input_pointer_capture = self
+                    .game_option_input_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.controller.has_pointer_capture())
+                    .then_some(ContextMenuPointerButton::Left);
+            }
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                 self.game_option_input_pointer_capture = None;
                 self.game_option_input_pointer_position = None;
@@ -34165,6 +34696,7 @@ impl GameApp {
 
     fn pointer_left(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.running_pointer_position = None;
         self.pointer_left_unchecked();
         Ok(())
     }
@@ -34178,10 +34710,11 @@ impl GameApp {
         if self.context_menu.is_none() {
             self.context_menu_pointer_capture = None;
         }
-        if let Some(dialog) = self.message_dialogs.last_mut() {
-            dialog.state.pointer_left();
-            let sounds = dialog.state.take_sound_events();
-            self.play_message_dialog_sound_events(sounds);
+        let messages_open = !self.message_dialogs.is_empty();
+        for index in 0..self.message_dialogs.len() {
+            self.message_dialog_pointer_left_at(index);
+        }
+        if messages_open && self.running_chat_controller().is_none() {
             return;
         }
         if self
@@ -38802,7 +39335,11 @@ impl GameApp {
         };
         let captured = outcome.captured && !outcome.pass_through;
         if captured {
-            self.message_dialog_consumed_keys.insert(key);
+            if self.running_chat_controller().is_some() {
+                self.game_option_input_consumed_keys.insert(key);
+            } else {
+                self.message_dialog_consumed_keys.insert(key);
+            }
         }
         self.process_context_menu_outcome(outcome)?;
         Ok(captured)
@@ -44867,7 +45404,7 @@ impl GameApp {
                 } if active_subject == subject
             )
         }) {
-            self.message_dialogs.remove(index);
+            self.remove_message_dialog_at(index);
             self.mark_menu_dirty();
         }
         let rejected_own_cancel = !result.approve
@@ -45654,7 +46191,7 @@ impl GameApp {
                     tracing::error!(%error, "failed to close timed lobby ready check");
                 }
             } else {
-                self.message_dialogs.remove(prompt_index);
+                self.remove_message_dialog_at(prompt_index);
                 self.mark_menu_dirty();
                 if let Err(error) = self.complete_lobby_ready_check_response(false) {
                     tracing::error!(%error, "failed to expire lobby ready check");
@@ -45702,8 +46239,10 @@ impl GameApp {
                 ) {
                     tracing::error!(%error, "failed to expire graphics scale test");
                 }
-            } else if let MessageDialogContinuation::OptionsScaleTest { old_percent, .. } =
-                self.message_dialogs.remove(prompt_index).continuation
+            } else if let Some((PendingMessageDialog {
+                continuation: MessageDialogContinuation::OptionsScaleTest { old_percent, .. },
+                ..
+            }, _)) = self.remove_message_dialog_at(prompt_index)
             {
                 if let Some(dialog) = self.startup_options_dialog.as_mut() {
                     dialog.graphics_mut().revert_scale_test();
@@ -46672,6 +47211,96 @@ impl GameApp {
         }
     }
 
+    fn release_game_option_input_pointer_elements(&mut self) {
+        let sounds = self
+            .game_option_input_dialog
+            .as_mut()
+            .map(|dialog| {
+                dialog.controller.release_pointer_elements();
+                dialog.controller.take_sound_events()
+            })
+            .unwrap_or_default();
+        self.game_option_input_pointer_capture = None;
+        self.play_input_dialog_sound_events(sounds);
+    }
+
+    fn stop_game_option_input_pointer_drag_at_current_position(&mut self) {
+        let point = self.running_pointer_position;
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        if let Some(((point, layout), fonts)) = point.zip(layout).zip(fonts.as_deref()) {
+            if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+                dialog
+                    .controller
+                    .stop_pointer_drag_at(point, &layout, &fonts.text);
+            }
+        }
+    }
+
+    fn handle_game_option_input_primary_pointer(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
+        let point = self.game_option_input_pointer_position;
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let clicked_edit = point.zip(layout.as_ref()).is_some_and(|(point, layout)| {
+            let edit = layout.edit;
+            point.x >= edit.x as f32
+                && point.x < (edit.x + edit.w) as f32
+                && point.y >= edit.y as f32
+                && point.y < (edit.y + edit.h) as f32
+        });
+        let actions = point
+            .zip(layout.as_ref())
+            .zip(fonts.as_deref())
+            .and_then(|((point, layout), fonts)| {
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| match button_state {
+                        ElementState::Pressed => {
+                            dialog
+                                .controller
+                                .handle_pointer_down(point, layout, &fonts.text)
+                        }
+                        ElementState::Released => {
+                            dialog
+                                .controller
+                                .handle_pointer_up(point, layout, &fonts.text)
+                        }
+                    })
+            })
+            .unwrap_or_default();
+        self.finish_game_option_input_dialog_actions(actions)?;
+        if button_state == ElementState::Released
+            && clicked_edit
+            && self.game_option_input_dialog.is_some()
+        {
+            let now = Instant::now();
+            let is_double = self
+                .game_option_input_last_click
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+            self.game_option_input_last_click = (!is_double).then_some(now);
+            if is_double {
+                let actions = point
+                    .zip(layout.as_ref())
+                    .zip(fonts.as_deref())
+                    .and_then(|((point, layout), fonts)| {
+                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                            dialog.controller.handle_pointer_double_click(
+                                point,
+                                layout,
+                                &fonts.text,
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                self.finish_game_option_input_dialog_actions(actions)?;
+            }
+        }
+        Ok(())
+    }
+
     fn finish_game_option_input_dialog_actions(
         &mut self,
         actions: Vec<InputDialogAction>,
@@ -46693,6 +47322,17 @@ impl GameApp {
             self.mark_menu_dirty();
             match action {
                 InputDialogAction::FocusChanged(_) | InputDialogAction::TextChanged(_) => {}
+                InputDialogAction::SubmittedLine(text) => {
+                    if self.game_option_input_dialog.as_ref().is_some_and(|pending| {
+                        pending.purpose == PendingInputDialogPurpose::RunningChat
+                    }) {
+                        self.process_running_chat_text(&text);
+                    } else {
+                        tracing::error!(
+                            "multiline continuation escaped a compact running-chat dialog"
+                        );
+                    }
+                }
                 InputDialogAction::ClipboardWrite(text) => {
                     if let Err(error) =
                         arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text))
@@ -46721,6 +47361,9 @@ impl GameApp {
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
                     match pending.purpose {
+                        PendingInputDialogPurpose::RunningChat => {
+                            self.submit_running_chat_text(text)?;
+                        }
                         PendingInputDialogPurpose::NetworkJoinPassword => {
                             if text.is_empty() {
                                 self.pending_network_join = None;
@@ -46779,6 +47422,9 @@ impl GameApp {
                     self.close_context_menu_silently();
                     self.game_option_input_last_click = None;
                     match pending.purpose {
+                        PendingInputDialogPurpose::RunningChat => {
+                            self.finalize_running_chat_input()?;
+                        }
                         PendingInputDialogPurpose::NetworkJoinPassword => {
                             self.pending_network_join = None;
                             self.status_text.clear();
@@ -47031,31 +47677,47 @@ impl GameApp {
                 .context("exact C4GUI::MessageDialog resource set is absent")
                 .and_then(|resources| resources.validate()),
         )?;
-        self.close_context_menu_silently();
-        if self.message_dialogs.is_empty() {
-            // Release the underlying screen's hover/drag capture before the
-            // C4GUI input-z dialog takes over.
-            self.cancel_underlying_interaction();
-            if matches!(self.mode, AppMode::Running) {
-                self.clear_local_controls()?;
-                self.cancel_ingame_mouse_gestures();
-            }
-        } else if let Some(dialog) = self.message_dialogs.last_mut() {
-            dialog.state.cancel_interaction();
+        let chat_above = self.running_chat_controller().is_some();
+        if !chat_above {
+            self.close_context_menu_silently();
         }
-        self.pressed_engine_keys.clear();
+        if self.message_dialogs.is_empty() {
+            if !chat_above {
+                // Release the underlying screen's hover/drag capture before
+                // the C4GUI input-z dialog takes over. Chat has z=+2, so a
+                // newly inserted default-z message remains underneath it.
+                self.cancel_underlying_interaction();
+                if matches!(self.mode, AppMode::Running) {
+                    self.clear_local_controls()?;
+                    self.cancel_ingame_mouse_gestures();
+                }
+            }
+        }
+        if !chat_above {
+            self.pressed_engine_keys.clear();
+        }
         self.message_dialogs.push(PendingMessageDialog {
             state,
             continuation,
         });
+        if !chat_above {
+            self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
+        }
         self.mark_menu_dirty();
         Ok(())
     }
 
     fn persist_top_message_dialog_checkbox_changes(&mut self) {
+        let Some(index) = self.message_dialogs.len().checked_sub(1) else {
+            return;
+        };
+        self.persist_message_dialog_checkbox_changes(index);
+    }
+
+    fn persist_message_dialog_checkbox_changes(&mut self, index: usize) {
         let changes = self
             .message_dialogs
-            .last_mut()
+            .get_mut(index)
             .filter(|dialog| {
                 matches!(
                     &dialog.continuation,
@@ -47083,15 +47745,57 @@ impl GameApp {
         &mut self,
         result: lc_frontend::message_dialog::MessageDialogResult,
     ) -> Result<(), EngineError> {
-        let Some(pending) = self.message_dialogs.pop() else {
+        let Some(index) = self.message_dialogs.len().checked_sub(1) else {
+            return Ok(());
+        };
+        self.finish_message_dialog_at(index, result)
+    }
+
+    fn remove_message_dialog_at(
+        &mut self,
+        index: usize,
+    ) -> Option<(PendingMessageDialog, bool)> {
+        if index >= self.message_dialogs.len() {
+            return None;
+        }
+        let was_active = self.message_dialog_active_index == Some(index);
+        if was_active {
+            self.release_message_dialog_pointer_elements();
+            self.release_game_option_input_pointer_elements();
+        }
+        let pending = self.message_dialogs.remove(index);
+        self.message_dialog_active_index = match self.message_dialog_active_index {
+            Some(active) if active > index => Some(active - 1),
+            Some(active) if active == index => None,
+            active => active,
+        };
+        self.message_dialog_pointer_capture_index =
+            match self.message_dialog_pointer_capture_index {
+                Some(captured) if captured > index => Some(captured - 1),
+                Some(captured) if captured == index => None,
+                captured => captured,
+            };
+        if was_active {
+            if self.running_chat.is_some() {
+                self.set_running_chat_active(true);
+            } else {
+                self.message_dialog_active_index = self.message_dialogs.len().checked_sub(1);
+            }
+        }
+        Some((pending, was_active))
+    }
+
+    fn finish_message_dialog_at(
+        &mut self,
+        index: usize,
+        result: lc_frontend::message_dialog::MessageDialogResult,
+    ) -> Result<(), EngineError> {
+        let Some((pending, _)) = self.remove_message_dialog_at(index) else {
             return Ok(());
         };
         self.startup_tooltip.pointer_left();
         let checkbox_checked = pending.state.checkbox_checked();
         self.mark_menu_dirty();
-        if let Some(dialog) = self.message_dialogs.last_mut() {
-            dialog.state.cancel_interaction();
-        }
         match pending.continuation {
             MessageDialogContinuation::None => {}
             MessageDialogContinuation::NetworkRuntimeJoin { reference }
@@ -47422,10 +48126,11 @@ impl GameApp {
         self.mark_menu_dirty();
     }
 
-    fn top_message_dialog_layout(
+    fn message_dialog_layout_at(
         &self,
+        index: usize,
     ) -> Option<lc_frontend::message_dialog::MessageDialogLayout> {
-        let dialog = self.message_dialogs.last()?;
+        let dialog = self.message_dialogs.get(index)?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
         Some(
@@ -47435,9 +48140,60 @@ impl GameApp {
         )
     }
 
+    fn top_message_dialog_layout(
+        &self,
+    ) -> Option<lc_frontend::message_dialog::MessageDialogLayout> {
+        self.message_dialogs
+            .len()
+            .checked_sub(1)
+            .and_then(|index| self.message_dialog_layout_at(index))
+    }
+
+    fn top_message_dialog_hit_index(&self, point: GuiPoint) -> Option<usize> {
+        (0..self.message_dialogs.len()).rev().find(|index| {
+            self.message_dialog_layout_at(*index)
+                .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout))
+        })
+    }
+
+    fn top_message_dialog_is_exclusive_vote(&self) -> bool {
+        self.message_dialogs.last().is_some_and(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeagueVote { .. }
+                    | MessageDialogContinuation::LeagueSurrender
+            )
+        })
+    }
+
+    fn active_message_dialog_index(&self) -> Option<usize> {
+        self.message_dialog_active_index
+            .filter(|index| *index < self.message_dialogs.len())
+    }
+
+    fn captured_message_dialog_index(&self) -> Option<usize> {
+        self.message_dialog_pointer_capture_index
+            .filter(|index| {
+                self.message_dialogs
+                    .get(*index)
+                    .is_some_and(|dialog| dialog.state.has_pointer_capture())
+            })
+    }
+
     fn point_in_message_dialog_bounds(
         point: GuiPoint,
         layout: &lc_frontend::message_dialog::MessageDialogLayout,
+    ) -> bool {
+        let bounds = layout.bounds;
+        point.x >= bounds.x as f32
+            && point.x < (bounds.x + bounds.w) as f32
+            && point.y >= bounds.y as f32
+            && point.y < (bounds.y + bounds.h) as f32
+    }
+
+    fn point_in_input_dialog_bounds(
+        point: GuiPoint,
+        layout: &lc_frontend::input_dialog::InputDialogLayout,
     ) -> bool {
         let bounds = layout.bounds;
         point.x >= bounds.x as f32
@@ -47501,6 +48257,83 @@ impl GameApp {
             }
             return Ok(false);
         }
+        let Some(active_index) = self.active_message_dialog_index() else {
+            return Ok(false);
+        };
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let top_exclusive = self.top_message_dialog_is_exclusive_vote();
+        let chat_already_open = self.running_chat_controller().is_some();
+        let gui_scope = self.mode != AppMode::Running || top_exclusive || chat_already_open;
+        let chat_open_fallthrough = matches!(self.mode, AppMode::Running)
+            && !self.running_chat_active()
+            && (matches!(
+                (key, c4_modifiers),
+                (VirtualKeyCode::F2, modifiers)
+                    if modifiers.is_empty()
+            ) || matches!(
+                (key, c4_modifiers),
+                (VirtualKeyCode::Return, ModifiersState::SHIFT)
+            ) || !chat_already_open
+                && !gui_scope
+                && matches!(
+                    (key, c4_modifiers),
+                    (VirtualKeyCode::Return, modifiers) if modifiers.is_empty()
+                )
+            || !chat_already_open
+                && !gui_scope
+                && matches!(
+                    (key, c4_modifiers),
+                    (VirtualKeyCode::Return, ModifiersState::ALT)
+                ));
+        if chat_open_fallthrough {
+            return Ok(false);
+        }
+        if !gui_scope {
+            return Ok(false);
+        }
+        let hotkey_modifiers = c4_modifiers == ModifiersState::ALT
+            || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+        let normal_modifiers = c4_modifiers.is_empty()
+            || (key == VirtualKeyCode::Tab && c4_modifiers == ModifiersState::SHIFT);
+        if !hotkey_modifiers && !normal_modifiers {
+            if state == ElementState::Released {
+                self.message_dialog_consumed_keys.remove(&key);
+            }
+            return Ok(true);
+        }
+        if hotkey_modifiers {
+            if state == ElementState::Released {
+                return Ok(false);
+            }
+            let Some(character) = message_dialog_hotkey(key) else {
+                return Ok(false);
+            };
+            let (owns_hotkey, result, sounds) = self
+                .message_dialogs
+                .get_mut(active_index)
+                .map(|dialog| {
+                    let owns_hotkey = dialog.state.has_hotkey(character);
+                    let result = owns_hotkey
+                        .then(|| dialog.state.handle_hotkey(character))
+                        .flatten();
+                    (
+                        owns_hotkey,
+                        result,
+                        dialog.state.take_sound_events(),
+                    )
+                })
+                .unwrap_or_default();
+            if !owns_hotkey {
+                return Ok(false);
+            }
+            self.play_message_dialog_sound_events(sounds);
+            self.persist_message_dialog_checkbox_changes(active_index);
+            if let Some(result) = result {
+                self.finish_message_dialog_at(active_index, result)?;
+            }
+            return Ok(true);
+        }
         match state {
             ElementState::Pressed => {
                 self.message_dialog_consumed_keys.insert(key);
@@ -47509,113 +48342,214 @@ impl GameApp {
                 self.message_dialog_consumed_keys.remove(&key);
             }
         }
-        let backwards = self.keyboard_modifiers.shift();
-        let alt = self.keyboard_modifiers.alt();
+        let backwards = c4_modifiers == ModifiersState::SHIFT;
         let (result, sounds) = self
             .message_dialogs
-            .last_mut()
+            .get_mut(active_index)
             .map(|dialog| {
-                let result = if alt {
-                    (state == ElementState::Pressed)
-                        .then(|| message_dialog_hotkey(key))
-                        .flatten()
-                        .and_then(|character| dialog.state.handle_hotkey(character))
-                } else {
-                    map_key_code(key).and_then(|key| match state {
-                        ElementState::Pressed => dialog.state.handle_key_down(key, backwards),
-                        ElementState::Released => dialog.state.handle_key_up(key),
-                    })
-                };
+                let result = map_key_code(key).and_then(|key| match state {
+                    ElementState::Pressed => dialog.state.handle_key_down(key, backwards),
+                    ElementState::Released => dialog.state.handle_key_up(key),
+                });
                 (result, dialog.state.take_sound_events())
             })
             .unwrap_or_default();
         self.play_message_dialog_sound_events(sounds);
-        self.persist_top_message_dialog_checkbox_changes();
+        self.persist_message_dialog_checkbox_changes(active_index);
         if let Some(result) = result {
-            self.finish_message_dialog(result)?;
+            self.finish_message_dialog_at(active_index, result)?;
         }
         Ok(true)
     }
 
-    fn handle_message_dialog_pointer_move(&mut self, point: GuiPoint) -> bool {
-        if self.message_dialogs.is_empty() {
-            return false;
-        }
-        if let Some(layout) = self.top_message_dialog_layout() {
-            let shared_screen_miss = self.mode == AppMode::Running
-                && !Self::point_in_message_dialog_bounds(point, &layout)
-                && !self
-                    .message_dialogs
-                    .last()
-                    .is_some_and(|dialog| dialog.state.has_pointer_capture());
-            let sounds = if let Some(dialog) = self.message_dialogs.last_mut() {
-                if shared_screen_miss {
-                    dialog.state.pointer_left();
-                } else {
-                    dialog.state.handle_pointer_move(point, &layout);
-                }
+    fn message_dialog_pointer_left_at(&mut self, index: usize) {
+        let sounds = self
+            .message_dialogs
+            .get_mut(index)
+            .map(|dialog| {
+                dialog.state.pointer_left();
                 dialog.state.take_sound_events()
-            } else {
-                Vec::new()
-            };
-            self.play_message_dialog_sound_events(sounds);
-            if shared_screen_miss {
-                return false;
+            })
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+    }
+
+    fn release_message_dialog_pointer_elements(&mut self) {
+        let mut sounds = Vec::new();
+        for dialog in &mut self.message_dialogs {
+            dialog.state.cancel_pointer_capture();
+            sounds.extend(dialog.state.take_sound_events());
+        }
+        self.message_dialog_pointer_capture_index = None;
+        self.play_message_dialog_sound_events(sounds);
+    }
+
+    fn cancel_message_dialog_pointer_capture_at(&mut self, index: usize) {
+        let sounds = self
+            .message_dialogs
+            .get_mut(index)
+            .map(|dialog| {
+                dialog.state.cancel_pointer_capture();
+                dialog.state.take_sound_events()
+            })
+            .unwrap_or_default();
+        if self.message_dialog_pointer_capture_index == Some(index) {
+            self.message_dialog_pointer_capture_index = None;
+        }
+        self.play_message_dialog_sound_events(sounds);
+    }
+
+    fn handle_message_dialog_pointer_move_at(&mut self, index: usize, point: GuiPoint) -> bool {
+        let Some(layout) = self.message_dialog_layout_at(index) else {
+            return false;
+        };
+        let sounds = self
+            .message_dialogs
+            .get_mut(index)
+            .map(|dialog| {
+                dialog.state.handle_pointer_move(point, &layout);
+                dialog.state.take_sound_events()
+            })
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+        true
+    }
+
+    fn handle_message_dialog_pointer_move(&mut self, point: GuiPoint) -> bool {
+        let Some(top_index) = self.message_dialogs.len().checked_sub(1) else {
+            return false;
+        };
+        let exclusive_top = self.running_chat_controller().is_none()
+            && self.top_message_dialog_is_exclusive_vote();
+        let capture_open = self.captured_message_dialog_index().is_some();
+        let active_index = self.active_message_dialog_index();
+        let target_index = if self.mode != AppMode::Running {
+            Some(top_index)
+        } else {
+            (0..self.message_dialogs.len())
+                .rev()
+                .find(|index| {
+                    self.message_dialog_layout_at(*index).is_some_and(|layout| {
+                        Self::point_in_message_dialog_bounds(point, &layout)
+                    }) || (capture_open && active_index == Some(*index))
+                })
+                .or_else(|| exclusive_top.then_some(top_index))
+        };
+
+        if self.primary_pointer_left_down {
+            if let Some(target) = target_index {
+                let target_is_hit = self.message_dialog_layout_at(target).is_some_and(|layout| {
+                    Self::point_in_message_dialog_bounds(point, &layout)
+                });
+                if target_is_hit {
+                    self.message_dialog_active_index = Some(target);
+                }
             }
         }
-        true
+
+        for index in 0..self.message_dialogs.len() {
+            if Some(index) != target_index {
+                self.message_dialog_pointer_left_at(index);
+            }
+        }
+        let Some(target_index) = target_index else {
+            return false;
+        };
+        self.handle_message_dialog_pointer_move_at(target_index, point)
+    }
+
+    fn handle_message_dialog_pointer_button_at(
+        &mut self,
+        index: usize,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        let Some(layout) = self.message_dialog_layout_at(index) else {
+            return Ok(false);
+        };
+        if let Some(captured) = self.captured_message_dialog_index() {
+            if captured != index {
+                self.cancel_message_dialog_pointer_capture_at(captured);
+            }
+        }
+        let pointer_position = self.running_pointer_position;
+        let (result, captures_pointer, sounds) = self
+            .message_dialogs
+            .get_mut(index)
+            .map(|dialog| {
+                let result = match state {
+                    ElementState::Pressed => {
+                        if let Some(point) = pointer_position {
+                            dialog.state.handle_pointer_down_at(point, &layout);
+                        } else {
+                            dialog.state.handle_pointer_down(&layout);
+                        }
+                        None
+                    }
+                    ElementState::Released => match pointer_position {
+                        Some(point) => dialog.state.handle_pointer_up_at(point, &layout),
+                        None => dialog.state.handle_pointer_up(&layout),
+                    },
+                };
+                (
+                    result,
+                    dialog.state.has_pointer_capture(),
+                    dialog.state.take_sound_events(),
+                )
+            })
+            .unwrap_or_default();
+        match state {
+            ElementState::Pressed if captures_pointer => {
+                self.message_dialog_pointer_capture_index = Some(index);
+            }
+            ElementState::Pressed => {
+                self.message_dialog_pointer_capture_index = None;
+            }
+            ElementState::Released => {
+                if self.message_dialog_pointer_capture_index == Some(index) {
+                    self.message_dialog_pointer_capture_index = None;
+                }
+            }
+        }
+        self.play_message_dialog_sound_events(sounds);
+        self.persist_message_dialog_checkbox_changes(index);
+        if let Some(result) = result {
+            self.finish_message_dialog_at(index, result)?;
+        }
+        Ok(true)
     }
 
     fn handle_message_dialog_pointer_button(
         &mut self,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.message_dialogs.is_empty() {
+        let Some(top_index) = self.message_dialogs.len().checked_sub(1) else {
             return Ok(false);
-        }
-        let layout = self.top_message_dialog_layout();
-        let shared_screen_miss = self.mode == AppMode::Running
-            && layout.as_ref().is_none_or(|layout| {
-                !self
-                    .running_pointer_position
-                    .is_some_and(|point| Self::point_in_message_dialog_bounds(point, layout))
-            });
-        if shared_screen_miss {
+        };
+        let exclusive_top = self.running_chat_controller().is_none()
+            && self.top_message_dialog_is_exclusive_vote();
+        let hit_index = self
+            .running_pointer_position
+            .and_then(|point| self.top_message_dialog_hit_index(point));
+        let target_index = if self.mode != AppMode::Running {
+            Some(top_index)
+        } else {
+            hit_index.or_else(|| exclusive_top.then_some(top_index))
+        };
+        let Some(target_index) = target_index else {
             if state == ElementState::Released {
-                let sounds = self
-                    .message_dialogs
-                    .last_mut()
-                    .filter(|dialog| dialog.state.has_pointer_capture())
-                    .map(|dialog| {
-                        dialog.state.cancel_pointer_capture();
-                        dialog.state.take_sound_events()
-                    })
-                    .unwrap_or_default();
-                self.play_message_dialog_sound_events(sounds);
+                if let Some(captured) = self.captured_message_dialog_index() {
+                    self.cancel_message_dialog_pointer_capture_at(captured);
+                }
             }
             return Ok(false);
+        };
+        if state == ElementState::Pressed
+            && self.mode == AppMode::Running
+            && hit_index == Some(target_index)
+        {
+            self.message_dialog_active_index = Some(target_index);
         }
-        let (result, sounds) = self
-            .top_message_dialog_layout()
-            .and_then(|layout| {
-                self.message_dialogs.last_mut().map(|dialog| {
-                    let result = match state {
-                        ElementState::Pressed => {
-                            dialog.state.handle_pointer_down(&layout);
-                            None
-                        }
-                        ElementState::Released => dialog.state.handle_pointer_up(&layout),
-                    };
-                    (result, dialog.state.take_sound_events())
-                })
-            })
-            .unwrap_or_default();
-        self.play_message_dialog_sound_events(sounds);
-        self.persist_top_message_dialog_checkbox_changes();
-        if let Some(result) = result {
-            self.finish_message_dialog(result)?;
-        }
-        Ok(true)
+        self.handle_message_dialog_pointer_button_at(target_index, state)
     }
 
     fn play_message_dialog_sound_events(
@@ -47645,12 +48579,18 @@ impl GameApp {
             );
         };
         let last = self.message_dialogs.len() - 1;
+        let active_index = (!self.running_chat_active())
+            .then(|| self.active_message_dialog_index())
+            .flatten();
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         for index in 0..=last {
+            let keyboard_active = Some(index) == active_index && self.context_menu.is_none();
+            let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
             self.message_dialogs[index].state.render(
                 self.graphics.surface_mut(),
                 resources,
-                index == last,
+                keyboard_active,
+                mouse_active,
                 gamma,
             )?;
             if ordered_native && index != last {
@@ -47702,6 +48642,14 @@ impl GameApp {
         Ok(())
     }
 
+    fn game_option_input_activity(&self) -> (bool, bool) {
+        let keyboard_active = self.context_menu.is_none()
+            && (self.running_chat_active() || self.message_dialogs.is_empty());
+        let mouse_active = self.context_menu.is_none()
+            && (matches!(self.mode, AppMode::Running) || keyboard_active);
+        (keyboard_active, mouse_active)
+    }
+
     fn render_game_option_input_dialog(
         &mut self,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -47712,13 +48660,18 @@ impl GameApp {
         let assets = Arc::clone(&self.assets);
         let resources = assets
             .input_dialog_resources()
-            .with_context(|| "classic Password/Comment input-dialog resources are unavailable")?;
-        let active = self.context_menu.is_none() && self.message_dialogs.is_empty();
+            .with_context(|| "classic C4GUI::InputDialog resources are unavailable")?;
+        let (keyboard_active, mouse_active) = self.game_option_input_activity();
         self.game_option_input_dialog
             .as_ref()
             .expect("checked above")
             .controller
-            .render(self.graphics.surface_mut(), &resources, active, gamma)?;
+            .render(
+                self.graphics.surface_mut(),
+                &resources,
+                keyboard_active,
+                gamma,
+            )?;
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         if ordered_native {
             self.next_pending_native_overlay();
@@ -47735,7 +48688,7 @@ impl GameApp {
             .as_ref()
             .expect("checked above")
             .controller
-            .render_tooltip(self.graphics.surface_mut(), &resources, active, gamma)
+            .render_tooltip(self.graphics.surface_mut(), &resources, mouse_active, gamma)
     }
 
     fn startup_base_context_menu(
@@ -48554,7 +49507,7 @@ impl GameApp {
         if self.game_option_input_dialog.is_some() {
             check(
                 self.assets.input_dialog_resources().map(|_| ()),
-                "Password/Comment input dialog",
+                "C4GUI::InputDialog",
             )?;
         }
         if self.context_menu.is_some() {
@@ -48753,6 +49706,7 @@ impl GameApp {
         if !self.mouse_control
             || !matches!(self.mode, AppMode::Running)
             || self.game_over_dialog.is_some()
+            || self.game_option_input_dialog.is_some()
             || !self.message_dialogs.is_empty()
         {
             return None;
@@ -49766,7 +50720,14 @@ impl GameApp {
         if ordered_native && !self.message_dialogs.is_empty() {
             self.next_pending_native_overlay();
         }
-        if self.context_menu.is_some() {
+        let running_chat_input_open = self.running_chat_controller().is_some();
+        if running_chat_input_open {
+            self.render_game_option_input_dialog(Some(&frame_gamma))?;
+            if ordered_native {
+                self.next_pending_native_overlay();
+            }
+        }
+        if self.context_menu.is_some() && !running_chat_input_open {
             // C4GUI::Screen draws its recursively owned context chain after
             // every dialog, so it stays above viewport menus, F1 help,
             // scoreboard, evaluation and message dialogs.
@@ -49875,9 +50836,6 @@ impl GameApp {
     /// The message board's current log line, dropped once its C++ fade
     /// window has passed (src/C4MessageBoard.cpp:163-212).
     fn message_board_line(&self) -> Option<String> {
-        if let Some(chat) = self.running_chat.as_ref() {
-            return Some(format!("Chat: {}¦", chat.edit.text));
-        }
         if self.board_back_scroll < 0 {
             return None;
         }
@@ -51055,6 +52013,9 @@ impl GameApp {
         self.control_playback = None;
         self.deferred_network_savegame_recreation.clear();
         self.message_dialogs.clear();
+        self.message_dialog_active_index = None;
+        self.message_dialog_pointer_capture_index = None;
+        self.primary_pointer_left_down = false;
         self.message_dialog_consumed_keys.clear();
         self.definition_selector = None;
         self.pending_definition_selection = None;
@@ -53669,6 +54630,7 @@ impl GameApp {
         // board timing = fade-in + strlen delay + fade-out at line height
         // 15 / Speed 1 (C4MessageBoard.cpp:163-212).
         self.running_chat = None;
+        self.game_option_input_dialog = None;
         self.board_log_history.clear();
         self.board_line = None;
         self.board_back_scroll = -1;
@@ -59871,6 +60833,81 @@ mod tests {
     }
 
     #[test]
+    fn running_chat_does_not_capture_release_from_active_world_moving_drag() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app
+            .engine
+            .crew_cursor(owner)
+            .expect("sandbox has a cursor crew member");
+        let crew_position = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .position;
+        let mut item = Definition::from_script("CHDG", "Chat drag item", "#strict\n")
+            .expect("carryable definition compiles");
+        item.set_category(lc_engine::CATEGORY_OBJECT);
+        item.set_collectible(true);
+        item.set_shape_rect(Some(lc_engine::DefinitionRect::new(-4, -4, 8, 8)));
+        app.engine
+            .register_definition(item)
+            .expect("register carryable definition");
+        let layer = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .layer;
+        let spawn = layer
+            .map(|layer| {
+                SpawnConfig::new("CHDG")
+                    .with_position(Vector2::new(crew_position.x - 60, crew_position.y))
+                    .with_layer(layer)
+            })
+            .unwrap_or_else(|| {
+                SpawnConfig::new("CHDG")
+                    .with_position(Vector2::new(crew_position.x - 60, crew_position.y))
+            });
+        let target = app
+            .engine
+            .spawn_object(spawn)
+            .expect("spawn chat-drag carryable");
+        render_mouse_test_app(&mut app);
+        let start = mouse_test_object_point(&app, owner, target);
+        let (end, _) = mouse_test_empty_point(&app, owner, start, None);
+
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(start.x), f64::from(start.y)))
+            .expect("move to carryable");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("begin world drag");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)))
+            .expect("cross world drag threshold");
+        assert!(app.mouse_state.is_some_and(|state| {
+            state.motion.moved && state.motion.world_drag_started
+        }));
+
+        app.start_running_chat(RunningChatMode::All);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Lower notice",
+                "Message",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("insert lower message without cancelling chat-owned drag");
+        assert!(app
+            .mouse_state
+            .is_some_and(|state| state.motion.world_drag_started));
+        app.handle_mouse_button(ElementState::Released)
+            .expect("active world drag release bypasses compact chat");
+        assert!(app.mouse_state.is_none());
+        assert!(app.running_chat.is_some());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.running_chat_text(), Some(""));
+    }
+
+    #[test]
     fn physical_left_drag_vehicle_queues_push_to_and_control_target() {
         // Grab==1 enters the same moving drag for either button. Control over
         // an OCF_Container selects VehiclePut, represented by PushTo with the
@@ -61265,7 +62302,7 @@ mod tests {
         assert!(app.mouse_state.is_none());
         assert!(app.ingame_right_mouse_state.is_none());
         assert!(app.ingame_dragged_objects.is_empty());
-        assert!(!app.ingame_region_drag_active());
+        assert!(!app.ingame_moving_drag_active());
     }
 
     #[test]
@@ -73632,6 +74669,23 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.finish_game_option_input(actions)
             .expect("open password modal");
 
+        app.handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::ALT)
+            .expect("hold combined mnemonic modifiers");
+        app.handle_key(VirtualKeyCode::O, ElementState::Pressed)
+            .expect("combined modifiers do not activate the exact Alt mnemonic");
+        app.handle_key(VirtualKeyCode::O, ElementState::Released)
+            .expect("release combined mnemonic probe");
+        assert!(app.game_option_input_dialog.is_some());
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift over regular input dialog");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("modified Escape does not cancel the regular dialog");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release modified Escape probe");
+        assert!(app.game_option_input_dialog.is_some());
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release modal modifiers");
+
         for key in [
             VirtualKeyCode::Up,
             VirtualKeyCode::Down,
@@ -77962,41 +79016,50 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (network, _events, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(0);
         app.network = Some(network);
+        let paste = |app: &mut GameApp, text: &str| {
+            let layout = app.game_option_input_layout().expect("chat layout");
+            let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+            let actions = app
+                .running_chat_controller_mut()
+                .expect("chat controller")
+                .apply_context_command(
+                    InputDialogContextCommand::Paste,
+                    Some(text),
+                    &layout,
+                    &fonts.text,
+                );
+            app.finish_game_option_input_dialog_actions(actions)
+                .expect("process running-chat paste");
+        };
 
         app.start_running_chat(RunningChatMode::All);
-        app.paste_running_chat_text("hello\nsecond\nworld");
+        paste(&mut app, "hello\nsecond\nworld");
         let submitted = commands.take_submitted_messages();
         assert_eq!(submitted.len(), 2);
         assert_eq!(submitted[0].message.as_bytes(), b"hello");
         assert_eq!(submitted[1].message.as_bytes(), b"second");
-        assert_eq!(
-            app.running_chat
-                .as_ref()
-                .expect("trailing fragment keeps chat open")
-                .edit
-                .text,
-            "world"
-        );
+        assert_eq!(app.running_chat_text(), Some("world"));
 
-        app.running_chat = None;
+        app.close_running_chat().expect("close retained chat");
         app.start_running_chat(RunningChatMode::All);
-        app.paste_running_chat_text("done\n");
+        paste(&mut app, "done\n");
         let submitted = commands.take_submitted_messages();
         assert_eq!(submitted.len(), 1);
         assert_eq!(submitted[0].message.as_bytes(), b"done");
         assert!(app.running_chat.is_none());
 
         app.start_running_chat(RunningChatMode::All);
-        app.paste_running_chat_text("stay\r\n");
+        paste(&mut app, "stay\r\n");
         let submitted = commands.take_submitted_messages();
         assert_eq!(submitted.len(), 1);
         assert_eq!(submitted[0].message.as_bytes(), b"stay");
-        let chat = app
-            .running_chat
-            .as_ref()
-            .expect("CRLF reports more at the first delimiter");
-        assert_eq!(chat.edit.text, "stay");
-        assert_eq!(chat.edit.selection, Some((0, 4)));
+        assert_eq!(app.running_chat_text(), Some("stay"));
+        assert_eq!(
+            app.running_chat_controller()
+                .expect("CRLF reports more at the first delimiter")
+                .selection(),
+            Some((0, 4))
+        );
     }
 
     #[test]
@@ -78328,12 +79391,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.start_running_chat(RunningChatMode::All);
         app.browse_running_chat_history(true);
         assert_eq!(
-            app.running_chat
-                .as_ref()
-                .expect("running chat opens")
-                .edit
-                .text,
-            "hello",
+            app.running_chat_text(),
+            Some("hello"),
             "C4MessageInput history survives the lobby-to-game transition"
         );
     }
@@ -86530,7 +87589,7 @@ ScenInfoArea=70,5,25,90
         assert_eq!((width, height), (expected_width, expected_height));
         assert_eq!(app.mode, AppMode::Running, "screenshots do not end the game");
 
-        app.running_chat = None;
+        app.close_running_chat().expect("close running chat");
         app.keyboard_modifiers = ModifiersState::empty();
         app.handle_key(VirtualKeyCode::F9, ElementState::Pressed)
             .expect("first repeated screenshot keydown");
@@ -96250,14 +97309,7 @@ ScenInfoArea=70,5,25,90
         }
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("complete nick before scoreboard routing");
-        assert_eq!(
-            app.running_chat
-                .as_ref()
-                .expect("chat remains open")
-                .edit
-                .text,
-            "Sender"
-        );
+        assert_eq!(app.running_chat_text(), Some("Sender"));
         let sound_enabled = app
             .audio
             .as_ref()
@@ -96276,6 +97328,1697 @@ ScenInfoArea=70,5,25,90
             sound_enabled
         );
         app.keyboard_modifiers = ModifiersState::empty();
+    }
+
+    #[test]
+    fn running_chat_multiline_paste_submits_lines_and_retains_final_text() {
+        let mut app = new_running_sandbox_app();
+        install_message_fixture(&mut app);
+        app.snapshot = app.engine.snapshot();
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("open running chat");
+
+        let layout = app.game_option_input_layout().expect("chat layout");
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let actions = app
+            .running_chat_controller_mut()
+            .expect("chat controller")
+            .apply_context_command(
+                InputDialogContextCommand::Paste,
+                Some("first\nsecond"),
+                &layout,
+                &fonts.text,
+            );
+        app.finish_game_option_input_dialog_actions(actions)
+            .expect("process multiline chat paste");
+        assert_eq!(app.running_chat_text(), Some("second"));
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_NORMAL,
+                player: app.local_owner,
+                to_player: -1,
+                message: lc_engine::LegacyCString::from_bytes(b"first".to_vec())
+                    .expect("fixture is NUL-free"),
+                by_client: 0,
+            }]
+        );
+        assert_eq!(
+            app.message_input_history.front().map(String::as_str),
+            Some("first")
+        );
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit retained final line");
+        assert!(app.running_chat.is_none());
+        assert_eq!(
+            commands.take_submitted_messages(),
+            vec![MessageControlData {
+                message_type: MESSAGE_TYPE_NORMAL,
+                player: app.local_owner,
+                to_player: -1,
+                message: lc_engine::LegacyCString::from_bytes(b"second".to_vec())
+                    .expect("fixture is NUL-free"),
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn running_chat_history_scrolls_replacement_and_preserves_offset_when_cleared() {
+        let mut app = new_running_sandbox_app();
+        app.message_input_history.push_front("history".to_string());
+        app.start_running_chat(RunningChatMode::All);
+        for character in "long text ".repeat(100).chars() {
+            app.handle_text_input(character)
+                .expect("type horizontally scrolling chat");
+        }
+        let long_scroll = app
+            .running_chat_controller()
+            .expect("running chat controller")
+            .horizontal_scroll();
+        assert!(long_scroll > 0);
+
+        app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("replace chat with older history");
+        assert_eq!(app.running_chat_text(), Some("history"));
+        let history_scroll = app
+            .running_chat_controller()
+            .expect("history chat controller")
+            .horizontal_scroll();
+        assert!(history_scroll < long_scroll);
+        assert_eq!(
+            app.running_chat_controller()
+                .expect("history chat controller")
+                .selection(),
+            Some((0, "history".len()))
+        );
+
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("clear chat past newest history");
+        assert_eq!(app.running_chat_text(), Some(""));
+        assert_eq!(
+            app.running_chat_controller()
+                .expect("cleared chat controller")
+                .horizontal_scroll(),
+            history_scroll
+        );
+    }
+
+    #[test]
+    fn running_chat_raw_gamepad_owner_outranks_game_over_source_eligibility() {
+        let mut app = new_game_over_keyboard_app();
+        app.local_controls.remove(app.local_owner);
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: GamepadSlot::new(1).control_set(),
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.start_running_chat(RunningChatMode::All);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local sandbox player")
+            .control
+            .pressed_coms = 0;
+
+        app.process_sourced_gamepad_event_batch(
+            [SourcedGamepadEvent {
+                gamepad: 1,
+                cluster: 17,
+                event: GamepadEvent::Direction {
+                    slot: GamepadSlot::new(1),
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                },
+            }],
+            false,
+        )
+        .expect("chat forwards raw input from a non-GUI gamepad above evaluation");
+
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local sandbox player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0
+        );
+        assert!(app.game_over_dialog.is_some());
+        assert!(app.running_chat.is_some());
+        assert!(app.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn running_chat_close_forgets_releases_swallowed_by_the_modal() {
+        let mut app = new_running_sandbox_app();
+        app.start_running_chat(RunningChatMode::All);
+        app.pressed_engine_keys.insert(VirtualKeyCode::A);
+        app.pressed_engine_keys.insert(VirtualKeyCode::Tab);
+        app.scoreboard_tab_raw_pressed = true;
+
+        app.handle_key(VirtualKeyCode::A, ElementState::Released)
+            .expect("chat owns held gameplay-key release");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("chat owns held scoreboard-key release");
+        assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::A));
+        assert!(app.scoreboard_tab_raw_pressed);
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close running chat");
+        assert!(app.pressed_engine_keys.is_empty());
+        assert!(!app.scoreboard_tab_raw_pressed);
+
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("first gameplay down after chat is not a stale repeat");
+        assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::A));
+    }
+
+    #[test]
+    fn running_chat_exclusive_scope_blocks_rebound_tab_player_control() {
+        let mut app = new_running_sandbox_app();
+        app.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
+        app.start_running_chat(RunningChatMode::All);
+
+        for context_open in [false, true] {
+            if context_open {
+                app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+                    .expect("open chat edit context");
+                app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+                    .expect("release context key");
+                assert!(app.context_menu.is_some());
+            }
+            app.engine
+                .player_mut(app.local_owner)
+                .expect("local sandbox player")
+                .control
+                .pressed_coms = 0;
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("chat scope owns rebound Tab down");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("chat scope owns rebound Tab up");
+            assert_eq!(
+                app.engine
+                    .player(app.local_owner)
+                    .expect("local sandbox player")
+                    .control
+                    .pressed_coms
+                    & (1 << lc_engine::COM_LEFT),
+                0
+            );
+            if context_open {
+                app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                    .expect("close chat edit context");
+                app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                    .expect("release context close key");
+            }
+        }
+    }
+
+    #[test]
+    fn running_chat_global_bindings_open_above_lower_messages_and_contexts() {
+        let notice = || {
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Lower notice",
+                "Message",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            )
+        };
+
+        let mut f2 = new_running_sandbox_app();
+        f2.push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push lower message");
+        let layout = f2.top_message_dialog_layout().expect("message layout");
+        let button = layout.buttons.first().expect("message button").rect;
+        f2.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(button.x + button.w / 2),
+            f64::from(button.y + button.h / 2),
+        ))
+        .expect("hover lower message button");
+        f2.handle_mouse_button(ElementState::Pressed)
+            .expect("capture lower message button");
+        assert!(f2.message_dialogs[0].state.has_pointer_capture());
+        assert_eq!(f2.message_dialog_pointer_capture_index, Some(0));
+        f2.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("F2 opens chat above lower message");
+        assert_eq!(f2.running_chat_text(), Some(""));
+        assert_eq!(f2.message_dialogs.len(), 1);
+        assert!(f2.message_dialogs[0].state.has_pointer_capture());
+        f2.handle_mouse_button(ElementState::Released)
+            .expect("release retained lower-message capture through chat");
+        assert!(f2.message_dialogs.is_empty());
+        assert!(f2.running_chat_active());
+
+        let mut focus_loss = new_running_sandbox_app();
+        focus_loss
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push lower message for focus-loss capture");
+        let layout = focus_loss.top_message_dialog_layout().expect("message layout");
+        let button = layout.buttons.first().expect("message button").rect;
+        focus_loss
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(button.x + button.w / 2),
+                f64::from(button.y + button.h / 2),
+            ))
+            .expect("hover lower focus-loss button");
+        focus_loss
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("capture lower focus-loss button");
+        focus_loss
+            .handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("open chat over retained focus-loss capture");
+        focus_loss
+            .handle_focus_lost()
+            .expect("focus loss clears captures below active chat");
+        assert!(!focus_loss.message_dialogs[0].state.has_pointer_capture());
+        assert_eq!(focus_loss.message_dialog_pointer_capture_index, None);
+        assert!(!focus_loss.primary_pointer_left_down);
+        focus_loss
+            .handle_mouse_button(ElementState::Released)
+            .expect("post-focus release cannot activate lower message");
+        assert_eq!(focus_loss.message_dialogs.len(), 1);
+
+        for (modifiers, expected) in [
+            (ModifiersState::SHIFT, "/team "),
+            (ModifiersState::ALT, "\""),
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.push_message_dialog(notice(), MessageDialogContinuation::None)
+                .expect("push lower message");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set chat-open modifier");
+            app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+                .expect("modified Return falls through lower message to chat");
+            assert_eq!(app.running_chat_text(), Some(expected));
+            assert_eq!(app.message_dialogs.len(), 1);
+        }
+
+        let mut bare_return = new_running_sandbox_app();
+        bare_return
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push lower message for bare Return");
+        bare_return
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("bare Return opens chat above nonexclusive lower message");
+        assert_eq!(bare_return.running_chat_text(), Some(""));
+        assert_eq!(bare_return.message_dialogs.len(), 1);
+
+        let lower_layout = bare_return
+            .top_message_dialog_layout()
+            .expect("lower message layout under chat");
+        let lower_point = PhysicalPosition::new(
+            f64::from(lower_layout.bounds.x + 5),
+            f64::from(lower_layout.bounds.y + 5),
+        );
+        bare_return
+            .handle_cursor_moved(lower_point)
+            .expect("hover lower message outside compact chat");
+        bare_return
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("activate lower shared-screen message");
+        bare_return
+            .handle_mouse_button(ElementState::Released)
+            .expect("release lower shared-screen message");
+        assert!(!bare_return.running_chat_active());
+        bare_return
+            .handle_text_input('x')
+            .expect("inactive chat ignores text while lower message owns keys");
+        assert_eq!(bare_return.running_chat_text(), Some(""));
+
+        let chat_layout = bare_return.game_option_input_layout().expect("chat layout");
+        let chat_point = PhysicalPosition::new(
+            f64::from(chat_layout.edit.x + chat_layout.edit.w / 2),
+            f64::from(chat_layout.edit.y + chat_layout.edit.h / 2),
+        );
+        bare_return
+            .handle_cursor_moved(chat_point)
+            .expect("hover chat above lower message");
+        bare_return
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("reactivate compact chat");
+        bare_return
+            .handle_mouse_button(ElementState::Released)
+            .expect("release compact chat click");
+        assert!(bare_return.running_chat_active());
+        bare_return
+            .handle_text_input('x')
+            .expect("reactivated chat accepts text");
+        assert_eq!(bare_return.running_chat_text(), Some("x"));
+
+        let mut inactive_return = new_running_sandbox_app();
+        inactive_return.start_running_chat(RunningChatMode::All);
+        inactive_return
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push message below visible chat for active-key routing");
+        let lower_layout = inactive_return
+            .top_message_dialog_layout()
+            .expect("inactive-key lower message layout");
+        inactive_return
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(lower_layout.bounds.x + 5),
+                f64::from(lower_layout.bounds.y + 5),
+            ))
+            .expect("hover lower message for active-key routing");
+        inactive_return
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("activate lower message for Return routing");
+        inactive_return
+            .handle_mouse_button(ElementState::Released)
+            .expect("release lower-message activation click");
+        inactive_return
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("active lower message owns Return down");
+        assert_eq!(inactive_return.message_dialogs.len(), 1);
+        assert!(!inactive_return.running_chat_active());
+        inactive_return
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("active lower message owns Return up");
+        assert!(inactive_return.message_dialogs.is_empty());
+        assert!(inactive_return.running_chat_active());
+
+        let mut held_drag = new_running_sandbox_app();
+        held_drag.start_running_chat(RunningChatMode::All);
+        held_drag
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push message below chat for held-pointer activation");
+        let lower_layout = held_drag
+            .top_message_dialog_layout()
+            .expect("held-pointer lower message layout");
+        let lower_button = lower_layout.buttons.first().expect("lower OK button").rect;
+        held_drag
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(lower_button.x + lower_button.w / 2),
+                f64::from(lower_button.y + lower_button.h / 2),
+            ))
+            .expect("hover lower button for held-pointer activation");
+        held_drag
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("press lower button while chat is visible");
+        assert!(!held_drag.running_chat_active());
+        let chat_layout = held_drag.game_option_input_layout().expect("held chat layout");
+        held_drag
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(chat_layout.edit.x + chat_layout.edit.w / 2),
+                f64::from(chat_layout.edit.y + chat_layout.edit.h / 2),
+            ))
+            .expect("held left movement activates the hit chat dialog");
+        assert!(held_drag.running_chat_active());
+        held_drag
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(lower_button.x + lower_button.w / 2),
+                f64::from(lower_button.y + lower_button.h / 2),
+            ))
+            .expect("active chat retains held routing outside its bounds");
+        held_drag
+            .handle_mouse_button(ElementState::Released)
+            .expect("lower button cannot re-arm after chat activation");
+        assert_eq!(held_drag.message_dialogs.len(), 1);
+
+        let mut label_drag = new_running_sandbox_app();
+        label_drag.start_running_chat(RunningChatMode::All);
+        label_drag
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push lower message for noncapturing chat-label drag");
+        let chat_layout = label_drag.game_option_input_layout().expect("label chat layout");
+        let label_point = PhysicalPosition::new(
+            f64::from(chat_layout.message.x + chat_layout.message.w / 2),
+            f64::from(chat_layout.message.y + chat_layout.message.h / 2),
+        );
+        let message_layout = label_drag
+            .top_message_dialog_layout()
+            .expect("label-drag lower message layout");
+        let lower_point = PhysicalPosition::new(
+            f64::from(message_layout.bounds.x + 5),
+            f64::from(message_layout.bounds.y + 5),
+        );
+        label_drag
+            .handle_cursor_moved(label_point)
+            .expect("hover the inert chat label");
+        label_drag
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("press the inert chat label");
+        assert_eq!(label_drag.game_option_input_pointer_capture, None);
+        assert!(label_drag.primary_pointer_left_down);
+        label_drag
+            .handle_cursor_moved(lower_point)
+            .expect("held label drag activates the hit lower message");
+        assert!(!label_drag.running_chat_active());
+        assert_eq!(label_drag.active_message_dialog_index(), Some(0));
+        label_drag
+            .handle_mouse_button(ElementState::Released)
+            .expect("release the noncapturing label drag");
+        assert!(!label_drag.primary_pointer_left_down);
+
+        let mut touch_lower = new_running_sandbox_app();
+        touch_lower.start_running_chat(RunningChatMode::All);
+        touch_lower
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push lower message for shared touch routing");
+        let message_layout = touch_lower
+            .top_message_dialog_layout()
+            .expect("touch lower message layout");
+        let lower_touch = GuiPoint::new(
+            (message_layout.bounds.x + 5) as f32,
+            (message_layout.bounds.y + 5) as f32,
+        );
+        touch_lower
+            .handle_touch(TouchPhase::Started, lower_touch)
+            .expect("touch starts on the exposed lower message");
+        assert!(!touch_lower.running_chat_active());
+        assert_eq!(touch_lower.active_message_dialog_index(), Some(0));
+        touch_lower
+            .handle_touch(TouchPhase::Ended, lower_touch)
+            .expect("touch ends on the lower message");
+
+        let mut release_hit = new_running_sandbox_app();
+        release_hit.start_running_chat(RunningChatMode::All);
+        release_hit
+            .push_message_dialog(
+                notice().with_checkbox("&Remember", false),
+                MessageDialogContinuation::None,
+            )
+            .expect("push checkbox message below captured chat edit");
+        let message_layout = release_hit
+            .top_message_dialog_layout()
+            .expect("checkbox message layout");
+        let checkbox = message_layout
+            .checkbox
+            .as_ref()
+            .expect("checkbox layout")
+            .square;
+        let checkbox_point = PhysicalPosition::new(
+            f64::from(checkbox.x + checkbox.w / 2),
+            f64::from(checkbox.y + checkbox.h / 2),
+        );
+        let chat_layout = release_hit.game_option_input_layout().expect("edit chat layout");
+        let edit_point = PhysicalPosition::new(
+            f64::from(chat_layout.edit.x + 5),
+            f64::from(chat_layout.edit.y + chat_layout.edit.h / 2),
+        );
+        release_hit
+            .handle_cursor_moved(edit_point)
+            .expect("hover chat edit");
+        release_hit
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("chat edit installs pDragElement");
+        assert_eq!(
+            release_hit.game_option_input_pointer_capture,
+            Some(ContextMenuPointerButton::Left),
+        );
+        release_hit
+            .handle_cursor_moved(checkbox_point)
+            .expect("chat edit capture retains held motion over checkbox");
+        release_hit
+            .handle_mouse_button(ElementState::Released)
+            .expect("release clears chat capture before checkbox hit-testing");
+        assert_eq!(release_hit.game_option_input_pointer_capture, None);
+        assert_eq!(
+            release_hit.message_dialogs[0].state.checkbox_checked(),
+            Some(true),
+        );
+
+        let mut close_active_chat = new_running_sandbox_app();
+        close_active_chat.start_running_chat(RunningChatMode::All);
+        close_active_chat
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push lower message for active-chat close cleanup");
+        let message_layout = close_active_chat
+            .top_message_dialog_layout()
+            .expect("close-cleanup message layout");
+        let button = message_layout.buttons.first().expect("close-cleanup button").rect;
+        close_active_chat
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(button.x + button.w / 2),
+                f64::from(button.y + button.h / 2),
+            ))
+            .expect("hover cleanup button");
+        close_active_chat
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("capture cleanup button");
+        let chat_layout = close_active_chat
+            .game_option_input_layout()
+            .expect("close-cleanup chat layout");
+        close_active_chat
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(chat_layout.edit.x + 5),
+                f64::from(chat_layout.edit.y + chat_layout.edit.h / 2),
+            ))
+            .expect("held move activates chat above retained capture");
+        assert!(close_active_chat.running_chat_active());
+        assert_eq!(close_active_chat.message_dialog_pointer_capture_index, Some(0));
+        close_active_chat
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("closing active chat releases all mouse elements");
+        assert!(close_active_chat.running_chat.is_none());
+        assert_eq!(close_active_chat.message_dialog_pointer_capture_index, None);
+        assert!(!close_active_chat.message_dialogs[0]
+            .state
+            .has_pointer_capture());
+
+        let mut stacked_active = new_running_sandbox_app();
+        stacked_active.start_running_chat(RunningChatMode::All);
+        stacked_active
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push first lower message");
+        let first_layout = stacked_active
+            .top_message_dialog_layout()
+            .expect("first lower message layout");
+        stacked_active
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(first_layout.bounds.x + 5),
+                f64::from(first_layout.bounds.y + 5),
+            ))
+            .expect("hover first lower message");
+        stacked_active
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("activate first lower message");
+        stacked_active
+            .handle_mouse_button(ElementState::Released)
+            .expect("release first lower activation");
+        assert_eq!(stacked_active.active_message_dialog_index(), Some(0));
+
+        let vote = || {
+            lc_frontend::message_dialog::MessageDialogState::new(
+                "Vote?",
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            )
+        };
+        let small_vote = || {
+            lc_frontend::message_dialog::MessageDialogState::new(
+                "Vote?",
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Small,
+                true,
+            )
+        };
+        let small_notice = || {
+            lc_frontend::message_dialog::MessageDialogState::new(
+                "Top notice",
+                "Message",
+                lc_frontend::message_dialog::MessageDialogButtons::OK,
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                lc_frontend::message_dialog::MessageDialogSize::Small,
+                false,
+            )
+        };
+        stacked_active
+            .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("insert second message below inactive chat");
+        assert_eq!(stacked_active.active_message_dialog_index(), Some(0));
+        stacked_active
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("previous lower active dialog owns Return down");
+        stacked_active
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("previous lower active dialog owns Return up");
+        assert_eq!(stacked_active.message_dialogs.len(), 1);
+        assert!(matches!(
+            stacked_active.message_dialogs[0].continuation,
+            MessageDialogContinuation::LeagueSurrender
+        ));
+        assert!(stacked_active.running_chat_active());
+
+        let mut stacked_capture = new_running_sandbox_app();
+        stacked_capture.start_running_chat(RunningChatMode::All);
+        stacked_capture
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push captured dialog A below chat");
+        let layout = stacked_capture
+            .top_message_dialog_layout()
+            .expect("captured dialog A layout");
+        let button = layout.buttons.first().expect("dialog A button").rect;
+        let button_point = PhysicalPosition::new(
+            f64::from(button.x + button.w / 2),
+            f64::from(button.y + button.h / 2),
+        );
+        stacked_capture
+            .handle_cursor_moved(button_point)
+            .expect("hover dialog A button");
+        stacked_capture
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("dialog A acquires global drag capture");
+        assert_eq!(stacked_capture.message_dialog_pointer_capture_index, Some(0));
+        stacked_capture
+            .push_message_dialog(small_vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("insert dialog B above captured A but below chat");
+        assert_eq!(stacked_capture.active_message_dialog_index(), Some(0));
+        let small_layout = stacked_capture
+            .top_message_dialog_layout()
+            .expect("smaller dialog B layout");
+        let button_gui_point = GuiPoint::new(button_point.x as f32, button_point.y as f32);
+        assert!(GameApp::point_in_message_dialog_bounds(
+            button_gui_point,
+            &small_layout,
+        ));
+        let a_only_point = PhysicalPosition::new(
+            f64::from(layout.bounds.x + 5),
+            f64::from(layout.bounds.y + 5),
+        );
+        assert!(!GameApp::point_in_message_dialog_bounds(
+            GuiPoint::new(a_only_point.x as f32, a_only_point.y as f32),
+            &small_layout,
+        ));
+
+        stacked_capture
+            .handle_mouse_button(ElementState::Released)
+            .expect("release hit-tests B after clearing A's global capture");
+        assert_eq!(stacked_capture.message_dialogs.len(), 2);
+        assert_eq!(stacked_capture.active_message_dialog_index(), Some(0));
+        assert_eq!(stacked_capture.message_dialog_pointer_capture_index, None);
+        assert!(stacked_capture
+            .message_dialogs
+            .iter()
+            .all(|dialog| !dialog.state.has_pointer_capture()));
+
+        let mut exposed_lower = new_running_sandbox_app();
+        exposed_lower
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push regular shared-screen dialog A");
+        let regular_layout = exposed_lower
+            .top_message_dialog_layout()
+            .expect("regular dialog A layout");
+        exposed_lower
+            .push_message_dialog(small_vote(), MessageDialogContinuation::None)
+            .expect("push smaller shared-screen dialog B");
+        let small_layout = exposed_lower
+            .top_message_dialog_layout()
+            .expect("smaller dialog B layout");
+        let close = regular_layout
+            .close_button
+            .expect("regular dialog A close button");
+        let exposed_point = PhysicalPosition::new(
+            f64::from(close.x + close.w / 2),
+            f64::from(close.y + close.h / 2),
+        );
+        assert!(!GameApp::point_in_message_dialog_bounds(
+            GuiPoint::new(exposed_point.x as f32, exposed_point.y as f32),
+            &small_layout,
+        ));
+        exposed_lower
+            .handle_cursor_moved(exposed_point)
+            .expect("hover the exposed lower dialog A");
+        exposed_lower
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("left-down activates and captures exposed lower dialog A");
+        assert_eq!(exposed_lower.active_message_dialog_index(), Some(0));
+        assert_eq!(exposed_lower.message_dialog_pointer_capture_index, Some(0));
+        let top_point = PhysicalPosition::new(
+            f64::from(small_layout.bounds.x + small_layout.bounds.w / 2),
+            f64::from(small_layout.bounds.y + small_layout.bounds.h / 2),
+        );
+        exposed_lower
+            .handle_cursor_moved(top_point)
+            .expect("held move into B activates it without transferring A capture");
+        assert_eq!(exposed_lower.active_message_dialog_index(), Some(1));
+        assert_eq!(exposed_lower.message_dialog_pointer_capture_index, Some(0));
+        exposed_lower
+            .handle_cursor_moved(exposed_point)
+            .expect("active B blocks the lower A-only hit while capture remains");
+        assert_eq!(exposed_lower.active_message_dialog_index(), Some(1));
+        assert_eq!(exposed_lower.message_dialog_pointer_capture_index, Some(0));
+        exposed_lower
+            .handle_mouse_button(ElementState::Released)
+            .expect("A-only release clears A capture without closing it");
+        assert_eq!(exposed_lower.message_dialogs.len(), 2);
+        assert_eq!(exposed_lower.message_dialog_pointer_capture_index, None);
+
+        let mut inserted_capture = new_running_sandbox_app();
+        inserted_capture
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push dialog A before an asynchronous insertion");
+        let regular_layout = inserted_capture
+            .top_message_dialog_layout()
+            .expect("asynchronous dialog A layout");
+        let close = regular_layout
+            .close_button
+            .expect("asynchronous dialog A close button");
+        let close_point = PhysicalPosition::new(
+            f64::from(close.x + close.w / 2),
+            f64::from(close.y + close.h / 2),
+        );
+        inserted_capture
+            .handle_cursor_moved(close_point)
+            .expect("hover dialog A close before insertion");
+        inserted_capture
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("dialog A captures before insertion");
+        inserted_capture
+            .push_message_dialog(small_vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("insert exclusive dialog B without releasing A capture");
+        assert_eq!(inserted_capture.active_message_dialog_index(), Some(1));
+        assert_eq!(inserted_capture.message_dialog_pointer_capture_index, Some(0));
+        assert!(inserted_capture.message_dialogs[0]
+            .state
+            .has_pointer_capture());
+        let small_layout = inserted_capture
+            .top_message_dialog_layout()
+            .expect("asynchronous dialog B layout");
+        let top_point = PhysicalPosition::new(
+            f64::from(small_layout.bounds.x + small_layout.bounds.w / 2),
+            f64::from(small_layout.bounds.y + small_layout.bounds.h / 2),
+        );
+        inserted_capture
+            .handle_cursor_moved(top_point)
+            .expect("active B owns held motion after insertion");
+        inserted_capture
+            .handle_mouse_button(ElementState::Released)
+            .expect("B hit clears the retained A capture");
+        assert_eq!(inserted_capture.message_dialogs.len(), 2);
+        assert_eq!(inserted_capture.message_dialog_pointer_capture_index, None);
+
+        let exposed_point = PhysicalPosition::new(
+            f64::from(regular_layout.bounds.x + 5),
+            f64::from(regular_layout.bounds.y + 5),
+        );
+        assert!(!GameApp::point_in_message_dialog_bounds(
+            GuiPoint::new(exposed_point.x as f32, exposed_point.y as f32),
+            &small_layout,
+        ));
+        inserted_capture
+            .handle_cursor_moved(exposed_point)
+            .expect("hover A outside the smaller exclusive B");
+        inserted_capture
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("exclusive B still permits shared-screen A hit-testing");
+        assert_eq!(inserted_capture.active_message_dialog_index(), Some(0));
+        inserted_capture
+            .handle_mouse_button(ElementState::Released)
+            .expect("release the exposed A click");
+
+        stacked_capture
+            .remove_message_dialog_at(1)
+            .expect("remove B to press A again");
+        stacked_capture
+            .handle_cursor_moved(button_point)
+            .expect("hover A before a second gesture");
+        stacked_capture
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("dialog A reacquires capture");
+        stacked_capture
+            .push_message_dialog(small_vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("insert B above A during the second drag");
+        stacked_capture
+            .handle_cursor_moved(button_point)
+            .expect("captured A drags first, then overlapping B activates");
+        assert_eq!(stacked_capture.message_dialog_pointer_capture_index, Some(0));
+        assert_eq!(stacked_capture.active_message_dialog_index(), Some(1));
+        stacked_capture
+            .handle_cursor_moved(a_only_point)
+            .expect("active B blocks a lower A-only hit while capture remains");
+        assert_eq!(stacked_capture.message_dialog_pointer_capture_index, Some(0));
+        assert_eq!(stacked_capture.active_message_dialog_index(), Some(1));
+        stacked_capture
+            .handle_mouse_button(ElementState::Released)
+            .expect("A-only release clears A capture without reactivating its button");
+        assert_eq!(stacked_capture.message_dialogs.len(), 2);
+        assert_eq!(stacked_capture.active_message_dialog_index(), Some(1));
+        assert_eq!(stacked_capture.message_dialog_pointer_capture_index, None);
+        assert!(stacked_capture
+            .message_dialogs
+            .iter()
+            .all(|dialog| !dialog.state.has_pointer_capture()));
+
+        let mut vote_pointer = new_running_sandbox_app();
+        vote_pointer
+            .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("push exclusive vote for outside-pointer routing");
+        vote_pointer.running_pointer_position = Some(GuiPoint::new(0.0, 0.0));
+        assert!(vote_pointer.handle_message_dialog_pointer_move(GuiPoint::new(0.0, 0.0)));
+        assert!(
+            vote_pointer
+                .handle_message_dialog_pointer_button(ElementState::Pressed)
+                .expect("exclusive vote consumes outside pointer down")
+        );
+        assert!(
+            vote_pointer
+                .handle_message_dialog_pointer_button(ElementState::Released)
+                .expect("exclusive vote consumes outside pointer up")
+        );
+
+        let mut vote_return = new_running_sandbox_app();
+        vote_return
+            .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("push exclusive vote for bare Return");
+        vote_return
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("bare Return remains owned by exclusive vote");
+        assert!(vote_return.running_chat.is_none());
+        assert_eq!(vote_return.message_dialogs.len(), 1);
+        vote_return
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("focused No rejects vote on Return release");
+        assert!(vote_return.message_dialogs.is_empty());
+        assert_eq!(vote_return.mode, AppMode::Running);
+
+        for (key, modifiers) in [
+            (VirtualKeyCode::Return, ModifiersState::CTRL),
+            (VirtualKeyCode::Space, ModifiersState::CTRL),
+            (VirtualKeyCode::Space, ModifiersState::SHIFT),
+            (VirtualKeyCode::Escape, ModifiersState::CTRL),
+            (
+                VirtualKeyCode::Y,
+                ModifiersState::CTRL | ModifiersState::ALT,
+            ),
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+                .expect("push vote for exact modifier routing");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set nonmatching GUI modifiers");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("nonmatching GUI key down is inert");
+            app.handle_key(key, ElementState::Released)
+                .expect("nonmatching GUI key up is inert");
+            assert_eq!(app.message_dialogs.len(), 1);
+            assert!(app.running_chat.is_none());
+        }
+
+        let mut unmatched_vote_hotkey = new_running_sandbox_app();
+        unmatched_vote_hotkey
+            .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("push exclusive vote for unmatched Alt mnemonic");
+        unmatched_vote_hotkey
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt over vote");
+        let irc_error = unmatched_vote_hotkey
+            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect_err("unmatched vote mnemonic falls through to global Alt+C");
+        assert_engine_parity_boundary(
+            irc_error,
+            ClassicParityBoundary::RuntimeIrcChatToggle,
+        );
+        unmatched_vote_hotkey
+            .handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("global Alt+C release also falls through the vote");
+        assert_eq!(unmatched_vote_hotkey.message_dialogs.len(), 1);
+
+        let mut handled_message_hotkey = new_running_sandbox_app();
+        handled_message_hotkey
+            .push_message_dialog(
+                vote().with_checkbox("&Don't display again", false),
+                MessageDialogContinuation::LeagueSurrender,
+            )
+            .expect("push checkbox message for down-only mnemonic");
+        handled_message_hotkey
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt over checkbox mnemonic");
+        assert!(handled_message_hotkey
+            .handle_message_dialog_key(VirtualKeyCode::D, ElementState::Pressed)
+            .expect("checkbox mnemonic down is handled"));
+        assert_eq!(
+            handled_message_hotkey.message_dialogs[0]
+                .state
+                .checkbox_checked(),
+            Some(true)
+        );
+        assert!(!handled_message_hotkey
+            .message_dialog_consumed_keys
+            .contains(&VirtualKeyCode::D));
+        assert!(!handled_message_hotkey
+            .handle_message_dialog_key(VirtualKeyCode::D, ElementState::Released)
+            .expect("mnemonic release is not owned by the dialog"));
+
+        let mut changed_release = new_running_sandbox_app();
+        changed_release
+            .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("push vote for modifier-changed release");
+        changed_release
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("bare Return presses focused No");
+        changed_release
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("change modifiers before Return up");
+        changed_release
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("modified Return up does not match the bare button binding");
+        assert_eq!(changed_release.message_dialogs.len(), 1);
+        assert!(changed_release.running_chat.is_none());
+
+        let mut exclusive_top_scope = new_running_sandbox_app();
+        exclusive_top_scope
+            .push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push ordinary lower A");
+        let lower_layout = exclusive_top_scope
+            .top_message_dialog_layout()
+            .expect("ordinary lower A layout");
+        exclusive_top_scope
+            .push_message_dialog(small_vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("push smaller exclusive top B");
+        let exposed = PhysicalPosition::new(
+            f64::from(lower_layout.bounds.x + 5),
+            f64::from(lower_layout.bounds.y + 5),
+        );
+        exclusive_top_scope
+            .handle_cursor_moved(exposed)
+            .expect("hover exposed ordinary A");
+        exclusive_top_scope
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("activate ordinary A under exclusive B");
+        exclusive_top_scope
+            .handle_mouse_button(ElementState::Released)
+            .expect("release ordinary A activation");
+        assert_eq!(exclusive_top_scope.active_message_dialog_index(), Some(0));
+        exclusive_top_scope
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("top exclusive B supplies GUI scope to active A");
+        exclusive_top_scope
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("active ordinary A accepts Return under B's GUI scope");
+        assert_eq!(exclusive_top_scope.message_dialogs.len(), 1);
+        assert!(matches!(
+            exclusive_top_scope.message_dialogs[0].continuation,
+            MessageDialogContinuation::LeagueSurrender
+        ));
+        assert!(exclusive_top_scope.running_chat.is_none());
+
+        let mut nonexclusive_top_scope = new_running_sandbox_app();
+        nonexclusive_top_scope
+            .push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+            .expect("push exclusive lower A");
+        let lower_layout = nonexclusive_top_scope
+            .top_message_dialog_layout()
+            .expect("exclusive lower A layout");
+        nonexclusive_top_scope
+            .push_message_dialog(small_notice(), MessageDialogContinuation::None)
+            .expect("push smaller nonexclusive top B");
+        let exposed = PhysicalPosition::new(
+            f64::from(lower_layout.bounds.x + 5),
+            f64::from(lower_layout.bounds.y + 5),
+        );
+        nonexclusive_top_scope
+            .handle_cursor_moved(exposed)
+            .expect("hover exposed lower vote A");
+        nonexclusive_top_scope
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("activate lower vote A");
+        nonexclusive_top_scope
+            .handle_mouse_button(ElementState::Released)
+            .expect("release lower vote A activation");
+        assert_eq!(nonexclusive_top_scope.active_message_dialog_index(), Some(0));
+        nonexclusive_top_scope
+            .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("nonexclusive top B leaves bare Return in global chat scope");
+        assert_eq!(nonexclusive_top_scope.running_chat_text(), Some(""));
+        assert_eq!(nonexclusive_top_scope.message_dialogs.len(), 2);
+
+        for (key, modifiers, expected) in [
+            (VirtualKeyCode::F2, ModifiersState::empty(), ""),
+            (VirtualKeyCode::Return, ModifiersState::SHIFT, "/team "),
+            (VirtualKeyCode::Return, ModifiersState::ALT, "\""),
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.push_message_dialog(vote(), MessageDialogContinuation::LeagueSurrender)
+                .expect("push exclusive vote for global chat binding");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set vote chat-open modifier");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("unhandled global chat binding falls through exclusive vote");
+            assert_eq!(app.running_chat_text(), Some(expected));
+            assert_eq!(app.message_dialogs.len(), 1);
+        }
+
+        for (key, modifiers, expected) in [
+            (VirtualKeyCode::F2, ModifiersState::empty(), ""),
+            (VirtualKeyCode::Return, ModifiersState::SHIFT, "/team "),
+            (VirtualKeyCode::Return, ModifiersState::ALT, "\""),
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Unrelated")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open unrelated context");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set context chat-open modifier");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("global chat binding opens underneath unrelated context");
+            assert_eq!(app.running_chat_text(), Some(expected));
+            assert!(app.context_menu.is_some());
+        }
+    }
+
+    #[test]
+    fn running_chat_shared_screen_pointer_lifecycle_matches_classic_mouse() {
+        let notice = || {
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Lower notice",
+                "Message",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            )
+        };
+
+        let mut app = new_running_sandbox_app();
+        app.start_running_chat(RunningChatMode::All);
+        for character in "alpha beta".chars() {
+            app.handle_text_input(character).expect("type chat text");
+        }
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt over compact chat");
+        assert!(!app
+            .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Pressed)
+            .expect("non-character Alt key has no input-dialog mnemonic"));
+        assert!(!app
+            .handle_game_option_input_dialog_key(VirtualKeyCode::F11, ElementState::Released)
+            .expect("non-character Alt release is also down-only fallthrough"));
+        let irc_error = app
+            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect_err("compact chat has no C mnemonic and yields global Alt+C");
+        assert_engine_parity_boundary(
+            irc_error,
+            ClassicParityBoundary::RuntimeIrcChatToggle,
+        );
+        app.handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("global Alt+C release passes compact chat");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt over compact chat");
+        app.push_message_dialog(notice(), MessageDialogContinuation::None)
+            .expect("push lower shared-screen message");
+        assert_eq!(app.game_option_input_activity(), (true, true));
+        let message_layout = app.top_message_dialog_layout().expect("message layout");
+        let message_button = message_layout.buttons[0].rect;
+        let message_point = PhysicalPosition::new(
+            f64::from(message_button.x + message_button.w / 2),
+            f64::from(message_button.y + message_button.h / 2),
+        );
+        app.handle_cursor_moved(message_point)
+            .expect("hover lower message through chat");
+        assert!(app.message_dialogs[0].state.has_pointer_hover());
+
+        let chat_layout = app.game_option_input_layout().expect("chat layout");
+        let chat_point = PhysicalPosition::new(
+            f64::from(chat_layout.edit.x + 5),
+            f64::from(chat_layout.edit.y + chat_layout.edit.h / 2),
+        );
+        app.handle_cursor_moved(chat_point)
+            .expect("move back into chat edit");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate chat edit");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release chat activation");
+        app.handle_cursor_moved(message_point)
+            .expect("hover lower message while chat keeps keyboard focus");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open chat context above hovered lower message");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release chat context key");
+        let context_row = app
+            .context_menu
+            .as_ref()
+            .expect("chat context menu")
+            .layout()
+            .panels[0]
+            .rows[0]
+            .rect;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(context_row.x + 1),
+            f64::from(context_row.y + 1),
+        ))
+        .expect("move into chat context menu");
+        assert!(!app.message_dialogs[0].state.has_pointer_hover());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close chat context");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release context Escape");
+
+        app.handle_cursor_moved(chat_point)
+            .expect("return to chat edit before retained drag");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start retained chat edit drag");
+        assert!(app
+            .running_chat_controller()
+            .expect("chat controller during drag")
+            .has_positional_pointer_drag());
+        let caret_before_context_drag = app
+            .running_chat_controller()
+            .expect("chat controller before context drag")
+            .caret();
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open context during retained chat drag");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release context key during retained chat drag");
+        let context_panel = app
+            .context_menu
+            .as_ref()
+            .expect("chat drag context")
+            .layout()
+            .panels[0]
+            .bounds;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(context_panel.x + context_panel.w - 2),
+            f64::from(context_panel.y + 1),
+        ))
+        .expect("retained edit drag updates before context captures motion");
+        assert_ne!(
+            app.running_chat_controller()
+                .expect("chat controller after context drag")
+                .caret(),
+            caret_before_context_drag
+        );
+        assert!(app
+            .running_chat_controller()
+            .expect("chat drag remains retained until up")
+            .has_positional_pointer_drag());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("context captures retained chat drag release");
+        assert!(!app
+            .running_chat_controller()
+            .expect("chat remains after context drag release")
+            .has_pointer_capture());
+        if app.context_menu.is_some() {
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("close context after retained chat drag");
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                .expect("release context close after retained chat drag");
+        }
+
+        let lower_point = PhysicalPosition::new(
+            f64::from(message_layout.bounds.x + 5),
+            f64::from(message_layout.bounds.y + 5),
+        );
+        app.handle_cursor_moved(lower_point)
+            .expect("move over lower message client");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate lower message without closing it");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release lower message activation");
+        assert_eq!(app.game_option_input_activity(), (false, true));
+
+        let start = GuiPoint::new(
+            (chat_layout.edit.x + 5) as f32,
+            (chat_layout.edit.y + chat_layout.edit.h / 2) as f32,
+        );
+        let end = GuiPoint::new(
+            (chat_layout.edit.x + 90) as f32,
+            (chat_layout.edit.y + chat_layout.edit.h / 2) as f32,
+        );
+        app.handle_touch(TouchPhase::Started, start)
+            .expect("start chat selection touch");
+        app.handle_touch(TouchPhase::Ended, end)
+            .expect("finish chat selection without an intermediate move");
+        assert!(app
+            .running_chat_controller()
+            .and_then(InputDialogController::selected_text)
+            .is_some_and(|text| !text.is_empty()));
+        assert!(!app
+            .running_chat_controller()
+            .expect("chat remains open")
+            .has_pointer_capture());
+
+        let mut cursor_exit = new_running_sandbox_app();
+        let checkbox_dialog = notice().with_checkbox("&Remember", false);
+        cursor_exit
+            .push_message_dialog(checkbox_dialog, MessageDialogContinuation::None)
+            .expect("push checkbox message");
+        let checkbox_layout = cursor_exit
+            .top_message_dialog_layout()
+            .expect("checkbox message layout");
+        let checkbox = checkbox_layout.checkbox.expect("checkbox layout").square;
+        let checkbox_point = PhysicalPosition::new(
+            f64::from(checkbox.x + checkbox.w / 2),
+            f64::from(checkbox.y + checkbox.h / 2),
+        );
+        cursor_exit
+            .handle_cursor_moved(checkbox_point)
+            .expect("hover checkbox before cursor exit");
+        assert!(cursor_exit.message_dialogs[0].state.has_pointer_hover());
+        cursor_exit.pointer_left().expect("cursor leaves window");
+        assert!(cursor_exit.running_pointer_position.is_none());
+        assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
+        cursor_exit
+            .handle_mouse_button(ElementState::Released)
+            .expect("outside release cannot reuse the stale checkbox point");
+        assert_eq!(
+            cursor_exit.message_dialogs[0].state.checkbox_checked(),
+            Some(false)
+        );
+
+        let button = checkbox_layout.buttons[0].rect;
+        cursor_exit
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(button.x + button.w / 2),
+                f64::from(button.y + button.h / 2),
+            ))
+            .expect("hover message button before resize");
+        cursor_exit
+            .handle_mouse_button(ElementState::Pressed)
+            .expect("capture message button before resize");
+        assert_eq!(cursor_exit.message_dialog_pointer_capture_index, Some(0));
+        cursor_exit.resize(360, 240).expect("resize running screen");
+        assert_eq!(cursor_exit.message_dialog_pointer_capture_index, None);
+        assert!(!cursor_exit.message_dialogs[0].state.has_pointer_capture());
+        assert!(!cursor_exit.message_dialogs[0].state.has_pointer_hover());
+
+        let mut menu = new_menu_app(320, 200);
+        let stationary_dialog = notice();
+        let fonts = menu.assets.clonk_fonts.clone().expect("classic fonts");
+        let stationary_layout = stationary_dialog.layout(320, 200, &fonts.text);
+        let button = stationary_layout.buttons[0].rect;
+        let stationary_point = PhysicalPosition::new(
+            f64::from(button.x + button.w / 2),
+            f64::from(button.y + button.h / 2),
+        );
+        menu.handle_cursor_moved(stationary_point)
+            .expect("position menu cursor before asynchronous dialog insertion");
+        menu.push_message_dialog(stationary_dialog, MessageDialogContinuation::None)
+            .expect("insert menu message under stationary cursor");
+        menu.handle_mouse_button(ElementState::Pressed)
+            .expect("stationary menu click presses inserted button");
+        menu.handle_mouse_button(ElementState::Released)
+            .expect("stationary menu click activates inserted button");
+        assert!(menu.message_dialogs.is_empty());
+
+        menu.open_game_option_input_dialog(GameOptionInputDialogRequest {
+            kind: GameOptionInputKind::Password,
+            message: "Password",
+            caption: "Password",
+            icon: lc_frontend::game_option_buttons::GameOptionIcon::Locked,
+            max_text: 31,
+            initial_text: "alpha beta".to_string(),
+            chat_layout: false,
+        })
+        .expect("open regular input dialog for context-captured drag");
+        let input_layout = menu.game_option_input_layout().expect("input layout");
+        let input_start = PhysicalPosition::new(
+            f64::from(input_layout.edit.x + 5),
+            f64::from(input_layout.edit.y + input_layout.edit.h / 2),
+        );
+        menu.handle_cursor_moved(input_start)
+            .expect("move into regular input edit");
+        menu.handle_mouse_button(ElementState::Pressed)
+            .expect("start regular input edit drag");
+        assert!(menu
+            .game_option_input_dialog
+            .as_ref()
+            .expect("regular input dialog")
+            .controller
+            .has_positional_pointer_drag());
+        menu.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open regular input context during drag");
+        menu.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release regular input context key");
+        let input_context = menu
+            .context_menu
+            .as_ref()
+            .expect("regular input context")
+            .layout()
+            .panels[0]
+            .bounds;
+        menu.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(input_context.x + input_context.w - 2),
+            f64::from(input_context.y + 1),
+        ))
+        .expect("regular input drag updates before context motion");
+        menu.handle_mouse_button(ElementState::Released)
+            .expect("context captures regular input drag release");
+        assert!(!menu
+            .game_option_input_dialog
+            .as_ref()
+            .expect("regular input remains open")
+            .controller
+            .has_pointer_capture());
+    }
+
+    #[test]
+    fn running_chat_uses_compact_bottom_third_dialog_above_log_and_message_dialogs() {
+        let mut app = new_running_sandbox_app();
+        install_message_fixture(&mut app);
+        assert!(
+            app.execute_message_control(message_control(
+                MESSAGE_TYPE_NORMAL,
+                7,
+                -1,
+                b"before chat",
+                7,
+            ))
+            .displayed
+        );
+        let board_before = app.message_board_line();
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("open running chat");
+        let surface_width = app.graphics.surface().width() as i32;
+        let surface_height = app.graphics.surface().height() as i32;
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let layout = app.game_option_input_layout().expect("chat layout");
+        let controller = app.running_chat_controller().expect("chat controller");
+        let edit_height = (fonts.text.line_height + 3).max(23);
+        let width = surface_width * 4 / 5;
+        let height = edit_height + 2;
+        let label_width = fonts.text.measure("Chat:", true).0 + 4;
+
+        assert!(controller.is_chat_layout());
+        assert_eq!(controller.message(), "Chat:");
+        assert_eq!(controller.caption(), "");
+        assert_eq!(controller.icon(), InputDialogIcon::None);
+        assert_eq!(
+            controller.focused_control(),
+            lc_frontend::input_dialog::InputDialogControl::Edit
+        );
+        assert_eq!(layout.caption, None);
+        assert_eq!(layout.close_button, None);
+        assert_eq!(layout.bounds.w, width);
+        assert_eq!(layout.bounds.h, height);
+        assert_eq!(layout.bounds.x, (surface_width - width) / 2);
+        assert_eq!(
+            layout.bounds.y,
+            (surface_height - height) / 2 + surface_height / 3
+        );
+        assert_eq!(layout.message.w, label_width);
+        assert_eq!((layout.icon.w, layout.icon.h), (0, 0));
+        assert_eq!((layout.ok_button.w, layout.ok_button.h), (0, 0));
+        assert_eq!((layout.cancel_button.w, layout.cancel_button.h), (0, 0));
+
+        for modifiers in [ModifiersState::SHIFT, ModifiersState::ALT] {
+            app.handle_modifiers_changed(modifiers)
+                .expect("hold modifier over the context-menu key");
+            app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+                .expect("modified Apps is not the exact context binding");
+            app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+                .expect("release modified Apps probe");
+            assert!(app.context_menu.is_none());
+        }
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release context-menu modifier");
+
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open context over empty chat");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release context-menu key");
+        assert!(app.context_menu.is_some());
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift over empty chat context");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("global allies binding reopens empty chat through its context");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release allies binding");
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.running_chat_text(), Some("/team "));
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close allies chat");
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("reopen empty chat for context say binding");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open context for say binding");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release context-menu key");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt over empty chat context");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("global say binding reopens empty chat through its context");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release say binding");
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.running_chat_text(), Some("\""));
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close say chat");
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("reopen empty chat for context F2 binding");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open context for F2 binding");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release context-menu key");
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("global all-chat binding reopens empty chat through its context");
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.running_chat_text(), Some(""));
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape closes chat without sending");
+        assert!(app.running_chat.is_none());
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("reopen running chat");
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Shift+Escape does not cancel the exact bare binding");
+        assert_eq!(app.running_chat_text(), Some(""));
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Shift+Return replaces empty chat with allies mode");
+        assert_eq!(app.running_chat_text(), Some("/team "));
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close allies chat");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("reopen ordinary running chat");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Alt+Return replaces empty chat with say mode");
+        assert_eq!(app.running_chat_text(), Some("\""));
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close say chat");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("reopen ordinary chat for editing");
+
+        for character in "alpha beta".chars() {
+            app.handle_text_input(character).expect("type chat text");
+        }
+        assert_eq!(app.running_chat_text(), Some("alpha beta"));
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
+                action: GamepadActionType::MenuToggle,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(8),
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("chat owns the raw gamepad Select cluster");
+        assert!(app.ingame_menu.is_none());
+        assert_eq!(app.running_chat_text(), Some("alpha beta"));
+        let caret_before_alt_navigation = app
+            .running_chat_controller()
+            .expect("chat controller before Alt navigation probe")
+            .caret();
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL | ModifiersState::ALT,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers)
+                .expect("hold an Alt modifier mask over chat edit");
+            for key in [VirtualKeyCode::Left, VirtualKeyCode::Back] {
+                app.handle_key(key, ElementState::Pressed)
+                    .expect("Alt navigation is not an Edit cursor binding");
+                app.handle_key(key, ElementState::Released)
+                    .expect("release Alt navigation probe");
+            }
+            assert_eq!(app.running_chat_text(), Some("alpha beta"));
+            assert_eq!(
+                app.running_chat_controller()
+                    .expect("chat remains open after Alt navigation probe")
+                    .caret(),
+                caret_before_alt_navigation
+            );
+        }
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt navigation modifier");
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift over nonempty chat");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Shift+Return leaves nonempty chat unchanged");
+        assert_eq!(app.running_chat_text(), Some("alpha beta"));
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt over nonempty chat");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Alt+Return leaves nonempty chat unchanged");
+        assert_eq!(app.running_chat_text(), Some("alpha beta"));
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+        assert_eq!(
+            app.message_board_line(),
+            board_before,
+            "the message board remains a fading log instead of echoing edit text"
+        );
+
+        app.pressed_engine_keys.insert(VirtualKeyCode::A);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local sandbox player")
+            .control
+            .pressed_coms = 1 << lc_engine::COM_LEFT;
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open chat context before lower message");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release chat context key");
+        assert!(app.context_menu.is_some());
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Notice",
+                "The chat remains the higher input-z dialog.",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push message below chat");
+        assert!(app.context_menu.is_some());
+        assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::A));
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local sandbox player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close chat context above lower message");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release context close key");
+        app.handle_text_input('!')
+            .expect("chat receives text above message dialog");
+        assert_eq!(app.running_chat_text(), Some("alpha beta!"));
+        assert_eq!(app.message_dialogs.len(), 1);
+        let mut frame = vec![0_u8; (surface_width * surface_height * 4) as usize];
+        app.render(&mut frame)
+            .expect("render chat above the lower message dialog");
+        assert!(frame.iter().any(|byte| *byte != 0));
+
+        app.handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::SHIFT)
+            .expect("hold Ctrl+Shift");
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("select previous word in chat edit");
+        assert!(
+            app.running_chat_controller()
+                .and_then(InputDialogController::selected_text)
+                .is_some_and(|text| !text.is_empty())
+        );
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release modifiers");
+        let keyboard_selection = app
+            .running_chat_controller()
+            .expect("chat controller after keyboard selection")
+            .selection();
+
+        let start = PhysicalPosition::new(
+            f64::from(layout.edit.x + 5),
+            f64::from(layout.edit.y + layout.edit.h / 2),
+        );
+        let end = PhysicalPosition::new(
+            f64::from(layout.edit.x + 35),
+            f64::from(layout.edit.y + layout.edit.h / 2),
+        );
+        app.handle_cursor_moved(start)
+            .expect("point into chat above message dialog");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start chat selection");
+        let selection_after_down = app
+            .running_chat_controller()
+            .expect("chat receives pointer down")
+            .selection();
+        assert!(selection_after_down.is_some_and(|(anchor, caret)| anchor == caret));
+        assert_ne!(selection_after_down, keyboard_selection);
+        app.handle_cursor_moved(end).expect("drag chat selection");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("finish chat selection");
+        assert!(
+            app.running_chat_controller()
+                .and_then(InputDialogController::selected_text)
+                .is_some_and(|text| !text.is_empty())
+        );
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("open chat edit context menu");
+        assert!(app.context_menu.is_some());
+        assert_eq!(app.message_dialogs.len(), 1);
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("release context-menu button");
+
+        let text_before_context_key = app.running_chat_text().map(str::to_string);
+        app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("context menu outranks chat history");
+        app.handle_key(VirtualKeyCode::Up, ElementState::Released)
+            .expect("release context-menu navigation");
+        assert!(app.game_option_input_consumed_keys.is_empty());
+        assert_eq!(app.running_chat_text(), text_before_context_key.as_deref());
+        assert_eq!(
+            app.running_chat.as_ref().map(|chat| chat.history_index),
+            Some(-1)
+        );
+
+        let caret_before_ctrl_left = app
+            .running_chat_controller()
+            .expect("chat remains under its context menu")
+            .caret();
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold Ctrl over chat context menu");
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("context makes the parent chat edit inactive");
+        assert_eq!(
+            app.running_chat_controller()
+                .expect("chat remains open")
+                .caret(),
+            caret_before_ctrl_left
+        );
+        assert!(app.context_menu.is_some());
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Ctrl");
+
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt over chat context menu");
+        let irc_error = app
+            .handle_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect_err("global IRC chord reaches its explicit drop boundary");
+        assert_engine_parity_boundary(
+            irc_error,
+            ClassicParityBoundary::RuntimeIrcChatToggle,
+        );
+        app.handle_key(VirtualKeyCode::C, ElementState::Released)
+            .expect("consume global IRC chord release");
+        assert!(app.context_menu.is_some());
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("context keeps the parent chat abort binding inactive");
+        assert!(app.running_chat.is_some());
+        assert!(app.context_menu.is_some());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape closes only the context menu");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("consume the context-owned Escape release");
+        assert!(app.running_chat.is_some());
+        assert!(app.context_menu.is_none());
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("F2 closes chat once its context is gone");
+        assert!(app.running_chat.is_none());
+        assert!(app.game_option_input_dialog.is_none());
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_board_line(), board_before);
     }
 
     #[test]
