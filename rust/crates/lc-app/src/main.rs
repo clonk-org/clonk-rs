@@ -88986,6 +88986,69 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn l060_player_shift_tab_covers_back_list_and_crew_edges() {
+        use lc_frontend::startup_plrsel::{PlrSelControl, PlrSelController};
+
+        let mut app = new_classic_menu_app(640, 480);
+        let mut dialog = PlrSelController::new(1);
+        dialog.resize(640, 480);
+        app.startup_player_dialog = Some(dialog);
+        app.replace_startup_view(StartupView::PlayerSelection);
+
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::PlayerList
+        );
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("plain Tab focuses Back");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release plain Tab");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::Back
+        );
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+        for (expected, description) in [
+            (PlrSelControl::PlayerList, "Back to PlayerList"),
+            (PlrSelControl::Crew, "PlayerList to Crew"),
+        ] {
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect(description);
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release Shift+Tab");
+            assert_eq!(
+                app.startup_player_dialog
+                    .as_ref()
+                    .expect("player dialog")
+                    .focused_control(),
+                expected
+            );
+        }
+
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("plain Tab still moves Crew to PlayerList");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release final plain Tab");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player dialog")
+                .focused_control(),
+            PlrSelControl::PlayerList
+        );
+    }
+
+    #[test]
     fn l047_player_typeahead_and_apps_route_through_selected_row() {
         let player = |name: &str| lc_frontend::startup_plrsel::PlrSelPlayer {
             name: name.to_string(),
