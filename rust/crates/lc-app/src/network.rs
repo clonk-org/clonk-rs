@@ -940,6 +940,58 @@ pub struct NetworkManager {
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
 }
 
+const MASTERSERVER_SIGNUP_PENDING: u8 = 0;
+const MASTERSERVER_SIGNUP_CANCELLED: u8 = 1;
+const MASTERSERVER_SIGNUP_FINISHED: u8 = 2;
+
+#[derive(Debug)]
+pub(crate) struct PendingMasterserverSignup {
+    enabled: bool,
+    previous_enabled: bool,
+    completion:
+        Receiver<std::result::Result<Option<lc_network::LeagueStartResponse>, String>>,
+    cancellation: Option<tokio::sync::oneshot::Sender<()>>,
+    transition: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl PendingMasterserverSignup {
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn previous_enabled(&self) -> bool {
+        self.previous_enabled
+    }
+
+    /// Returns false when the worker already committed a terminal result. In
+    /// that race the caller must consume completion instead of painting an
+    /// off state over a live registration.
+    pub(crate) fn cancel(&mut self) -> bool {
+        if self
+            .transition
+            .compare_exchange(
+                MASTERSERVER_SIGNUP_PENDING,
+                MASTERSERVER_SIGNUP_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(cancellation) = self.cancellation.take() {
+            let _ = cancellation.send(());
+        }
+        true
+    }
+}
+
+impl Drop for PendingMasterserverSignup {
+    fn drop(&mut self) {
+        let _ = self.cancel();
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ControlTickProbe {
     tick: Tick,
@@ -957,6 +1009,45 @@ struct NetworkNetpuncherState {
 #[cfg(test)]
 pub(crate) struct TestNetworkCommands {
     command_rx: tokio_mpsc::Receiver<NetworkCommand>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestMasterserverSignupCommand {
+    pub(crate) enabled: bool,
+    pub(crate) config: PreparedLeagueHostConfig,
+    pub(crate) reference: lc_network::HostGameReference,
+    completion:
+        Sender<std::result::Result<Option<lc_network::LeagueStartResponse>, String>>,
+    cancellation: tokio::sync::oneshot::Receiver<()>,
+    transition: Arc<std::sync::atomic::AtomicU8>,
+}
+
+#[cfg(test)]
+impl TestMasterserverSignupCommand {
+    pub(crate) fn complete(
+        self,
+        result: std::result::Result<Option<lc_network::LeagueStartResponse>, String>,
+    ) {
+        self.transition
+            .compare_exchange(
+                MASTERSERVER_SIGNUP_PENDING,
+                MASTERSERVER_SIGNUP_FINISHED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .expect("test signup completion must win the pending transaction");
+        self.completion.send(result).expect("return signup result");
+    }
+
+    pub(crate) fn wait_for_cancellation(self) {
+        self.cancellation
+            .blocking_recv()
+            .expect("pending signup must signal cancellation");
+        assert_eq!(
+            self.transition.load(Ordering::Acquire),
+            MASTERSERVER_SIGNUP_CANCELLED
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1642,21 +1733,23 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn receive_masterserver_signup(
-        &mut self,
-    ) -> (
-        bool,
-        PreparedLeagueHostConfig,
-        lc_network::HostGameReference,
-        Sender<std::result::Result<(), String>>,
-    ) {
+    pub(crate) fn receive_masterserver_signup(&mut self) -> TestMasterserverSignupCommand {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::SetMasterserverSignup {
                 enabled,
                 config,
                 reference,
                 completion,
-            }) => (enabled, config, reference, completion),
+                cancellation,
+                transition,
+            }) => TestMasterserverSignupCommand {
+                enabled,
+                config,
+                reference,
+                completion,
+                cancellation,
+                transition,
+            },
             Some(command) => panic!("expected masterserver-signup command, got {command:?}"),
             None => panic!("network command channel ended before masterserver-signup command"),
         }
@@ -2013,7 +2106,11 @@ enum NetworkCommand {
         enabled: bool,
         config: PreparedLeagueHostConfig,
         reference: lc_network::HostGameReference,
-        completion: Sender<std::result::Result<(), String>>,
+        completion: Sender<
+            std::result::Result<Option<lc_network::LeagueStartResponse>, String>,
+        >,
+        cancellation: tokio::sync::oneshot::Receiver<()>,
+        transition: Arc<std::sync::atomic::AtomicU8>,
     },
     SubmitJoinPlayer {
         tick: Tick,
@@ -3096,65 +3193,71 @@ impl NetworkManager {
             .map_err(|message| anyhow!(message))
     }
 
-    pub fn set_masterserver_signup(
+    pub(crate) fn begin_masterserver_signup(
         &self,
         enabled: bool,
         config: PreparedLeagueHostConfig,
         reference: lc_network::HostGameReference,
-    ) -> Result<()> {
+    ) -> Result<PendingMasterserverSignup> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
                 "only the network host may change masterserver signup"
             ));
         }
-        if self.league_runtime_available.load(Ordering::Acquire) == enabled {
-            return Ok(());
-        }
-
+        let previous_enabled = self.league_runtime_available.load(Ordering::Acquire);
         let (completion, completed) = mpsc::channel();
+        let (cancellation, cancelled) = tokio::sync::oneshot::channel();
+        let transition = Arc::new(std::sync::atomic::AtomicU8::new(
+            MASTERSERVER_SIGNUP_PENDING,
+        ));
         if self
             .command_tx
-            .blocking_send(NetworkCommand::SetMasterserverSignup {
+            .try_send(NetworkCommand::SetMasterserverSignup {
                 enabled,
                 config,
                 reference,
                 completion,
+                cancellation: cancelled,
+                transition: Arc::clone(&transition),
             })
             .is_err()
         {
-            self.league_runtime_available
-                .store(false, Ordering::Release);
             return Err(anyhow!(
-                "network worker is not accepting masterserver-signup changes"
+                "network worker cannot accept a masterserver-signup change right now"
             ));
         }
+        Ok(PendingMasterserverSignup {
+            enabled,
+            previous_enabled,
+            completion: completed,
+            cancellation: Some(cancellation),
+            transition,
+        })
+    }
 
-        let result = if enabled {
-            completed
-                .recv()
-                .map_err(|_| anyhow!("league runtime did not finish enabling masterserver signup"))
-        } else {
-            completed
-                .recv()
-                .map_err(|_| anyhow!("league runtime ended before disabling masterserver signup"))
+    pub(crate) fn poll_masterserver_signup(
+        &self,
+        pending: &mut PendingMasterserverSignup,
+    ) -> Option<Result<Option<lc_network::LeagueStartResponse>>> {
+        let result = match pending.completion.try_recv() {
+            Ok(result) => result.map_err(|message| anyhow!(message)),
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err(anyhow!(
+                "network worker ended before finishing the masterserver-signup change"
+            )),
         };
-        match result {
-            Ok(Ok(())) => {
-                self.league_runtime_available
-                    .store(enabled, Ordering::Release);
-                Ok(())
-            }
-            Ok(Err(message)) => {
-                self.league_runtime_available
-                    .store(false, Ordering::Release);
-                Err(anyhow!(message))
-            }
-            Err(error) => {
-                self.league_runtime_available
-                    .store(false, Ordering::Release);
-                Err(error)
-            }
-        }
+        pending.cancellation.take();
+        self.league_runtime_available.store(
+            if result.is_ok() {
+                pending.enabled
+            } else if pending.enabled {
+                pending.previous_enabled
+            } else {
+                false
+            },
+            Ordering::Release,
+        );
+        Some(result)
     }
 
     pub fn publish_join_snapshot(&self, snapshot: HostJoinSnapshot) -> Result<()> {
@@ -3473,6 +3576,43 @@ impl Drop for NetworkManager {
             let _ = handle.join();
         }
     }
+}
+
+pub(crate) fn apply_league_start_response_to_parameters(
+    parameters: &mut lc_network::JoinGameParametersEnvelope,
+    response: &lc_network::LeagueStartResponse,
+) -> std::result::Result<Option<usize>, String> {
+    let max_players = (response.max_players != 0)
+        .then(|| usize::try_from(response.max_players))
+        .transpose()
+        .map_err(|_| {
+            format!(
+                "league Start MaxPlayers {} is outside the supported range",
+                response.max_players
+            )
+        })?;
+    parameters.league = response.league.clone();
+    if let Some(seed) = response.seed {
+        parameters.random_seed = seed;
+    }
+    if max_players.is_some() {
+        parameters.max_players = response.max_players;
+    }
+    if response.league.is_empty() {
+        parameters.league_address = lc_engine::LegacyCString::default();
+    }
+    Ok(max_players)
+}
+
+fn apply_league_start_response_to_reference(
+    reference: &lc_network::HostGameReference,
+    response: &lc_network::LeagueStartResponse,
+) -> std::result::Result<lc_network::HostGameReference, String> {
+    let mut parameters = reference.parameters().clone();
+    apply_league_start_response_to_parameters(&mut parameters, response)?;
+    reference
+        .replacing_parameters(parameters)
+        .map_err(|error| format!("league Start settings are invalid: {error}"))
 }
 
 async fn register_league_host(
@@ -4480,51 +4620,260 @@ async fn run_host_worker(
                         config,
                         reference,
                         completion,
+                        mut cancellation,
+                        transition,
                     } => {
                         if enabled {
                             if league_runtime.is_some() {
-                                latest_league_reference = Some(reference);
-                                let _ = completion.send(Ok(()));
-                            } else {
-                                match register_league_host(
-                                    config,
-                                    &reference,
-                                    event_tx.clone(),
-                                )
-                                .await
+                                if transition
+                                    .compare_exchange(
+                                        MASTERSERVER_SIGNUP_PENDING,
+                                        MASTERSERVER_SIGNUP_FINISHED,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
                                 {
-                                    Ok((_response, runtime)) => {
-                                        latest_league_reference = Some(reference);
-                                        league_runtime = Some(runtime);
-                                        let _ = completion.send(Ok(()));
-                                    }
+                                    latest_league_reference = Some(reference);
+                                    let _ = completion.send(Ok(None));
+                                } else {
+                                    let _ = completion.send(Err(
+                                        "masterserver signup was cancelled".to_string(),
+                                    ));
+                                }
+                            } else {
+                                let puncher_address =
+                                    reference.summary().netpuncher_address.clone();
+                                let live_attempt = async {
+                                    let registration = register_league_host(
+                                        config,
+                                        &reference,
+                                        event_tx.clone(),
+                                    );
+                                    let puncher_init = async {
+                                        let addresses = resolve_netpuncher_addresses(
+                                            &puncher_address,
+                                        )
+                                        .await;
+                                        if addresses.is_empty() {
+                                            Ok(())
+                                        } else {
+                                            host.init_netpunchers(addresses).await
+                                        }
+                                    };
+                                    tokio::pin!(registration);
+                                    tokio::pin!(puncher_init);
+                                    let mut registered = None;
+                                    let mut puncher_result = None;
+                                    let cancelled = loop {
+                                        tokio::select! {
+                                            // Poll Start first. Once it dispatches and yields,
+                                            // puncher initialization runs concurrently with the
+                                            // response wait like C4Network2::LeagueStart.
+                                            biased;
+                                            _ = &mut cancellation => break true,
+                                            result = &mut registration, if registered.is_none() => {
+                                                let failed = result.is_err();
+                                                registered = Some(result);
+                                                if failed || puncher_result.is_some() {
+                                                    break false;
+                                                }
+                                            }
+                                            result = &mut puncher_init, if puncher_result.is_none() => {
+                                                puncher_result = Some(result);
+                                                if registered.is_some() {
+                                                    break false;
+                                                }
+                                            }
+                                        }
+                                    };
+                                    (registered, puncher_result, cancelled)
+                                };
+                                let (registered, puncher_result, cancelled) =
+                                    await_host_operation_while_forwarding_events(
+                                        live_attempt,
+                                        &mut host_events,
+                                        local_owner,
+                                        &event_tx,
+                                        &telemetry_tx,
+                                        &mut player_info_echo_provenance,
+                                        &netpuncher_state,
+                                    )
+                                    .await?;
+                                if cancelled {
+                                    // Native abort tears down the local league client without
+                                    // waiting for a compensating End request.
+                                    drop(registered);
+                                    latest_league_reference.take();
+                                    let _ = completion.send(Err(
+                                        "masterserver signup was cancelled".to_string(),
+                                    ));
+                                    continue;
+                                }
+                                let registered = registered
+                                    .expect("uncancelled live signup has a Start result");
+                                match registered {
                                     Err(error) => {
                                         latest_league_reference.take();
-                                        let _ = completion.send(Err(error.to_string()));
+                                        if transition
+                                            .compare_exchange(
+                                                MASTERSERVER_SIGNUP_PENDING,
+                                                MASTERSERVER_SIGNUP_FINISHED,
+                                                Ordering::AcqRel,
+                                                Ordering::Acquire,
+                                            )
+                                            .is_ok()
+                                        {
+                                            let _ = completion.send(Err(error.to_string()));
+                                        } else {
+                                            let _ = completion.send(Err(
+                                                "masterserver signup was cancelled".to_string(),
+                                            ));
+                                        }
+                                    }
+                                    Ok((response, runtime)) => {
+                                        let updated_reference =
+                                            apply_league_start_response_to_reference(
+                                                &reference,
+                                                &response,
+                                            );
+                                        if let Err(error) = updated_reference.as_ref() {
+                                            let cleanup = async {
+                                                tokio::select! {
+                                                    biased;
+                                                    _ = &mut cancellation => None,
+                                                    result = finish_league_runtime(
+                                                        &runtime,
+                                                        reference.clone(),
+                                                        None,
+                                                    ) => Some(result),
+                                                }
+                                            };
+                                            if let Some(Err(cleanup_error)) =
+                                                await_host_operation_while_forwarding_events(
+                                                    cleanup,
+                                                    &mut host_events,
+                                                    local_owner,
+                                                    &event_tx,
+                                                    &telemetry_tx,
+                                                    &mut player_info_echo_provenance,
+                                                    &netpuncher_state,
+                                                )
+                                                .await?
+                                            {
+                                                tracing::error!(
+                                                    %cleanup_error,
+                                                    "failed to end invalid live league registration"
+                                                );
+                                            }
+                                            if transition.compare_exchange(
+                                                MASTERSERVER_SIGNUP_PENDING,
+                                                MASTERSERVER_SIGNUP_FINISHED,
+                                                Ordering::AcqRel,
+                                                Ordering::Acquire,
+                                            ).is_ok() {
+                                                let _ = completion.send(Err(error.clone()));
+                                            } else {
+                                                let _ = completion.send(Err(
+                                                    "masterserver signup was cancelled".to_string(),
+                                                ));
+                                            }
+                                            continue;
+                                        }
+                                        if transition
+                                            .compare_exchange(
+                                                MASTERSERVER_SIGNUP_PENDING,
+                                                MASTERSERVER_SIGNUP_FINISHED,
+                                                Ordering::AcqRel,
+                                                Ordering::Acquire,
+                                        )
+                                        .is_err()
+                                        {
+                                            drop(runtime);
+                                            latest_league_reference.take();
+                                            let _ = completion.send(Err(
+                                                "masterserver signup was cancelled".to_string(),
+                                            ));
+                                            continue;
+                                        }
+                                        if let Some(Err(error)) = puncher_result {
+                                            tracing::error!(
+                                                %error,
+                                                "live masterserver signup could not initialize the netpuncher"
+                                            );
+                                        }
+                                        latest_league_reference =
+                                            Some(updated_reference.expect("checked Ok above"));
+                                        league_runtime = Some(runtime);
+                                        let _ = completion.send(Ok(Some(response)));
                                     }
                                 }
                             }
                         } else {
                             let result = if let Some(runtime) = league_runtime.take() {
-                                finish_league_runtime(&runtime, reference, None).await
+                                let ending = async {
+                                    tokio::select! {
+                                        biased;
+                                        _ = &mut cancellation => None,
+                                        result = finish_league_runtime(
+                                            &runtime,
+                                            reference,
+                                            None,
+                                        ) => Some(result),
+                                    }
+                                };
+                                await_host_operation_while_forwarding_events(
+                                    ending,
+                                    &mut host_events,
+                                    local_owner,
+                                    &event_tx,
+                                    &telemetry_tx,
+                                    &mut player_info_echo_provenance,
+                                    &netpuncher_state,
+                                )
+                                .await?
                             } else {
-                                Ok(None)
+                                Some(Ok(None))
                             };
+                            if result.is_none()
+                                || transition
+                                    .compare_exchange(
+                                        MASTERSERVER_SIGNUP_PENDING,
+                                        MASTERSERVER_SIGNUP_FINISHED,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_err()
+                            {
+                                latest_league_reference.take();
+                                let _ = completion.send(Err(
+                                    "masterserver signup change was cancelled".to_string(),
+                                ));
+                                continue;
+                            }
                             latest_league_reference.take();
-                            match result {
+                            match result.expect("uncancelled signup disable has an End result") {
                                 Ok(Some(packet)) => {
-                                    if let Err(error) =
-                                        host.broadcast_league_round_results(packet).await
+                                    if let Err(error) = await_host_operation_while_forwarding_events(
+                                        host.broadcast_league_round_results(packet),
+                                        &mut host_events,
+                                        local_owner,
+                                        &event_tx,
+                                        &telemetry_tx,
+                                        &mut player_info_echo_provenance,
+                                        &netpuncher_state,
+                                    )
+                                    .await?
                                     {
                                         tracing::error!(
                                             %error,
                                             "host league-result broadcast failed while disabling signup"
                                         );
                                     }
-                                    let _ = completion.send(Ok(()));
+                                    let _ = completion.send(Ok(None));
                                 }
                                 Ok(None) => {
-                                    let _ = completion.send(Ok(()));
+                                    let _ = completion.send(Ok(None));
                                 }
                                 Err(error) => {
                                     let _ = completion.send(Err(error));
@@ -5170,8 +5519,10 @@ async fn run_client_worker(
                         NetworkCommand::RemoveResource { completion, .. }
                         | NetworkCommand::SetJoinAllowed { completion, .. }
                         | NetworkCommand::SetHostPassword { completion, .. }
-                        | NetworkCommand::SetMasterserverSignup { completion, .. }
                         | NetworkCommand::GracefulPart { completion } => {
+                            let _ = completion.send(Err(unavailable));
+                        }
+                        NetworkCommand::SetMasterserverSignup { completion, .. } => {
                             let _ = completion.send(Err(unavailable));
                         }
                         NetworkCommand::LeagueEnd { completion, .. } => {
@@ -6221,6 +6572,7 @@ mod tests {
     use std::io::{Read, Write};
 
     use flate2::read::ZlibDecoder;
+    use tokio::io::AsyncReadExt as _;
 
     use super::*;
 
@@ -6593,6 +6945,25 @@ mod tests {
         .expect("minimal league reference validates")
     }
 
+    fn minimal_league_reference_with_netpuncher(
+        address: SocketAddr,
+    ) -> lc_network::HostGameReference {
+        let reference = minimal_league_reference();
+        let mut summary = reference.summary().clone();
+        summary.netpuncher_address = address.to_string();
+        let mut metadata = reference.metadata().clone();
+        metadata.netpuncher_address = lc_engine::LegacyCString::from_bytes(
+            address.to_string().into_bytes(),
+        )
+        .expect("socket address has no NUL");
+        lc_network::HostGameReference::new(
+            summary,
+            metadata,
+            reference.parameters().clone(),
+        )
+        .expect("netpuncher reference validates")
+    }
+
     #[test]
     fn league_end_reference_uses_the_latest_projected_gains() {
         let reference = minimal_league_reference();
@@ -6622,16 +6993,20 @@ mod tests {
         );
     }
 
-    fn league_http_fixture(
+    fn league_http_fixture_with_before_reply<F>(
         replies: Vec<&'static [u8]>,
-    ) -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+        mut before_reply: F,
+    ) -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>)
+    where
+        F: FnMut(usize) + Send + 'static,
+    {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fixture");
         listener.set_nonblocking(true).expect("nonblocking fixture");
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
             let mut bodies = Vec::new();
-            for reply in replies {
+            for (reply_index, reply) in replies.into_iter().enumerate() {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -6680,6 +7055,7 @@ mod tests {
                     request.extend_from_slice(&chunk[..count]);
                 }
                 bodies.push(request[header_end..header_end + content_length].to_vec());
+                before_reply(reply_index);
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -6691,6 +7067,12 @@ mod tests {
             bodies
         });
         (endpoint, server)
+    }
+
+    fn league_http_fixture(
+        replies: Vec<&'static [u8]>,
+    ) -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+        league_http_fixture_with_before_reply(replies, |_| {})
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7055,12 +7437,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn host_worker_enables_and_disables_masterserver_signup_live() {
-        let (endpoint, league_server) = league_http_fixture(vec![
-            b"[Response]\r\nStatus=Failure\r\nMessage=try again\r\n",
-            b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nMaxPlayers=4\r\n",
-            b"[Response]\r\nStatus=Success\r\n",
-        ]);
+    async fn l082_host_worker_returns_live_start_response_and_initializes_puncher() {
+        let (second_start_seen_tx, second_start_seen_rx) = mpsc::channel();
+        let (release_second_start_tx, release_second_start_rx) = mpsc::channel();
+        let (endpoint, league_server) = league_http_fixture_with_before_reply(
+            vec![
+                b"[Response]\r\nStatus=Failure\r\nMessage=try again\r\n",
+                b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=305419896\r\nMaxPlayers=4\r\nStreamTo=https://stream.example/upload?\r\n",
+                b"[Response]\r\nStatus=Success\r\n",
+            ],
+            move |reply_index| {
+                if reply_index == 1 {
+                    second_start_seen_tx
+                        .send(())
+                        .expect("report gated Start request");
+                    release_second_start_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release gated Start response");
+                }
+            },
+        );
+        let mut puncher =
+            lc_network::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .expect("bind live puncher fixture");
+        let puncher_address = puncher.local_addr();
         let settings = HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             player_name: "Host".to_string(),
@@ -7090,7 +7490,8 @@ mod tests {
             .expect("host worker readiness");
         assert!(!ready.league_runtime_available);
 
-        let reference = minimal_league_reference();
+        let failed_reference = minimal_league_reference();
+        let reference = minimal_league_reference_with_netpuncher(puncher_address);
         let config = PreparedLeagueHostConfig {
             endpoint,
             transport: lc_network::LeagueHttpTransportConfig::default(),
@@ -7098,12 +7499,18 @@ mod tests {
             league_server_signup: false,
         };
         let (failed_tx, failed_rx) = mpsc::channel();
+        let (_failed_cancel, failed_cancellation) = tokio::sync::oneshot::channel();
+        let failed_transition = Arc::new(std::sync::atomic::AtomicU8::new(
+            MASTERSERVER_SIGNUP_PENDING,
+        ));
         command_tx
             .send(NetworkCommand::SetMasterserverSignup {
                 enabled: true,
                 config: config.clone(),
-                reference: reference.clone(),
+                reference: failed_reference,
                 completion: failed_tx,
+                cancellation: failed_cancellation,
+                transition: failed_transition,
             })
             .await
             .expect("attempt masterserver signup");
@@ -7113,27 +7520,76 @@ mod tests {
             .expect_err("failed Start rolls the runtime back");
 
         let (enabled_tx, enabled_rx) = mpsc::channel();
+        let (_enabled_cancel, enabled_cancellation) = tokio::sync::oneshot::channel();
+        let enabled_transition = Arc::new(std::sync::atomic::AtomicU8::new(
+            MASTERSERVER_SIGNUP_PENDING,
+        ));
         command_tx
             .send(NetworkCommand::SetMasterserverSignup {
                 enabled: true,
                 config: config.clone(),
                 reference: reference.clone(),
                 completion: enabled_tx,
+                cancellation: enabled_cancellation,
+                transition: enabled_transition,
             })
             .await
             .expect("enable masterserver signup");
-        enabled_rx
+        second_start_seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second Start request reaches the HTTP server");
+        let mut puncher_stream = tokio::time::timeout(
+            Duration::from_secs(2),
+            puncher.accept(),
+        )
+        .await
+        .expect("live signup contacts puncher before Start responds")
+        .expect("accept live host puncher session");
+        let puncher_request = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut header = [0_u8; 5];
+            puncher_stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], 0xff);
+            let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let mut payload = vec![0; length];
+            puncher_stream.read_exact(&mut payload).await.unwrap();
+            payload
+        })
+        .await
+        .expect("live puncher ID request arrives before Start responds");
+        assert_eq!(
+            lc_network::decode_netpuncher_packet(&puncher_request).unwrap(),
+            lc_network::NetpuncherPacket::IdRequest
+        );
+        assert!(matches!(enabled_rx.try_recv(), Err(TryRecvError::Empty)));
+        release_second_start_tx
+            .send(())
+            .expect("release successful Start response");
+        let response = enabled_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("masterserver signup enable completion")
-            .expect("masterserver signup enables");
+            .expect("masterserver signup enables")
+            .expect("fresh enable returns Start response");
+        assert_eq!(response.league.as_bytes(), b"Cup");
+        assert_eq!(response.seed, Some(305_419_896));
+        assert_eq!(response.max_players, 4);
+        assert_eq!(
+            response.stream_to.as_bytes(),
+            b"https://stream.example/upload?"
+        );
 
         let (disabled_tx, disabled_rx) = mpsc::channel();
+        let (_disabled_cancel, disabled_cancellation) = tokio::sync::oneshot::channel();
+        let disabled_transition = Arc::new(std::sync::atomic::AtomicU8::new(
+            MASTERSERVER_SIGNUP_PENDING,
+        ));
         command_tx
             .send(NetworkCommand::SetMasterserverSignup {
                 enabled: false,
                 config,
                 reference,
                 completion: disabled_tx,
+                cancellation: disabled_cancellation,
+                transition: disabled_transition,
             })
             .await
             .expect("disable masterserver signup");
@@ -7162,6 +7618,7 @@ mod tests {
         assert!(bodies[2]
             .windows(b"Action=End".len())
             .any(|window| window == b"Action=End"));
+        puncher.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -757,6 +757,10 @@ pub enum HostCommand {
         password: Option<lc_engine::LegacyCString>,
         completion: oneshot::Sender<()>,
     },
+    InitNetpunchers {
+        addresses: Vec<SocketAddr>,
+        completion: oneshot::Sender<()>,
+    },
     InspectRuntimeConnections {
         completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
     },
@@ -1027,6 +1031,21 @@ impl HostHandle {
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         applied.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Re-runs the host's NAT-puncher handshake for the first address of
+    /// each resolved family. Live Internet signup uses the same reliable-UDP
+    /// socket as startup so the externally observed port remains stable.
+    pub async fn init_netpunchers(&self, addresses: Vec<SocketAddr>) -> Result<(), HostError> {
+        let (completion, initialized) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::InitNetpunchers {
+                addresses,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        initialized.await.map_err(|_| HostError::HostLoopGone)
     }
 
     pub async fn runtime_connections(&self) -> Result<Vec<RuntimeNetworkConnection>, HostError> {
@@ -5436,6 +5455,30 @@ async fn run_host(
                         completion,
                     } => {
                         state.admission.set_password(password);
+                        let _ = completion.send(());
+                    }
+                    HostCommand::InitNetpunchers {
+                        addresses,
+                        completion,
+                    } => {
+                        if let Some(udp_handle) = udp_handle.as_ref() {
+                            for address in selected_puncher_addresses(&addresses) {
+                                if let Err(error) = udp_handle
+                                    .init_puncher(address, NetpuncherRole::Host)
+                                    .await
+                                {
+                                    let _ = state
+                                        .event_tx
+                                        .send(HostEvent::TransportError {
+                                            client_id: None,
+                                            error: format!(
+                                                "failed to initialize netpuncher at {address}: {error}"
+                                            ),
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
                         let _ = completion.send(());
                     }
                     HostCommand::InspectRuntimeConnections { completion } => {
@@ -11294,6 +11337,71 @@ mod tests {
 
         host.shutdown().await.unwrap();
         puncher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn l082_live_host_initializes_one_netpuncher_per_resolved_family() {
+        let mut ipv4_puncher =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let mut ipv6_puncher = crate::ReliableUdpSessionHub::bind(SocketAddr::from((
+            [0, 0, 0, 0, 0, 0, 0, 1],
+            0,
+        )))
+        .unwrap();
+        let ipv4_address = ipv4_puncher.local_addr();
+        let ipv6_address = ipv6_puncher.local_addr();
+        let ignored_same_family = SocketAddr::from(([127, 0, 0, 2], ipv4_address.port()));
+        let listener = TcpListener::bind(SocketAddr::from((
+            [0, 0, 0, 0, 0, 0, 0, 1],
+            0,
+        )))
+        .await
+        .unwrap();
+        let host = start_host(
+            listener,
+            HostConfig {
+                udp_bind_address: Some(SocketAddr::from(([0_u16; 8], 0))),
+                netpuncher_addresses: Vec::new(),
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        host.init_netpunchers(vec![
+            ipv4_address,
+            ignored_same_family,
+            ipv6_address,
+        ])
+        .await
+        .unwrap();
+        let (mut ipv4_stream, mut ipv6_stream) = tokio::join!(
+            async {
+                timeout(Duration::from_secs(2), ipv4_puncher.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            },
+            async {
+                timeout(Duration::from_secs(2), ipv6_puncher.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        );
+        for stream in [&mut ipv4_stream, &mut ipv6_stream] {
+            let payload = timeout(Duration::from_secs(2), read_udp_session_payload(stream))
+                .await
+                .unwrap();
+            assert_eq!(
+                crate::decode_netpuncher_packet(&payload).unwrap(),
+                NetpuncherPacket::IdRequest
+            );
+        }
+
+        host.shutdown().await.unwrap();
+        ipv4_puncher.shutdown().await.unwrap();
+        ipv6_puncher.shutdown().await.unwrap();
     }
 
     fn add_test_route_queue(

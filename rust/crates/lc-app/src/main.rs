@@ -8677,6 +8677,7 @@ enum MessageDialogContinuation {
     },
     NetworkScenarioPlayerCountWarning { scenario: FrontendScenario },
     LobbyReadyCheck { remaining_seconds: u32 },
+    LiveMasterserverSignup,
     LeagueVote { subject: LeagueVoteSubject },
     LeagueSurrender,
     OptionsScaleTest {
@@ -9920,6 +9921,18 @@ fn initial_network_league_name(network_mode: Option<&NetworkMode>) -> Vec<u8> {
         })
 }
 
+fn initial_network_stream_address(network_mode: Option<&NetworkMode>) -> LegacyCString {
+    network_mode
+        .and_then(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => Some(prepared.stream_address().clone()),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        })
+        .unwrap_or_default()
+}
+
 fn initial_network_team_assignment(
     network_mode: Option<&NetworkMode>,
     generated_team_name_template: &LegacyCString,
@@ -10338,6 +10351,10 @@ struct GameApp {
     sandbox_crew_definition_paths: Option<AppPaths>,
     configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
     material_library: Option<Arc<MaterialSet>>,
+    // Fields drop in declaration order. Cancel an in-flight league request
+    // before NetworkManager joins its worker so shutdown cannot wait for the
+    // HTTP timeout.
+    pending_lobby_internet_signup: Option<network::PendingMasterserverSignup>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
@@ -10376,6 +10393,9 @@ struct GameApp {
     /// from `network_is_league`, which models `isLeague()`'s LeagueAddress
     /// test; GetLeagueProgressData gates on this name instead.
     network_league_name: Vec<u8>,
+    /// Process-local `Game.Parameters.StreamAddress`; this value is assigned
+    /// by league Start but is intentionally absent from JoinData.
+    network_stream_address: LegacyCString,
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     frames_per_second: i32,
     frames_since_second: i32,
@@ -19885,6 +19905,7 @@ impl GameApp {
         let network_max_players = initial_network_max_players(network_mode.as_ref());
         let network_is_league = initial_network_is_league(network_mode.as_ref());
         let network_league_name = initial_network_league_name(network_mode.as_ref());
+        let network_stream_address = initial_network_stream_address(network_mode.as_ref());
         let host_local_alternate_colors_by_resource =
             initial_host_local_alternate_colors(network_mode.as_ref());
         let host_local_player_info_ids = initial_host_local_player_info_ids(network_mode.as_ref());
@@ -20206,6 +20227,7 @@ impl GameApp {
             sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,
             material_library: None,
+            pending_lobby_internet_signup: None,
             network,
             network_mode,
             network_lobby,
@@ -20229,6 +20251,7 @@ impl GameApp {
             network_max_players,
             network_is_league,
             network_league_name,
+            network_stream_address,
             frames_per_second: 0,
             frames_since_second: 0,
             control_clients,
@@ -40635,6 +40658,8 @@ impl GameApp {
                             self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
                             self.network_is_league = initial_network_is_league(Some(&mode));
                             self.network_league_name = initial_network_league_name(Some(&mode));
+                            self.network_stream_address =
+                                initial_network_stream_address(Some(&mode));
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
                                 &self.network_league_name,
@@ -40682,6 +40707,8 @@ impl GameApp {
                             self.host_join_snapshot = initial_host_join_snapshot(Some(&mode));
                             self.network_is_league = initial_network_is_league(Some(&mode));
                             self.network_league_name = initial_network_league_name(Some(&mode));
+                            self.network_stream_address =
+                                initial_network_stream_address(Some(&mode));
                             seed_engine_player_info_parameters(
                                 &mut self.engine,
                                 &self.network_league_name,
@@ -40738,6 +40765,7 @@ impl GameApp {
                     );
                     self.network_is_league = initial_network_is_league(Some(&mode));
                     self.network_league_name = initial_network_league_name(Some(&mode));
+                    self.network_stream_address = initial_network_stream_address(Some(&mode));
                     seed_engine_player_info_parameters(
                         &mut self.engine,
                         &self.network_league_name,
@@ -40759,11 +40787,13 @@ impl GameApp {
                     return;
                 }
                 self.classic_host_lobby = None;
+                self.abandon_live_masterserver_signup();
                 self.network = None;
                 self.network_mode = None;
                 self.host_join_snapshot = None;
                 self.network_is_league = false;
                 self.network_league_name.clear();
+                self.network_stream_address = LegacyCString::default();
                 seed_engine_player_info_parameters(
                     &mut self.engine,
                     &self.network_league_name,
@@ -40797,6 +40827,7 @@ impl GameApp {
             self.classic_host_lobby = None;
             self.staged_network_host_scenario = None;
             self.loader_screen = None;
+            self.abandon_live_masterserver_signup();
             self.network = None;
             self.network_mode = None;
             self.host_join_snapshot = None;
@@ -40804,6 +40835,7 @@ impl GameApp {
             self.host_local_player_info_ids.clear();
             self.network_is_league = false;
             self.network_league_name.clear();
+            self.network_stream_address = LegacyCString::default();
             seed_engine_player_info_parameters(
                 &mut self.engine,
                 &self.network_league_name,
@@ -48457,6 +48489,7 @@ impl GameApp {
             self.host_lobby_countdown = None;
             self.pending_local_lobby_countdown_echoes.clear();
             self.loader_screen = None;
+            self.abandon_live_masterserver_signup();
             self.network = None;
             self.network_mode = None;
             self.host_join_snapshot = None;
@@ -48470,6 +48503,7 @@ impl GameApp {
             self.control_player_infos = ControlPlayerInfoRegistry::default();
             self.network_is_league = false;
             self.network_league_name.clear();
+            self.network_stream_address = LegacyCString::default();
             seed_engine_player_info_parameters(
                 &mut self.engine,
                 &self.network_league_name,
@@ -49108,6 +49142,7 @@ impl GameApp {
         if let Ok(timing) = lc_engine::NetworkControlTiming::new(control_tick, 1) {
             self.engine.initialize_network_control_timing(timing);
         }
+        self.abandon_live_masterserver_signup();
         self.network = None;
         self.network_mode = None;
         self.runtime_client_list = None;
@@ -50649,6 +50684,7 @@ impl GameApp {
         }
         self.poll_startup_game_search()?;
         self.poll_startup_network_connection();
+        self.poll_live_masterserver_signup()?;
         self.process_network_events()?;
         // C4Network2::Execute probes the runtime status target before
         // Control.Prepare on every attempted frame, including halted frames.
@@ -51823,6 +51859,336 @@ impl GameApp {
         }
     }
 
+    fn open_live_masterserver_signup_dialog(
+        &mut self,
+        server_name: &str,
+    ) -> Result<(), EngineError> {
+        let message = self
+            .runtime_resource_text(
+                "IDS_NET_LEAGUE_REGGAME",
+                "Registering game at %s...",
+            )
+            .replacen("%s", server_name, 1);
+        let caption = self.runtime_resource_text(
+            "IDS_NET_LEAGUE_STARTGAME",
+            "Starting game...",
+        );
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(3),
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::LiveMasterserverSignup,
+        )?;
+        let abort = self.runtime_resource_text("IDS_DLG_ABORT", "Abort");
+        if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.set_button_label(
+                lc_frontend::message_dialog::MessageDialogButton::Cancel,
+                abort,
+            );
+        }
+        Ok(())
+    }
+
+    fn apply_live_league_start_response(
+        &mut self,
+        response: &lc_network::LeagueStartResponse,
+    ) -> Result<()> {
+        let mut parameters = self
+            .host_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.clone())
+            .or_else(|| {
+                self.advertised_game_reference
+                    .as_ref()
+                    .map(|reference| reference.parameters().clone())
+            })
+            .ok_or_else(|| anyhow!("live host game parameters are unavailable"))?;
+        let max_players = network::apply_league_start_response_to_parameters(
+            &mut parameters,
+            response,
+        )
+        .map_err(|message| anyhow!(message))?;
+
+        // Validate every local representation before mutating any of them.
+        // The server-side registration is already live at this point, so a
+        // partially applied response must never be painted as signup-off.
+        let updated_prepared = self
+            .network_mode
+            .as_ref()
+            .and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings { prepared, .. }) => prepared.as_ref(),
+                NetworkMode::Client(_) => None,
+            })
+            .map(|prepared| {
+                let mut updated = prepared.clone();
+                updated
+                    .apply_league_start_response(response)
+                    .map_err(|error| {
+                        anyhow!("cannot apply live league Start settings: {error}")
+                    })?;
+                Ok::<_, anyhow::Error>(updated)
+            })
+            .transpose()?;
+        let updated_reference = self
+            .advertised_game_reference
+            .as_ref()
+            .map(|reference| {
+                reference
+                    .replacing_parameters(parameters.clone())
+                    .map_err(|error| anyhow!("cannot rebuild live league reference: {error}"))
+            })
+            .transpose()?;
+
+        if let Some(updated) = updated_prepared {
+            if let Some(prepared) = self.network_mode.as_mut().and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings { prepared, .. }) => prepared.as_mut(),
+                NetworkMode::Client(_) => None,
+            }) {
+                *prepared = updated;
+            }
+        }
+
+        if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+            snapshot.parameters = parameters.clone();
+        }
+        if let Some(max_players) = max_players {
+            self.network_max_players = max_players;
+            self.engine.set_max_players(response.max_players);
+            if let Some(staged) = self.staged_network_host_scenario.as_mut() {
+                staged.lobby.max_players = response.max_players;
+            }
+        }
+        self.network_league_name = parameters.league.as_bytes().to_vec();
+        self.network_stream_address = if response.league.is_empty() {
+            LegacyCString::default()
+        } else {
+            response.stream_to.clone()
+        };
+        self.network_is_league = synchronized_parameters_are_league(&parameters);
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
+        );
+        self.scenario_game_options
+            .set_lobby_league(self.network_is_league);
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_league_mode(self.network_is_league);
+        }
+        self.sync_classic_lobby_roster();
+
+        if let Some(snapshot) = self.host_join_snapshot.clone() {
+            if let Some(network) = self.network.as_ref() {
+                if let Err(error) = network.publish_join_snapshot(snapshot) {
+                    tracing::error!(
+                        %error,
+                        "failed to publish live league Start parameters"
+                    );
+                }
+            }
+        }
+        if let Some(updated) = updated_reference {
+            if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+                if let Err(error) = advertiser.update_exact(&updated) {
+                    tracing::error!(
+                        %error,
+                        "failed to publish live league Start reference"
+                    );
+                }
+            }
+            self.advertised_game_reference = Some(updated);
+        }
+        Ok(())
+    }
+
+    fn clear_live_league_registration(&mut self) -> Result<()> {
+        let mut parameters = self
+            .host_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.clone())
+            .or_else(|| {
+                self.advertised_game_reference
+                    .as_ref()
+                    .map(|reference| reference.parameters().clone())
+            })
+            .ok_or_else(|| anyhow!("live host game parameters are unavailable"))?;
+        parameters.league = LegacyCString::default();
+        parameters.league_address = LegacyCString::default();
+
+        let updated_prepared = self
+            .network_mode
+            .as_ref()
+            .and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings { prepared, .. }) => prepared.as_ref(),
+                NetworkMode::Client(_) => None,
+            })
+            .map(|prepared| {
+                let mut updated = prepared.clone();
+                updated
+                    .clear_live_league_registration()
+                    .map_err(|error| anyhow!("cannot clear live league settings: {error}"))?;
+                Ok::<_, anyhow::Error>(updated)
+            })
+            .transpose()?;
+        let updated_reference = self
+            .advertised_game_reference
+            .as_ref()
+            .map(|reference| {
+                reference
+                    .replacing_parameters(parameters.clone())
+                    .map_err(|error| anyhow!("cannot rebuild non-league reference: {error}"))
+            })
+            .transpose()?;
+
+        if let Some(updated) = updated_prepared {
+            if let Some(prepared) = self.network_mode.as_mut().and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings { prepared, .. }) => prepared.as_mut(),
+                NetworkMode::Client(_) => None,
+            }) {
+                *prepared = updated;
+            }
+        }
+        if let Some(snapshot) = self.host_join_snapshot.as_mut() {
+            snapshot.parameters = parameters;
+        }
+        self.network_league_name.clear();
+        self.network_is_league = false;
+        seed_engine_player_info_parameters(
+            &mut self.engine,
+            &self.network_league_name,
+            &self.control_player_infos,
+        );
+        self.scenario_game_options.set_lobby_league(false);
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_league_mode(false);
+        }
+        self.sync_classic_lobby_roster();
+
+        if let Some(snapshot) = self.host_join_snapshot.clone() {
+            if let Some(network) = self.network.as_ref() {
+                if let Err(error) = network.publish_join_snapshot(snapshot) {
+                    tracing::error!(%error, "failed to publish cleared live league parameters");
+                }
+            }
+        }
+        if let Some(updated) = updated_reference {
+            if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+                if let Err(error) = advertiser.update_exact(&updated) {
+                    tracing::error!(%error, "failed to publish non-league reference");
+                }
+            }
+            self.advertised_game_reference = Some(updated);
+        }
+        Ok(())
+    }
+
+    fn close_live_masterserver_signup_dialog(&mut self) -> Result<(), EngineError> {
+        let Some(index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LiveMasterserverSignup
+            )
+        }) else {
+            return Ok(());
+        };
+        self.finish_message_dialog_at(
+            index,
+            lc_frontend::message_dialog::MessageDialogResult::Dismissed,
+        )
+    }
+
+    fn poll_live_masterserver_signup(&mut self) -> Result<(), EngineError> {
+        let result = match (
+            self.network.as_ref(),
+            self.pending_lobby_internet_signup.as_mut(),
+        ) {
+            (Some(network), Some(pending)) => network.poll_masterserver_signup(pending),
+            _ => None,
+        };
+        let Some(result) = result else {
+            return Ok(());
+        };
+        let pending = self
+            .pending_lobby_internet_signup
+            .take()
+            .expect("polled live masterserver request is retained");
+        if let Err(error) = self.close_live_masterserver_signup_dialog() {
+            tracing::error!(%error, "failed to close live masterserver wait dialog");
+        }
+
+        let enabled = pending.enabled();
+        let previous_enabled = pending.previous_enabled();
+        let (effective, failure) = match result {
+            Ok(response) => {
+                if enabled {
+                    match response
+                        .as_ref()
+                        .map(|response| self.apply_live_league_start_response(response))
+                        .transpose()
+                    {
+                        Ok(_) => (true, None),
+                        // Start has committed on the worker. Keep the button
+                        // honest if a local invariant prevents propagation;
+                        // reporting signup-off here would create a hidden live
+                        // registration.
+                        Err(error) => (true, Some(error)),
+                    }
+                } else {
+                    match self.clear_live_league_registration() {
+                        Ok(()) => (false, None),
+                        Err(error) => (false, Some(error)),
+                    }
+                }
+            }
+            Err(error) => (
+                if enabled { previous_enabled } else { false },
+                Some(error),
+            ),
+        };
+        self.scenario_game_options
+            .apply_lobby_internet_result(effective);
+        self.persist_game_option_value(
+            "Network",
+            "MasterServerSignUp",
+            i32::from(effective).to_string(),
+        );
+        if let Some(error) = failure {
+            tracing::error!(%error, enabled, "failed to change live masterserver signup");
+            self.status_text = format!("Unable to change Internet game signup: {error}");
+        }
+        Ok(())
+    }
+
+    fn abort_live_masterserver_signup(&mut self) {
+        let Some(mut pending) = self.pending_lobby_internet_signup.take() else {
+            return;
+        };
+        if !pending.cancel() {
+            self.pending_lobby_internet_signup = Some(pending);
+            return;
+        }
+        let previous_enabled = pending.previous_enabled();
+        self.scenario_game_options
+            .apply_lobby_internet_result(previous_enabled);
+        self.persist_game_option_value(
+            "Network",
+            "MasterServerSignUp",
+            i32::from(previous_enabled).to_string(),
+        );
+        self.status_text = "Internet game signup cancelled.".to_string();
+    }
+
+    fn abandon_live_masterserver_signup(&mut self) {
+        if let Some(mut pending) = self.pending_lobby_internet_signup.take() {
+            let _ = pending.cancel();
+        }
+    }
+
     fn process_lobby_game_option_action(
         &mut self,
         action: GameOptionAction,
@@ -51837,25 +52203,48 @@ impl GameApp {
                 live_lobby,
             } => {
                 debug_assert!(live_lobby);
+                if let Some(pending) = self.pending_lobby_internet_signup.as_ref() {
+                    self.scenario_game_options
+                        .apply_lobby_internet_result(pending.previous_enabled());
+                    return Ok(());
+                }
                 let config = load_prepared_league_host_config(self.app_paths.as_ref(), false);
+                let server_name = config.endpoint.clone();
                 let reference = self.advertised_game_reference.clone();
-                let result = match (self.network.as_mut(), reference) {
+                let result = match (self.network.as_ref(), reference) {
                     (Some(network), Some(reference)) => {
-                        network.set_masterserver_signup(enabled, config, reference)
+                        network.begin_masterserver_signup(enabled, config, reference)
                     }
                     _ => Err(anyhow!("live host registration state is unavailable")),
                 };
-                let effective = if enabled { result.is_ok() } else { false };
-                self.scenario_game_options
-                    .apply_lobby_internet_result(effective);
-                self.persist_game_option_value(
-                    "Network",
-                    "MasterServerSignUp",
-                    i32::from(effective).to_string(),
-                );
-                if let Err(error) = result {
-                    tracing::error!(%error, enabled, "failed to change live masterserver signup");
-                    self.status_text = format!("Unable to change Internet game signup: {error}");
+                match result {
+                    Ok(pending) => {
+                        let previous_enabled = pending.previous_enabled();
+                        self.scenario_game_options
+                            .apply_lobby_internet_result(previous_enabled);
+                        self.pending_lobby_internet_signup = Some(pending);
+                        if enabled {
+                            if let Err(error) =
+                                self.open_live_masterserver_signup_dialog(&server_name)
+                            {
+                                self.abort_live_masterserver_signup();
+                                return Err(error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let effective = !enabled;
+                        self.scenario_game_options
+                            .apply_lobby_internet_result(effective);
+                        self.persist_game_option_value(
+                            "Network",
+                            "MasterServerSignUp",
+                            i32::from(effective).to_string(),
+                        );
+                        tracing::error!(%error, enabled, "failed to change live masterserver signup");
+                        self.status_text =
+                            format!("Unable to change Internet game signup: {error}");
+                    }
                 }
             }
             GameOptionAction::LeagueSignupChanged(enabled) => {
@@ -52756,6 +53145,9 @@ impl GameApp {
                 self.complete_lobby_ready_check_response(
                     result == lc_frontend::message_dialog::MessageDialogResult::Yes,
                 )?;
+            }
+            MessageDialogContinuation::LiveMasterserverSignup => {
+                self.abort_live_masterserver_signup();
             }
             MessageDialogContinuation::LeagueVote { subject } => {
                 self.complete_league_vote_response(
@@ -57492,6 +57884,7 @@ impl GameApp {
         self.initial_lobby_status_ack_pending = false;
         self.network_is_league = false;
         self.network_league_name.clear();
+        self.network_stream_address = LegacyCString::default();
         seed_engine_player_info_parameters(
             &mut self.engine,
             &self.network_league_name,
@@ -84625,60 +85018,205 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn classic_lobby_internet_button_registers_deregisters_and_rolls_back_failure() {
+    fn l082_classic_lobby_internet_signup_is_pollable_and_rolls_back_failure() {
         let mut app = new_menu_app(640, 480);
         let (_events, mut commands) = install_classic_host_network_stub(&mut app);
         let (_snapshot, reference) = default_exact_host_reference();
         app.advertised_game_reference = Some(reference);
 
-        let observer = thread::spawn(move || {
-            let mut observed = Vec::new();
-            for result in [
-                Ok(()),
-                Ok(()),
-                Err("masterserver rejected the game".to_string()),
-            ] {
-                let (enabled, config, reference, completion) =
-                    commands.receive_masterserver_signup();
-                observed.push((enabled, config.league_server_signup, reference));
-                completion.send(result).expect("return signup result");
-            }
-            observed
-        });
-
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
             LobbyGameOptionInput::Hotkey('I'),
         )])
-        .expect("register live lobby at the masterserver");
+        .expect("queue live lobby registration without blocking");
+        assert!(!app.scenario_game_options.values().master_server_signup);
+        let enable = commands.receive_masterserver_signup();
+        assert!(enable.enabled);
+        assert!(!enable.config.league_server_signup);
+        assert_eq!(enable.reference.summary().state, "Lobby");
+        enable.complete(Ok(Some(lc_network::LeagueStartResponse::default())));
+        app.poll_live_masterserver_signup()
+            .expect("apply live signup completion");
         assert!(app.scenario_game_options.values().master_server_signup);
 
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
             LobbyGameOptionInput::Hotkey('I'),
         )])
-        .expect("deregister live lobby from the masterserver");
+        .expect("queue live lobby deregistration without blocking");
+        assert!(app.scenario_game_options.values().master_server_signup);
+        let disable = commands.receive_masterserver_signup();
+        assert!(!disable.enabled);
+        disable.complete(Ok(None));
+        app.poll_live_masterserver_signup()
+            .expect("apply live deregistration completion");
         assert!(!app.scenario_game_options.values().master_server_signup);
         assert!(!app.scenario_game_options.values().league_server_signup);
 
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
             LobbyGameOptionInput::Hotkey('I'),
         )])
-        .expect("failed registration rolls the button back without exiting the lobby");
+        .expect("queue rejected registration without blocking");
+        let rejected = commands.receive_masterserver_signup();
+        assert!(rejected.enabled);
+        rejected.complete(Err("masterserver rejected the game".to_string()));
+        app.poll_live_masterserver_signup()
+            .expect("apply rejected live registration");
         assert!(!app.scenario_game_options.values().master_server_signup);
         assert!(app
             .status_text
             .contains("masterserver rejected the game"));
+    }
 
-        let observed = observer.join().expect("signup observer");
+    #[test]
+    fn l082_aborting_live_internet_signup_keeps_the_prior_off_state() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(reference);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live signup without waiting for its HTTP response");
+        assert!(!app.scenario_game_options.values().master_server_signup);
+        assert!(app.pending_lobby_internet_signup.is_some());
+        let wait = app.message_dialogs.last().expect("cancellable wait dialog");
+        assert!(matches!(
+            wait.continuation,
+            MessageDialogContinuation::LiveMasterserverSignup
+        ));
         assert_eq!(
-            observed
-                .iter()
-                .map(|(enabled, league, _)| (*enabled, *league))
-                .collect::<Vec<_>>(),
-            vec![(true, false), (false, false), (true, false)]
+            wait.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(3)
         );
-        assert!(observed
-            .iter()
-            .all(|(_, _, reference)| reference.summary().state == "Lobby"));
+        assert_eq!(
+            wait.state.button_label(
+                lc_frontend::message_dialog::MessageDialogButton::Cancel
+            ),
+            "Abort"
+        );
+
+        let pending_command = commands.receive_masterserver_signup();
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("Abort closes the signup wait");
+        pending_command.wait_for_cancellation();
+        assert!(app.pending_lobby_internet_signup.is_none());
+        assert!(!app.scenario_game_options.values().master_server_signup);
+        assert_eq!(app.status_text, "Internet game signup cancelled.");
+    }
+
+    #[test]
+    fn l082_live_signup_applies_every_start_response_field() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let (snapshot, reference) = default_exact_host_reference();
+        app.host_join_snapshot = Some(snapshot);
+        app.advertised_game_reference = Some(reference);
+        let league = LegacyCString::from_bytes(b"Cup".to_vec()).unwrap();
+        let stream_to = LegacyCString::from_bytes(
+            b"https://stream.example/upload?".to_vec(),
+        )
+        .unwrap();
+        let response = lc_network::LeagueStartResponse {
+            league: league.clone(),
+            stream_to: stream_to.clone(),
+            seed: Some(0x1234_5678),
+            max_players: 4,
+            ..lc_network::LeagueStartResponse::default()
+        };
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live signup");
+        commands
+            .receive_masterserver_signup()
+            .complete(Ok(Some(response)));
+        app.poll_live_masterserver_signup()
+            .expect("apply live Start response");
+
+        let parameters = &app
+            .host_join_snapshot
+            .as_ref()
+            .expect("live host JoinData")
+            .parameters;
+        assert_eq!(parameters.league, league);
+        assert_eq!(parameters.random_seed, 0x1234_5678);
+        assert_eq!(parameters.max_players, 4);
+        assert_eq!(app.network_stream_address, stream_to);
+        assert_eq!(app.network_league_name, b"Cup");
+        assert_eq!(app.network_max_players, 4);
+        assert_eq!(app.engine.max_players(), Some(4));
+        let reference = app
+            .advertised_game_reference
+            .as_ref()
+            .expect("updated exact host reference");
+        assert_eq!(reference.parameters().league.as_bytes(), b"Cup");
+        assert_eq!(reference.parameters().random_seed, 0x1234_5678);
+        assert_eq!(reference.parameters().max_players, 4);
+        let published = commands.take_published_join_snapshots();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].parameters.league.as_bytes(), b"Cup");
+        assert_eq!(published[0].parameters.random_seed, 0x1234_5678);
+        assert_eq!(published[0].parameters.max_players, 4);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live signup disable");
+        let disable = commands.receive_masterserver_signup();
+        assert!(!disable.enabled);
+        disable.complete(Ok(None));
+        app.poll_live_masterserver_signup()
+            .expect("apply live signup disable");
+
+        let parameters = &app
+            .host_join_snapshot
+            .as_ref()
+            .expect("cleared live host JoinData")
+            .parameters;
+        assert!(parameters.league.is_empty());
+        assert!(parameters.league_address.is_empty());
+        assert_eq!(parameters.random_seed, 0x1234_5678);
+        assert_eq!(parameters.max_players, 4);
+        assert_eq!(app.network_stream_address, stream_to);
+        assert!(app.network_league_name.is_empty());
+        let reference = app
+            .advertised_game_reference
+            .as_ref()
+            .expect("updated non-league host reference");
+        assert!(reference.parameters().league.is_empty());
+        assert!(reference.parameters().league_address.is_empty());
+        assert_eq!(reference.parameters().random_seed, 0x1234_5678);
+        assert_eq!(reference.parameters().max_players, 4);
+        let published = commands.take_published_join_snapshots();
+        assert_eq!(published.len(), 1);
+        assert!(published[0].parameters.league.is_empty());
+        assert!(published[0].parameters.league_address.is_empty());
+        assert_eq!(published[0].parameters.random_seed, 0x1234_5678);
+        assert_eq!(published[0].parameters.max_players, 4);
+    }
+
+    #[test]
+    fn l082_committed_start_never_paints_a_hidden_live_registration_off() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(reference);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live signup");
+        let signup = commands.receive_masterserver_signup();
+        app.advertised_game_reference = None;
+        signup.complete(Ok(Some(lc_network::LeagueStartResponse::default())));
+        app.poll_live_masterserver_signup()
+            .expect("retain committed worker state after local invariant failure");
+
+        assert!(app.scenario_game_options.values().master_server_signup);
+        assert!(app
+            .status_text
+            .contains("live host game parameters are unavailable"));
     }
 
     #[test]

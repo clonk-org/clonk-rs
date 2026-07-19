@@ -406,6 +406,22 @@ impl PreparedHostBootstrap {
         Ok(())
     }
 
+    /// Mirrors `C4Network2::DeinitLeague`: clear the synchronized league
+    /// identity while retaining Start's seed, capacity and stream address.
+    pub fn clear_live_league_registration(
+        &mut self,
+    ) -> Result<(), PrepareHostBootstrapError> {
+        let parameters = &mut self
+            .host_config
+            .initial_join_snapshot
+            .as_mut()
+            .ok_or(PrepareHostBootstrapError::MissingJoinSnapshot)?
+            .parameters;
+        parameters.league = LegacyCString::default();
+        parameters.league_address = LegacyCString::default();
+        Ok(())
+    }
+
     pub fn start_time(&self) -> i32 {
         self.start_time
     }
@@ -1515,6 +1531,38 @@ mod definition_root_graphics_tests {
         assert_eq!(parameters.max_players, 8, "zero MaxPlayers is no override");
         assert_eq!(prepared.admission().max_players(), 8);
         assert_eq!(prepared.host_config().initial_status.control_mode, 1);
+        assert_eq!(
+            prepared.stream_address().as_bytes(),
+            b"https://stream.example/upload?"
+        );
+    }
+
+    #[test]
+    fn l082_live_league_deinit_clears_identity_but_retains_start_overrides() {
+        let mut prepared = league_prepared_host(1);
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: legacy_string("Gold League"),
+                stream_to: legacy_string("https://stream.example/upload?"),
+                seed: Some(123),
+                max_players: 4,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start response");
+        prepared
+            .clear_live_league_registration()
+            .expect("clear live league registration");
+
+        let parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        assert!(parameters.league.is_empty());
+        assert!(parameters.league_address.is_empty());
+        assert_eq!(parameters.random_seed, 123);
+        assert_eq!(parameters.max_players, 4);
         assert_eq!(
             prepared.stream_address().as_bytes(),
             b"https://stream.example/upload?"
