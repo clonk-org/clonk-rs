@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -934,7 +934,7 @@ pub struct NetworkManager {
     role: NetworkRole,
     client_status: ClientStatusState,
     league_start_response: Option<lc_network::LeagueStartResponse>,
-    league_runtime_available: bool,
+    league_runtime_available: AtomicBool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
     #[cfg(test)]
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
@@ -1601,6 +1601,42 @@ impl TestNetworkCommands {
         }
     }
 
+    pub(crate) fn receive_host_password(
+        &mut self,
+    ) -> (
+        lc_engine::LegacyCString,
+        Sender<std::result::Result<(), String>>,
+    ) {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::SetHostPassword {
+                password,
+                completion,
+            }) => (password, completion),
+            Some(command) => panic!("expected host-password command, got {command:?}"),
+            None => panic!("network command channel ended before host-password command"),
+        }
+    }
+
+    pub(crate) fn receive_masterserver_signup(
+        &mut self,
+    ) -> (
+        bool,
+        PreparedLeagueHostConfig,
+        lc_network::HostGameReference,
+        Sender<std::result::Result<(), String>>,
+    ) {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::SetMasterserverSignup {
+                enabled,
+                config,
+                reference,
+                completion,
+            }) => (enabled, config, reference, completion),
+            Some(command) => panic!("expected masterserver-signup command, got {command:?}"),
+            None => panic!("network command channel ended before masterserver-signup command"),
+        }
+    }
+
     pub(crate) fn receive_resource_removal(
         &mut self,
     ) -> (i32, Sender<std::result::Result<(), String>>) {
@@ -1948,6 +1984,12 @@ enum NetworkCommand {
         completion: Sender<std::result::Result<(), String>>,
     },
     LeagueInvalidate,
+    SetMasterserverSignup {
+        enabled: bool,
+        config: PreparedLeagueHostConfig,
+        reference: lc_network::HostGameReference,
+        completion: Sender<std::result::Result<(), String>>,
+    },
     SubmitJoinPlayer {
         tick: Tick,
         join: JoinPlayerControlData,
@@ -2024,6 +2066,10 @@ enum NetworkCommand {
     ClientUpdateExecuted(lc_engine::ClientUpdateControlData),
     SetJoinAllowed {
         allowed: bool,
+        completion: Sender<std::result::Result<(), String>>,
+    },
+    SetHostPassword {
+        password: lc_engine::LegacyCString,
         completion: Sender<std::result::Result<(), String>>,
     },
     PublishJoinSnapshot {
@@ -2189,7 +2235,7 @@ impl NetworkManager {
             Err(error) => return Err(error),
         };
 
-        let league_runtime_available = ready.league_runtime_available;
+        let league_runtime_available = AtomicBool::new(ready.league_runtime_available);
         Ok(Self {
             command_tx,
             control_tick_tx,
@@ -2702,7 +2748,7 @@ impl NetworkManager {
         auth: lc_network::LeagueAuthRequestHead,
         player: &mut lc_engine::ControlPlayerInfoEntry,
     ) -> Result<bool> {
-        if !self.league_runtime_available {
+        if !self.league_runtime_available.load(Ordering::Acquire) {
             return Ok(false);
         }
         let (completion, completed) = mpsc::channel();
@@ -2730,7 +2776,7 @@ impl NetworkManager {
         if self.role != NetworkRole::Host {
             return Err(anyhow!("only the network host may check league players"));
         }
-        if !self.league_runtime_available {
+        if !self.league_runtime_available.load(Ordering::Acquire) {
             return Ok(false);
         }
         let (completion, completed) = mpsc::channel();
@@ -2752,7 +2798,8 @@ impl NetworkManager {
         now: i64,
         reference: lc_network::HostGameReference,
     ) -> Result<()> {
-        if self.role != NetworkRole::Host || !self.league_runtime_available {
+        if self.role != NetworkRole::Host || !self.league_runtime_available.load(Ordering::Acquire)
+        {
             return Ok(());
         }
         self.command_tx
@@ -2765,7 +2812,8 @@ impl NetworkManager {
         reference: lc_network::HostGameReference,
         record: Option<lc_network::LeagueEndRecord>,
     ) -> Result<Option<lc_network::LeagueRoundResultsPacket>> {
-        if self.role != NetworkRole::Host || !self.league_runtime_available {
+        if self.role != NetworkRole::Host || !self.league_runtime_available.load(Ordering::Acquire)
+        {
             return Ok(None);
         }
         let (completion, completed) = mpsc::channel();
@@ -2788,7 +2836,7 @@ impl NetworkManager {
         players: lc_network::ClientPlayerInfosSnapshot,
         fbids: lc_network::LeagueFbidRegistry,
     ) -> Result<()> {
-        if !self.league_runtime_available {
+        if !self.league_runtime_available.load(Ordering::Acquire) {
             return Err(anyhow!("league runtime is unavailable"));
         }
         let (completion, completed) = mpsc::channel();
@@ -2811,7 +2859,8 @@ impl NetworkManager {
     }
 
     pub fn invalidate_league_reference(&self) -> Result<()> {
-        if self.role != NetworkRole::Host || !self.league_runtime_available {
+        if self.role != NetworkRole::Host || !self.league_runtime_available.load(Ordering::Acquire)
+        {
             return Ok(());
         }
         self.command_tx
@@ -3001,6 +3050,86 @@ impl NetworkManager {
             .recv()
             .map_err(|_| anyhow!("network worker ended before confirming join admission"))?
             .map_err(|message| anyhow!(message))
+    }
+
+    pub fn set_host_password(&self, password: lc_engine::LegacyCString) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!(
+                "only the network host may change the host password"
+            ));
+        }
+        let (completion, applied) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::SetHostPassword {
+                password,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting host-password changes"))?;
+        applied
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before confirming the host password"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    pub fn set_masterserver_signup(
+        &self,
+        enabled: bool,
+        config: PreparedLeagueHostConfig,
+        reference: lc_network::HostGameReference,
+    ) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may change masterserver signup"
+            ));
+        }
+        if self.league_runtime_available.load(Ordering::Acquire) == enabled {
+            return Ok(());
+        }
+
+        let (completion, completed) = mpsc::channel();
+        if self
+            .command_tx
+            .blocking_send(NetworkCommand::SetMasterserverSignup {
+                enabled,
+                config,
+                reference,
+                completion,
+            })
+            .is_err()
+        {
+            self.league_runtime_available
+                .store(false, Ordering::Release);
+            return Err(anyhow!(
+                "network worker is not accepting masterserver-signup changes"
+            ));
+        }
+
+        let result = if enabled {
+            completed
+                .recv()
+                .map_err(|_| anyhow!("league runtime did not finish enabling masterserver signup"))
+        } else {
+            completed
+                .recv()
+                .map_err(|_| anyhow!("league runtime ended before disabling masterserver signup"))
+        };
+        match result {
+            Ok(Ok(())) => {
+                self.league_runtime_available
+                    .store(enabled, Ordering::Release);
+                Ok(())
+            }
+            Ok(Err(message)) => {
+                self.league_runtime_available
+                    .store(false, Ordering::Release);
+                Err(anyhow!(message))
+            }
+            Err(error) => {
+                self.league_runtime_available
+                    .store(false, Ordering::Release);
+                Err(error)
+            }
+        }
     }
 
     pub fn publish_join_snapshot(&self, snapshot: HostJoinSnapshot) -> Result<()> {
@@ -3205,7 +3334,7 @@ impl NetworkManager {
                 role: NetworkRole::Host,
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
-                league_runtime_available: false,
+                league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             },
@@ -3234,7 +3363,7 @@ impl NetworkManager {
                 role: NetworkRole::Client,
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
-                league_runtime_available: false,
+                league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             },
@@ -3287,7 +3416,7 @@ impl NetworkManager {
                 },
                 client_status: ClientStatusState::default(),
                 league_start_response: None,
-                league_runtime_available: false,
+                league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             },
@@ -3300,9 +3429,11 @@ impl NetworkManager {
     pub(crate) fn test_stub_with_league_commands_for_client_id(
         local_client_id: ClientId,
     ) -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
-        let (mut manager, events, commands) =
+        let (manager, events, commands) =
             Self::test_stub_with_commands_for_client_id(local_client_id);
-        manager.league_runtime_available = true;
+        manager
+            .league_runtime_available
+            .store(true, Ordering::Release);
         (manager, events, commands)
     }
 }
@@ -4319,6 +4450,63 @@ async fn run_host_worker(
                                 .await;
                         }
                     }
+                    NetworkCommand::SetMasterserverSignup {
+                        enabled,
+                        config,
+                        reference,
+                        completion,
+                    } => {
+                        if enabled {
+                            if league_runtime.is_some() {
+                                latest_league_reference = Some(reference);
+                                let _ = completion.send(Ok(()));
+                            } else {
+                                match register_league_host(
+                                    config,
+                                    &reference,
+                                    event_tx.clone(),
+                                )
+                                .await
+                                {
+                                    Ok((_response, runtime)) => {
+                                        latest_league_reference = Some(reference);
+                                        league_runtime = Some(runtime);
+                                        let _ = completion.send(Ok(()));
+                                    }
+                                    Err(error) => {
+                                        latest_league_reference.take();
+                                        let _ = completion.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                        } else {
+                            let result = if let Some(runtime) = league_runtime.take() {
+                                finish_league_runtime(&runtime, reference, None).await
+                            } else {
+                                Ok(None)
+                            };
+                            latest_league_reference.take();
+                            match result {
+                                Ok(Some(packet)) => {
+                                    if let Err(error) =
+                                        host.broadcast_league_round_results(packet).await
+                                    {
+                                        tracing::error!(
+                                            %error,
+                                            "host league-result broadcast failed while disabling signup"
+                                        );
+                                    }
+                                    let _ = completion.send(Ok(()));
+                                }
+                                Ok(None) => {
+                                    let _ = completion.send(Ok(()));
+                                }
+                                Err(error) => {
+                                    let _ = completion.send(Err(error));
+                                }
+                            }
+                        }
+                    }
                     NetworkCommand::SubmitJoinPlayer { tick, join } => {
                         frame_builder.record_control(
                             tick,
@@ -4492,6 +4680,22 @@ async fn run_host_worker(
                                 let message = format!(
                                     "host join-admission change failed: {error}"
                                 );
+                                let _ = completion.send(Err(message.clone()));
+                                return Err(anyhow!(message));
+                            }
+                        }
+                    }
+                    NetworkCommand::SetHostPassword {
+                        password,
+                        completion,
+                    } => {
+                        let password = (!password.is_empty()).then_some(password);
+                        match host.set_password(password).await {
+                            Ok(()) => {
+                                let _ = completion.send(Ok(()));
+                            }
+                            Err(error) => {
+                                let message = format!("host password change failed: {error}");
                                 let _ = completion.send(Err(message.clone()));
                                 return Err(anyhow!(message));
                             }
@@ -4940,6 +5144,8 @@ async fn run_client_worker(
                         }
                         NetworkCommand::RemoveResource { completion, .. }
                         | NetworkCommand::SetJoinAllowed { completion, .. }
+                        | NetworkCommand::SetHostPassword { completion, .. }
+                        | NetworkCommand::SetMasterserverSignup { completion, .. }
                         | NetworkCommand::GracefulPart { completion } => {
                             let _ = completion.send(Err(unavailable));
                         }
@@ -5125,6 +5331,12 @@ async fn run_client_worker(
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to invalidate a host league reference".to_string(),
                         ));
+                    }
+                    NetworkCommand::SetMasterserverSignup { completion, .. } => {
+                        let message =
+                            "client attempted to change host masterserver signup".to_string();
+                        let _ = completion.send(Err(message.clone()));
+                        let _ = event_tx.send(NetworkEvent::Error(message));
                     }
                     NetworkCommand::SubmitJoinPlayer { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
@@ -5341,6 +5553,11 @@ async fn run_client_worker(
                         let _ = event_tx.send(NetworkEvent::Error(
                             message,
                         ));
+                    }
+                    NetworkCommand::SetHostPassword { completion, .. } => {
+                        let message = "client attempted to change host password".to_string();
+                        let _ = completion.send(Err(message.clone()));
+                        let _ = event_tx.send(NetworkEvent::Error(message));
                     }
                     NetworkCommand::PublishJoinSnapshot { .. } => {
                         let message = "client attempted to publish host JoinData".to_string();
@@ -6799,6 +7016,116 @@ mod tests {
             .await
             .expect("join host worker")
             .expect("host worker exits cleanly");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_worker_enables_and_disables_masterserver_signup_live() {
+        let (endpoint, league_server) = league_http_fixture(vec![
+            b"[Response]\r\nStatus=Failure\r\nMessage=try again\r\n",
+            b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nMaxPlayers=4\r\n",
+            b"[Response]\r\nStatus=Success\r\n",
+        ]);
+        let settings = HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        };
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+            )
+            .await
+        });
+        let ready = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect("host worker readiness");
+        assert!(!ready.league_runtime_available);
+
+        let reference = minimal_league_reference();
+        let config = PreparedLeagueHostConfig {
+            endpoint,
+            transport: lc_network::LeagueHttpTransportConfig::default(),
+            update_period_secs: 120,
+            league_server_signup: false,
+        };
+        let (failed_tx, failed_rx) = mpsc::channel();
+        command_tx
+            .send(NetworkCommand::SetMasterserverSignup {
+                enabled: true,
+                config: config.clone(),
+                reference: reference.clone(),
+                completion: failed_tx,
+            })
+            .await
+            .expect("attempt masterserver signup");
+        failed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed masterserver signup completion")
+            .expect_err("failed Start rolls the runtime back");
+
+        let (enabled_tx, enabled_rx) = mpsc::channel();
+        command_tx
+            .send(NetworkCommand::SetMasterserverSignup {
+                enabled: true,
+                config: config.clone(),
+                reference: reference.clone(),
+                completion: enabled_tx,
+            })
+            .await
+            .expect("enable masterserver signup");
+        enabled_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("masterserver signup enable completion")
+            .expect("masterserver signup enables");
+
+        let (disabled_tx, disabled_rx) = mpsc::channel();
+        command_tx
+            .send(NetworkCommand::SetMasterserverSignup {
+                enabled: false,
+                config,
+                reference,
+                completion: disabled_tx,
+            })
+            .await
+            .expect("disable masterserver signup");
+        disabled_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("masterserver signup disable completion")
+            .expect("masterserver signup disables");
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop host worker");
+        worker
+            .await
+            .expect("join host worker")
+            .expect("host worker exits cleanly");
+
+        let bodies = league_server.join().expect("join league HTTP fixture");
+        assert_eq!(bodies.len(), 3, "shutdown must not repeat the live End");
+        assert!(bodies[0]
+            .windows(b"Action=Start".len())
+            .any(|window| window == b"Action=Start"));
+        assert!(bodies[1]
+            .windows(b"Action=Start".len())
+            .any(|window| window == b"Action=Start"));
+        assert!(bodies[2]
+            .windows(b"Action=End".len())
+            .any(|window| window == b"Action=End"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

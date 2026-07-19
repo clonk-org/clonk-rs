@@ -633,6 +633,28 @@ impl GameOptionButtons {
         self.values.comment = comment.into();
     }
 
+    /// Commit a live lobby password only after the application has updated
+    /// host admission and the advertised reference successfully.
+    pub fn apply_lobby_password_result(
+        &mut self,
+        password: impl Into<String>,
+        remember_for_next_round: Option<String>,
+    ) {
+        debug_assert!(self.context.is_lobby());
+        self.values.password = password.into();
+        if let Some(password) = remember_for_next_round {
+            self.values.last_password = password;
+        }
+        self.sounds.push(GameOptionSound::Connect);
+    }
+
+    /// Commit a validated live lobby comment and queue its callback sound.
+    pub fn apply_lobby_comment_result(&mut self, comment: impl Into<String>) {
+        debug_assert!(self.context.is_lobby());
+        self.values.comment = comment.into();
+        self.sounds.push(GameOptionSound::Connect);
+    }
+
     pub fn set_lobby_league(&mut self, league: bool) {
         self.values.lobby_is_league = league;
         if league {
@@ -957,11 +979,17 @@ impl GameOptionButtons {
         let text = text.into();
         match kind {
             GameOptionInputKind::Password => {
+                let remember_for_next_round = (!text.is_empty()).then(|| text.clone());
+                if self.context.is_lobby() {
+                    return vec![GameOptionAction::PasswordChanged {
+                        password: text,
+                        remember_for_next_round,
+                    }];
+                }
                 self.values.password = text.clone();
-                let remember_for_next_round = (!text.is_empty()).then(|| {
-                    self.values.last_password = text.clone();
-                    text.clone()
-                });
+                if let Some(password) = remember_for_next_round.as_ref() {
+                    self.values.last_password = password.clone();
+                }
                 self.sounds.push(GameOptionSound::Connect);
                 vec![GameOptionAction::PasswordChanged {
                     password: text,
@@ -971,6 +999,9 @@ impl GameOptionButtons {
             GameOptionInputKind::Comment => {
                 if text == self.values.comment {
                     return Vec::new();
+                }
+                if self.context.is_lobby() {
+                    return vec![GameOptionAction::CommentChanged(text)];
                 }
                 self.values.comment = text.clone();
                 self.sounds.push(GameOptionSound::Connect);
@@ -1241,8 +1272,10 @@ impl GameOptionButtons {
 
     fn activate_password(&mut self) -> Vec<GameOptionAction> {
         if !self.values.password.is_empty() {
-            self.values.password.clear();
-            self.sounds.push(GameOptionSound::Connect);
+            if !self.context.is_lobby() {
+                self.values.password.clear();
+                self.sounds.push(GameOptionSound::Connect);
+            }
             return vec![GameOptionAction::PasswordChanged {
                 password: String::new(),
                 remember_for_next_round: None,
@@ -1714,6 +1747,60 @@ mod tests {
         );
         assert_eq!(state.take_sound_events(), [GameOptionSound::Connect]);
         assert_eq!(COMMENT_CHANGED_LOG, "Network game comment adjusted.");
+    }
+
+    #[test]
+    fn lobby_password_and_comment_wait_for_the_application_to_commit() {
+        let values = GameOptionValues {
+            password: "old password".into(),
+            last_password: "remembered password".into(),
+            comment: "old comment".into(),
+            ..GameOptionValues::default()
+        };
+        let mut state = GameOptionButtons::new(GameOptionContext::LobbyHost, values);
+        state.set_bounds(bounds());
+
+        assert_eq!(
+            state.handle_hotkey('P'),
+            [GameOptionAction::PasswordChanged {
+                password: String::new(),
+                remember_for_next_round: None,
+            }]
+        );
+        assert_eq!(state.values().password, "old password");
+        assert!(state.take_sound_events().is_empty());
+        state.apply_lobby_password_result(String::new(), None);
+        assert!(state.values().password.is_empty());
+        assert_eq!(state.values().last_password, "remembered password");
+        assert_eq!(state.take_sound_events(), [GameOptionSound::Connect]);
+
+        assert_eq!(
+            state.submit_input_dialog(GameOptionInputKind::Password, "new password"),
+            [GameOptionAction::PasswordChanged {
+                password: "new password".into(),
+                remember_for_next_round: Some("new password".into()),
+            }]
+        );
+        assert!(state.values().password.is_empty());
+        assert_eq!(state.values().last_password, "remembered password");
+        assert!(state.take_sound_events().is_empty());
+        state.apply_lobby_password_result(
+            "new password",
+            Some("new password".to_string()),
+        );
+        assert_eq!(state.values().password, "new password");
+        assert_eq!(state.values().last_password, "new password");
+        assert_eq!(state.take_sound_events(), [GameOptionSound::Connect]);
+
+        assert_eq!(
+            state.submit_input_dialog(GameOptionInputKind::Comment, "new comment"),
+            [GameOptionAction::CommentChanged("new comment".into())]
+        );
+        assert_eq!(state.values().comment, "old comment");
+        assert!(state.take_sound_events().is_empty());
+        state.apply_lobby_comment_result("new comment");
+        assert_eq!(state.values().comment, "new comment");
+        assert_eq!(state.take_sound_events(), [GameOptionSound::Connect]);
     }
 
     #[test]

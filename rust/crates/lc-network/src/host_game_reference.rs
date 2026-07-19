@@ -76,6 +76,26 @@ impl HostGameReference {
         &self.metadata
     }
 
+    /// Rebuilds the two reference fields changed by the live lobby password
+    /// and comment controls.
+    ///
+    /// Neither value belongs to [`JoinGameParametersEnvelope`]: password
+    /// presence is part of the search summary, while the comment is top-level
+    /// `C4Network2Reference` metadata. Rebuilding them together keeps the
+    /// published reference atomic and runs the complete reference validation
+    /// without disturbing the synchronized game parameters.
+    pub fn replacing_lobby_options(
+        &self,
+        password_needed: bool,
+        comment: LegacyCString,
+    ) -> Result<Self, HostGameReferenceError> {
+        let mut summary = self.summary.clone();
+        summary.password_needed = password_needed;
+        let mut metadata = self.metadata.clone();
+        metadata.comment = comment;
+        Self::new(summary, metadata, self.parameters.clone())
+    }
+
     /// Rebuild the exact reference after a live C4GameParameters mutation.
     /// The display projection duplicates title and MaxPlayers and therefore
     /// must advance atomically with the serialized parameters.
@@ -994,6 +1014,86 @@ mod tests {
     use lc_engine::{ControlPlayerInfoEntry, LegacyCString};
 
     use super::*;
+
+    fn exact_reference() -> HostGameReference {
+        let host_config = crate::HostConfig::default();
+        let parameters = host_config
+            .initial_join_snapshot
+            .as_ref()
+            .expect("default host JoinData")
+            .parameters
+            .clone();
+        let host = parameters
+            .clients
+            .clients
+            .iter()
+            .find(|client| client.client_id == 0)
+            .expect("default host client");
+        HostGameReference::new(
+            NetworkGameReference {
+                title: lc_resources::decode_legacy_script_text(parameters.title.as_bytes()),
+                host_name: lc_resources::decode_legacy_script_text(host.name.as_bytes()),
+                host_nick: lc_resources::decode_legacy_script_text(host.nick.as_bytes()),
+                state: "Lobby".to_string(),
+                control_mode: host_config.initial_status.control_mode,
+                password_needed: false,
+                official_server: true,
+                max_players: parameters.max_players,
+                game: "LegacyClonk".to_string(),
+                version: [4, 9, 11, 0],
+                build: 362,
+                ..NetworkGameReference::default()
+            },
+            HostGameReferenceMetadata {
+                icon: 7,
+                time: 23,
+                frame: 24,
+                league_performance: 25,
+                comment: LegacyCString::from_bytes(b"old comment".to_vec()).unwrap(),
+                ..HostGameReferenceMetadata::default()
+            },
+            parameters,
+        )
+        .expect("exact reference fixture validates")
+    }
+
+    #[test]
+    fn lobby_option_rebuild_updates_only_password_presence_and_comment() {
+        let reference = exact_reference();
+        let original_summary = reference.summary.clone();
+        let original_metadata = reference.metadata.clone();
+        let original_parameters = reference.parameters.clone();
+        let comment = LegacyCString::from_bytes(b"new \x80 comment".to_vec()).unwrap();
+
+        let updated = reference
+            .replacing_lobby_options(true, comment.clone())
+            .expect("live lobby options rebuild validates");
+
+        let mut expected_summary = original_summary;
+        expected_summary.password_needed = true;
+        let mut expected_metadata = original_metadata;
+        expected_metadata.comment = comment;
+        assert_eq!(updated.summary, expected_summary);
+        assert_eq!(updated.metadata, expected_metadata);
+        assert_eq!(updated.parameters, original_parameters);
+    }
+
+    #[test]
+    fn lobby_option_rebuild_revalidates_the_complete_reference() {
+        let mut reference = exact_reference();
+        reference.summary.max_players += 1;
+        let expected = HostGameReferenceError::MaxPlayersMismatch {
+            reference: reference.summary.max_players,
+            parameters: reference.parameters.max_players,
+        };
+
+        assert_eq!(
+            reference
+                .replacing_lobby_options(false, reference.metadata.comment.clone())
+                .unwrap_err(),
+            expected
+        );
+    }
 
     #[test]
     fn standalone_player_info_list_round_trips_through_the_cpp_ini_shape() {

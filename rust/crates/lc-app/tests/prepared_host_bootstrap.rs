@@ -47,6 +47,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
         group_maker: "FileMaker",
         host_name: "NetworkName",
         host_nick: "NetworkNick",
+        network_password: "round secret",
         network_comment: " Host comment ",
         netpuncher_address: "puncher.invalid:11115",
         player_sources: &player_sources,
@@ -103,7 +104,8 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     assert_eq!(reference.summary().control_mode, 2);
     assert_eq!(reference.summary().start_time, 1_720_000_122);
     assert!(reference.summary().join_allowed);
-    assert!(!reference.summary().password_needed);
+    assert!(reference.summary().password_needed);
+    assert_eq!(host.password.as_bytes(), b"round secret");
     assert_eq!(reference.summary().max_players, 1);
     // InitLocal copies every local net-client address into the reference's
     // canonical Addrs container (pristine 9ffa0a5d
@@ -990,6 +992,7 @@ fn native_host_metadata_and_player_filename_prepare_as_c4_bytes() {
         group_maker: "Mäker",
         host_name: "Höst",
         host_nick: "Nïck",
+        network_password: "",
         network_comment: "Grüße",
         netpuncher_address: "netpuncher.openclonk.org:11115",
         player_sources: &player_sources,
@@ -1337,6 +1340,7 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
             group_maker: "FileMaker",
             host_name: "Host",
             host_nick: "Host",
+            network_password: "",
             network_comment: "",
             netpuncher_address: "",
             player_sources: &player_sources,
@@ -1782,6 +1786,7 @@ fn prepare_typed_with_names_and_league_impl(
         group_maker: "Fixture Maker",
         host_name,
         host_nick,
+        network_password: "",
         network_comment: "",
         netpuncher_address,
         player_sources,

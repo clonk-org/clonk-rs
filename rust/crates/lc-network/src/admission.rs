@@ -139,6 +139,10 @@ impl HostAdmission {
         self.allow_join = allow_join;
     }
 
+    pub fn set_password(&mut self, password: Option<LegacyCString>) {
+        self.password = password;
+    }
+
     pub fn register_client_name(&mut self, name: &LegacyCString) {
         self.used_names.insert(name.as_bytes().to_vec());
     }
@@ -573,6 +577,37 @@ mod tests {
             false,
         );
         assert_eq!(denied_host.next_client_id(), 8);
+    }
+
+    #[test]
+    fn host_password_changes_apply_to_subsequent_admission_attempts() {
+        let mut host = HostAdmission::new(3, true, None, []);
+
+        assert!(matches!(
+            host.admit_new_peer(&request(-1, 11)),
+            AdmissionDecision::Accept { .. }
+        ));
+
+        let secret = LegacyCString::from_bytes(b"secret".to_vec()).unwrap();
+        host.set_password(Some(secret.clone()));
+        assert_reply(
+            &host.admit_new_peer(&request(-1, 12)),
+            false,
+            b"wrong password",
+            true,
+        );
+        let mut authenticated = request(-1, 13);
+        authenticated.password = secret;
+        assert!(matches!(
+            host.admit_new_peer(&authenticated),
+            AdmissionDecision::Accept { .. }
+        ));
+
+        host.set_password(None);
+        assert!(matches!(
+            host.admit_new_peer(&request(-1, 14)),
+            AdmissionDecision::Accept { .. }
+        ));
     }
 
     #[test]

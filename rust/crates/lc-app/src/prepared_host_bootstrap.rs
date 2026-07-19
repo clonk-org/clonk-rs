@@ -132,6 +132,8 @@ pub struct PreparedHostBootstrapSpec<'a> {
     pub host_name: &'a str,
     /// Already-selected `Config.Network.Nick`; empty falls back to `host_name`.
     pub host_nick: &'a str,
+    /// Process-local `Game.Network` password selected before the host starts.
+    pub network_password: &'a str,
     /// `Config.Network.Comment`, copied verbatim into the game reference.
     pub network_comment: &'a str,
     /// `Config.Network.PuncherAddress`, present even before a puncher ID exists.
@@ -1299,7 +1301,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             control_mode: spec.config.control_mode,
             target_tick: game.control_tick,
         },
-        password: LegacyCString::default(),
+        password: legacy_string(spec.network_password),
         allow_join: false,
         enable_upnp: spec.config.enable_upnp,
         configured_tcp_port: Some(spec.config.network_tcp_port),
@@ -1740,6 +1742,7 @@ fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHo
     validate_c4_text("C4Group maker", spec.group_maker, true)?;
     validate_network_name("host network name", spec.host_name, false)?;
     validate_network_name("host network nick", spec.host_nick, true)?;
+    validate_c4_text("network password", spec.network_password, true)?;
     validate_c4_text("network comment", spec.network_comment, true)?;
     validate_ascii_text("netpuncher address", spec.netpuncher_address, true)?;
     if let Some(league) = spec.league {

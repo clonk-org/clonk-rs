@@ -17024,6 +17024,31 @@ fn load_network_reference_port(paths: Option<&AppPaths>) -> u16 {
         .unwrap_or(lc_network::DEFAULT_REFERENCE_PORT)
 }
 
+fn load_prepared_league_host_config(
+    paths: Option<&AppPaths>,
+    league_server_signup: bool,
+) -> prepared_host_bootstrap::PreparedLeagueHostConfig {
+    let config = load_native_config_bytes(paths);
+    let raw_value = |section: &str, key: &str| native_config_text(&config, section, key);
+    let integer = |section: &str, key: &str, default: i32| {
+        raw_value(section, key)
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .unwrap_or(default)
+    };
+    let server = load_network_search_settings(paths);
+    prepared_host_bootstrap::PreparedLeagueHostConfig {
+        endpoint: server.master_server_url,
+        transport: lc_network::LeagueHttpTransportConfig {
+            language_charset: raw_value("General", "LanguageCharset").unwrap_or_default(),
+            language_sequence: raw_value("General", "LanguageEx")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| startup_language_sequence(paths).join(",")),
+        },
+        update_period_secs: i64::from(integer("Network", "MasterReferencePeriod", 120)),
+        league_server_signup,
+    }
+}
+
 fn lobby_ready_check_cooldown_from_config(config: Option<&Config>) -> LobbyReadyCheckCooldown {
     let seconds = config
         .and_then(|config| config.get_in(Some("Cooldowns"), "ReadyCheck"))
@@ -17181,22 +17206,8 @@ fn build_network_host_preparation(
         .unwrap_or_else(|| value("General", "Name").unwrap_or_default());
     let master_server_signup = app.scenario_game_options.values().master_server_signup;
     let league_server_signup = app.scenario_game_options.values().league_server_signup;
-    let league = (master_server_signup || league_server_signup).then(|| {
-        let server = load_network_search_settings(app.app_paths.as_ref());
-        prepared_host_bootstrap::PreparedLeagueHostConfig {
-            endpoint: server.master_server_url,
-            transport: lc_network::LeagueHttpTransportConfig {
-                language_charset: raw_value("General", "LanguageCharset").unwrap_or_default(),
-                language_sequence: raw_value("General", "LanguageEx")
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| {
-                        startup_language_sequence(app.app_paths.as_ref()).join(",")
-                    }),
-            },
-            update_period_secs: i64::from(integer("Network", "MasterReferencePeriod", 120)),
-            league_server_signup,
-        }
-    });
+    let league = (master_server_signup || league_server_signup)
+        .then(|| load_prepared_league_host_config(app.app_paths.as_ref(), league_server_signup));
 
     Ok(NetworkHostPreparation {
         scenario_path,
@@ -17212,6 +17223,7 @@ fn build_network_host_preparation(
         group_maker,
         host_name,
         host_nick,
+        network_password: app.scenario_game_options.values().password.clone(),
         network_comment,
         netpuncher_address: raw_value("Network", "PuncherAddress")
             .unwrap_or_else(|| "netpuncher.openclonk.org:11115".to_string()),
@@ -39130,42 +39142,7 @@ impl GameApp {
                             .unwrap_or_default(),
                     );
                 }
-                GameOptionAction::InternetSignupChanged { .. } => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::GameOptionSideEffect("Internet signup"),
-                    ));
-                }
-                GameOptionAction::LeagueSignupChanged(_) => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::GameOptionSideEffect("League signup"),
-                    ));
-                }
-                GameOptionAction::ShowInputDialog(_) => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::GameOptionSideEffect("Password/Comment dialog"),
-                    ));
-                }
-                GameOptionAction::PasswordChanged { .. } => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::GameOptionSideEffect("Password mutation"),
-                    ));
-                }
-                GameOptionAction::CommentChanged(_) => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::GameOptionSideEffect("Comment mutation"),
-                    ));
-                }
-                GameOptionAction::FairCrewPreferenceChanged(_)
-                | GameOptionAction::SendLobbyFairCrewControl { .. } => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::GameOptionSideEffect("FairCrew control"),
-                    ));
-                }
-                GameOptionAction::RecordPreferenceChanged(_) => {
-                    return Err(classic_game_lobby_child_error(
-                        ClassicGameLobbyChild::GameOptionSideEffect("Record preference"),
-                    ));
-                }
+                action => self.process_lobby_game_option_action(action)?,
             }
         }
         let focused = self.scenario_game_options.focused_button();
@@ -42022,6 +41999,10 @@ impl GameApp {
                     snapshot.parameters.fair_crew_strength = fair_crew_strength;
                     host_snapshot_changed = true;
                 }
+                if self.scenario_game_options.context().is_lobby() {
+                    self.scenario_game_options
+                        .set_lobby_fair_crew(use_fair_crew, false);
+                }
             }
             // C4CVT_None and unknown raw values are release-build no-ops.
             _ => {}
@@ -44053,9 +44034,18 @@ impl GameApp {
         &mut self,
         actions: Vec<GameOptionAction>,
     ) -> Result<(), EngineError> {
-        let sounds = self.scenario_game_options.take_sound_events();
-        self.play_game_option_sound_events(sounds);
-        self.process_game_option_actions(actions)
+        if self.scenario_game_options.context().is_lobby() {
+            for action in actions {
+                self.process_lobby_game_option_action(action)?;
+            }
+            let sounds = self.scenario_game_options.take_sound_events();
+            self.play_game_option_sound_events(sounds);
+            Ok(())
+        } else {
+            let sounds = self.scenario_game_options.take_sound_events();
+            self.play_game_option_sound_events(sounds);
+            self.process_game_option_actions(actions)
+        }
     }
 
     fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
@@ -44066,6 +44056,176 @@ impl GameApp {
             tracing::error!(%error, section, key, "failed to persist game option");
             self.status_text = format!("Unable to save game option: {error}");
         }
+    }
+
+    fn publish_lobby_game_option_reference(
+        &mut self,
+        password_needed: bool,
+        comment: lc_engine::LegacyCString,
+    ) {
+        let Some(reference) = self.advertised_game_reference.clone() else {
+            return;
+        };
+        let updated = match reference.replacing_lobby_options(password_needed, comment) {
+            Ok(updated) => updated,
+            Err(error) => {
+                tracing::error!(%error, "failed to rebuild lobby game-option reference");
+                self.status_text = format!("Unable to update network game reference: {error}");
+                return;
+            }
+        };
+        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+            if let Err(error) = advertiser.update_exact(&updated) {
+                tracing::error!(%error, "failed to publish lobby game-option reference");
+            }
+        }
+        self.advertised_game_reference = Some(updated);
+        if let Some(network) = self.network.as_ref() {
+            if let Err(error) = network.invalidate_league_reference() {
+                tracing::error!(%error, "failed to invalidate lobby game-option reference");
+            }
+        }
+    }
+
+    fn process_lobby_game_option_action(
+        &mut self,
+        action: GameOptionAction,
+    ) -> Result<(), EngineError> {
+        self.mark_menu_dirty();
+        match action {
+            GameOptionAction::FocusTraversalRequested { .. } => {
+                tracing::error!("lobby game-option focus traversal escaped its recursive owner");
+            }
+            GameOptionAction::InternetSignupChanged {
+                enabled,
+                live_lobby,
+            } => {
+                debug_assert!(live_lobby);
+                let config = load_prepared_league_host_config(self.app_paths.as_ref(), false);
+                let reference = self.advertised_game_reference.clone();
+                let result = match (self.network.as_mut(), reference) {
+                    (Some(network), Some(reference)) => {
+                        network.set_masterserver_signup(enabled, config, reference)
+                    }
+                    _ => Err(anyhow!("live host registration state is unavailable")),
+                };
+                let effective = if enabled { result.is_ok() } else { false };
+                self.scenario_game_options
+                    .apply_lobby_internet_result(effective);
+                self.persist_game_option_value(
+                    "Network",
+                    "MasterServerSignUp",
+                    i32::from(effective).to_string(),
+                );
+                if let Err(error) = result {
+                    tracing::error!(%error, enabled, "failed to change live masterserver signup");
+                    self.status_text = format!("Unable to change Internet game signup: {error}");
+                }
+            }
+            GameOptionAction::LeagueSignupChanged(enabled) => {
+                self.persist_game_option_value(
+                    "Network",
+                    "LeagueServerSignUp",
+                    i32::from(enabled).to_string(),
+                );
+            }
+            GameOptionAction::ShowInputDialog(request) => {
+                self.open_game_option_input_dialog(request)?;
+            }
+            GameOptionAction::PasswordChanged {
+                password,
+                remember_for_next_round,
+            } => {
+                let Some(password_bytes) = lc_resources::encode_legacy_script_text(&password)
+                else {
+                    self.status_text =
+                        "Network password is not representable in the classic encoding".to_string();
+                    return Ok(());
+                };
+                let Some(network_password) = lc_engine::LegacyCString::from_bytes(password_bytes)
+                else {
+                    self.status_text =
+                        "Network password contains an unsupported NUL byte".to_string();
+                    return Ok(());
+                };
+                if let Some(network) = self.network.as_ref() {
+                    if let Err(error) = network.set_host_password(network_password) {
+                        tracing::error!(%error, "failed to update live host password");
+                        self.status_text = format!("Unable to update network password: {error}");
+                        return Ok(());
+                    }
+                } else {
+                    self.status_text = "Live host password state is unavailable".to_string();
+                    return Ok(());
+                }
+                if let Some(password) = remember_for_next_round.as_ref() {
+                    self.persist_game_option_value(
+                        "Network",
+                        "LastPassword",
+                        password.clone(),
+                    );
+                }
+                let comment = self
+                    .advertised_game_reference
+                    .as_ref()
+                    .map(|reference| reference.metadata().comment.clone())
+                    .unwrap_or_default();
+                self.publish_lobby_game_option_reference(!password.is_empty(), comment);
+                self.scenario_game_options
+                    .apply_lobby_password_result(password, remember_for_next_round);
+            }
+            GameOptionAction::CommentChanged(comment) => {
+                let Some(comment_bytes) = lc_resources::encode_legacy_script_text(&comment) else {
+                    self.status_text =
+                        "Network comment is not representable in the classic encoding".to_string();
+                    return Ok(());
+                };
+                let Some(reference_comment) = lc_engine::LegacyCString::from_bytes(comment_bytes)
+                else {
+                    self.status_text =
+                        "Network comment contains an unsupported NUL byte".to_string();
+                    return Ok(());
+                };
+                self.persist_game_option_value("Network", "Comment", comment.clone());
+                let password_needed = self
+                    .advertised_game_reference
+                    .as_ref()
+                    .is_some_and(|reference| reference.summary().password_needed);
+                self.publish_lobby_game_option_reference(password_needed, reference_comment);
+                self.append_control_message_log(
+                    lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG.to_string(),
+                    CONTROL_LOG_COLOR,
+                    None,
+                );
+                self.scenario_game_options
+                    .apply_lobby_comment_result(comment);
+            }
+            GameOptionAction::SendLobbyFairCrewControl { value } => {
+                if let Some(network) = self.network.as_ref() {
+                    if let Err(error) = network.submit_control_set(lc_network::LegacyControlSet {
+                        value_type: 5,
+                        data: value,
+                        by_client: 0,
+                    }) {
+                        tracing::error!(%error, "failed to submit lobby FairCrew update");
+                        self.status_text = format!("Unable to change Fair Crew: {error}");
+                    }
+                }
+            }
+            GameOptionAction::RecordPreferenceChanged(enabled) => {
+                self.startup_view_flags.record = enabled;
+                self.recording_enabled = enabled && self.recordings_dir.is_some();
+                self.persist_game_option_value(
+                    "General",
+                    "Record",
+                    i32::from(enabled).to_string(),
+                );
+            }
+            GameOptionAction::FairCrewPreferenceChanged(_) => {
+                tracing::error!("lobby controller emitted selector-only FairCrew preference");
+            }
+        }
+        Ok(())
     }
 
     fn process_game_option_actions(
@@ -71758,7 +71918,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn classic_host_lobby_children_are_typed_fail_fast() {
+    fn unsupported_classic_host_lobby_children_are_typed_fail_fast() {
         let cases = vec![
             (
                 ClassicLobbyAction::RosterContextRequested {
@@ -71766,10 +71926,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                     position: GuiPoint::new(1.0, 1.0),
                 },
                 "RosterContext",
-            ),
-            (
-                ClassicLobbyAction::GameOptions(LobbyGameOptionInput::Hotkey('P')),
-                "Password/Comment dialog",
             ),
             (
                 ClassicLobbyAction::SheetRequested(LobbySheet::Options),
@@ -71812,6 +71968,329 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (manager, events, commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         (events, commands)
+    }
+
+    #[test]
+    fn classic_lobby_internet_button_registers_deregisters_and_rolls_back_failure() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(reference);
+
+        let observer = thread::spawn(move || {
+            let mut observed = Vec::new();
+            for result in [
+                Ok(()),
+                Ok(()),
+                Err("masterserver rejected the game".to_string()),
+            ] {
+                let (enabled, config, reference, completion) =
+                    commands.receive_masterserver_signup();
+                observed.push((enabled, config.league_server_signup, reference));
+                completion.send(result).expect("return signup result");
+            }
+            observed
+        });
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("register live lobby at the masterserver");
+        assert!(app.scenario_game_options.values().master_server_signup);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("deregister live lobby from the masterserver");
+        assert!(!app.scenario_game_options.values().master_server_signup);
+        assert!(!app.scenario_game_options.values().league_server_signup);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("failed registration rolls the button back without exiting the lobby");
+        assert!(!app.scenario_game_options.values().master_server_signup);
+        assert!(app
+            .status_text
+            .contains("masterserver rejected the game"));
+
+        let observed = observer.join().expect("signup observer");
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(enabled, league, _)| (*enabled, *league))
+                .collect::<Vec<_>>(),
+            vec![(true, false), (false, false), (true, false)]
+        );
+        assert!(observed
+            .iter()
+            .all(|(_, _, reference)| reference.summary().state == "Lobby"));
+    }
+
+    #[test]
+    fn classic_lobby_password_button_clears_then_presets_and_sets_live_password() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::LobbyHost,
+            GameOptionValues {
+                password: "old password".to_string(),
+                last_password: "remembered password".to_string(),
+                ..GameOptionValues::default()
+            },
+        );
+        app.sync_scenario_game_option_bounds();
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(
+            reference
+                .replacing_lobby_options(true, LegacyCString::default())
+                .expect("password-protected reference"),
+        );
+
+        let observer = thread::spawn(move || {
+            let mut passwords = Vec::new();
+            for result in [
+                Err("host admission rejected the change".to_string()),
+                Ok(()),
+                Ok(()),
+            ] {
+                let (password, completion) = commands.receive_host_password();
+                passwords.push(password.as_bytes().to_vec());
+                completion.send(result).expect("return password result");
+            }
+            passwords
+        });
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('P'),
+        )])
+        .expect("failed clear does not exit the lobby");
+        assert_eq!(app.scenario_game_options.values().password, "old password");
+        assert!(app
+            .advertised_game_reference
+            .as_ref()
+            .expect("retained reference")
+            .summary()
+            .password_needed);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('P'),
+        )])
+        .expect("one click clears the existing password");
+        assert!(app.scenario_game_options.values().password.is_empty());
+        assert!(!app
+            .advertised_game_reference
+            .as_ref()
+            .expect("retained reference")
+            .summary()
+            .password_needed);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('P'),
+        )])
+        .expect("open password input after clearing");
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("password input")
+                .controller
+                .text(),
+            "remembered password"
+        );
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "unsupported 🔒".to_string(),
+        )])
+        .expect("unsupported password is rejected without mutating lobby state");
+        assert!(app.scenario_game_options.values().password.is_empty());
+        assert_eq!(
+            app.scenario_game_options.values().last_password,
+            "remembered password"
+        );
+        assert!(!app
+            .advertised_game_reference
+            .as_ref()
+            .expect("retained reference")
+            .summary()
+            .password_needed);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('P'),
+        )])
+        .expect("reopen password input after rejected text");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "new password".to_string(),
+        )])
+        .expect("apply password input to the live host");
+
+        assert_eq!(app.scenario_game_options.values().password, "new password");
+        assert_eq!(
+            app.scenario_game_options.values().last_password,
+            "new password"
+        );
+        assert!(app
+            .advertised_game_reference
+            .as_ref()
+            .expect("retained reference")
+            .summary()
+            .password_needed);
+        assert_eq!(
+            observer.join().expect("password observer"),
+            vec![
+                Vec::<u8>::new(),
+                Vec::<u8>::new(),
+                b"new password".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn classic_lobby_comment_updates_and_invalidates_the_advertised_reference() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_league_commands_for_client_id(0);
+        app.network = Some(manager);
+        app.scenario_game_options.set_comment("old comment");
+        let (_snapshot, reference) = default_exact_host_reference();
+        app.advertised_game_reference = Some(
+            reference
+                .replacing_lobby_options(
+                    false,
+                    LegacyCString::from_bytes(b"old comment".to_vec()).unwrap(),
+                )
+                .expect("commented reference"),
+        );
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('M'),
+        )])
+        .expect("open lobby comment input");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "old comment".to_string(),
+        )])
+        .expect("unchanged comment is a no-op");
+        assert_eq!(commands.take_league_update_effects().1, 0);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('M'),
+        )])
+        .expect("reopen lobby comment input for invalid text");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "unsupported 💬".to_string(),
+        )])
+        .expect("unsupported comment is rejected without mutating lobby state");
+        assert_eq!(app.scenario_game_options.values().comment, "old comment");
+        assert_eq!(commands.take_league_update_effects().1, 0);
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .expect("classic lobby")
+            .controller
+            .logs()
+            .is_empty());
+        assert_eq!(
+            app.advertised_game_reference
+                .as_ref()
+                .expect("retained reference")
+                .metadata()
+                .comment
+                .as_bytes(),
+            b"old comment"
+        );
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('M'),
+        )])
+        .expect("reopen lobby comment input");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "new comment".to_string(),
+        )])
+        .expect("apply changed lobby comment");
+
+        assert_eq!(commands.take_league_update_effects().1, 1);
+        assert_eq!(
+            app.advertised_game_reference
+                .as_ref()
+                .expect("retained reference")
+                .metadata()
+                .comment
+                .as_bytes(),
+            b"new comment"
+        );
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("classic lobby")
+                .controller
+                .logs()
+                .last()
+                .map(|line| line.text.as_str()),
+            Some(lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG)
+        );
+    }
+
+    #[test]
+    fn classic_lobby_fair_crew_control_echoes_and_countdown_or_force_gate_it() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::LobbyHost,
+            GameOptionValues {
+                fair_crew_strength: 75,
+                ..GameOptionValues::default()
+            },
+        );
+        app.sync_scenario_game_option_bounds();
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('F'),
+        )])
+        .expect("submit fair-crew enable control");
+        let sets = commands.take_submitted_control_sets();
+        assert_eq!(
+            sets,
+            vec![lc_network::LegacyControlSet {
+                value_type: 5,
+                data: 75,
+                by_client: 0,
+            }]
+        );
+        assert!(!app.scenario_game_options.values().fair_crew);
+        app.execute_control_set(sets[0]);
+        assert!(app.scenario_game_options.values().fair_crew);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('F'),
+        )])
+        .expect("submit fair-crew disable control");
+        assert_eq!(commands.take_submitted_control_sets()[0].data, -1);
+
+        app.scenario_game_options.set_countdown(true);
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('F'),
+        )])
+        .expect("countdown-disabled Fair Crew passes without a side effect");
+        assert!(commands.take_submitted_control_sets().is_empty());
+
+        app.scenario_game_options.set_countdown(false);
+        app.scenario_game_options.set_lobby_fair_crew(false, true);
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('F'),
+        )])
+        .expect("forced Fair Crew passes without a side effect");
+        assert!(commands.take_submitted_control_sets().is_empty());
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('R'),
+        )])
+        .expect("record remains a local lobby preference");
+        assert!(app.scenario_game_options.values().record);
+        assert!(app.startup_view_flags.record);
     }
 
     #[test]

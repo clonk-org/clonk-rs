@@ -753,6 +753,10 @@ pub enum HostCommand {
         reset_performance: bool,
         completion: oneshot::Sender<Vec<RuntimeNetworkClientState>>,
     },
+    SetPassword {
+        password: Option<lc_engine::LegacyCString>,
+        completion: oneshot::Sender<()>,
+    },
     InspectRuntimeConnections {
         completion: oneshot::Sender<Vec<RuntimeNetworkConnection>>,
     },
@@ -1003,6 +1007,21 @@ impl HostHandle {
         self.command_tx
             .send(HostCommand::SetJoinAllowed {
                 allowed,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        applied.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn set_password(
+        &self,
+        password: Option<lc_engine::LegacyCString>,
+    ) -> Result<(), HostError> {
+        let (completion, applied) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SetPassword {
+                password,
                 completion,
             })
             .await
@@ -5411,6 +5430,13 @@ async fn run_host(
                             state.client_performance.reset_accumulators();
                         }
                         let _ = completion.send(host_runtime_client_states(&state, tick));
+                    }
+                    HostCommand::SetPassword {
+                        password,
+                        completion,
+                    } => {
+                        state.admission.set_password(password);
+                        let _ = completion.send(());
                     }
                     HostCommand::InspectRuntimeConnections { completion } => {
                         let _ = completion.send(host_runtime_connections(&state));
@@ -12675,6 +12701,37 @@ mod tests {
             "CopyClientList-style resets clear the displayed EWMA"
         );
         host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_password_setter_returns_only_after_the_live_state_applies() {
+        let (command_tx, mut commands) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let handle = HostHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: tokio::spawn(async {}),
+            udp_local_addr: None,
+        };
+        let secret = lc_engine::LegacyCString::from_bytes(b"secret".to_vec()).unwrap();
+        let setter = tokio::spawn(async move { handle.set_password(Some(secret)).await });
+
+        let HostCommand::SetPassword {
+            password,
+            completion,
+        } = commands.recv().await.expect("password command")
+        else {
+            panic!("expected password command");
+        };
+        assert_eq!(password.unwrap().as_bytes(), b"secret");
+        assert!(!setter.is_finished(), "host state has not applied the password");
+        completion.send(()).expect("acknowledge applied password");
+        setter
+            .await
+            .expect("setter task")
+            .expect("password acknowledgement");
     }
 
     #[tokio::test(flavor = "multi_thread")]
