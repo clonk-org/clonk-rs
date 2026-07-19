@@ -23,6 +23,7 @@ struct SectionMeta {
 pub struct Config {
     entries: IndexMap<(Option<String>, String), Entry>,
     section_meta: IndexMap<Option<String>, SectionMeta>,
+    standalone_comments: Vec<String>,
 }
 
 impl Default for Config {
@@ -30,6 +31,7 @@ impl Default for Config {
         let mut cfg = Self {
             entries: IndexMap::new(),
             section_meta: IndexMap::new(),
+            standalone_comments: Vec::new(),
         };
         cfg.ensure_section(None, false);
         cfg
@@ -91,7 +93,9 @@ impl Config {
             let bytes_read = reader.read_line(&mut buffer)?;
             if bytes_read == 0 {
                 if !line_accumulator.trim().is_empty() {
-                    if let Some(item) = parse_line(&line_accumulator) {
+                    if let Some(comment) = standalone_comment(&line_accumulator) {
+                        config.standalone_comments.push(comment);
+                    } else if let Some(item) = parse_line(&line_accumulator) {
                         handle_item(&mut config, &mut current_section, item);
                     }
                 }
@@ -101,7 +105,9 @@ impl Config {
             if line_continues(&mut line_accumulator) {
                 continue;
             }
-            if let Some(item) = parse_line(&line_accumulator) {
+            if let Some(comment) = standalone_comment(&line_accumulator) {
+                config.standalone_comments.push(comment);
+            } else if let Some(item) = parse_line(&line_accumulator) {
                 handle_item(&mut config, &mut current_section, item);
             }
             line_accumulator.clear();
@@ -155,17 +161,21 @@ impl Config {
         let value = value.into();
         let section_owned = section.map(String::from);
         self.ensure_section(section_owned.clone(), false);
+        let map_key = (section_owned.clone(), key.clone());
+        if let Some(existing) = self.entries.get_mut(&map_key) {
+            // Updating a live config field must not discard the comment that
+            // was attached to its INI node. The advanced editor writes only
+            // changed values through this path while preserving all other
+            // source metadata and vendor extensions.
+            existing.value = value;
+            return;
+        }
         let entry = Entry {
             section: section_owned.clone(),
             key: key.clone(),
             value,
             comment: None,
         };
-        let map_key = (section_owned.clone(), key);
-        if let Some(existing) = self.entries.get_mut(&map_key) {
-            *existing = entry;
-            return;
-        }
         let insertion_index = self
             .entries
             .values()
@@ -206,6 +216,9 @@ impl Config {
     where
         W: Write,
     {
+        for comment in &self.standalone_comments {
+            writeln!(writer, "{comment}")?;
+        }
         let mut current_section: Option<&Option<String>> = None;
         for entry in self.entries.values() {
             let section_ref = &entry.section;
@@ -227,20 +240,64 @@ impl Config {
                 current_section = Some(section_ref);
             }
             if let Some(comment) = &entry.comment {
-                writeln!(writer, "#{}", comment)?;
+                // Keep entry comments inline, which is the form the parser
+                // can associate with the same name node on the next load.
+                // Emitting a standalone `#...` line silently detached it
+                // during an Options -> advanced editor save/reload cycle.
+                writeln!(
+                    writer,
+                    "{} = {} #{}",
+                    entry.key,
+                    quote_value(&entry.value),
+                    comment
+                )?;
+            } else {
+                writeln!(writer, "{} = {}", entry.key, quote_value(&entry.value))?;
             }
-            writeln!(writer, "{} = {}", entry.key, quote_value(&entry.value))?;
         }
         Ok(())
     }
 }
 
-fn quote_value(value: &str) -> String {
-    if value.contains(|ch: char| ch.is_whitespace()) {
-        format!("\"{}\"", value)
+fn standalone_comment(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("//")
+        || trimmed
+            .strip_prefix('#')
+            .is_some_and(|rest| !rest.trim_start().starts_with('['))
+    {
+        Some(trimmed.to_string())
     } else {
-        value.to_string()
+        None
     }
+}
+
+fn quote_value(value: &str) -> String {
+    if !value.contains(|ch: char| ch.is_whitespace() || ch.is_control() || ch == '#' || ch == '"') {
+        return value.to_string();
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '\u{7}' => quoted.push_str("\\a"),
+            '\u{8}' => quoted.push_str("\\b"),
+            '\u{c}' => quoted.push_str("\\f"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '\u{b}' => quoted.push_str("\\v"),
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            character if character.is_control() => {
+                quoted.push('\\');
+                quoted.push_str(&format!("{:o}", character as u32));
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn line_continues(line: &mut String) -> bool {
@@ -296,7 +353,7 @@ mod tests {
         let data = b"Name = <i>Player</i> # main user\nEnabled=true\n\n";
         let mut cursor = Cursor::new(&data[..]);
         let cfg = Config::from_reader(&mut cursor).unwrap();
-        assert_eq!(cfg.get("Name"), Some("Player"));
+        assert_eq!(cfg.get("Name"), Some("<i>Player</i>"));
         assert_eq!(cfg.get_bool("Enabled"), Some(true));
         let entry = cfg
             .entries
@@ -324,6 +381,59 @@ mod tests {
     }
 
     #[test]
+    fn save_reload_preserves_continued_and_escaped_quoted_values() {
+        let data = b"[Vendor]\nMultiline=first\\\nsecond\nTitle=\"Alice \\\"The #1\\\"\" # keep\n";
+        let mut cursor = Cursor::new(&data[..]);
+        let cfg = Config::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            cfg.get_in(Some("Vendor"), "Multiline"),
+            Some("first\nsecond")
+        );
+        assert_eq!(
+            cfg.get_in(Some("Vendor"), "Title"),
+            Some("Alice \"The #1\"")
+        );
+
+        let serialized = cfg.to_string().unwrap();
+        assert!(serialized.contains("Multiline = \"first\\nsecond\""));
+        assert!(serialized.contains("Title = \"Alice \\\"The #1\\\"\" #keep"));
+        let mut cursor = Cursor::new(serialized.as_bytes());
+        let reloaded = Config::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            reloaded.get_in(Some("Vendor"), "Multiline"),
+            Some("first\nsecond")
+        );
+        assert_eq!(
+            reloaded.get_in(Some("Vendor"), "Title"),
+            Some("Alice \"The #1\"")
+        );
+    }
+
+    #[test]
+    fn save_reload_preserves_vendor_markup_and_native_numeric_escapes() {
+        let data = b"[Vendor]\nTemplate=\"<i>keep</i>\"\nValue=\"\\101\\x42\\33\"\n";
+        let mut cursor = Cursor::new(&data[..]);
+        let cfg = Config::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            cfg.get_in(Some("Vendor"), "Template"),
+            Some("<i>keep</i>")
+        );
+        assert_eq!(cfg.get_in(Some("Vendor"), "Value"), Some("AB\u{1b}"));
+
+        let serialized = cfg.to_string().unwrap();
+        let mut cursor = Cursor::new(serialized.as_bytes());
+        let reloaded = Config::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            reloaded.get_in(Some("Vendor"), "Template"),
+            Some("<i>keep</i>")
+        );
+        assert_eq!(
+            reloaded.get_in(Some("Vendor"), "Value"),
+            Some("AB\u{1b}")
+        );
+    }
+
+    #[test]
     fn server_url_survives_cpp_load_rust_save_and_reload() {
         let data = b"[Network]\nServerAddress=\"https://league.clonkspot.org\"\n";
         let mut cursor = Cursor::new(&data[..]);
@@ -341,6 +451,21 @@ mod tests {
         assert_eq!(
             reloaded.get_in(Some("Network"), "ServerAddress"),
             Some("https://league.clonkspot.org")
+        );
+    }
+
+    #[test]
+    fn hash_prefixed_irc_channels_survive_save_and_reload() {
+        let mut config = Config::new();
+        config.set_in(Some("IRC"), "Channel", "#clonken,#legacyclonk");
+
+        let serialized = config.to_string().expect("config serializes");
+        assert!(serialized.contains("Channel = \"#clonken,#legacyclonk\""));
+        let mut reader = Cursor::new(serialized.as_bytes());
+        let reloaded = Config::from_reader(&mut reader).expect("config reloads");
+        assert_eq!(
+            reloaded.get_in(Some("IRC"), "Channel"),
+            Some("#clonken,#legacyclonk")
         );
     }
 
@@ -395,6 +520,50 @@ mod tests {
             reloaded.get_in(Some("General"), "Participants"),
             Some("Exact.c4p")
         );
+    }
+
+    #[test]
+    fn updating_an_existing_value_preserves_its_comment() {
+        let data = b"[General]\nName=Old # keep this note\n";
+        let mut reader = Cursor::new(&data[..]);
+        let mut config = Config::from_reader(&mut reader).expect("parse config");
+
+        config.set_in(Some("General"), "Name", "New");
+
+        let entry = config
+            .iter()
+            .find(|entry| entry.section.as_deref() == Some("General") && entry.key == "Name")
+            .expect("updated entry");
+        assert_eq!(entry.value, "New");
+        assert_eq!(entry.comment.as_deref(), Some("keep this note"));
+        let serialized = config.to_string().expect("serialize config");
+        assert!(serialized.contains("Name = New #keep this note"));
+        let mut reloaded = Cursor::new(serialized.as_bytes());
+        let reloaded = Config::from_reader(&mut reloaded).expect("reload config");
+        assert_eq!(
+            reloaded
+                .iter()
+                .find(|entry| entry.key == "Name")
+                .and_then(|entry| entry.comment.as_deref()),
+            Some("keep this note")
+        );
+    }
+
+    #[test]
+    fn standalone_comments_survive_config_rewrites() {
+        let data = b"# first note\n[General]\nName=Old\n// trailing note\n";
+        let mut reader = Cursor::new(&data[..]);
+        let mut config = Config::from_reader(&mut reader).expect("parse config");
+        config.set_in(Some("General"), "Name", "New");
+
+        let serialized = config.to_string().expect("serialize config");
+        assert!(serialized.contains("# first note\n"));
+        assert!(serialized.contains("// trailing note\n"));
+        let mut reader = Cursor::new(serialized.as_bytes());
+        let reloaded = Config::from_reader(&mut reader).expect("reload config");
+        let rewritten = reloaded.to_string().expect("rewrite config");
+        assert!(rewritten.contains("# first note\n"));
+        assert!(rewritten.contains("// trailing note\n"));
     }
 
     #[test]

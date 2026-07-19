@@ -671,6 +671,14 @@ fn is_german_system() -> bool {
         .is_some_and(|value| value.to_ascii_lowercase().contains("de"))
 }
 
+/// Raw defaults traversed by the advanced-config compiler before per-key INI
+/// overrides are applied. Keeping the editor on this table prevents its
+/// platform/locale view from drifting from the live controls loader.
+pub(crate) fn advanced_config_default_raw_keyboard_keys(
+) -> [[i32; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
+    cpp_default_raw_keyboard_keys(is_german_system())
+}
+
 fn read_keyboard_entry(
     config: &Config,
     set_index: usize,

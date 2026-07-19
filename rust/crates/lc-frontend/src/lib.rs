@@ -24,6 +24,7 @@ pub mod runtime_help;
 pub mod scoreboard;
 pub mod startup_about_dlg;
 pub mod startup_netdlg;
+pub mod startup_options_advanced;
 pub mod startup_options_controls;
 pub mod startup_options_dlg;
 pub mod startup_options_graphics;

@@ -106,6 +106,22 @@ impl<Focus> RenameEdit<Focus> {
         self.horizontal_scroll
     }
 
+    /// Maps a window-space x coordinate to the nearest UTF-8 byte boundary,
+    /// matching the classic edit's half-glyph caret hit test.
+    pub fn character_at_x(&self, x: f32, rect: IntRect, font: &ClonkFont) -> usize {
+        let target = (x - (rect.x + 2) as f32 + self.horizontal_scroll as f32).max(0.0);
+        let mut previous_width = 0_i32;
+        for (index, character) in self.text.char_indices() {
+            let end = index + character.len_utf8();
+            let width = font.measure(&self.text[..end], false).0;
+            if target < (previous_width + width) as f32 / 2.0 {
+                return index;
+            }
+            previous_width = width;
+        }
+        self.text.len()
+    }
+
     pub fn is_focused(&self) -> bool {
         self.focused
     }

@@ -8,6 +8,7 @@
     clippy::too_many_arguments
 )]
 
+mod advanced_config;
 mod clonk_fonts;
 mod control_message;
 mod control_options;
@@ -4076,6 +4077,20 @@ impl FrontendAssets {
             button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             button: self.dialog_image("GUIButton.png")?,
         })
+    }
+
+    fn options_advanced_assets(
+        &self,
+    ) -> Option<lc_frontend::startup_options_advanced::AdvancedConfigAssets> {
+        Some(
+            lc_frontend::startup_options_advanced::AdvancedConfigAssets {
+                caption: self.dialog_image("GUICaption.png")?,
+                button: self.dialog_image("GUIButton.png")?,
+                button_down: self.dialog_image("GUIButtonDown.png")?,
+                button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
+                checkbox: self.dialog_image("GUICheckbox.png")?,
+            },
+        )
     }
 
     fn plrsel_assets(&self) -> Option<lc_frontend::startup_plrsel::PlrSelAssets> {
@@ -8370,6 +8385,7 @@ enum MessageDialogContinuation {
     OptionsControlCapture(lc_frontend::startup_options_controls::ControlCaptureTarget),
     OptionsAlternateServerNotice,
     OptionsResetConfiguration,
+    OptionsAdvancedWarning,
 }
 
 #[derive(Clone, Debug)]
@@ -8433,6 +8449,11 @@ impl ScenarioSelectorMode {
 struct PendingGameOptionInputDialog {
     purpose: PendingInputDialogPurpose,
     controller: InputDialogController,
+}
+
+struct PendingOptionsAdvancedDialog {
+    controller: lc_frontend::startup_options_advanced::AdvancedConfigController,
+    return_sheet: lc_frontend::startup_options_dlg::OptionsSheet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9902,6 +9923,7 @@ struct GameApp {
     startup_crew_models: Vec<lc_frontend::startup_plrsel::PlrSelCrew>,
     startup_crew_player_index: Option<usize>,
     startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
+    startup_options_advanced_dialog: Option<PendingOptionsAdvancedDialog>,
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
     /// C4Startup::SwitchDialog's paired FadeOut/FadeIn. The outgoing pixels
@@ -16913,14 +16935,15 @@ fn load_gamepad_gui_control(paths: Option<&AppPaths>) -> bool {
         .unwrap_or(false)
 }
 
-/// `Config.General.FairCrew` — drives the scen-sel fair-crew icon button
-/// (C4Network2Dialogs.cpp:796-816).
+/// Native `Config.General.NoCrew` (`C4Config.cpp:384`) drives the scen-sel
+/// fair-crew icon. `FairCrew` remains a read fallback for older Rust configs.
 fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
     paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
         .and_then(|config| {
             config
-                .get_in(Some("General"), "FairCrew")
+                .get_in(Some("General"), "NoCrew")
+                .or_else(|| config.get_in(Some("General"), "FairCrew"))
                 .map(parse_config_bool)
         })
         .unwrap_or(false)
@@ -17768,7 +17791,11 @@ fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValue
         password: String::new(),
         last_password: string_value("Network", "LastPassword", "Wipf"),
         comment: string_value("Network", "Comment", ""),
-        fair_crew: bool_value("General", "FairCrew", false),
+        fair_crew: native_config_text(&config, "General", "NoCrew")
+            .or_else(|| native_config_text(&config, "General", "FairCrew"))
+            .as_deref()
+            .map(parse_config_bool)
+            .unwrap_or(false),
         fair_crew_strength,
         record: bool_value("General", "Record", false),
         ..GameOptionValues::default()
@@ -17820,8 +17847,8 @@ fn persist_config_value(
     config.save(path)
 }
 
-fn persist_startup_options_config(
-    paths: &AppPaths,
+fn apply_startup_options_config(
+    config: &mut Config,
     program: &lc_frontend::startup_options_dlg::ProgramSheetState,
     audio_options: Option<&AudioOptions>,
     graphics: &lc_frontend::startup_options_graphics::GraphicsSheetState,
@@ -17829,13 +17856,7 @@ fn persist_startup_options_config(
     keyboard_bindings: &KeyboardBindings,
     gamepad_bindings: &GamepadBindings,
     gamepad_gui_control: bool,
-) -> io::Result<()> {
-    let path = paths.config_file();
-    let mut config = match Config::load(&path) {
-        Ok(config) => config,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
-        Err(error) => return Err(error),
-    };
+) {
     config.set_in(Some("General"), "Language", &program.language);
     config.set_in(Some("General"), "LanguageEx", &program.language_ex);
     config.set_in(Some("General"), "FontName", &program.font_face);
@@ -17867,7 +17888,7 @@ fn persist_startup_options_config(
         program.fair_crew_strength.to_string(),
     );
     if let Some(audio_options) = audio_options {
-        audio_options.write_startup_sound_config(&mut config);
+        audio_options.write_startup_sound_config(config);
     }
     config.set_in(
         Some("Graphics"),
@@ -17936,8 +17957,36 @@ fn persist_startup_options_config(
         "GamepadGuiControl",
         bool_string(gamepad_gui_control),
     );
-    keyboard_bindings.write_to_config(&mut config);
-    gamepad_bindings.write_to_config(&mut config);
+    keyboard_bindings.write_to_config(config);
+    gamepad_bindings.write_to_config(config);
+}
+
+fn persist_startup_options_config(
+    paths: &AppPaths,
+    program: &lc_frontend::startup_options_dlg::ProgramSheetState,
+    audio_options: Option<&AudioOptions>,
+    graphics: &lc_frontend::startup_options_graphics::GraphicsSheetState,
+    network: &lc_frontend::startup_options_network::NetworkSheetState,
+    keyboard_bindings: &KeyboardBindings,
+    gamepad_bindings: &GamepadBindings,
+    gamepad_gui_control: bool,
+) -> io::Result<()> {
+    let path = paths.config_file();
+    let mut config = match Config::load(&path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    apply_startup_options_config(
+        &mut config,
+        program,
+        audio_options,
+        graphics,
+        network,
+        keyboard_bindings,
+        gamepad_bindings,
+        gamepad_gui_control,
+    );
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -19511,6 +19560,7 @@ impl GameApp {
             startup_crew_models: Vec::new(),
             startup_crew_player_index: None,
             startup_options_dialog: None,
+            startup_options_advanced_dialog: None,
             startup_about_dialog: None,
             startup_view: StartupView::MainMenu,
             startup_dialog_fade: None,
@@ -20390,6 +20440,10 @@ impl GameApp {
                 dialog.resize(width as i32, height as i32, fonts, book);
                 dialog.pointer_left();
             }
+            if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                pending.controller.resize(width as i32, height as i32);
+                pending.controller.cancel_interaction();
+            }
             if let (Some(dialog), Some(fonts)) = (
                 self.startup_about_dialog.as_mut(),
                 self.assets.clonk_fonts.as_deref(),
@@ -20842,6 +20896,15 @@ impl GameApp {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && !self.running_chat_active() {
+            return Ok(());
+        }
+        if self.startup_options_advanced_dialog.is_some() {
+            let mut encoded = [0_u8; 4];
+            let text = character.encode_utf8(&mut encoded);
+            if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                pending.controller.handle_text_input(text);
+            }
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -21523,6 +21586,22 @@ impl GameApp {
                 })
             });
             if scrolled {
+                self.mark_menu_dirty();
+            }
+            return Ok(());
+        }
+        if self.startup_options_advanced_dialog.is_some() {
+            let native_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let changed = self
+                .startup_options_advanced_dialog
+                .as_mut()
+                .is_some_and(|pending| pending.controller.handle_wheel(native_delta));
+            if changed {
                 self.mark_menu_dirty();
             }
             return Ok(());
@@ -23435,6 +23514,7 @@ impl GameApp {
         self.mode == AppMode::Menu
             && self.startup_view == StartupView::Options
             && self.startup_options_dialog.is_some()
+            && self.startup_options_advanced_dialog.is_none()
             && self.message_dialogs.is_empty()
             && self.context_menu.is_none()
             && self.definition_selector.is_none()
@@ -24333,6 +24413,148 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_network_start_wait_key(key, state)? {
+            return Ok(());
+        }
+        if self.startup_options_advanced_dialog.is_some() {
+            let modifiers = self.keyboard_modifiers;
+            let ctrl = modifiers.ctrl();
+            let shift = modifiers.shift();
+            let edit_modifiers = !modifiers
+                .intersects(ModifiersState::ALT | ModifiersState::LOGO);
+            let control_only = modifiers == ModifiersState::CTRL;
+            let unmodified = modifiers.is_empty();
+            let hotkey_modifiers = modifiers == ModifiersState::ALT
+                || modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+            let actions = if state == ElementState::Pressed && hotkey_modifiers {
+                context_menu_hotkey(key)
+                    .and_then(|character| {
+                        self.startup_options_advanced_dialog
+                            .as_mut()
+                            .map(|pending| pending.controller.handle_hotkey(character))
+                    })
+                    .unwrap_or_default()
+            } else if key == VirtualKeyCode::Tab {
+                if state == ElementState::Pressed {
+                    if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                        if edit_modifiers && ctrl {
+                            pending.controller.select_relative_section(shift);
+                        } else if edit_modifiers && !ctrl {
+                            pending.controller.handle_focus_step(shift);
+                        }
+                    }
+                }
+                Vec::new()
+            } else if unmodified
+                && matches!(key, VirtualKeyCode::PageUp | VirtualKeyCode::PageDown)
+            {
+                if state == ElementState::Pressed {
+                    let delta = if key == VirtualKeyCode::PageUp { 10 } else { -10 };
+                    if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                        pending.controller.handle_integer_page_step(delta);
+                    }
+                }
+                Vec::new()
+            } else if edit_modifiers
+                && state == ElementState::Pressed
+                && key == VirtualKeyCode::Back
+            {
+                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    pending
+                        .controller
+                        .handle_backspace_with_modifiers(ctrl, shift);
+                }
+                Vec::new()
+            } else if edit_modifiers
+                && state == ElementState::Pressed
+                && key == VirtualKeyCode::Delete
+            {
+                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    pending.controller.handle_delete(ctrl, shift);
+                }
+                Vec::new()
+            } else if edit_modifiers
+                && state == ElementState::Pressed
+                && matches!(
+                    key,
+                    VirtualKeyCode::Left
+                        | VirtualKeyCode::Right
+                        | VirtualKeyCode::Home
+                        | VirtualKeyCode::End
+                )
+            {
+                use lc_frontend::rename_edit::RenameEditCursorOperation;
+                let operation = match key {
+                    VirtualKeyCode::Left => RenameEditCursorOperation::Left,
+                    VirtualKeyCode::Right => RenameEditCursorOperation::Right,
+                    VirtualKeyCode::Home => RenameEditCursorOperation::Home,
+                    VirtualKeyCode::End => RenameEditCursorOperation::End,
+                    _ => unreachable!(),
+                };
+                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    pending.controller.move_edit_cursor(operation, ctrl, shift);
+                }
+                Vec::new()
+            } else if state == ElementState::Pressed
+                && control_only
+                && key == VirtualKeyCode::A
+            {
+                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    pending.controller.select_all_edit_text();
+                }
+                Vec::new()
+            } else if state == ElementState::Pressed
+                && control_only
+                && matches!(key, VirtualKeyCode::C | VirtualKeyCode::X)
+            {
+                let selected = self
+                    .startup_options_advanced_dialog
+                    .as_ref()
+                    .and_then(|pending| pending.controller.selected_edit_text())
+                    .map(str::to_string);
+                if let Some(selected) = selected {
+                    match arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(selected))
+                    {
+                        Ok(()) if key == VirtualKeyCode::X => {
+                            if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                                pending.controller.delete_edit_selection();
+                            }
+                        }
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to copy advanced setting text")
+                        }
+                    }
+                }
+                Vec::new()
+            } else if state == ElementState::Pressed
+                && control_only
+                && key == VirtualKeyCode::V
+            {
+                match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+                    Ok(text) => {
+                        if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                            pending.controller.handle_text_input(&text);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to paste advanced setting text")
+                    }
+                }
+                Vec::new()
+            } else if let Some(gui_key) = unmodified.then(|| map_key_code(key)).flatten() {
+                self.startup_options_advanced_dialog
+                    .as_mut()
+                    .map(|pending| match state {
+                        ElementState::Pressed => pending.controller.handle_key_down(gui_key),
+                        ElementState::Released => pending.controller.handle_key_up(gui_key),
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            self.process_options_advanced_actions(actions)?;
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -29894,6 +30116,7 @@ impl GameApp {
             ContextPending,
             Context,
             Input,
+            Advanced,
             Chat,
             GameOver,
             Base,
@@ -29943,6 +30166,12 @@ impl GameApp {
                 ClusterOwner::Definition
             } else if self.game_option_input_dialog.is_some() {
                 ClusterOwner::Input
+            } else if self.startup_options_advanced_dialog.is_some() {
+                if eligible_gamepad_gui {
+                    ClusterOwner::Advanced
+                } else {
+                    ClusterOwner::Suppressed
+                }
             } else if game_over_open {
                 ClusterOwner::GameOver
             } else if self.startup_dialog_fade_active()
@@ -30019,6 +30248,31 @@ impl GameApp {
                         ClusterOwner::Input => {
                             self.handle_game_option_input_dialog_gamepad_event(event)?;
                         }
+                        ClusterOwner::Advanced => match event {
+                            GamepadEvent::GuiButton {
+                                class: GuiButtonClass::Low,
+                                ..
+                            } => {
+                                self.handle_gamepad_event(event)?;
+                                suppress_base_select_alias = true;
+                            }
+                            GamepadEvent::GuiButton {
+                                class: GuiButtonClass::High,
+                                ..
+                            } => {
+                                self.handle_gamepad_event(event)?;
+                                suppress_base_cancel_alias = true;
+                            }
+                            GamepadEvent::Action {
+                                action: GamepadActionType::Select,
+                                ..
+                            } if suppress_base_select_alias => {}
+                            GamepadEvent::Action {
+                                action: GamepadActionType::Cancel,
+                                ..
+                            } if suppress_base_cancel_alias => {}
+                            event => self.handle_gamepad_event(event)?,
+                        },
                         ClusterOwner::Chat => match event {
                             event @ (GamepadEvent::Direction { .. }
                             | GamepadEvent::Button { .. }
@@ -30059,7 +30313,8 @@ impl GameApp {
                             let rename_owns_raw_gui_button = eligible_gamepad_gui && rename_active;
                             let options_owns_raw_gui_button = eligible_gamepad_gui
                                 && self.mode == AppMode::Menu
-                                && self.startup_view == StartupView::Options;
+                                && self.startup_view == StartupView::Options
+                                && self.startup_options_advanced_dialog.is_none();
                             match event {
                                 GamepadEvent::Direction { .. }
                                     if rename_active && !eligible_gamepad_gui =>
@@ -30384,6 +30639,8 @@ impl GameApp {
                     if let Some(wait) = self.network_start_wait.as_mut() {
                         wait.controller.cancel_interaction();
                     }
+                } else if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    pending.controller.cancel_interaction();
                 } else if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                     pending.controller.pointer_left();
                 } else if self.classic_host_lobby_active() {
@@ -30429,6 +30686,21 @@ impl GameApp {
                         })
                         .unwrap_or_default();
                     self.process_network_start_wait_actions(actions)?;
+                    self.mark_menu_dirty();
+                } else if self.startup_options_advanced_dialog.is_some() {
+                    let key = match class {
+                        GuiButtonClass::Low => KeyCode::Space,
+                        GuiButtonClass::High => KeyCode::Escape,
+                    };
+                    let actions = self
+                        .startup_options_advanced_dialog
+                        .as_mut()
+                        .map(|pending| match state {
+                            ElementState::Pressed => pending.controller.handle_key_down(key),
+                            ElementState::Released => pending.controller.handle_key_up(key),
+                        })
+                        .unwrap_or_default();
+                    self.process_options_advanced_actions(actions)?;
                     self.mark_menu_dirty();
                 } else if self.startup_player_properties_dialog.is_some() {
                     let key = match class {
@@ -30507,6 +30779,9 @@ impl GameApp {
         {
             return Ok(());
         }
+        if self.startup_options_advanced_dialog.is_some() {
+            return Ok(());
+        }
         if self.startup_player_properties_dialog.is_some() {
             return Ok(());
         }
@@ -30568,6 +30843,32 @@ impl GameApp {
                 }
                 self.mark_menu_dirty();
             }
+            return Ok(());
+        }
+        if self.startup_options_advanced_dialog.is_some() {
+            if state == ElementState::Pressed {
+                if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+                    match button {
+                        ControlButton::Left => pending.controller.handle_focus_step(true),
+                        ControlButton::Right => pending.controller.handle_focus_step(false),
+                        ControlButton::Up
+                            if pending.controller.focus()
+                                == lc_frontend::startup_options_advanced::AdvancedConfigFocus::SectionTabs =>
+                        {
+                            pending.controller.handle_key_down(KeyCode::Up);
+                        }
+                        ControlButton::Down
+                            if pending.controller.focus()
+                                == lc_frontend::startup_options_advanced::AdvancedConfigFocus::SectionTabs =>
+                        {
+                            pending.controller.handle_key_down(KeyCode::Down);
+                        }
+                        ControlButton::Up | ControlButton::Down => {}
+                    }
+                }
+            }
+            self.process_options_advanced_actions(Vec::new())?;
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -30813,6 +31114,26 @@ impl GameApp {
                 action,
                 state,
             });
+        }
+        if self.startup_options_advanced_dialog.is_some() {
+            let key = match action {
+                GamepadActionType::Select => Some(KeyCode::Space),
+                GamepadActionType::Cancel => Some(KeyCode::Escape),
+                GamepadActionType::MenuToggle => None,
+            };
+            let actions = key
+                .and_then(|key| {
+                    self.startup_options_advanced_dialog
+                        .as_mut()
+                        .map(|pending| match state {
+                            ElementState::Pressed => pending.controller.handle_key_down(key),
+                            ElementState::Released => pending.controller.handle_key_up(key),
+                        })
+                })
+                .unwrap_or_default();
+            self.process_options_advanced_actions(actions)?;
+            self.mark_menu_dirty();
+            return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
             let key = match action {
@@ -31099,6 +31420,22 @@ impl GameApp {
                 wait.controller.handle_pointer_move(point, &layout);
             }
             self.play_network_start_wait_sounds();
+            return Ok(());
+        }
+        if self.startup_options_advanced_dialog.is_some() {
+            let font = self.assets.clonk_fonts.as_deref().map(|fonts| &fonts.text);
+            let actions = self
+                .startup_options_advanced_dialog
+                .as_mut()
+                .map(|pending| match font {
+                    Some(font) => pending
+                        .controller
+                        .handle_pointer_move_with_font(point, font),
+                    None => pending.controller.handle_pointer_move(point),
+                })
+                .unwrap_or_default();
+            self.process_options_advanced_actions(actions)?;
+            self.suspend_ingame_pointer_for_gui();
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -32598,6 +32935,9 @@ impl GameApp {
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
             return Ok(());
         }
+        if self.startup_options_advanced_dialog.is_some() {
+            return Ok(());
+        }
         if self.startup_player_properties_dialog.is_some() {
             return Ok(());
         }
@@ -32756,6 +33096,9 @@ impl GameApp {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() && self.running_chat_controller().is_none() {
+            return Ok(());
+        }
+        if self.startup_options_advanced_dialog.is_some() {
             return Ok(());
         }
         if self.startup_player_properties_dialog.is_some() {
@@ -33865,6 +34208,35 @@ impl GameApp {
             self.process_network_start_wait_actions(actions)?;
             return Ok(());
         }
+        if self.startup_options_advanced_dialog.is_some() {
+            let font = self.assets.clonk_fonts.as_deref().map(|fonts| &fonts.text);
+            let point = self
+                .startup_options_advanced_dialog
+                .as_ref()
+                .and_then(|pending| pending.controller.pointer_position());
+            let actions = point
+                .and_then(|point| {
+                    self.startup_options_advanced_dialog
+                        .as_mut()
+                        .map(|pending| match (button_state, font) {
+                            (ElementState::Pressed, Some(font)) => pending
+                                .controller
+                                .handle_pointer_down_with_font(point, font),
+                            (ElementState::Released, Some(font)) => pending
+                                .controller
+                                .handle_pointer_up_with_font(point, font),
+                            (ElementState::Pressed, None) => {
+                                pending.controller.handle_pointer_down(point)
+                            }
+                            (ElementState::Released, None) => {
+                                pending.controller.handle_pointer_up(point)
+                            }
+                        })
+                })
+                .unwrap_or_default();
+            self.process_options_advanced_actions(actions)?;
+            return Ok(());
+        }
         if self.startup_player_properties_dialog.is_some() {
             let point = self
                 .startup_player_properties_dialog
@@ -34463,6 +34835,40 @@ impl GameApp {
             self.process_network_start_wait_actions(actions)?;
             return Ok(());
         }
+        if self.startup_options_advanced_dialog.is_some() {
+            self.mark_menu_dirty();
+            let font = self.assets.clonk_fonts.as_deref().map(|fonts| &fonts.text);
+            let actions = self
+                .startup_options_advanced_dialog
+                .as_mut()
+                .map(|pending| match phase {
+                    TouchPhase::Started => match font {
+                        Some(font) => pending
+                            .controller
+                            .handle_pointer_down_with_font(position, font),
+                        None => pending.controller.handle_pointer_down(position),
+                    },
+                    TouchPhase::Moved => match font {
+                        Some(font) => pending
+                            .controller
+                            .handle_pointer_move_with_font(position, font),
+                        None => pending.controller.handle_pointer_move(position),
+                    },
+                    TouchPhase::Ended => match font {
+                        Some(font) => pending
+                            .controller
+                            .handle_pointer_up_with_font(position, font),
+                        None => pending.controller.handle_pointer_up(position),
+                    },
+                    TouchPhase::Cancelled => {
+                        pending.controller.cancel_interaction();
+                        Vec::new()
+                    }
+                })
+                .unwrap_or_default();
+            self.process_options_advanced_actions(actions)?;
+            return Ok(());
+        }
         if self.startup_player_properties_dialog.is_some() {
             self.mark_menu_dirty();
             let actions = self
@@ -34988,6 +35394,10 @@ impl GameApp {
                 wait.controller.pointer_left();
             }
             self.play_network_start_wait_sounds();
+            return;
+        }
+        if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
+            pending.controller.cancel_interaction();
             return;
         }
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
@@ -40646,9 +41056,8 @@ impl GameApp {
                     self.show_options_reset_configuration()?;
                 }
                 OptionsDlgAction::OpenAdvancedSettings => {
-                    return Err(classic_startup_action_error(
-                        ClassicStartupAction::OptionsAdvancedSettings,
-                    ));
+                    self.play_ui_sound("Command");
+                    self.show_options_advanced_warning()?;
                 }
                 OptionsDlgAction::Sound(action) => match action {
                     SoundSheetAction::GuiSound(sound) | SoundSheetAction::TestSound(sound) => {
@@ -40880,6 +41289,215 @@ impl GameApp {
             ),
             MessageDialogContinuation::OptionsResetConfiguration,
         )
+    }
+
+    fn show_options_advanced_warning(&mut self) -> Result<(), EngineError> {
+        let message = self.runtime_resource_text(
+            "IDS_MSG_ADVANCED_SETTINGS_WARNING",
+            "Some settings only apply after a restart.|Modifications may cause Clonk to stop working correctly. Proceed at your own risk!",
+        );
+        let caption = self.runtime_resource_text("IDS_DLG_WARNING", "Warning");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                lc_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
+                lc_frontend::message_dialog::MessageDialogIcon::None,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            ),
+            MessageDialogContinuation::OptionsAdvancedWarning,
+        )
+    }
+
+    fn show_options_advanced_error(
+        &mut self,
+        detail: impl std::fmt::Display,
+    ) -> Result<(), EngineError> {
+        let caption = self.runtime_resource_text("IDS_DLG_ERROR", "Error");
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                format!("Unable to access advanced settings: {detail}"),
+                caption,
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn open_options_advanced_dialog(&mut self) -> Result<(), EngineError> {
+        let Some(config_path) = self
+            .app_paths
+            .as_ref()
+            .map(|paths| paths.config_file())
+        else {
+            self.show_options_advanced_error("application configuration is unavailable")?;
+            return Ok(());
+        };
+        let mut config = match Config::load(&config_path) {
+            Ok(config) => config,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+            Err(error) => {
+                tracing::warn!(%error, "failed to load advanced configuration");
+                self.show_options_advanced_error(error)?;
+                return Ok(());
+            }
+        };
+        if self.apply_open_options_config(&mut config).is_none() {
+            self.show_options_advanced_error("the Options dialog is unavailable")?;
+            return Ok(());
+        }
+        let return_sheet = self
+            .startup_options_dialog
+            .as_ref()
+            .map(|dialog| dialog.active_sheet())
+            .unwrap_or_default();
+        let mut controller =
+            lc_frontend::startup_options_advanced::AdvancedConfigController::new(
+                advanced_config::sections(&config),
+            );
+        controller.set_labels(
+            lc_frontend::startup_options_advanced::AdvancedConfigLabels {
+                caption: self
+                    .runtime_resource_text("IDS_DLG_ADVANCED_SETTINGS", "Advanced settings"),
+                save: self.runtime_resource_text("IDS_BTN_SAVE", "&Save"),
+                cancel: self.runtime_resource_text("IDS_BTN_CANCEL", "Cancel"),
+            },
+        );
+        controller.resize(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        self.startup_options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
+            controller,
+            return_sheet,
+        });
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn save_options_advanced_changes(
+        &self,
+        changes: &[lc_frontend::startup_options_advanced::AdvancedConfigChange],
+    ) -> io::Result<()> {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "application paths are unavailable",
+            ));
+        };
+        let path = paths.config_file();
+        let mut config = match Config::load(&path) {
+            Ok(config) => config,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+            Err(error) => return Err(error),
+        };
+        if self.apply_open_options_config(&mut config).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the Options dialog is unavailable",
+            ));
+        }
+        advanced_config::canonicalize_existing(&mut config);
+        advanced_config::apply_changes(&mut config, changes);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        config.save(path)
+    }
+
+    fn synchronize_advanced_options_runtime(&mut self) {
+        let paths = self.app_paths.as_ref();
+        self.display_flags = load_display_flags(paths);
+        self.white_lobby_chat = load_white_lobby_chat(paths);
+        self.show_log_timestamps = load_show_log_timestamps(paths);
+        self.show_folder_maps = load_show_folder_maps(paths);
+        let record = load_recording_flag(paths);
+        self.startup_view_flags.record = record;
+        self.recording_enabled = record && self.recordings_dir.is_some();
+        self.startup_view_flags.fair_crew = load_fair_crew_flag(paths);
+        self.graphics_smoke_level = load_graphics_smoke_level(paths);
+        self.engine.set_smoke_level(self.graphics_smoke_level);
+        self.mission_access = paths
+            .and_then(|paths| match load_configured_mission_access(paths) {
+                Ok(access) => Some(MissionAccessStore::new(access)),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to reload General.MissionAccess");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        self.engine
+            .set_mission_access_store(self.mission_access.clone());
+        self.bindings = KeyboardBindings::load(paths);
+        self.gamepad_bindings = GamepadBindings::load(paths);
+        self.gamepad_gui_control = load_gamepad_gui_control(paths);
+        self.engine
+            .set_control_key_names(configured_control_key_names(&self.bindings));
+
+        let reloaded_audio = AudioOptions::load(paths);
+        if let Some(audio) = self.audio.as_mut() {
+            let music_volume = reloaded_audio.music_volume_percent();
+            let sound_volume = reloaded_audio.sound_volume_percent();
+            audio.options = reloaded_audio;
+            audio.set_music_volume_percent(music_volume);
+            audio.set_sound_volume_percent(sound_volume);
+        }
+    }
+
+    fn process_options_advanced_actions(
+        &mut self,
+        actions: Vec<lc_frontend::startup_options_advanced::AdvancedConfigAction>,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::startup_options_advanced::AdvancedConfigAction;
+
+        let sounds = self
+            .startup_options_advanced_dialog
+            .as_mut()
+            .map(|pending| pending.controller.take_sound_events())
+            .unwrap_or_default();
+        for sound in sounds {
+            use lc_frontend::startup_options_advanced::AdvancedConfigSound;
+            self.play_ui_sound(match sound {
+                AdvancedConfigSound::ArrowHit => "ArrowHit",
+                AdvancedConfigSound::Click => "Click",
+                AdvancedConfigSound::Command => "Command",
+            });
+        }
+
+        for action in actions {
+            match action {
+                AdvancedConfigAction::Cancel => {
+                    self.startup_options_advanced_dialog = None;
+                }
+                AdvancedConfigAction::Save => {
+                    let Some((changes, return_sheet)) =
+                        self.startup_options_advanced_dialog.as_ref().map(|pending| {
+                            (pending.controller.changes(), pending.return_sheet)
+                        })
+                    else {
+                        continue;
+                    };
+                    let saved = self.save_options_advanced_changes(&changes);
+                    match saved {
+                        Ok(()) => {
+                            self.startup_options_advanced_dialog = None;
+                            self.synchronize_advanced_options_runtime();
+                            self.open_options_menu();
+                            if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                                dialog.restore_sheet(return_sheet);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to save advanced configuration");
+                            self.show_options_advanced_error(error)?;
+                        }
+                    }
+                }
+            }
+        }
+        self.mark_menu_dirty();
+        Ok(())
     }
 
     fn show_options_network_validation_error(&mut self, message: &str) -> Result<(), EngineError> {
@@ -44023,6 +44641,7 @@ impl GameApp {
             &self.scenario_game_options,
             self.scenario_selector_mode,
             self.startup_options_dialog.as_ref(),
+            None,
             false,
             self.startup_about_dialog.as_ref(),
             self.startup_view,
@@ -44135,6 +44754,9 @@ impl GameApp {
         // otherwise invent a target in the new view without mouse input.
         self.startup_tooltip.pointer_left();
         self.menu_frame_cache = None;
+        if view != StartupView::Options {
+            self.startup_options_advanced_dialog = None;
+        }
         self.startup_view = view;
         let keeps_pending_fade = self
             .visible_startup_dialog()
@@ -44370,6 +44992,7 @@ impl GameApp {
 
     fn open_options_menu(&mut self) {
         self.close_context_menu_silently();
+        self.startup_options_advanced_dialog = None;
         let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::with_all(
             load_options_program_state(self.app_paths.as_ref()),
             load_options_sound_state(self.audio.as_ref()),
@@ -44411,6 +45034,21 @@ impl GameApp {
             &self.gamepad_bindings,
             self.gamepad_gui_control,
         ))
+    }
+
+    fn apply_open_options_config(&self, config: &mut Config) -> Option<()> {
+        let dialog = self.startup_options_dialog.as_ref()?;
+        apply_startup_options_config(
+            config,
+            dialog.program(),
+            self.audio.as_ref().map(|audio| &audio.options),
+            dialog.graphics(),
+            dialog.network(),
+            &self.bindings,
+            &self.gamepad_bindings,
+            self.gamepad_gui_control,
+        );
+        Some(())
     }
 
     fn reload_application_language_resources(&mut self) -> Result<String> {
@@ -46529,6 +47167,10 @@ impl GameApp {
                     .rename_edit
                     .as_mut()
                     .is_some_and(|rename| rename.edit.tick_blink());
+                let advanced_blink_changed = self
+                    .startup_options_advanced_dialog
+                    .as_mut()
+                    .is_some_and(|dialog| dialog.controller.tick_edit_blink());
                 let netdlg_blink_changed = self
                     .startup_network_dialog
                     .as_mut()
@@ -46537,6 +47179,7 @@ impl GameApp {
                     || scrollbar_changed
                     || search_blink_changed
                     || rename_blink_changed
+                    || advanced_blink_changed
                     || netdlg_blink_changed
                 {
                     self.mark_menu_dirty();
@@ -47617,7 +48260,7 @@ impl GameApp {
                     self.startup_view_flags.fair_crew = enabled;
                     self.persist_game_option_value(
                         "General",
-                        "FairCrew",
+                        "NoCrew",
                         i32::from(enabled).to_string(),
                     );
                 }
@@ -48437,6 +49080,12 @@ impl GameApp {
                 self.request_exit();
             }
             MessageDialogContinuation::OptionsResetConfiguration => {}
+            MessageDialogContinuation::OptionsAdvancedWarning
+                if result == lc_frontend::message_dialog::MessageDialogResult::Ok =>
+            {
+                self.open_options_advanced_dialog()?;
+            }
+            MessageDialogContinuation::OptionsAdvancedWarning => {}
         }
         Ok(())
     }
@@ -49189,6 +49838,7 @@ impl GameApp {
                 .is_some_and(|wait| wait.visible)
             || self.definition_selector.is_some()
             || self.game_option_input_dialog.is_some()
+            || self.startup_options_advanced_dialog.is_some()
         {
             return None;
         }
@@ -49760,6 +50410,7 @@ impl GameApp {
                     && !fade_was_active
                     && self.context_menu.is_none()
                     && self.startup_player_properties_dialog.is_none()
+                    && self.startup_options_advanced_dialog.is_none()
                     && self.game_option_input_dialog.is_none()
                     && self.definition_selector.is_none()
                     && self.message_dialogs.is_empty()
@@ -49815,6 +50466,9 @@ impl GameApp {
                     &self.scenario_game_options,
                     self.scenario_selector_mode,
                     self.startup_options_dialog.as_ref(),
+                    self.startup_options_advanced_dialog
+                        .as_mut()
+                        .map(|pending| &mut pending.controller),
                     options_draw_focus,
                     self.startup_about_dialog.as_ref(),
                     self.startup_view,
@@ -56068,6 +56722,9 @@ fn render_startup_frame(
     scenario_game_options: &GameOptionButtons,
     scenario_selector_mode: ScenarioSelectorMode,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
+    options_advanced: Option<
+        &mut lc_frontend::startup_options_advanced::AdvancedConfigController,
+    >,
     options_draw_focus: bool,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
     view: StartupView,
@@ -56249,6 +56906,19 @@ fn render_startup_frame(
                         Some(startup_gamma()),
                         options_draw_focus,
                     );
+                    if let Some(controller) = options_advanced {
+                        let advanced_assets = assets.options_advanced_assets().with_context(
+                            || "classic advanced-options resources are unavailable",
+                        )?;
+                        lc_frontend::startup_options_advanced::AdvancedConfigScreen::render(
+                            surface,
+                            &advanced_assets,
+                            fonts,
+                            controller,
+                            !message_dialog_open,
+                            Some(startup_gamma()),
+                        )?;
+                    }
                     true
                 }
                 _ => false,
@@ -75288,7 +75958,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
         for (section, key, value) in [
-            ("General", "FairCrew", "1"),
+            ("General", "NoCrew", "1"),
             ("General", "DefCrewStrength", "777"),
             ("General", "Record", "0"),
             ("Network", "MasterServerSignUp", "0"),
@@ -75385,7 +76055,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         ])
         .expect("persist selector options");
         let config = Config::load(paths.config_file()).expect("reload persisted options");
-        assert_eq!(config.get_in(Some("General"), "FairCrew"), Some("0"));
+        assert_eq!(config.get_in(Some("General"), "NoCrew"), Some("0"));
         assert_eq!(config.get_in(Some("General"), "Record"), Some("1"));
         assert_eq!(
             config.get_in(Some("General"), "DefCrewStrength"),
@@ -91382,6 +92052,544 @@ ScenInfoArea=70,5,25,90
         assert!(app.configuration_reset_requested);
         assert!(app.take_exit_request());
         assert_eq!(app.startup_view, StartupView::Options);
+    }
+
+    #[test]
+    fn l048_advanced_options_click_save_and_cancel_round_trip_typed_config() {
+        use lc_frontend::message_dialog::{
+            MessageDialogButton, MessageDialogButtons, MessageDialogResult,
+        };
+        use lc_frontend::startup_options_advanced::{
+            AdvancedConfigAction, AdvancedConfigValue,
+        };
+        use lc_frontend::startup_options_dlg::{OptionsDlgAction, OptionsSheet};
+        use lc_frontend::startup_options_network::NetworkTextField;
+
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("advanced-options user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "# standalone note\n[General]\nLanguageEx=DE\nName=Old # keep this note\nFPS=yes\nVersion=347\nConfigResetSafety=42\nVendorExtension=keep\n[Graphics]\nSmokeLevel=200\n[Vendor]\nTemplate=\"<i>keep</i>\"\nEscaped=\"\\101\\x42\\33\"\n",
+        )
+        .expect("seed typed config");
+
+        let mut app = new_menu_app_with_paths(1280, 720, &paths);
+        install_classic_test_assets(&mut app);
+        app.open_options_menu();
+
+        let layout = lc_frontend::startup_options_dlg::options_dlg_layout(
+            1280,
+            720,
+            app.assets.clonk_fonts.as_deref().expect("GUI fonts"),
+            app.assets
+                .options_book_fonts
+                .as_deref()
+                .expect("options book fonts"),
+        );
+        let advanced_point = PhysicalPosition::new(
+            f64::from(layout.advanced_button.x + layout.advanced_button.w / 2),
+            f64::from(layout.advanced_button.y + layout.advanced_button.h / 2),
+        );
+        let before_warning = fs::read(paths.config_file()).expect("config before warning");
+        app.handle_cursor_moved(advanced_point)
+            .expect("hover Advanced settings");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Advanced settings");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release Advanced settings");
+
+        let warning = app.message_dialogs.last().expect("advanced warning");
+        assert_eq!(warning.state.buttons(), MessageDialogButtons::OK_CANCEL);
+        assert_eq!(
+            warning.state.focused_button(),
+            Some(MessageDialogButton::Cancel),
+            "the dangerous action defaults to Cancel"
+        );
+        assert!(app.startup_options_advanced_dialog.is_none());
+        app.finish_message_dialog(MessageDialogResult::Cancel)
+            .expect("cancel warning");
+        assert_eq!(
+            fs::read(paths.config_file()).expect("config after warning cancel"),
+            before_warning
+        );
+
+        {
+            let options = app
+                .startup_options_dialog
+                .as_mut()
+                .expect("Options dialog before advanced editor");
+            options.restore_sheet(OptionsSheet::Network);
+            options.network_mut().set_text(
+                NetworkTextField::LocalName,
+                "Unsaved host".to_string(),
+            );
+        }
+        let before_editor_open =
+            fs::read(paths.config_file()).expect("config before opening advanced editor");
+        app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
+            .expect("reopen advanced warning");
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("accept advanced warning");
+        assert_eq!(
+            fs::read(paths.config_file()).expect("config after opening advanced editor"),
+            before_editor_open,
+            "opening Advanced must not persist or rewrite Options configuration"
+        );
+        let controller = &app
+            .startup_options_advanced_dialog
+            .as_ref()
+            .expect("advanced editor")
+            .controller;
+        assert_eq!(controller.labels().caption, "Erweiterte Einstellungen");
+        assert_eq!(controller.labels().save, "&Speichern");
+        assert_eq!(controller.labels().cancel, "Abbrechen");
+        assert_eq!(controller.sections().len(), 16);
+        assert_eq!(
+            controller
+                .sections()
+                .iter()
+                .map(|section| section.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "General",
+                "Controls",
+                "Gamepad0",
+                "Gamepad1",
+                "Gamepad2",
+                "Gamepad3",
+                "Graphics",
+                "Sound",
+                "Network",
+                "Lobby",
+                "IRC",
+                "Developer",
+                "Startup",
+                "Cooldowns",
+                "Toasts",
+                "Logging",
+            ]
+        );
+        assert!(matches!(
+            controller.value("General", "Name"),
+            Some(AdvancedConfigValue::Text(value)) if value == "Old"
+        ));
+        assert_eq!(
+            controller.value("General", "FPS"),
+            Some(&AdvancedConfigValue::Bool(false))
+        );
+        assert!(matches!(
+            controller.value("Graphics", "SmokeLevel"),
+            Some(AdvancedConfigValue::Integer { value: 200, .. })
+        ));
+        assert!(matches!(
+            controller.value("General", "Version"),
+            Some(AdvancedConfigValue::ReadOnly(value)) if value == "347"
+        ));
+        assert_eq!(
+            controller.layout().bounds,
+            lc_frontend::classic_gui::IntRect {
+                x: 160,
+                y: 90,
+                w: 960,
+                h: 540,
+            }
+        );
+
+        let mut rendered = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut rendered).expect("render advanced modal");
+        assert!(rendered.iter().any(|byte| *byte != 0));
+
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt for Advanced hotkey");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("ignore Alt+Enter");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release ignored Alt+Enter");
+        assert!(app.startup_options_advanced_dialog.is_some());
+        app.handle_key(VirtualKeyCode::S, ElementState::Pressed)
+            .expect("invoke localized Advanced Save hotkey");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt");
+        assert!(app.startup_options_advanced_dialog.is_none());
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("config after Alt+S normalization")
+                .get_in(Some("General"), "FPS"),
+            Some("0"),
+            "Advanced Save canonicalizes existing typed values even when untouched"
+        );
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("Options recreated after Alt+S")
+                .active_sheet(),
+            OptionsSheet::Network
+        );
+        app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
+            .expect("reopen after Alt+S");
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("accept warning after Alt+S");
+
+        let slot = GamepadSlot::new(0);
+        let sourced = |gamepad, cluster, event| SourcedGamepadEvent {
+            gamepad,
+            cluster,
+            event,
+        };
+        app.process_sourced_gamepad_event_batch(
+            [sourced(
+                1,
+                0,
+                GamepadEvent::GuiButton {
+                    slot: GamepadSlot::new(1),
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+            )],
+            true,
+        )
+        .expect("ignore non-primary Advanced GUI button");
+        app.process_sourced_gamepad_event_batch(
+            [sourced(
+                0,
+                1,
+                GamepadEvent::GuiButton {
+                    slot,
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+            )],
+            false,
+        )
+        .expect("ignore Advanced GUI button while gamepad GUI is disabled");
+        assert!(app.startup_options_advanced_dialog.is_some());
+
+        {
+            let controller = &mut app
+                .startup_options_advanced_dialog
+                .as_mut()
+                .expect("advanced editor for clustered input")
+                .controller;
+            while controller.focus()
+                != lc_frontend::startup_options_advanced::AdvancedConfigFocus::Save
+            {
+                controller.handle_focus_step(false);
+            }
+        }
+        app.process_sourced_gamepad_event_batch(
+            [sourced(
+                0,
+                2,
+                GamepadEvent::GuiButton {
+                    slot,
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                },
+            )],
+            true,
+        )
+        .expect("press focused Advanced Save");
+        app.process_sourced_gamepad_event_batch(
+            [sourced(0, 3, GamepadEvent::Clear { slot })],
+            true,
+        )
+        .expect("clear held Advanced button");
+        app.process_sourced_gamepad_event_batch(
+            [
+                sourced(
+                    0,
+                    4,
+                    GamepadEvent::GuiButton {
+                        slot,
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Released,
+                    },
+                ),
+                sourced(
+                    0,
+                    4,
+                    GamepadEvent::Action {
+                        slot,
+                        action: GamepadActionType::Select,
+                        state: ElementState::Released,
+                    },
+                ),
+            ],
+            true,
+        )
+        .expect("release cleared Advanced button without saving");
+        assert!(app.startup_options_advanced_dialog.is_some());
+
+        app.process_sourced_gamepad_event_batch(
+            [
+                sourced(
+                    0,
+                    5,
+                    GamepadEvent::GuiButton {
+                        slot,
+                        class: GuiButtonClass::High,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                sourced(
+                    0,
+                    5,
+                    GamepadEvent::Action {
+                        slot,
+                        action: GamepadActionType::Cancel,
+                        state: ElementState::Pressed,
+                    },
+                ),
+            ],
+            true,
+        )
+        .expect("Advanced raw High owns its Cancel alias cluster");
+        assert!(app.startup_options_advanced_dialog.is_none());
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert!(app.startup_options_dialog.is_some());
+        app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
+            .expect("reopen after clustered gamepad cancel");
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("accept reopened advanced warning");
+
+        let controller = &mut app
+            .startup_options_advanced_dialog
+            .as_mut()
+            .expect("advanced editor")
+            .controller;
+        assert!(controller.set_value(
+            "General",
+            "Name",
+            AdvancedConfigValue::Text("New name".to_string()),
+        ));
+        assert!(controller.set_value("General", "FPS", AdvancedConfigValue::Bool(true)));
+        assert!(controller.set_value(
+            "General",
+            "Record",
+            AdvancedConfigValue::Bool(true),
+        ));
+        assert!(controller.set_value(
+            "General",
+            "NoCrew",
+            AdvancedConfigValue::Bool(true),
+        ));
+        assert!(controller.set_value(
+            "Graphics",
+            "SmokeLevel",
+            AdvancedConfigValue::Integer {
+                value: 321,
+                min: i128::MIN,
+                max: i128::MAX,
+            },
+        ));
+        assert!(controller.set_value(
+            "General",
+            "MissionAccess",
+            AdvancedConfigValue::Text("Secret;Beta".to_string()),
+        ));
+        assert!(controller.set_value(
+            "Graphics",
+            "ShowFolderMaps",
+            AdvancedConfigValue::Bool(false),
+        ));
+        assert!(controller.set_value(
+            "Sound",
+            "MenuMusic",
+            AdvancedConfigValue::Bool(false),
+        ));
+        let replacement_key = input::advanced_config_default_raw_keyboard_keys()[0][1];
+        assert!(controller.set_value(
+            "Controls",
+            "Kbd1Key1",
+            AdvancedConfigValue::Integer {
+                value: i128::from(replacement_key),
+                min: i128::MIN,
+                max: i128::MAX,
+            },
+        ));
+        assert!(!controller.set_value(
+            "General",
+            "Version",
+            AdvancedConfigValue::ReadOnly("999".to_string()),
+        ));
+        app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
+            .expect("save advanced settings");
+
+        assert!(app.startup_options_advanced_dialog.is_none());
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert_eq!(app.graphics_smoke_level, 321);
+        assert_eq!(app.mission_access.snapshot(), "Secret;Beta");
+        assert!(!app.show_folder_maps);
+        assert!(app.startup_view_flags.record);
+        assert_eq!(app.recording_enabled, app.recordings_dir.is_some());
+        assert!(app.startup_view_flags.fair_crew);
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("recreated Options dialog")
+                .active_sheet(),
+            OptionsSheet::Network
+        );
+        assert!(
+            !app.startup_options_dialog
+                .as_ref()
+                .expect("recreated Options dialog")
+                .sound()
+                .frontend_music,
+            "the recreated Sound sheet must use the advanced value"
+        );
+        let saved = Config::load(paths.config_file()).expect("reload advanced config");
+        assert_eq!(saved.get_in(Some("General"), "Name"), Some("New name"));
+        assert_eq!(saved.get_in(Some("General"), "FPS"), Some("1"));
+        assert_eq!(saved.get_in(Some("General"), "Record"), Some("1"));
+        assert_eq!(saved.get_in(Some("General"), "NoCrew"), Some("1"));
+        assert_eq!(
+            saved.get_in(Some("Graphics"), "SmokeLevel"),
+            Some("321")
+        );
+        assert_eq!(saved.get_in(Some("General"), "Version"), Some("347"));
+        assert_eq!(
+            saved.get_in(Some("General"), "ConfigResetSafety"),
+            Some("42")
+        );
+        assert_eq!(
+            saved.get_in(Some("General"), "VendorExtension"),
+            Some("keep")
+        );
+        assert_eq!(
+            saved.get_in(Some("Vendor"), "Template"),
+            Some("<i>keep</i>")
+        );
+        assert_eq!(saved.get_in(Some("Vendor"), "Escaped"), Some("AB\u{1b}"));
+        assert_eq!(saved.get_in(Some("Sound"), "MenuMusic"), Some("0"));
+        assert_eq!(
+            saved.get_in(Some("Network"), "LocalName"),
+            Some("Unsaved host"),
+            "Save commits the retained normal Options draft before recreation"
+        );
+        let replacement_key_text = replacement_key.to_string();
+        assert_eq!(
+            saved.get_in(Some("Controls"), "Kbd1Key1"),
+            Some(replacement_key_text.as_str())
+        );
+        assert!(
+            {
+                let serialized = fs::read_to_string(paths.config_file())
+                    .expect("serialized advanced config");
+                serialized.contains("#keep this note")
+                    && serialized.contains("# standalone note")
+            }
+        );
+        app.persist_open_options_config()
+            .expect("open Options config")
+            .expect("normal Options resave");
+        let resaved = Config::load(paths.config_file()).expect("reload normal Options resave");
+        assert!(resaved
+            .get_in(Some("Sound"), "MenuMusic")
+            .is_some_and(|value| !parse_config_bool(value)));
+        assert_eq!(
+            resaved.get_in(Some("Controls"), "Kbd1Key1"),
+            Some(replacement_key_text.as_str()),
+            "normal Options persistence must not undo the advanced binding"
+        );
+        let options_before_cancel = {
+            let options = app
+                .startup_options_dialog
+                .as_mut()
+                .expect("Options dialog before cancel path");
+            options.network_mut().set_text(
+                NetworkTextField::LocalName,
+                "Keep this unsaved edit".to_string(),
+            );
+            options as *const _ as usize
+        };
+        let before_cancel = fs::read(paths.config_file()).expect("config before editor cancel");
+        app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
+            .expect("open cancel-path warning");
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("open cancel-path editor");
+        assert_eq!(
+            fs::read(paths.config_file()).expect("config after cancel-path open"),
+            before_cancel
+        );
+        assert!(app
+            .startup_options_advanced_dialog
+            .as_mut()
+            .expect("cancel-path editor")
+            .controller
+            .set_value(
+                "General",
+                "Name",
+                AdvancedConfigValue::Text("Discard me".to_string()),
+            ));
+        let cancel = app
+            .startup_options_advanced_dialog
+            .as_ref()
+            .expect("cancel-path editor")
+            .controller
+            .layout()
+            .cancel_button;
+        let cancel_point = GuiPoint::new(
+            (cancel.x + cancel.w / 2) as f32,
+            (cancel.y + cancel.h / 2) as f32,
+        );
+        app.handle_touch(TouchPhase::Started, cancel_point)
+            .expect("touch advanced Cancel");
+        app.handle_touch(TouchPhase::Ended, cancel_point)
+            .expect("release advanced Cancel");
+        assert!(app.startup_options_advanced_dialog.is_none());
+        let options_after_cancel = app
+            .startup_options_dialog
+            .as_ref()
+            .expect("same Options dialog after advanced Cancel");
+        assert_eq!(options_after_cancel as *const _ as usize, options_before_cancel);
+        assert_eq!(options_after_cancel.active_sheet(), OptionsSheet::Network);
+        assert_eq!(
+            options_after_cancel.network().local_name,
+            "Keep this unsaved edit"
+        );
+        assert_eq!(
+            fs::read(paths.config_file()).expect("config after editor cancel"),
+            before_cancel
+        );
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::OpenAdvancedSettings])
+            .expect("open save-failure warning");
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("open save-failure editor");
+        fs::remove_file(paths.config_file()).expect("remove config before forced save failure");
+        fs::create_dir(paths.config_file()).expect("block config file with a directory");
+        app.process_options_advanced_actions(vec![AdvancedConfigAction::Save])
+            .expect("surface advanced save failure");
+        assert!(
+            app.startup_options_advanced_dialog.is_some(),
+            "a failed Save keeps the draft editor open"
+        );
+        assert_eq!(
+            app.message_dialogs
+                .last()
+                .expect("advanced save error dialog")
+                .state
+                .caption(),
+            "Error"
+        );
+        assert!(app.status_text.is_empty());
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("close save error");
+        assert!(app.startup_options_advanced_dialog.is_some());
+        fs::remove_dir(paths.config_file()).expect("remove blocked config path");
+        reset_cached_app_paths();
     }
 
     #[test]

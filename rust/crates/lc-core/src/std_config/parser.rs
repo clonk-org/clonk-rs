@@ -1,4 +1,3 @@
-use crate::std_markup::Markup;
 use std::borrow::Cow;
 
 pub(crate) enum ParsedItem<'a> {
@@ -43,18 +42,14 @@ pub(crate) fn parse_line(line: &str) -> Option<ParsedItem<'_>> {
     let (content, comment) = split_comment(trimmed);
     let (raw_key, raw_value) = split_key_value(content)?;
     let key = raw_key.trim();
-    let mut value = raw_value.trim();
-
-    if let Some(unquoted) = strip_quotes(value) {
-        value = unquoted;
-    }
+    let value = raw_value.trim();
 
     let mut key_owned = key.to_string();
-    let mut value_owned = value.to_string();
+    let mut value_owned = strip_quotes(value)
+        .map(decode_escaped_value)
+        .unwrap_or_else(|| value.to_string());
     unescape_comment_markers(&mut key_owned);
     unescape_comment_markers(&mut value_owned);
-    Markup::strip_markup(&mut key_owned);
-    Markup::strip_markup(&mut value_owned);
 
     let comment = comment.and_then(|c| {
         let trimmed = c.trim();
@@ -90,8 +85,14 @@ fn parse_section(line: &str, commented: bool) -> Option<Cow<'_, str>> {
 fn split_comment(line: &str) -> (&str, Option<&str>) {
     let chars = line.char_indices();
     let mut in_quotes = false;
+    let mut escaped = false;
     for (idx, ch) in chars {
+        if in_quotes && escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            '\\' if in_quotes => escaped = true,
             '"' => in_quotes = !in_quotes,
             '#' if !in_quotes && comment_marker_is_separated(line, idx) => {
                 return (&line[..idx], Some(&line[idx + 1..]));
@@ -116,8 +117,14 @@ fn comment_marker_is_separated(line: &str, index: usize) -> bool {
 fn split_key_value(line: &str) -> Option<(&str, &str)> {
     let chars = line.char_indices().peekable();
     let mut in_quotes = false;
+    let mut escaped = false;
     for (idx, ch) in chars {
+        if in_quotes && escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            '\\' if in_quotes => escaped = true,
             '"' => in_quotes = !in_quotes,
             '=' if !in_quotes => {
                 let key = &line[..idx];
@@ -136,6 +143,59 @@ fn strip_quotes(value: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn decode_escaped_value(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let Some(escaped) = chars.next() else {
+            decoded.push('\\');
+            break;
+        };
+        let decoded_character = match escaped {
+            'a' => '\u{7}',
+            'b' => '\u{8}',
+            'f' => '\u{c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => '\u{b}',
+            '\'' => '\'',
+            '"' => '"',
+            '\\' => '\\',
+            '?' => '?',
+            'x' => {
+                let mut number = 0_u32;
+                let mut found = false;
+                while let Some(digit) = chars.peek().and_then(|digit| digit.to_digit(16)) {
+                    found = true;
+                    number = number.wrapping_mul(16).wrapping_add(digit);
+                    chars.next();
+                }
+                if found {
+                    char::from_u32(number & 0xff).unwrap_or('\u{fffd}')
+                } else {
+                    'x'
+                }
+            }
+            first @ '0'..='7' => {
+                let mut number = first.to_digit(8).expect("matched octal digit");
+                while let Some(digit) = chars.peek().and_then(|digit| digit.to_digit(8)) {
+                    number = number.wrapping_mul(8).wrapping_add(digit);
+                    chars.next();
+                }
+                char::from_u32(number & 0xff).unwrap_or('\u{fffd}')
+            }
+            other => other,
+        };
+        decoded.push(decoded_character);
+    }
+    decoded
 }
 
 fn unescape_comment_markers(s: &mut String) {

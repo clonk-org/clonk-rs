@@ -1476,6 +1476,15 @@ impl OptionsDlgState {
         self.active_sheet
     }
 
+    /// Restores the tab that owned the advanced-settings dialog after the
+    /// options screen is recreated. Native `RecreateDialog` reconstructs the
+    /// controls, then the caller reselects the previously active sheet.
+    pub fn restore_sheet(&mut self, sheet: OptionsSheet) {
+        let _ = self.handle_pointer_left();
+        self.active_sheet = sheet;
+        self.focus = OptionsFocus::Tabular;
+    }
+
     pub fn program(&self) -> &ProgramSheetState {
         &self.program
     }
