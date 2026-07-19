@@ -32860,6 +32860,13 @@ impl GameApp {
         }
         let point = ingame_pointer_world_pixel(pointer);
         let fog_blocked = self.ingame_pointer_fog_blocked(pointer);
+        // Move snapshots dwKeyFlags before dispatching LeftUp, and every
+        // SendCommand in that event observes the same ShiftDown value.
+        let add_mode = 1 | if self.keyboard_modifiers.shift() {
+            4
+        } else {
+            0
+        };
         // UpdateCursorTarget evaluates the nearby Jump cursor after Select,
         // so an eligible jump zone owns the click even over another crew
         // member (C4MouseControl.cpp:522-534,1129-1132).
@@ -32873,7 +32880,7 @@ impl GameApp {
                 target: 0,
                 target2: 0,
                 data: 0,
-                add_mode: 1,
+                add_mode,
                 by_client: -1,
             })?;
             return Ok(());
@@ -32905,7 +32912,7 @@ impl GameApp {
             target: 0,
             target2: 0,
             data: 0,
-            add_mode: 1,
+            add_mode,
             by_client: -1,
         })?;
         Ok(())
@@ -58271,10 +58278,206 @@ mod tests {
             .expect("physical left-up");
     }
 
+    fn physical_left_click_with_modifiers(
+        app: &mut GameApp,
+        point: GuiPoint,
+        press_modifiers: ModifiersState,
+        release_modifiers: ModifiersState,
+    ) {
+        // Distinct waypoint clicks are not a platform LeftDouble gesture.
+        app.ingame_last_left_down = None;
+        app.handle_modifiers_changed(press_modifiers)
+            .expect("install left-down modifiers");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("move to click point");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("physical left-down");
+        app.handle_modifiers_changed(release_modifiers)
+            .expect("install left-up modifiers");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("physical left-up");
+    }
+
     fn install_mouse_network_capture(app: &mut GameApp) -> network::TestNetworkCommands {
         let (manager, _events, commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         commands
+    }
+
+    #[test]
+    fn l043_shift_left_clicks_append_and_sample_release_modifiers() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        render_mouse_test_app(&mut app);
+        let viewport = app.graphics.viewport_rect(owner).expect("sandbox viewport");
+        let mut clicks = Vec::new();
+        'rows: for y in viewport.y..viewport.y + viewport.height as i32 {
+            for x in viewport.x..viewport.x + viewport.width as i32 {
+                let screen = GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5);
+                let routed = GuiPoint::new(screen.x.ceil(), screen.y.ceil());
+                let Some(pointer) = app.graphics.viewport_point_at(routed) else {
+                    continue;
+                };
+                let world = ingame_pointer_world_pixel(pointer);
+                if pointer.owner != owner
+                    || app.ingame_viewport_region(owner, routed).is_some()
+                    || app.ingame_primary_mouse_target(owner, routed).is_some()
+                    || app.ingame_pointer_fog_blocked(pointer)
+                    || app.engine.mouse_jump_zone(owner, world)
+                    || clicks
+                        .iter()
+                        .any(|(_, prior_world): &(GuiPoint, Vector2)| *prior_world == world)
+                {
+                    continue;
+                }
+                clicks.push((screen, world));
+                if clicks.len() == 3 {
+                    break 'rows;
+                }
+            }
+        }
+        let [(first_screen, first_world), (second_screen, second_world), (third_screen, third_world)] =
+            clicks.as_slice()
+        else {
+            panic!("sandbox viewport needs three distinct MoveTo points: {clicks:?}");
+        };
+
+        // LeftUp is the triggering C4MouseControl::Move event. Shift pressed
+        // after LeftDown must therefore append the first command.
+        physical_left_click_with_modifiers(
+            &mut app,
+            *first_screen,
+            ModifiersState::empty(),
+            ModifiersState::SHIFT,
+        );
+        physical_left_click_with_modifiers(
+            &mut app,
+            *second_screen,
+            ModifiersState::SHIFT,
+            ModifiersState::SHIFT,
+        );
+        let appended = app
+            .engine
+            .object_snapshot(cursor)
+            .expect("cursor survives Shift waypoints")
+            .command_stack
+            .command_views();
+        assert_eq!(
+            appended
+                .iter()
+                .map(|command| command.name.as_str())
+                .collect::<Vec<_>>(),
+            ["MoveTo", "MoveTo"]
+        );
+        assert_eq!(
+            appended
+                .iter()
+                .map(|command| (command.tx, command.ty))
+                .collect::<Vec<_>>(),
+            [
+                (Some(first_world.x), Some(first_world.y)),
+                (Some(second_world.x), Some(second_world.y)),
+            ]
+        );
+
+        // Releasing Shift before LeftUp restores Set even though LeftDown saw
+        // Shift, proving the modifier is sampled at the command event.
+        physical_left_click_with_modifiers(
+            &mut app,
+            *third_screen,
+            ModifiersState::SHIFT,
+            ModifiersState::empty(),
+        );
+        let replaced = app
+            .engine
+            .object_snapshot(cursor)
+            .expect("cursor survives plain waypoint")
+            .command_stack
+            .command_views();
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].name, "MoveTo");
+        assert_eq!(
+            (replaced[0].tx, replaced[0].ty),
+            (Some(third_world.x), Some(third_world.y))
+        );
+    }
+
+    #[test]
+    fn l043_shift_double_get_samples_the_second_press_event() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let crew_state = app
+            .engine
+            .object_snapshot(crew)
+            .expect("sandbox cursor survives");
+        let mut item = Definition::from_script("M43G", "Shift Get target", "#strict\n")
+            .expect("carryable definition compiles");
+        item.set_category(lc_engine::CATEGORY_OBJECT);
+        item.set_collectible(true);
+        item.set_shape_rect(Some(lc_engine::DefinitionRect::new(-4, -4, 8, 8)));
+        app.engine
+            .register_definition(item)
+            .expect("register carryable definition");
+        let mut spawn = SpawnConfig::new("M43G").with_position(Vector2::new(
+            crew_state.position.x - 60,
+            crew_state.position.y,
+        ));
+        if let Some(layer) = crew_state.layer {
+            spawn = spawn.with_layer(layer);
+        }
+        let target = app
+            .engine
+            .spawn_object(spawn)
+            .expect("spawn carryable target");
+        render_mouse_test_app(&mut app);
+        let target_point = mouse_test_object_point(&app, owner, target);
+        assert_eq!(
+            app.ingame_primary_mouse_target(owner, target_point),
+            Some(target)
+        );
+        let mut commands = install_mouse_network_capture(&mut app);
+
+        app.ingame_last_left_down = None;
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("start without Shift");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(target_point.x),
+            f64::from(target_point.y),
+        ))
+        .expect("move over carryable target");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("first left-down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("first left-up queues MoveTo");
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("press Shift for LeftDouble");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("second left-down becomes Shift-LeftDouble");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Shift after the triggering event");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("post-double left-up is ignored");
+
+        let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
+        assert!(direct.is_empty());
+        assert!(selections.is_empty());
+        let [(_, first), (_, second)] = player_commands.as_slice() else {
+            panic!("expected MoveTo then Get, got {player_commands:?}");
+        };
+        assert_eq!(
+            (first.command, first.add_mode),
+            (CommandId::MoveTo as i32, 1)
+        );
+        assert_eq!(
+            (second.command, second.target, second.add_mode),
+            (CommandId::Get as i32, target.as_u64() as i32, 1 | 4)
+        );
     }
 
     fn configure_mouse_fog(
@@ -107711,6 +107914,28 @@ protected func InputCallback(string answer, int player)
                     target2: 0,
                     data: 0,
                     add_mode: 1,
+                    by_client: 7,
+                },
+            )]
+        );
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("set Shift modifier");
+        app.handle_ingame_mouse_click(pointer)
+            .expect("Shift jump-zone click queues appended command");
+        assert_eq!(
+            commands.take_submitted_player_commands(),
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    player: owner,
+                    command: CommandId::Jump as i32,
+                    x: click.x,
+                    y: click.y,
+                    target: 0,
+                    target2: 0,
+                    data: 0,
+                    add_mode: 1 | 4,
                     by_client: 7,
                 },
             )]
