@@ -152,7 +152,7 @@ use lc_resources::{
     scenario as resource_scenario,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
-use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
+use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
 use network::{
     ClientSettings, HostSettings, NetworkControl, NetworkControlClock, NetworkEvent,
     NetworkManager, NetworkMode, NetworkStartError,
@@ -22965,15 +22965,19 @@ impl GameApp {
         event: ControlEvent,
     ) -> Result<(), EngineError> {
         let mut event = event;
-        let progressing_cursor_menu = self.object_menu.is_none()
+        let cursor_menu_text_progressing = (self.object_menu.is_none()
             && !self.ingame_menu_belongs_to(owner)
-            && self.save_browser.is_none()
-            && self
-                .engine
+            && self.save_browser.is_none())
+        .then(|| {
+            self.engine
                 .cursor_object_menu(owner)
-                .is_some_and(|(_, menu)| menu.text_progressing);
-        if progressing_cursor_menu {
-            if let Some(mapped) = map_progressing_menu_control_event(event) {
+                .map(|(_, menu)| menu.text_progressing)
+        })
+        .flatten();
+        if let Some(text_progressing) = cursor_menu_text_progressing {
+            if let Some(mapped) =
+                map_async_cursor_menu_control_event(event, text_progressing)
+            {
                 event = mapped;
             }
         }
@@ -103998,6 +104002,301 @@ protected func InputCallback(string answer, int player)
             text_progressing: false,
             decoration: None,
         }
+    }
+
+    fn install_test_cursor_menu(
+        app: &mut GameApp,
+        cursor: ObjectId,
+        menu: lc_engine::ObjectMenuState,
+    ) {
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install cursor object menu");
+    }
+
+    #[test]
+    fn network_cursor_menu_converts_exact_press_coms_before_submission() {
+        // LocalPlayerControl applies the cursor menu's asynchronous
+        // ConvertCom before Input.Add, so both the network packet and CtrlRec
+        // contain menu coms rather than their raw gameplay inputs
+        // (C4Game.cpp:3616-3623; C4Menu.cpp:1040-1069).
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+
+        for (raw, mapped, wire_com) in [
+            (
+                ControlEvent::Command {
+                    command: ControlCommand::Throw,
+                    kind: CommandKind::Press,
+                },
+                ControlCommand::MenuEnter,
+                38,
+            ),
+            (
+                ControlEvent::Command {
+                    command: ControlCommand::Dig,
+                    kind: CommandKind::Press,
+                },
+                ControlCommand::MenuClose,
+                40,
+            ),
+            (
+                ControlEvent::Command {
+                    command: ControlCommand::Special2,
+                    kind: CommandKind::Press,
+                },
+                ControlCommand::MenuEnterAll,
+                39,
+            ),
+            (
+                ControlEvent::Press(ControlButton::Left),
+                ControlCommand::MenuLeft,
+                52,
+            ),
+            (
+                ControlEvent::Press(ControlButton::Right),
+                ControlCommand::MenuRight,
+                53,
+            ),
+            (
+                ControlEvent::Press(ControlButton::Up),
+                ControlCommand::MenuUp,
+                54,
+            ),
+            (
+                ControlEvent::Press(ControlButton::Down),
+                ControlCommand::MenuDown,
+                55,
+            ),
+        ] {
+            let tick = app.local_control_submission_tick();
+            app.dispatch_control_event_for_local_player(owner, raw)
+                .expect("queue local cursor-menu control");
+            let submitted = commands.take_submitted_local();
+            assert_eq!(
+                submitted,
+                vec![(
+                    owner,
+                    ControlEvent::Command {
+                        command: mapped,
+                        kind: CommandKind::Press,
+                    },
+                    tick,
+                )]
+            );
+            let packet = NetworkControl::Player {
+                owner,
+                event: submitted[0].1,
+            }
+            .into_packet()
+            .expect("converted event has a legacy packet");
+            let lc_engine::ControlPacket::PlayerControl(packet) = packet else {
+                panic!("cursor-menu event must encode as PlayerControl");
+            };
+            assert_eq!(packet.player, owner);
+            assert_eq!(packet.command, wire_com);
+            assert_eq!(packet.data, 0);
+        }
+    }
+
+    #[test]
+    fn queued_cursor_menu_actions_cannot_fire_after_the_menu_closes() {
+        // A converted menu action may execute after another synchronized
+        // control has closed the menu. It must never reappear as the raw
+        // Throw/Dig action that produced it (C4Object.cpp:3369-3371).
+        for (definition_id, raw, callback) in [
+            (
+                "QTHR",
+                ControlCommand::Throw,
+                "throw_count",
+            ),
+            ("QDIG", ControlCommand::Dig, "dig_count"),
+        ] {
+            let mut app = new_running_sandbox_app();
+            let owner = app.local_owner;
+            let script = r#"#strict
+local throw_count, dig_count;
+func ControlThrow() { throw_count = 1; return(1); }
+func ControlDig() { dig_count = 1; return(1); }
+"#;
+            let mut probe = Definition::from_script(definition_id, "Menu race probe", script)
+                .expect("probe definition compiles");
+            probe.set_category(lc_engine::CATEGORY_LIVING);
+            probe.set_crew_member(true);
+            app.engine
+                .register_definition(probe)
+                .expect("register menu race probe");
+            let cursor = app
+                .engine
+                .spawn_object(
+                    SpawnConfig::new(definition_id)
+                        .with_owner(owner)
+                        .with_crew_member(true),
+                )
+                .expect("spawn menu race probe");
+            let mut crew = app
+                .engine
+                .player(owner)
+                .expect("sandbox player remains live")
+                .crew()
+                .to_vec();
+            crew.push(cursor);
+            app.engine
+                .player_mut(owner)
+                .expect("sandbox player remains live")
+                .set_crew(crew);
+            app.engine.clear_crew_selection(owner);
+            app.engine
+                .select_crew(owner, [cursor])
+                .expect("select menu race probe");
+            app.engine
+                .set_crew_cursor(owner, Some(cursor))
+                .expect("make menu race probe the cursor");
+            install_test_cursor_menu(&mut app, cursor, two_item_script_menu(cursor));
+
+            let (manager, _events, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(7);
+            app.network = Some(manager);
+            app.dispatch_control_event_for_local_player(
+                owner,
+                ControlEvent::Command {
+                    command: raw,
+                    kind: CommandKind::Press,
+                },
+            )
+            .expect("queue cursor-menu action");
+            let (_, converted, tick) = commands
+                .take_submitted_local()
+                .pop()
+                .expect("converted control was queued");
+            app.engine
+                .apply_object_update(
+                    cursor,
+                    ObjectUpdate {
+                        menu: Some(None),
+                        ..ObjectUpdate::default()
+                    },
+                )
+                .expect("close menu before control execution");
+            app.apply_ready_controls(
+                tick,
+                vec![NetworkControl::Player {
+                    owner,
+                    event: converted,
+                }],
+            )
+            .expect("execute converted control after close");
+            let cursor = app
+                .engine
+                .object_snapshot(cursor)
+                .expect("menu race probe survives");
+            for name in ["throw_count", "dig_count"] {
+                assert!(
+                    cursor
+                        .local_vars
+                        .get(name)
+                        .is_none_or(|value| value == &Value::Nil),
+                    "converted {raw:?} must leave {name} unset"
+                );
+            }
+
+            // Prove the fixture would catch the old raw packet: a second,
+            // deliberately unconverted press reaches the corresponding
+            // ControlThrow/ControlDig callback immediately.
+            app.apply_ready_controls(
+                tick.saturating_add(1),
+                vec![NetworkControl::Player {
+                    owner,
+                    event: ControlEvent::Command {
+                        command: raw,
+                        kind: CommandKind::Press,
+                    },
+                }],
+            )
+            .expect("execute deliberate raw gameplay control");
+            assert_eq!(
+                app.engine
+                    .object_snapshot(cursor.id)
+                    .expect("menu race probe survives raw control")
+                    .local_vars
+                    .get(callback),
+                Some(&Value::Int(1)),
+                "the fixture must observe an unconverted {raw:?} action"
+            );
+        }
+    }
+
+    #[test]
+    fn network_progressing_cursor_menu_submits_show_text_before_execution() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.text_progressing = true;
+        for item in &mut menu.items {
+            item.text_display_progress = 0;
+        }
+        install_test_cursor_menu(&mut app, cursor, menu);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+
+        app.dispatch_control_event_for_local_player(
+            owner,
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Press,
+            },
+        )
+        .expect("queue first progressive-menu press");
+        let (_, event, tick) = commands
+            .take_submitted_local()
+            .pop()
+            .expect("show-text control was queued");
+        assert_eq!(
+            event,
+            ControlEvent::Command {
+                command: ControlCommand::MenuShowText,
+                kind: CommandKind::Press,
+            }
+        );
+        let packet = NetworkControl::Player { owner, event }
+            .into_packet()
+            .expect("show-text event has a legacy packet");
+        let lc_engine::ControlPacket::PlayerControl(packet) = packet else {
+            panic!("show-text event must encode as PlayerControl");
+        };
+        assert_eq!(packet.command, 42);
+        assert!(
+            app.engine
+                .cursor_object_menu(owner)
+                .is_some_and(|(_, menu)| menu.text_progressing),
+            "submission alone must not reveal local-length text"
+        );
+
+        app.apply_ready_controls(tick, vec![NetworkControl::Player { owner, event }])
+            .expect("execute synchronized show-text control");
+        let (_, menu) = app
+            .engine
+            .cursor_object_menu(owner)
+            .expect("progressive menu remains open");
+        assert_eq!(menu.selection, 0);
+        assert!(!menu.text_progressing);
+        assert!(menu
+            .items
+            .iter()
+            .all(|item| item.text_display_progress == -1));
     }
 
     #[test]

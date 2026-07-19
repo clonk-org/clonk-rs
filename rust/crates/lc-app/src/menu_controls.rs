@@ -13,28 +13,33 @@ pub fn map_menu_control_event(event: ControlEvent) -> Option<ControlEvent> {
     }
 }
 
-/// C4Game::LocalPlayerControl's asynchronous `C4Menu::ConvertCom` pass:
-/// the first raw menu press reveals progressive text instead of queuing its
-/// navigation/action. Received, replayed, released, and already-converted
-/// controls must not depend on local text length.
-pub fn map_progressing_menu_control_event(event: ControlEvent) -> Option<ControlEvent> {
-    let recognized_press = match event {
-        ControlEvent::Press(
-            ControlButton::Left
-            | ControlButton::Right
-            | ControlButton::Up
-            | ControlButton::Down,
-        ) => true,
+/// C4Game::LocalPlayerControl's asynchronous cursor-menu `ConvertCom` pass.
+/// Only exact base presses convert; releases and synthesized Single/Double
+/// commands must stay raw. Progressive text replaces any recognized press
+/// with MenuShowText before the converted control enters the queue.
+pub fn map_async_cursor_menu_control_event(
+    event: ControlEvent,
+    text_progressing: bool,
+) -> Option<ControlEvent> {
+    let mapped = match event {
+        ControlEvent::Press(button) => map_button_press(button, CommandKind::Press),
         ControlEvent::Command {
-            command: ControlCommand::Throw | ControlCommand::Dig | ControlCommand::Special2,
+            command,
             kind: CommandKind::Press,
-        } => true,
-        _ => false,
-    };
-    recognized_press.then_some(ControlEvent::Command {
-        command: ControlCommand::MenuShowText,
-        kind: CommandKind::Press,
-    })
+        } => map_command(command, CommandKind::Press),
+        ControlEvent::Release(_)
+        | ControlEvent::Command { .. }
+        | ControlEvent::RawPlayerControl { .. }
+        | ControlEvent::ClearPressed => None,
+    }?;
+    if text_progressing {
+        Some(ControlEvent::Command {
+            command: ControlCommand::MenuShowText,
+            kind: CommandKind::Press,
+        })
+    } else {
+        Some(mapped)
+    }
 }
 
 fn map_button_press(button: ControlButton, kind: CommandKind) -> Option<ControlEvent> {
@@ -133,20 +138,108 @@ mod tests {
     }
 
     #[test]
-    fn progressive_text_reveal_only_maps_raw_local_presses() {
+    fn async_cursor_menu_maps_exact_base_presses() {
+        for (event, expected) in [
+            (
+                ControlEvent::Press(ControlButton::Left),
+                ControlCommand::MenuLeft,
+            ),
+            (
+                ControlEvent::Press(ControlButton::Right),
+                ControlCommand::MenuRight,
+            ),
+            (
+                ControlEvent::Press(ControlButton::Up),
+                ControlCommand::MenuUp,
+            ),
+            (
+                ControlEvent::Press(ControlButton::Down),
+                ControlCommand::MenuDown,
+            ),
+            (
+                ControlEvent::Command {
+                    command: ControlCommand::Throw,
+                    kind: CommandKind::Press,
+                },
+                ControlCommand::MenuEnter,
+            ),
+            (
+                ControlEvent::Command {
+                    command: ControlCommand::Dig,
+                    kind: CommandKind::Press,
+                },
+                ControlCommand::MenuClose,
+            ),
+            (
+                ControlEvent::Command {
+                    command: ControlCommand::Special2,
+                    kind: CommandKind::Press,
+                },
+                ControlCommand::MenuEnterAll,
+            ),
+        ] {
+            assert_eq!(
+                map_async_cursor_menu_control_event(event, false),
+                Some(ControlEvent::Command {
+                    command: expected,
+                    kind: CommandKind::Press,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn async_cursor_menu_leaves_non_base_controls_raw() {
+        for event in [
+            ControlEvent::Release(ControlButton::Left),
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Release,
+            },
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Single,
+            },
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Double,
+            },
+            ControlEvent::Command {
+                command: ControlCommand::Special,
+                kind: CommandKind::Press,
+            },
+            ControlEvent::Command {
+                command: ControlCommand::MenuLeft,
+                kind: CommandKind::Press,
+            },
+            ControlEvent::RawPlayerControl {
+                command: 1,
+                data: 0,
+            },
+            ControlEvent::ClearPressed,
+        ] {
+            assert_eq!(map_async_cursor_menu_control_event(event, false), None);
+        }
+    }
+
+    #[test]
+    fn progressive_text_reveal_only_maps_exact_local_presses() {
         let show_text = ControlEvent::Command {
             command: ControlCommand::MenuShowText,
             kind: CommandKind::Press,
         };
         assert_eq!(
-            map_progressing_menu_control_event(ControlEvent::Press(ControlButton::Left)),
+            map_async_cursor_menu_control_event(ControlEvent::Press(ControlButton::Left), true),
             Some(show_text)
         );
         assert_eq!(
-            map_progressing_menu_control_event(ControlEvent::Command {
-                command: ControlCommand::Throw,
-                kind: CommandKind::Press,
-            }),
+            map_async_cursor_menu_control_event(
+                ControlEvent::Command {
+                    command: ControlCommand::Throw,
+                    kind: CommandKind::Press,
+                },
+                true,
+            ),
             Some(show_text)
         );
         for event in [
@@ -164,7 +257,7 @@ mod tests {
                 data: 0,
             },
         ] {
-            assert_eq!(map_progressing_menu_control_event(event), None);
+            assert_eq!(map_async_cursor_menu_control_event(event, true), None);
         }
     }
 }
