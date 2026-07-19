@@ -8928,6 +8928,8 @@ enum AppContextMenuCommand {
     OptionsFontSize(i32),
     OptionsDisplayMode(lc_frontend::startup_options_graphics::GraphicsDisplayMode),
     LobbyTeam { player_id: i32, team_id: i32 },
+    LobbyPlayerRemove { client_id: i32, player_id: i32 },
+    LobbyPlayerNewColor { client_id: i32, player_id: i32 },
     LobbyKick(i32),
     LobbySheet(LobbySheet),
     NetworkJoinEdit(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
@@ -10556,6 +10558,9 @@ struct GameApp {
     /// synchronized removal closes this menu before input can target a row
     /// that no longer exists.
     context_menu_lobby_kick_client: Option<i32>,
+    /// Player row whose root context menu is open. An authoritative update
+    /// that removes the row closes the stale popup before it can dispatch.
+    context_menu_lobby_player: Option<(i32, i32)>,
     /// C4GUI::ComboBox remembers the last menu index after Screen closes an
     /// outside-clicked menu. Retain that owner for the remainder of the same
     /// pointer-down so clicking the open combo closes instead of reopening it.
@@ -20290,6 +20295,7 @@ impl GameApp {
             context_menu: None,
             context_menu_lobby_team_player: None,
             context_menu_lobby_kick_client: None,
+            context_menu_lobby_player: None,
             context_menu_pointer_dismissed_lobby_team_player: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
@@ -40597,7 +40603,18 @@ impl GameApp {
                     })
                 })
         });
-        if stale_team_combo || stale_kick {
+        let stale_player = self
+            .context_menu_lobby_player
+            .is_some_and(|(client_id, player_id)| {
+                !roster_active
+                    || !self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                        lobby.controller.rows().iter().any(|row| {
+                            matches!(row, LobbyRosterRow::Player(player)
+                                if player.id == player_id && player.client_id == client_id)
+                        })
+                    })
+            });
+        if stale_team_combo || stale_kick || stale_player {
             // ComboBox::SetReadOnly aborts its menu without a DoorClose sound.
             self.close_context_menu_silently();
         }
@@ -40633,6 +40650,7 @@ impl GameApp {
         self.note_classic_host_lobby_non_pointer_input();
         self.context_menu = Some(menu);
         self.context_menu_lobby_kick_client = None;
+        self.context_menu_lobby_player = None;
         self.set_context_menu_lobby_team_player(lobby_team_player);
         self.process_context_menu_outcome(outcome)?;
         Ok(true)
@@ -41041,7 +41059,8 @@ impl GameApp {
         }
         if !sheet.is_roster()
             && (self.context_menu_lobby_team_player.is_some()
-                || self.context_menu_lobby_kick_client.is_some())
+                || self.context_menu_lobby_kick_client.is_some()
+                || self.context_menu_lobby_player.is_some())
         {
             self.close_context_menu_silently();
         }
@@ -41088,47 +41107,154 @@ impl GameApp {
         self.open_context_menu_at(entries, position)
     }
 
+    fn classic_lobby_player_is_owned(&self, client_id: i32) -> bool {
+        matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self.control_clients.contains(client_id)
+            || self
+                .network
+                .as_ref()
+                .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                == Some(client_id)
+    }
+
+    fn classic_lobby_player_context_entries(
+        &self,
+        player_id: i32,
+    ) -> Option<(i32, Vec<ContextMenuEntry<AppContextMenuCommand>>)> {
+        let client_id = self.classic_host_lobby.as_ref().and_then(|lobby| {
+            lobby.controller.rows().iter().find_map(|row| match row {
+                LobbyRosterRow::Player(player) if player.id == player_id => {
+                    Some(player.client_id)
+                }
+                _ => None,
+            })
+        })?;
+
+        if client_id == -1 {
+            return Some((
+                client_id,
+                vec![ContextMenuEntry::new(
+                    self.runtime_resource_text("IDS_MSG_TAKEOVERPLR", "&Take over"),
+                )
+                .with_tooltip(self.runtime_resource_text(
+                    "IDS_MSG_TAKEOVERPLR_DESC",
+                    "Control the player in the game",
+                ))
+                .with_icon(ContextMenuIcon::Phase(9))
+                // The separately tracked nested-takeover ticket owns these rows.
+                .with_submenu(Vec::new())],
+            ));
+        }
+
+        let Some(player) = self
+            .control_player_infos
+            .client_update_request(client_id)
+            .and_then(|request| {
+                request
+                    .players
+                    .into_iter()
+                    .find(|player| player.id == player_id)
+            })
+        else {
+            return Some((client_id, Vec::new()));
+        };
+        if !self.classic_lobby_player_is_owned(client_id) {
+            return Some((client_id, Vec::new()));
+        }
+
+        let mut entries = Vec::new();
+        if !player.is_script_player() || player.savegame_player == 0 {
+            entries.push(
+                ContextMenuEntry::new(
+                    self.runtime_resource_text("IDS_MSG_REMOVEPLR", "&Remove"),
+                )
+                .with_tooltip(self.runtime_resource_text(
+                    "IDS_MSG_REMOVEPLR_DESC",
+                    "Do not join with this player",
+                ))
+                .with_icon(ContextMenuIcon::Phase(34))
+                .with_action(AppContextMenuCommand::LobbyPlayerRemove {
+                    client_id,
+                    player_id,
+                }),
+            );
+        }
+        let team_colors = self
+            .network_team_assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.teams().team_colors);
+        if player.color != player.original_color && (!team_colors || player.team == 0) {
+            entries.push(
+                ContextMenuEntry::new(
+                    self.runtime_resource_text("IDS_MSG_NEWPLRCOLOR", "New &color"),
+                )
+                .with_tooltip(self.runtime_resource_text(
+                    "IDS_MSG_NEWPLRCOLOR_DESC",
+                    "Generate a new random player color",
+                ))
+                .with_icon(ContextMenuIcon::Phase(9))
+                .with_action(AppContextMenuCommand::LobbyPlayerNewColor {
+                    client_id,
+                    player_id,
+                }),
+            );
+        }
+        Some((client_id, entries))
+    }
+
     fn open_classic_lobby_roster_context(
         &mut self,
         row: LobbyRosterId,
         position: GuiPoint,
     ) -> Result<bool, EngineError> {
-        let LobbyRosterId::Client(client_id) = row else {
-            return Err(classic_game_lobby_child_error(
+        match row {
+            LobbyRosterId::Player(player_id) => {
+                let Some((client_id, entries)) =
+                    self.classic_lobby_player_context_entries(player_id)
+                else {
+                    return Ok(false);
+                };
+                let opened = self.open_context_menu_at(entries, position)?;
+                if opened {
+                    self.context_menu_lobby_player = Some((client_id, player_id));
+                }
+                Ok(opened)
+            }
+            LobbyRosterId::Client(client_id) => {
+                let local_client_id = self
+                    .network
+                    .as_ref()
+                    .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                    .unwrap_or(0);
+                let visible_remote = self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                    lobby.controller.rows().iter().any(|row| {
+                        matches!(row, LobbyRosterRow::Client(client)
+                            if client.id == client_id && !client.local)
+                    })
+                });
+                if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+                    || client_id == local_client_id
+                    || !visible_remote
+                    || !self.control_clients.contains(client_id)
+                {
+                    return Ok(false);
+                }
+                let opened = self.open_context_menu_at(
+                    vec![ContextMenuEntry::new("Kick")
+                        .with_tooltip("Remove this client from the game.")
+                        .with_icon(ContextMenuIcon::Empty)
+                        .with_action(AppContextMenuCommand::LobbyKick(client_id))],
+                    position,
+                )?;
+                if opened {
+                    self.context_menu_lobby_kick_client = Some(client_id);
+                }
+                Ok(opened)
+            }
+            row @ LobbyRosterId::Header(_) => Err(classic_game_lobby_child_error(
                 ClassicGameLobbyChild::RosterContext(row),
-            ));
-        };
-        let local_client_id = self
-            .network
-            .as_ref()
-            .and_then(|network| i32::try_from(network.local_client_id()).ok())
-            .unwrap_or(0);
-        let visible_remote = self
-            .classic_host_lobby
-            .as_ref()
-            .is_some_and(|lobby| {
-                lobby.controller.rows().iter().any(|row| {
-                    matches!(row, LobbyRosterRow::Client(client) if client.id == client_id && !client.local)
-                })
-            });
-        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
-            || client_id == local_client_id
-            || !visible_remote
-            || !self.control_clients.contains(client_id)
-        {
-            return Ok(false);
+            )),
         }
-        let opened = self.open_context_menu_at(
-            vec![ContextMenuEntry::new("Kick")
-                .with_tooltip("Remove this client from the game.")
-                .with_icon(ContextMenuIcon::Empty)
-                .with_action(AppContextMenuCommand::LobbyKick(client_id))],
-            position,
-        )?;
-        if opened {
-            self.context_menu_lobby_kick_client = Some(client_id);
-        }
-        Ok(opened)
     }
 
     fn kick_classic_lobby_client(&mut self, client_id: i32) {
@@ -41588,6 +41714,96 @@ impl GameApp {
         }
     }
 
+    fn classic_lobby_player_action_is_allowed(&self, client_id: i32, player_id: i32) -> bool {
+        player_id != 0
+            && self.network.is_some()
+            && self.classic_lobby_player_is_owned(client_id)
+            && self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                lobby.controller.rows().iter().any(|row| {
+                    matches!(row, LobbyRosterRow::Player(player)
+                        if player.id == player_id && player.client_id == client_id)
+                })
+            })
+    }
+
+    fn clear_remembered_league_password(&mut self) {
+        if let Some(NetworkMode::Client(settings)) = self.network_mode.as_mut() {
+            settings.league_auth.password = LegacyCString::default();
+        }
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        if let Err(error) = persist_config_value(paths, "Network", "LeaguePassword", "") {
+            tracing::warn!(%error, "failed to clear remembered league password");
+        }
+    }
+
+    fn remove_classic_lobby_player(&mut self, client_id: i32, player_id: i32) {
+        if !self.classic_lobby_player_action_is_allowed(client_id, player_id) {
+            return;
+        }
+        let countdown_locked = self
+            .classic_host_lobby
+            .as_ref()
+            .is_some_and(|lobby| lobby.controller.countdown().is_locked());
+        if countdown_locked {
+            if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+                return;
+            }
+            if !self.abort_network_lobby_countdown() {
+                self.submit_and_apply_lobby_countdown(lc_network::LobbyCountdownPacket::new(
+                    lc_network::LobbyCountdownPacket::ABORT,
+                ));
+            }
+        }
+
+        let Some(mut request) = self.control_player_infos.client_update_request(client_id) else {
+            return;
+        };
+        let Some(index) = request
+            .players
+            .iter()
+            .position(|player| player.id == player_id)
+        else {
+            return;
+        };
+        request.players.swap_remove(index);
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.submit_player_info_update(request) {
+            tracing::error!(%error, client_id, player_id, "failed to remove lobby player");
+        }
+        if self.network_is_league {
+            // C++ clears this immediately after the void update request so
+            // account changes require fresh authentication on the next join.
+            self.clear_remembered_league_password();
+        }
+    }
+
+    fn reset_classic_lobby_player_color(&mut self, client_id: i32, player_id: i32) {
+        if !self.classic_lobby_player_action_is_allowed(client_id, player_id) {
+            return;
+        }
+        let Some(mut request) = self.control_player_infos.client_update_request(client_id) else {
+            return;
+        };
+        let Some(player) = request
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_id)
+        else {
+            return;
+        };
+        player.color = player.original_color;
+        let Some(network) = self.network.as_ref() else {
+            return;
+        };
+        if let Err(error) = network.submit_player_info_update(request) {
+            tracing::error!(%error, client_id, player_id, "failed to reset lobby player color");
+        }
+    }
+
     fn open_startup_player_context_menu(
         &mut self,
         keyboard_trigger: bool,
@@ -41792,6 +42008,7 @@ impl GameApp {
                     self.context_menu = None;
                     self.set_context_menu_lobby_team_player(None);
                     self.context_menu_lobby_kick_client = None;
+                    self.context_menu_lobby_player = None;
                 }
                 ContextMenuEvent::Activated(command) => match command {
                     AppContextMenuCommand::StartupPlayer(
@@ -41892,6 +42109,18 @@ impl GameApp {
                     }
                     AppContextMenuCommand::LobbyTeam { player_id, team_id } => {
                         self.submit_classic_lobby_team_selection(player_id, team_id);
+                    }
+                    AppContextMenuCommand::LobbyPlayerRemove {
+                        client_id,
+                        player_id,
+                    } => {
+                        self.remove_classic_lobby_player(client_id, player_id);
+                    }
+                    AppContextMenuCommand::LobbyPlayerNewColor {
+                        client_id,
+                        player_id,
+                    } => {
+                        self.reset_classic_lobby_player_color(client_id, player_id);
                     }
                     AppContextMenuCommand::LobbyKick(client_id) => {
                         self.kick_classic_lobby_client(client_id);
@@ -42300,6 +42529,7 @@ impl GameApp {
         let Some(mut menu) = self.context_menu.take() else {
             self.set_context_menu_lobby_team_player(None);
             self.context_menu_lobby_kick_client = None;
+            self.context_menu_lobby_player = None;
             self.context_menu_pointer_dismissed_lobby_team_player = None;
             return;
         };
@@ -42308,6 +42538,7 @@ impl GameApp {
         self.note_classic_host_lobby_non_pointer_input();
         self.set_context_menu_lobby_team_player(None);
         self.context_menu_lobby_kick_client = None;
+        self.context_menu_lobby_player = None;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
         self.context_menu_pointer_capture = None;
         self.mark_menu_dirty();
@@ -83536,7 +83767,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let cases = vec![
             (
                 ClassicLobbyAction::RosterContextRequested {
-                    row: LobbyRosterId::Player(99),
+                    row: LobbyRosterId::Header(LobbyRosterHeader::ScriptPlayers),
                     position: GuiPoint::new(1.0, 1.0),
                 },
                 "RosterContext",
@@ -85101,6 +85332,280 @@ public func Grant(password) { return GainMissionAccess(password); }
             .admission_resources
             .resources
             .contains_key(&remote_resource));
+    }
+
+    #[test]
+    fn l081_player_context_root_matches_cpp_entry_gates() {
+        let mut app = new_menu_app(640, 480);
+        let (mut chooser, _) = install_test_classic_host_team_lobby(&mut app);
+        chooser.color = 0x00ab_cdef;
+        let associated_script = lc_engine::ControlPlayerInfoEntry {
+            id: 9,
+            player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+            savegame_player: 90,
+            color: 0x0012_3456,
+            original_color: 0x0065_4321,
+            ..Default::default()
+        };
+        app.control_player_infos.replace_snapshot(
+            9,
+            [
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![chooser.clone()],
+                    by_client: 0,
+                },
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![associated_script.clone()],
+                    by_client: 0,
+                },
+            ],
+        );
+        let player_row = |id, client_id, name: &str, team| {
+            LobbyRosterRow::Player(LobbyPlayerRow {
+                id,
+                client_id,
+                name: name.to_string(),
+                color: [0xff; 4],
+                icon: LobbyRosterIcon::Standard(7),
+                joined_player_overlay: None,
+                team: Some(LobbyTeamValue {
+                    id: team,
+                    name: format!("Team {team}"),
+                    selectable: false,
+                }),
+                league_score: None,
+                league_rank: None,
+            })
+        };
+        let client_row = app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .rows()[0]
+            .clone();
+        app.classic_host_lobby
+            .as_mut()
+            .unwrap()
+            .controller
+            .set_rows(vec![
+                player_row(50, -1, "Free restore", 0),
+                client_row,
+                player_row(7, 0, "Chooser", 1),
+                player_row(9, 7, "Script", 0),
+            ]);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+
+        let (_, free) = app
+            .classic_lobby_player_context_entries(50)
+            .expect("visible free restore row");
+        assert_eq!(free.len(), 1);
+        assert_eq!(free[0].text, "<c ffffff7f>T</c>ake over");
+        assert_eq!(free[0].tooltip.as_deref(), Some("Control the player in the game"));
+        assert_eq!(free[0].icon, ContextMenuIcon::Phase(9));
+        assert_eq!(free[0].hotkey, Some('T'));
+        assert_eq!(free[0].action, None);
+        assert!(free[0].has_submenu());
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(50),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("free restore context opens");
+        assert_eq!(
+            app.context_menu.as_ref().unwrap().layout().panels[0]
+                .rows
+                .len(),
+            1
+        );
+        app.close_context_menu_silently();
+
+        let (_, ordinary) = app
+            .classic_lobby_player_context_entries(7)
+            .expect("visible ordinary row");
+        assert_eq!(ordinary.len(), 2);
+        assert_eq!(ordinary[0].text, "<c ffffff7f>R</c>emove");
+        assert_eq!(ordinary[0].tooltip.as_deref(), Some("Do not join with this player"));
+        assert_eq!(ordinary[0].icon, ContextMenuIcon::Phase(34));
+        assert_eq!(ordinary[0].hotkey, Some('R'));
+        assert_eq!(
+            ordinary[0].action,
+            Some(AppContextMenuCommand::LobbyPlayerRemove {
+                client_id: 0,
+                player_id: 7,
+            })
+        );
+        assert_eq!(ordinary[1].text, "New <c ffffff7f>c</c>olor");
+        assert_eq!(
+            ordinary[1].tooltip.as_deref(),
+            Some("Generate a new random player color")
+        );
+        assert_eq!(ordinary[1].icon, ContextMenuIcon::Phase(9));
+        assert_eq!(ordinary[1].hotkey, Some('C'));
+        assert_eq!(
+            ordinary[1].action,
+            Some(AppContextMenuCommand::LobbyPlayerNewColor {
+                client_id: 0,
+                player_id: 7,
+            })
+        );
+
+        app.network_team_assignment
+            .as_mut()
+            .unwrap()
+            .teams_mut()
+            .team_colors = true;
+        let (_, ordinary) = app.classic_lobby_player_context_entries(7).unwrap();
+        assert_eq!(ordinary.len(), 1, "a nonzero team color suppresses reroll");
+        let (_, script) = app.classic_lobby_player_context_entries(9).unwrap();
+        assert_eq!(script.len(), 1, "association suppresses only Remove");
+        assert_eq!(
+            script[0].action,
+            Some(AppContextMenuCommand::LobbyPlayerNewColor {
+                client_id: 7,
+                player_id: 9,
+            }),
+            "team zero retains New Color even with team colors enabled"
+        );
+
+        app.network_mode = None;
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Remote owner")]);
+        let (_, foreign) = app.classic_lobby_player_context_entries(7).unwrap();
+        assert!(foreign.is_empty());
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(7),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("C++ opens an empty root for an unowned player");
+        assert!(app.context_menu.is_some());
+        assert_eq!(app.context_menu_lobby_player, Some((0, 7)));
+    }
+
+    #[test]
+    fn l081_remove_aborts_countdown_before_swap_removed_update_and_clears_league_password() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated league configuration");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Network", "LeaguePassword", "remembered secret")
+            .expect("seed league password");
+
+        let mut app = new_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_is_league = true;
+        app.host_lobby_countdown = Some(HostLobbyCountdown::with_seconds(5));
+        app.apply_lobby_countdown_presentation(lc_network::LobbyCountdownPacket::new(5));
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(chooser.id),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("player context opens");
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::R, ElementState::Pressed)
+                .expect("activate Remove hotkey")
+        );
+
+        assert_eq!(
+            commands.take_lobby_player_update_commands(),
+            vec![
+                crate::network::TestLobbyPlayerUpdateCommand::Countdown(
+                    lc_network::LobbyCountdownPacket::new(
+                        lc_network::LobbyCountdownPacket::ABORT,
+                    ),
+                ),
+                crate::network::TestLobbyPlayerUpdateCommand::PlayerInfo(
+                    lc_network::PlayerInfoUpdateRequest {
+                        client_id: 0,
+                        flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                        players: vec![companion],
+                    },
+                ),
+            ],
+            "RemoveInfo swap-removes the target only after the host abort packet"
+        );
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(!app
+            .classic_host_lobby
+            .as_ref()
+            .unwrap()
+            .controller
+            .countdown()
+            .is_locked());
+        assert!(
+            load_league_auth_settings(Some(&paths)).password.is_empty(),
+            "league removal rerequires authentication"
+        );
+    }
+
+    #[test]
+    fn l081_new_color_resets_only_current_color_in_full_packet() {
+        let mut app = new_menu_app(640, 480);
+        let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
+        chooser.color = 0x00ab_cdef;
+        app.control_player_infos.replace_snapshot(
+            9,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![chooser.clone(), companion.clone()],
+                by_client: 0,
+            }],
+        );
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(0);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(chooser.id),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("player context opens");
+        assert!(
+            app.handle_context_menu_key(VirtualKeyCode::C, ElementState::Pressed)
+                .expect("activate New Color hotkey")
+        );
+
+        let mut reset = chooser.clone();
+        reset.color = reset.original_color;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![reset, companion],
+            }]
+        );
+        assert_eq!(
+            app.control_player_infos
+                .client_update_request(0)
+                .unwrap()
+                .players[0]
+                .color,
+            chooser.color,
+            "the roster waits for the authoritative echo"
+        );
     }
 
     #[test]

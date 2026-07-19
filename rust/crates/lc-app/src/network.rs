@@ -967,6 +967,13 @@ pub(crate) enum TestLobbyStartCommand {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TestLobbyPlayerUpdateCommand {
+    Countdown(lc_network::LobbyCountdownPacket),
+    PlayerInfo(lc_network::PlayerInfoUpdateRequest),
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TestRuntimeStatusCommand {
     Change(NetworkStatus),
@@ -1007,6 +1014,24 @@ impl TestNetworkCommands {
                     observed.push(TestLobbyStartCommand::Status(status));
                 }
                 command => panic!("unexpected lobby-start command: {command:?}"),
+            }
+        }
+        observed
+    }
+
+    pub(crate) fn take_lobby_player_update_commands(
+        &mut self,
+    ) -> Vec<TestLobbyPlayerUpdateCommand> {
+        let mut observed = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                NetworkCommand::SubmitLobbyCountdown(packet) => {
+                    observed.push(TestLobbyPlayerUpdateCommand::Countdown(packet));
+                }
+                NetworkCommand::SubmitPlayerInfoUpdate(request) => {
+                    observed.push(TestLobbyPlayerUpdateCommand::PlayerInfo(request));
+                }
+                command => panic!("unexpected lobby-player update command: {command:?}"),
             }
         }
         observed
