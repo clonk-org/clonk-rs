@@ -40883,17 +40883,17 @@ impl GameApp {
                         PlrSelPlayerContextCommand::DeletePlayer(index),
                     ) => {
                         // ContextMenu already emitted the activation Click.
-                        self.open_startup_player_delete_dialog(index, false)?;
+                        self.open_startup_player_delete_dialog(index)?;
                     }
                     AppContextMenuCommand::StartupCrew(
                         PlrSelCrewContextCommand::RenameCrew(index),
                     ) => {
-                        self.open_startup_crew_rename_dialog(index, false)?;
+                        self.open_startup_crew_rename_dialog(index)?;
                     }
                     AppContextMenuCommand::StartupCrew(
                         PlrSelCrewContextCommand::DeleteCrew(index),
                     ) => {
-                        self.open_startup_crew_delete_dialog(index, false)?;
+                        self.open_startup_crew_delete_dialog(index)?;
                     }
                     AppContextMenuCommand::StartupCrew(
                         PlrSelCrewContextCommand::SetCrewDeathMessage(index),
@@ -41708,12 +41708,24 @@ impl GameApp {
         &mut self,
         actions: Vec<lc_frontend::startup_plrsel::PlrSelAction>,
     ) -> Result<(), EngineError> {
-        use lc_frontend::startup_plrsel::PlrSelAction;
+        use lc_frontend::startup_plrsel::{PlrSelAction, PlrSelSound};
+
+        let sounds = self
+            .startup_player_dialog
+            .as_mut()
+            .map(|dialog| dialog.take_sound_events())
+            .unwrap_or_default();
+        for sound in sounds {
+            self.play_ui_sound(match sound {
+                PlrSelSound::Command => "Command",
+                PlrSelSound::ArrowHit => "ArrowHit",
+                PlrSelSound::Click => "Click",
+            });
+        }
 
         for action in actions {
             match action {
-                PlrSelAction::SelectionChanged(Some(_)) => self.play_ui_sound("Command"),
-                PlrSelAction::SelectionChanged(None) | PlrSelAction::FocusChanged(_) => {}
+                PlrSelAction::SelectionChanged(_) | PlrSelAction::FocusChanged(_) => {}
                 PlrSelAction::Back => {
                     self.begin_startup_dialog_fade(StartupDialog::MainMenu);
                     self.show_main_menu();
@@ -41777,7 +41789,7 @@ impl GameApp {
                     }
                 }
                 PlrSelAction::DeletePlayer(index) => {
-                    self.open_startup_player_delete_dialog(index, true)?;
+                    self.open_startup_player_delete_dialog(index)?;
                 }
                 PlrSelAction::PlayerProperties(index) => {
                     self.open_existing_startup_player_properties(index);
@@ -41795,10 +41807,10 @@ impl GameApp {
                     self.set_startup_crew_participation(index, participating)?;
                 }
                 PlrSelAction::DeleteCrew(index) => {
-                    self.open_startup_crew_delete_dialog(index, true)?;
+                    self.open_startup_crew_delete_dialog(index)?;
                 }
                 PlrSelAction::RenameCrew(index) => {
-                    self.open_startup_crew_rename_dialog(index, true)?;
+                    self.open_startup_crew_rename_dialog(index)?;
                 }
                 PlrSelAction::SetCrewDeathMessage(index) => {
                     self.open_startup_crew_death_message_dialog(index)?;
@@ -41808,11 +41820,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn open_startup_player_delete_dialog(
-        &mut self,
-        index: usize,
-        play_source_click: bool,
-    ) -> Result<(), EngineError> {
+    fn open_startup_player_delete_dialog(&mut self, index: usize) -> Result<(), EngineError> {
         let delete = self
             .startup_player_files
             .get(index)
@@ -41827,9 +41835,6 @@ impl GameApp {
             tracing::error!(index, "player-delete action references a stale row");
             return Ok(());
         };
-        if play_source_click {
-            self.play_ui_sound("Click");
-        }
         self.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::new(
                 warning,
@@ -42011,11 +42016,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn open_startup_crew_delete_dialog(
-        &mut self,
-        index: usize,
-        play_source_click: bool,
-    ) -> Result<(), EngineError> {
+    fn open_startup_crew_delete_dialog(&mut self, index: usize) -> Result<(), EngineError> {
         let delete = self.startup_crew_files.get(index).map(|entry| {
             (
                 entry.player_path.clone(),
@@ -42027,9 +42028,6 @@ impl GameApp {
             tracing::error!(index, "crew-delete action references a stale row");
             return Ok(());
         };
-        if play_source_click {
-            self.play_ui_sound("Click");
-        }
         self.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::new(
                 warning,
@@ -42046,11 +42044,7 @@ impl GameApp {
         )
     }
 
-    fn open_startup_crew_rename_dialog(
-        &mut self,
-        index: usize,
-        play_source_click: bool,
-    ) -> Result<(), EngineError> {
+    fn open_startup_crew_rename_dialog(&mut self, index: usize) -> Result<(), EngineError> {
         let Some(initial_text) = self
             .startup_crew_models
             .get(index)
@@ -42065,9 +42059,6 @@ impl GameApp {
             self.assets.input_dialog_resources().map(|_| ()),
         )?;
         self.close_context_menu_silently();
-        if play_source_click {
-            self.play_ui_sound("Click");
-        }
         let controller = InputDialogController::new(
             "Rename crew member:",
             "Rename",
@@ -89265,6 +89256,47 @@ public func Grant(password) { return GainMissionAccess(password); }
         .expect("new-player properties are implemented");
         assert!(app.startup_player_properties_dialog.is_some());
         app.startup_player_properties_dialog = None;
+    }
+
+    #[test]
+    fn l061_player_selection_widget_sounds_reach_the_production_audio_route() {
+        let mut app = new_classic_menu_app(640, 480);
+        let mut dialog = lc_frontend::startup_plrsel::PlrSelController::new(2);
+        dialog.resize(640, 480);
+        app.startup_player_dialog = Some(dialog);
+        app.ui_sound_log.clear();
+
+        let actions = app
+            .startup_player_dialog
+            .as_mut()
+            .unwrap()
+            .handle_key_down(KeyCode::Down);
+        app.process_player_dialog_actions(actions)
+            .expect("route the selection sound");
+        assert_eq!(app.ui_sound_log, ["Command"]);
+
+        let back = lc_frontend::startup_plrsel::plrsel_layout(640, 480).buttons[0];
+        let back = GuiPoint::new(
+            (back.x + back.w / 2) as f32,
+            (back.y + back.h / 2) as f32,
+        );
+        let actions = app
+            .startup_player_dialog
+            .as_mut()
+            .unwrap()
+            .handle_pointer_down(back);
+        app.process_player_dialog_actions(actions)
+            .expect("route the button-down sound");
+        assert_eq!(app.ui_sound_log, ["Command", "ArrowHit"]);
+
+        let actions = app
+            .startup_player_dialog
+            .as_mut()
+            .unwrap()
+            .handle_pointer_up(back);
+        app.process_player_dialog_actions(actions)
+            .expect("route the button-release sound before Back");
+        assert_eq!(app.ui_sound_log, ["Command", "ArrowHit", "Click"]);
     }
 
     #[test]

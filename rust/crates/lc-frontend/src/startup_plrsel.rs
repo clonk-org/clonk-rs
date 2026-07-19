@@ -913,6 +913,14 @@ pub enum PlrSelControl {
     Rename,
 }
 
+/// Classic GUI samples emitted by player-selection controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlrSelSound {
+    Command,
+    ArrowHit,
+    Click,
+}
+
 /// Requests produced by [`PlrSelController`]. File creation, deletion and
 /// persistence remain application responsibilities; activation is mirrored
 /// locally so the renderer can update immediately.
@@ -1101,6 +1109,7 @@ pub struct PlrSelController {
     scrollbar_dragging: bool,
     scrollbar_arrow_captured: bool,
     scrollbar_arrow: i8,
+    sound_events: Vec<PlrSelSound>,
 }
 
 impl PlrSelController {
@@ -1127,6 +1136,7 @@ impl PlrSelController {
             scrollbar_dragging: false,
             scrollbar_arrow_captured: false,
             scrollbar_arrow: 0,
+            sound_events: Vec::new(),
         }
     }
 
@@ -1400,6 +1410,10 @@ impl PlrSelController {
         self.pointer_position
     }
 
+    pub fn take_sound_events(&mut self) -> Vec<PlrSelSound> {
+        std::mem::take(&mut self.sound_events)
+    }
+
     /// Current vertical ScrollWindow displacement in logical pixels.
     pub const fn list_scroll_offset(&self) -> i32 {
         self.list_scroll_y
@@ -1517,6 +1531,7 @@ impl PlrSelController {
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
+        let button_was_down = self.pointer_button_is_down();
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         let layout = self.layout();
@@ -1525,13 +1540,21 @@ impl PlrSelController {
         } else if self.scrollbar_arrow_captured {
             self.scrollbar_arrow = self.scrollbar_arrow_at(position, &layout);
         }
+        if button_was_down != self.pointer_button_is_down() {
+            self.sound_events.push(PlrSelSound::ArrowHit);
+        }
         Vec::new()
     }
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
+        let button_was_down = self.pointer_button_is_down();
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         self.pointer_pressed = self.hovered;
+
+        if !button_was_down && self.pointer_button_is_down() {
+            self.sound_events.push(PlrSelSound::ArrowHit);
+        }
 
         let layout = self.layout();
         if self.max_list_scroll(&layout) > 0 && contains_plrsel(layout.list_scrollbar, position) {
@@ -1557,6 +1580,7 @@ impl PlrSelController {
     }
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
+        let button_was_down = self.pointer_button_is_down();
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         if self.scrollbar_dragging {
@@ -1570,17 +1594,21 @@ impl PlrSelController {
             self.scrollbar_arrow = 0;
             return Vec::new();
         }
+        if let Some(pressed) = self.pointer_pressed.take() {
+            if !button_was_down || self.hit_button(position) != Some(pressed) {
+                if button_was_down {
+                    self.sound_events.push(PlrSelSound::ArrowHit);
+                }
+                return Vec::new();
+            }
+            self.sound_events.push(PlrSelSound::Click);
+            return self.activate(pressed);
+        }
         if let Some(index) = self.checkbox_at(position) {
-            self.pointer_pressed = None;
+            self.sound_events.push(PlrSelSound::ArrowHit);
             return self.toggle_activation(index);
         }
-        let Some(pressed) = self.pointer_pressed.take() else {
-            return Vec::new();
-        };
-        if self.hit_button(position) != Some(pressed) {
-            return Vec::new();
-        }
-        self.activate(pressed)
+        Vec::new()
     }
 
     pub fn handle_pointer_double_click(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
@@ -1594,7 +1622,11 @@ impl PlrSelController {
         let selected = self.list_item_at(position);
         let mut actions = self.change_focus(PlrSelControl::PlayerList);
         actions.extend(self.change_selection(selected));
-        actions.extend(self.selected_edit_action());
+        let edit = self.selected_edit_action();
+        if !edit.is_empty() {
+            self.sound_events.push(PlrSelSound::Click);
+        }
+        actions.extend(edit);
         actions
     }
 
@@ -1756,13 +1788,24 @@ impl PlrSelController {
                 .into_iter()
                 .collect(),
             KeyCode::Space if self.focus == PlrSelControl::PlayerList => {
-                self.toggle_selected_activation()
+                let actions = self.toggle_selected_activation();
+                if !actions.is_empty() {
+                    self.sound_events.push(PlrSelSound::ArrowHit);
+                }
+                actions
             }
             KeyCode::Enter if self.focus == PlrSelControl::PlayerList => {
-                self.selected_edit_action()
+                let actions = self.selected_edit_action();
+                if !actions.is_empty() {
+                    self.sound_events.push(PlrSelSound::Click);
+                }
+                actions
             }
             KeyCode::Enter | KeyCode::Space => {
-                self.key_pressed = Some((self.focus, key));
+                if self.key_pressed.is_none() {
+                    self.key_pressed = Some((self.focus, key));
+                    self.sound_events.push(PlrSelSound::ArrowHit);
+                }
                 Vec::new()
             }
             _ => Vec::new(),
@@ -1776,6 +1819,7 @@ impl PlrSelController {
         if pressed_key != key || pressed != self.focus {
             return Vec::new();
         }
+        self.sound_events.push(PlrSelSound::Click);
         self.activate(pressed)
     }
 
@@ -1907,6 +1951,9 @@ impl PlrSelController {
         self.selected = selected;
         let layout = self.layout();
         self.ensure_selection_visible(&layout);
+        if selected.is_some() {
+            self.sound_events.push(PlrSelSound::Command);
+        }
         vec![PlrSelAction::SelectionChanged(selected)]
     }
 
@@ -2212,8 +2259,13 @@ impl PlrSelController {
         (draw_focus && self.focus == control) || self.hovered == Some(control)
     }
 
+    fn pointer_button_is_down(&self) -> bool {
+        self.pointer_pressed
+            .is_some_and(|pressed| self.hovered == Some(pressed))
+    }
+
     fn is_pressed(&self, control: PlrSelControl) -> bool {
-        self.pointer_pressed == Some(control)
+        (self.pointer_pressed == Some(control) && self.hovered == Some(control))
             || self
                 .key_pressed
                 .is_some_and(|(pressed, _)| pressed == control)
@@ -4083,6 +4135,126 @@ mod tests {
                 PlrSelAction::PlayerProperties(0),
             ]
         );
+    }
+
+    #[test]
+    fn l061_list_and_checkbox_sounds_follow_the_user_input_source() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(2);
+        controller.resize(1280, 720);
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Down),
+            vec![PlrSelAction::SelectionChanged(Some(1))]
+        );
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::Command]);
+        assert!(controller.handle_key_down(crate::KeyCode::Down).is_empty());
+        assert!(controller.take_sound_events().is_empty());
+
+        let first_checkbox = crate::GuiPoint::new(
+            (layout.list_client.x + layout.item_height / 2) as f32,
+            (layout.list_client.y + layout.item_height / 2) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_down(first_checkbox),
+            vec![PlrSelAction::SelectionChanged(Some(0))]
+        );
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::Command]);
+        assert_eq!(
+            controller.handle_pointer_up(first_checkbox),
+            vec![PlrSelAction::ActivationChanged {
+                index: 0,
+                activated: true,
+            }]
+        );
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Space),
+            vec![PlrSelAction::ActivationChanged {
+                index: 0,
+                activated: false,
+            }]
+        );
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+
+        let second_row_name = crate::GuiPoint::new(
+            (layout.list_client.x + layout.item_height * 3) as f32,
+            (layout.list_client.y + layout.item_pitch + layout.item_height / 2) as f32,
+        );
+        assert_eq!(
+            controller.handle_pointer_double_click(second_row_name),
+            vec![
+                PlrSelAction::SelectionChanged(Some(1)),
+                PlrSelAction::PlayerProperties(1),
+            ]
+        );
+        assert_eq!(
+            controller.take_sound_events(),
+            [PlrSelSound::Command, PlrSelSound::Click]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![PlrSelAction::PlayerProperties(1)]
+        );
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::Click]);
+        assert_eq!(
+            controller.handle_edit_shortcut(),
+            vec![PlrSelAction::PlayerProperties(1)]
+        );
+        assert!(controller.take_sound_events().is_empty());
+    }
+
+    #[test]
+    fn l061_button_sounds_follow_down_cancel_reentry_and_keyboard_paths() {
+        let layout = plrsel_layout(1280, 720);
+        let back = center(layout.buttons[0]);
+        let outside = crate::GuiPoint::new(0.0, 0.0);
+        let mut controller = PlrSelController::new(1);
+        controller.resize(1280, 720);
+
+        assert!(controller.handle_pointer_down(back).is_empty());
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+        assert!(controller.handle_pointer_down(back).is_empty());
+        assert!(controller.take_sound_events().is_empty());
+        assert!(controller.handle_pointer_up(outside).is_empty());
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+
+        assert!(controller.handle_pointer_down(back).is_empty());
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+        assert!(controller.handle_pointer_move(outside).is_empty());
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+        assert!(controller.handle_pointer_move(back).is_empty());
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+        assert_eq!(controller.handle_pointer_up(back), vec![PlrSelAction::Back]);
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::Click]);
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
+        assert!(controller.take_sound_events().is_empty());
+        assert!(controller.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+        assert!(controller.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert!(controller.take_sound_events().is_empty());
+        assert_eq!(
+            controller.handle_key_up(crate::KeyCode::Enter),
+            vec![PlrSelAction::Back]
+        );
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::Click]);
+
+        let activate = center(layout.buttons[2]);
+        assert!(controller.handle_pointer_down(activate).is_empty());
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::ArrowHit]);
+        assert_eq!(
+            controller.handle_pointer_up(activate),
+            vec![PlrSelAction::ActivationChanged {
+                index: 0,
+                activated: true,
+            }]
+        );
+        assert_eq!(controller.take_sound_events(), [PlrSelSound::Click]);
     }
 
     #[test]
