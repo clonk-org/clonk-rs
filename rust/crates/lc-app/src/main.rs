@@ -8677,6 +8677,7 @@ enum MenuTitleDrag {
 enum MessageDialogContinuation {
     None,
     StartupNetworkConnectProgress,
+    NetworkClientStartWait,
     NetworkRuntimeJoin {
         reference: lc_network::NetworkGameReference,
     },
@@ -20463,6 +20464,7 @@ impl GameApp {
 
     fn can_defer_native_loader_text(&self, scale: f32) -> bool {
         self.mode == AppMode::Loading
+            && self.message_dialogs.is_empty()
             && !self
                 .network_start_wait
                 .as_ref()
@@ -30737,8 +30739,11 @@ impl GameApp {
                             .as_ref()
                             .is_some_and(|wait| wait.expected_status == status);
                         self.handle_status_committed(status)?;
-                        if closes_start_wait && self.mode == AppMode::Running {
-                            self.network_start_wait = None;
+                        if self.mode == AppMode::Running {
+                            if closes_start_wait {
+                                self.network_start_wait = None;
+                            }
+                            self.dismiss_network_client_start_wait();
                         }
                     }
                     NetworkEvent::ActivationRequest {
@@ -45369,6 +45374,42 @@ impl GameApp {
         });
     }
 
+    fn show_reached_network_start_wait(&mut self) -> Result<(), EngineError> {
+        if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            if let Some(wait) = self.network_start_wait.as_mut() {
+                wait.visible = true;
+            }
+            self.mark_menu_dirty();
+            return Ok(());
+        }
+
+        let dialog = lc_frontend::message_dialog::MessageDialogState::new(
+            self.runtime_resource_text("IDS_NET_WAITFORSTART", "Waiting for start..."),
+            self.runtime_resource_text("IDS_NET_CAPTION", "Network"),
+            lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(3),
+            lc_frontend::message_dialog::MessageDialogSize::Small,
+            false,
+        )
+        .without_focus();
+        self.push_message_dialog(dialog, MessageDialogContinuation::NetworkClientStartWait)
+    }
+
+    fn dismiss_network_client_start_wait(&mut self) {
+        let Some(index) = self.message_dialogs.iter().rposition(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::NetworkClientStartWait
+            )
+        }) else {
+            return;
+        };
+        if self.remove_message_dialog_at(index).is_some() {
+            self.startup_tooltip.pointer_left();
+            self.mark_menu_dirty();
+        }
+    }
+
     fn retarget_network_start_wait(&mut self, status: lc_network::NetworkStatus) {
         let Some(wait) = self.network_start_wait.as_mut() else {
             return;
@@ -51723,12 +51764,7 @@ impl GameApp {
                                         pending.status.target_tick = current_control_tick;
                                     }
                                 }
-                                if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
-                                    if let Some(wait) = self.network_start_wait.as_mut() {
-                                        wait.visible = true;
-                                    }
-                                    self.mark_menu_dirty();
-                                }
+                                self.show_reached_network_start_wait()?;
                             }
                             Some(Err(error)) => {
                                 self.status_text =
@@ -53191,6 +53227,9 @@ impl GameApp {
                     self.pending_network_join = None;
                     self.status_text.clear();
                 }
+            }
+            MessageDialogContinuation::NetworkClientStartWait => {
+                self.return_to_menu();
             }
             MessageDialogContinuation::NetworkRuntimeJoin { reference }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
@@ -55396,6 +55435,7 @@ impl GameApp {
             .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
         if config.application_scale() > 1.0
             && !defer_native_text
+            && self.message_dialogs.is_empty()
             && !self
                 .network_start_wait
                 .as_ref()
@@ -55447,8 +55487,61 @@ impl GameApp {
                 .render(&mut surface, &resources, true, self.loader_gamma.as_ref())
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
         }
+        self.render_loading_message_dialogs(&mut surface)?;
         frame.copy_from_slice(surface.pixels());
         Ok(())
+    }
+
+    fn render_loading_message_dialogs(&mut self, surface: &mut Surface) -> Result<()> {
+        if self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        let assets = Arc::clone(&self.assets);
+        let resources = assets.message_dialog_resources().ok_or_else(|| {
+            self.loader_boundary(
+                "classic message-dialog resources are unavailable during network start wait",
+            )
+        })?;
+        let last = self.message_dialogs.len() - 1;
+        let active_index = self.active_message_dialog_index();
+        let context_menu_closed = self.context_menu.is_none();
+        let now = Instant::now();
+        for index in 0..=last {
+            let keyboard_active = Some(index) == active_index && context_menu_closed;
+            let mouse_active = Some(index) == active_index;
+            let result = self.message_dialogs[index].state.render_at(
+                surface,
+                resources,
+                keyboard_active,
+                mouse_active,
+                self.loader_gamma.as_ref(),
+                now,
+            );
+            if let Err(error) = result {
+                return Err(self.loader_boundary(error.to_string()));
+            }
+        }
+
+        let Some(tooltip_pointer) = self.startup_tooltip.eligible_pointer() else {
+            return Ok(());
+        };
+        let (surface_width, surface_height) = (surface.width() as i32, surface.height() as i32);
+        let Some(index) = (0..self.message_dialogs.len()).rev().find(|index| {
+            let dialog = &self.message_dialogs[*index].state;
+            let layout = dialog.layout(surface_width, surface_height, &resources.fonts.text);
+            dialog
+                .tooltip_state(Some(tooltip_pointer), &layout)
+                .is_some()
+        }) else {
+            return Ok(());
+        };
+        let result = self.message_dialogs[index].state.render_tooltip(
+            surface,
+            resources,
+            Some(tooltip_pointer),
+            self.loader_gamma.as_ref(),
+        );
+        result.map_err(|error| self.loader_boundary(error.to_string()))
     }
 
     fn render_native_loader_text(
@@ -86297,8 +86390,104 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn l083_reached_network_start_wait_uses_host_roster_and_client_abort_dialog() {
+        let status = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 4,
+        };
+
+        let mut host = new_menu_app(640, 480);
+        host.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        host.begin_network_start_wait(status);
+        host.show_reached_network_start_wait()
+            .expect("show reached host wait");
+        assert!(host
+            .network_start_wait
+            .as_ref()
+            .is_some_and(|wait| wait.visible && wait.expected_status == status));
+        assert!(host.message_dialogs.is_empty());
+
+        let mut client = new_menu_app(640, 480);
+        client.mode = AppMode::Loading;
+        client.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        client
+            .show_reached_network_start_wait()
+            .expect("show reached client wait");
+        assert!(client.network_start_wait.is_none());
+        let [dialog] = client.message_dialogs.as_slice() else {
+            panic!("client should have exactly one start-wait dialog");
+        };
+        assert!(matches!(
+            dialog.continuation,
+            MessageDialogContinuation::NetworkClientStartWait
+        ));
+        assert_eq!(dialog.state.message(), "Waiting for start...");
+        assert_eq!(dialog.state.caption(), "Network");
+        assert_eq!(
+            dialog.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::CANCEL
+        );
+        assert_eq!(
+            dialog.state.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(3)
+        );
+        assert_eq!(
+            dialog.state.size(),
+            lc_frontend::message_dialog::MessageDialogSize::Small
+        );
+        assert_eq!(dialog.state.focused_button(), None);
+        assert_eq!(
+            dialog
+                .state
+                .button_label(lc_frontend::message_dialog::MessageDialogButton::Cancel),
+            "Cancel"
+        );
+
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        let blank = surface.pixels().to_vec();
+        client
+            .render_loading_message_dialogs(&mut surface)
+            .expect("render client wait over the loading surface");
+        assert_ne!(surface.pixels(), blank.as_slice());
+    }
+
+    #[test]
+    fn l083_client_start_wait_escape_and_abort_clear_network_and_return_to_main() {
+        use lc_frontend::message_dialog::MessageDialogResult;
+
+        for result in [MessageDialogResult::Dismissed, MessageDialogResult::Cancel] {
+            let mut app = new_menu_app(640, 480);
+            let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+            app.network = Some(network);
+            app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+            app.startup_view = StartupView::NetworkLobby;
+            app.last_startup_dialog = StartupDialog::NetworkGame;
+            app.mode = AppMode::Loading;
+            app.show_reached_network_start_wait()
+                .expect("show client wait");
+
+            if result == MessageDialogResult::Dismissed {
+                app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                    .expect("Escape aborts client start wait");
+            } else {
+                app.finish_message_dialog(result)
+                    .expect("Cancel aborts client start wait");
+            }
+
+            assert!(matches!(app.mode, AppMode::Menu));
+            assert_eq!(app.startup_view, StartupView::NetworkGame);
+            assert!(app.network.is_none());
+            assert!(app.network_mode.is_none());
+            assert!(app.network_start_wait.is_none());
+            assert!(app.message_dialogs.is_empty());
+        }
+    }
+
+    #[test]
     fn network_start_wait_tracks_only_matching_accepted_status_acknowledgements() {
         let mut app = new_menu_app(640, 480);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
         app.control_clients.replace_snapshot([
             message_client(0, b"Exact Host"),
             message_client(7, b"Remote"),
@@ -102646,6 +102835,10 @@ ScenInfoArea=70,5,25,90
             .network_start_wait
             .as_ref()
             .is_some_and(|wait| wait.visible));
+        assert!(
+            app.message_dialogs.is_empty(),
+            "the host uses its roster wait instead of the client message dialog"
+        );
         events
             .send(NetworkEvent::StatusRequested(expected_go))
             .expect("queue the host session's delayed self-echo");
@@ -117689,6 +117882,24 @@ ScenInfoArea=70,5,25,90
         assert!(matches!(app.mode, AppMode::Loading));
         app.poll_loading().expect("finish client InitGame phase");
         assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.network_start_wait.is_none());
+        let client_wait = app
+            .message_dialogs
+            .iter()
+            .find(|dialog| {
+                matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::NetworkClientStartWait
+                )
+            })
+            .expect("FinalInit presents the client start-wait message");
+        assert_eq!(client_wait.state.message(), "Waiting for start...");
+        assert_eq!(client_wait.state.caption(), "Network");
+        assert_eq!(
+            client_wait.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::CANCEL
+        );
+        assert_eq!(client_wait.state.focused_button(), None);
         assert!(app.engine.snapshot().players.is_empty());
         assert!(app.engine.definition_ids().any(|id| id == "HOST"));
         // InitClient copies JoinData's start tick and control rate before
@@ -117759,6 +117970,10 @@ ScenInfoArea=70,5,25,90
         assert!(matches!(app.mode, AppMode::Running));
         assert!(app.loading_state.is_none());
         assert!(app.network_control_running);
+        assert!(app.message_dialogs.iter().all(|dialog| !matches!(
+            dialog.continuation,
+            MessageDialogContinuation::NetworkClientStartWait
+        )));
     }
 
     #[test]
