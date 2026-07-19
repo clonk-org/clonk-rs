@@ -8,14 +8,16 @@
 //! with the fullscreen-dialog margins of C4GuiDialogs.cpp:813-822 and the
 //! ComponentAligner of C4Gui.cpp:975-1057.
 
+use std::time::Instant;
+
 use crate::classic_gui::{
     blacken_transparent_pixels, draw_3d_frame, draw_clipped_text, draw_engine_box,
-    ClassicButtonState, ClassicGuiSkin,
+    draw_facet_stretch, ClassicButtonState, ClassicGuiSkin,
 };
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::startup_main_menu::{IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
-use lc_graphics::clonk_font::TextAlign;
+use lc_graphics::clonk_font::{ClonkFont, TextAlign};
 use lc_graphics::{GammaRamp, Surface};
 use lc_gui::Rect as GuiRect;
 
@@ -29,8 +31,11 @@ const CLR_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 const CLR_DISABLED: [u8; 4] = [0x7f, 0x7f, 0x7f, 0xff];
 /// ListBox background / C4GUI_EditBGColor.
 const CLR_DARK_BG: u32 = 0x7f00_0000;
+const CLR_EDIT_SELECTION: u32 = 0x7f7f_7f00;
 const SCROLLBAR_WIDTH: i32 = 16;
 const SCROLLBAR_PART: i32 = 16;
+const JOIN_EDIT_MAX_PAYLOAD: usize = 254;
+const EDIT_SCROLL_OFFSET: i32 = 2;
 
 /// The `Graphics.c4g` images `C4StartupNetDlg` draws (C4Startup.cpp:48,82-83;
 /// C4Gui.cpp:1087-1097).
@@ -423,14 +428,12 @@ fn gui_rect(rect: IntRect) -> GuiRect {
     GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
 }
 
-/// One C++ inclusive-corner clipper covering `rect` (x2 = x + w, y2 = y + h;
-/// the covered span is one pixel wider/taller than the rect).
-fn inclusive_clip(rect: IntRect) -> IntRect {
+fn edit_client(rect: IntRect) -> IntRect {
     IntRect {
-        x: rect.x,
-        y: rect.y,
-        w: rect.w + 1,
-        h: rect.h + 1,
+        x: rect.x + 4,
+        y: rect.y + 2,
+        w: (rect.w - 8).max(0),
+        h: (rect.h - 4).max(0),
     }
 }
 
@@ -494,21 +497,402 @@ pub enum NetDlgSound {
     Command,
 }
 
+/// Cursor operations registered by `C4GUI::Edit` for every modifier state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgEditKey {
+    Left,
+    Right,
+    Home,
+    End,
+    Backspace,
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetDlgEditModifiers {
+    pub shift: bool,
+    pub control: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgEditClipboardShortcut {
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgEditContextCommand {
+    Cut,
+    Copy,
+    Paste,
+    Clear,
+    SelectAll,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgEditContextItem {
+    pub command: NetDlgEditContextCommand,
+    pub label: String,
+    pub tooltip: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetDlgEditContextRequest {
+    pub anchor: GuiPoint,
+    pub items: Vec<NetDlgEditContextItem>,
+}
+
 /// Requests produced by [`NetDlgController`]. The controller mutates only
 /// presentation-local state; the application owns network/config side effects.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NetDlgAction {
     FocusChanged(NetDlgControl),
     ModeChanged(NetDlgMode),
     Back,
     Refresh,
-    QueryAddress { address: String },
-    JoinGame { address: Option<String> },
+    QueryAddress {
+        address: String,
+    },
+    JoinGame {
+        address: Option<String>,
+    },
     CreateGame,
     MasterserverSignupChanged(bool),
     RecordingChanged(bool),
     JoinAddressChanged(String),
+    OpenJoinAddressContextMenu(NetDlgEditContextRequest),
+    /// The host writes `text` to the native clipboard. For a cut, it calls
+    /// [`NetDlgController::confirm_clipboard_cut`] only after that write
+    /// succeeds, so a failed clipboard operation never destroys user text.
+    ClipboardTransfer {
+        text: String,
+        cut: bool,
+    },
     GuiSound(NetDlgSound),
+}
+
+/// Capture metadata for edit-only routes that otherwise fall through to the
+/// startup dialog or application key bindings.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetDlgEditInputOutcome {
+    pub captured: bool,
+    pub actions: Vec<NetDlgAction>,
+}
+
+impl NetDlgEditInputOutcome {
+    fn passed() -> Self {
+        Self::default()
+    }
+
+    fn captured(actions: Vec<NetDlgAction>) -> Self {
+        Self {
+            captured: true,
+            actions,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingClipboardCut {
+    range: (usize, usize),
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct NetDlgEditState {
+    text: String,
+    caret: usize,
+    selection: Option<(usize, usize)>,
+    horizontal_scroll: i32,
+    drag_anchor: Option<usize>,
+    last_input: Instant,
+    last_reported_cursor_visible: bool,
+    pending_cut: Option<PendingClipboardCut>,
+}
+
+impl Default for NetDlgEditState {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            caret: 0,
+            selection: None,
+            horizontal_scroll: 0,
+            drag_anchor: None,
+            last_input: Instant::now(),
+            last_reported_cursor_visible: false,
+            pending_cut: None,
+        }
+    }
+}
+
+impl NetDlgEditState {
+    fn set_text(&mut self, text: &str) {
+        self.text = truncate_utf8(text, JOIN_EDIT_MAX_PAYLOAD).to_string();
+        self.caret = self.text.len();
+        self.selection = None;
+        self.horizontal_scroll = 0;
+        self.drag_anchor = None;
+        self.pending_cut = None;
+        self.last_input = Instant::now();
+    }
+
+    fn selected_range(&self) -> Option<(usize, usize)> {
+        let (anchor, caret) = self.selection?;
+        (anchor != caret).then_some((anchor.min(caret), anchor.max(caret)))
+    }
+
+    fn selected_text(&self) -> Option<&str> {
+        let (start, end) = self.selected_range()?;
+        self.text.get(start..end)
+    }
+
+    fn focus(&mut self) {
+        self.caret = self.text.len();
+        self.selection = (!self.text.is_empty()).then_some((0, self.text.len()));
+        self.drag_anchor = None;
+        self.pending_cut = None;
+        self.last_input = Instant::now();
+    }
+
+    fn blur(&mut self) {
+        self.selection = None;
+        self.drag_anchor = None;
+        self.pending_cut = None;
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selected_range() else {
+            return false;
+        };
+        self.text.replace_range(start..end, "");
+        self.caret = start;
+        self.selection = None;
+        self.pending_cut = None;
+        self.last_input = Instant::now();
+        true
+    }
+
+    /// `Edit::InsertText`: selection deletion happens before the capacity
+    /// check, and this path performs no CharIn/Paste transformations.
+    fn insert_raw_text(&mut self, text: &str) -> bool {
+        let old_text = self.text.clone();
+        self.delete_selection();
+        let available = JOIN_EDIT_MAX_PAYLOAD.saturating_sub(self.text.len());
+        let insert = truncate_utf8(text, available);
+        if !insert.is_empty() {
+            self.text.insert_str(self.caret, insert);
+            self.caret += insert.len();
+            self.last_input = Instant::now();
+        }
+        self.selection = None;
+        self.pending_cut = None;
+        self.text != old_text
+    }
+
+    fn handle_key(
+        &mut self,
+        key: NetDlgEditKey,
+        modifiers: NetDlgEditModifiers,
+        rect: IntRect,
+        font: &ClonkFont,
+    ) -> bool {
+        let old_text = self.text.clone();
+        self.pending_cut = None;
+
+        if matches!(key, NetDlgEditKey::Backspace | NetDlgEditKey::Delete)
+            && self.delete_selection()
+        {
+            self.ensure_cursor_in_view(rect, font);
+            return self.text != old_text;
+        }
+        if self.selected_range().is_some() && !modifiers.shift {
+            self.selection = None;
+        }
+
+        match key {
+            NetDlgEditKey::Backspace | NetDlgEditKey::Delete if modifiers.shift => {}
+            NetDlgEditKey::Backspace => {
+                let start = if modifiers.control {
+                    self.word_boundary(-1)
+                } else {
+                    previous_boundary(&self.text, self.caret)
+                };
+                if start < self.caret {
+                    self.text.replace_range(start..self.caret, "");
+                    self.caret = start;
+                }
+                self.selection = None;
+            }
+            NetDlgEditKey::Delete => {
+                let end = if modifiers.control {
+                    self.word_boundary(1)
+                } else {
+                    next_boundary(&self.text, self.caret)
+                };
+                if end > self.caret {
+                    self.text.replace_range(self.caret..end, "");
+                }
+                self.selection = None;
+            }
+            NetDlgEditKey::Left
+            | NetDlgEditKey::Right
+            | NetDlgEditKey::Home
+            | NetDlgEditKey::End => {
+                let old_caret = self.caret;
+                let destination = match key {
+                    NetDlgEditKey::Left if modifiers.control => self.word_boundary(-1),
+                    NetDlgEditKey::Right if modifiers.control => self.word_boundary(1),
+                    NetDlgEditKey::Left => previous_boundary(&self.text, self.caret),
+                    NetDlgEditKey::Right => next_boundary(&self.text, self.caret),
+                    NetDlgEditKey::Home => 0,
+                    NetDlgEditKey::End => self.text.len(),
+                    _ => self.caret,
+                };
+                self.caret = destination;
+                if modifiers.shift {
+                    let anchor = self.selection.map_or(old_caret, |(anchor, _)| anchor);
+                    self.selection = (anchor != destination).then_some((anchor, destination));
+                } else {
+                    self.selection = None;
+                }
+            }
+        }
+
+        self.last_input = Instant::now();
+        self.ensure_cursor_in_view(rect, font);
+        self.text != old_text
+    }
+
+    fn word_boundary(&self, direction: i8) -> usize {
+        let mut position = self.caret;
+        let mut nonspace_found = false;
+        let mut space_found = false;
+        loop {
+            let next = if direction < 0 {
+                if position == 0 {
+                    break;
+                }
+                previous_boundary(&self.text, position)
+            } else {
+                if position >= self.text.len() {
+                    break;
+                }
+                next_boundary(&self.text, position)
+            };
+            let sample = if direction < 0 { next } else { position };
+            if is_word_spacer(char_at(&self.text, sample)) {
+                if nonspace_found && direction < 0 {
+                    break;
+                }
+                space_found = true;
+            } else {
+                if space_found && direction > 0 {
+                    break;
+                }
+                nonspace_found = true;
+            }
+            position = next;
+        }
+        position
+    }
+
+    fn ensure_cursor_in_view(&mut self, rect: IntRect, font: &ClonkFont) {
+        let client_width = edit_client(rect).w;
+        if client_width < 5 {
+            return;
+        }
+        let mut width = font.measure(&self.text[..self.caret], false).0;
+        width += font.measure("\u{a6}", false).0 / 2;
+        if width < self.horizontal_scroll && self.horizontal_scroll > 0 {
+            self.horizontal_scroll = (width - EDIT_SCROLL_OFFSET).max(0);
+        }
+        if width > self.horizontal_scroll && width > client_width + self.horizontal_scroll {
+            self.horizontal_scroll = width - client_width
+                + if self.caret < self.text.len() {
+                    EDIT_SCROLL_OFFSET
+                } else {
+                    0
+                };
+        }
+    }
+
+    fn character_at(&self, pointer_x: f32, rect: IntRect, font: &ClonkFont) -> usize {
+        let control_x = pointer_x.floor() as i32 - edit_client(rect).x + self.horizontal_scroll;
+        let mut previous_width = 0;
+        for (index, character) in self.text.char_indices() {
+            let end = index + character.len_utf8();
+            let width = font.measure(&self.text[..end], false).0;
+            // C4GuiEdit.cpp:207-213: a midpoint tie belongs to the character
+            // on the left, i.e. the caret before this character.
+            if width - (width - previous_width) / 2 >= control_x {
+                return index;
+            }
+            previous_width = width;
+        }
+        self.text.len()
+    }
+
+    fn begin_pointer_selection(&mut self, position: usize, rect: IntRect, font: &ClonkFont) {
+        self.pending_cut = None;
+        self.caret = position.min(self.text.len());
+        self.selection = Some((self.caret, self.caret));
+        self.drag_anchor = Some(self.caret);
+        self.ensure_cursor_in_view(rect, font);
+    }
+
+    fn drag_pointer_selection(&mut self, position: usize, rect: IntRect, font: &ClonkFont) {
+        let Some(anchor) = self.drag_anchor else {
+            return;
+        };
+        self.pending_cut = None;
+        self.caret = position.min(self.text.len());
+        self.selection = Some((anchor, self.caret));
+        self.ensure_cursor_in_view(rect, font);
+    }
+
+    fn select_word_at(&mut self, mut position: usize, rect: IntRect, font: &ClonkFont) {
+        position = position.min(self.text.len());
+        if is_word_spacer(char_at(&self.text, position)) {
+            if position == 0 {
+                self.drag_anchor = None;
+                return;
+            }
+            position = previous_boundary(&self.text, position);
+            if is_word_spacer(char_at(&self.text, position)) {
+                self.drag_anchor = None;
+                return;
+            }
+        }
+        let mut start = position;
+        while start > 0 {
+            let previous = previous_boundary(&self.text, start);
+            if is_word_spacer(char_at(&self.text, previous)) {
+                break;
+            }
+            start = previous;
+        }
+        let mut end = next_boundary(&self.text, position);
+        while end < self.text.len() && !is_word_spacer(char_at(&self.text, end)) {
+            end = next_boundary(&self.text, end);
+        }
+        self.caret = end;
+        self.selection = Some((start, end));
+        self.drag_anchor = None;
+        self.pending_cut = None;
+        self.ensure_cursor_in_view(rect, font);
+    }
+
+    fn cursor_visible(&self) -> bool {
+        Instant::now()
+            .checked_duration_since(self.last_input)
+            .unwrap_or_default()
+            .as_millis()
+            / 500
+            % 2
+            == 0
+    }
 }
 
 /// Live input state for the pixel-parity network dialog.
@@ -522,7 +906,7 @@ pub struct NetDlgController {
     height: i32,
     config: NetDlgConfig,
     mode: NetDlgMode,
-    join_address: String,
+    join_edit: NetDlgEditState,
     focus: NetDlgControl,
     pointer_position: Option<GuiPoint>,
     hovered: Option<NetDlgControl>,
@@ -551,7 +935,7 @@ impl NetDlgController {
             height: 1,
             config,
             mode: NetDlgMode::GameList,
-            join_address: String::new(),
+            join_edit: NetDlgEditState::default(),
             // C4StartupNetDlg.cpp:734 / GetDlgModeFocusControl: game list.
             focus: NetDlgControl::GameList,
             pointer_position: None,
@@ -620,11 +1004,7 @@ impl NetDlgController {
                 "IDS_DESC_SHOWSAVAILABLENETWORKGAME",
                 true,
             ),
-            (
-                layout.btn_chat,
-                "IDS_DESC_CONNECTSTOANIRCCHATSERVER",
-                true,
-            ),
+            (layout.btn_chat, "IDS_DESC_CONNECTSTOANIRCCHATSERVER", true),
             (
                 layout.btn_internet,
                 "IDS_DLGTIP_SEARCHINTERNETGAME",
@@ -668,6 +1048,7 @@ impl NetDlgController {
         self.hovered = position.and_then(|point| self.hit_button(point));
         if position.is_none() {
             self.pointer_pressed = None;
+            self.join_edit.drag_anchor = None;
             self.scrollbar_dragging = false;
             self.scrollbar_arrow_captured = false;
             self.scrollbar_arrow = 0;
@@ -684,11 +1065,41 @@ impl NetDlgController {
     }
 
     pub fn join_address(&self) -> &str {
-        &self.join_address
+        &self.join_edit.text
+    }
+
+    pub const fn join_address_caret(&self) -> usize {
+        self.join_edit.caret
+    }
+
+    pub fn join_address_selection(&self) -> Option<(usize, usize)> {
+        self.join_edit.selected_range()
+    }
+
+    pub const fn join_address_horizontal_scroll(&self) -> i32 {
+        self.join_edit.horizontal_scroll
+    }
+
+    pub fn join_address_contains(&self, point: GuiPoint) -> bool {
+        self.mode == NetDlgMode::GameList && contains(self.layout().join_edit, point)
+    }
+
+    pub fn join_address_cursor_visible(&self) -> bool {
+        self.mode == NetDlgMode::GameList
+            && self.focus == NetDlgControl::JoinAddress
+            && self.join_edit.cursor_visible()
+    }
+
+    /// Returns true only when the effective 500ms C4GUI cursor phase changed.
+    pub fn tick_join_address_cursor(&mut self) -> bool {
+        let visible = self.join_address_cursor_visible();
+        let changed = visible != self.join_edit.last_reported_cursor_visible;
+        self.join_edit.last_reported_cursor_visible = visible;
+        changed
     }
 
     pub fn set_join_address(&mut self, address: impl Into<String>) {
-        self.join_address = address.into();
+        self.join_edit.set_text(&address.into());
     }
 
     pub fn set_games(&mut self, games: Vec<NetDlgGameEntry>) {
@@ -748,27 +1159,212 @@ impl NetDlgController {
     /// Adds text received from the windowing layer while the IP edit owns
     /// focus. `KeyCode` intentionally contains navigation keys only, so text
     /// input is a separate operation just like C4GUI::Edit::CharIn.
-    pub fn handle_text_input(&mut self, text: &str) -> Vec<NetDlgAction> {
+    pub fn handle_text_input(&mut self, text: &str, font: &ClonkFont) -> Vec<NetDlgAction> {
         if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
             return Vec::new();
         }
-        self.join_address
-            .extend(text.chars().filter(|character| !character.is_control()));
-        vec![NetDlgAction::JoinAddressChanged(self.join_address.clone())]
-    }
-
-    pub fn delete_join_address_char(&mut self) -> Vec<NetDlgAction> {
-        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+        let filtered: String = text
+            .chars()
+            .filter(|character| !character.is_control() && *character != '\u{7f}')
+            .map(|character| {
+                if character == '|' {
+                    '\u{a6}'
+                } else {
+                    character
+                }
+            })
+            .collect();
+        if filtered.is_empty() {
             return Vec::new();
         }
-        self.join_address.pop();
-        vec![NetDlgAction::JoinAddressChanged(self.join_address.clone())]
+        let changed = self.join_edit.insert_raw_text(&filtered);
+        self.join_edit
+            .ensure_cursor_in_view(self.layout().join_edit, font);
+        changed
+            .then(|| NetDlgAction::JoinAddressChanged(self.join_edit.text.clone()))
+            .into_iter()
+            .collect()
     }
 
-    pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+    pub fn handle_edit_key_down(
+        &mut self,
+        key: NetDlgEditKey,
+        modifiers: NetDlgEditModifiers,
+        font: &ClonkFont,
+    ) -> NetDlgEditInputOutcome {
+        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+            return NetDlgEditInputOutcome::passed();
+        }
+        let changed = self
+            .join_edit
+            .handle_key(key, modifiers, self.layout().join_edit, font);
+        let actions = changed
+            .then(|| NetDlgAction::JoinAddressChanged(self.join_edit.text.clone()))
+            .into_iter()
+            .collect();
+        NetDlgEditInputOutcome::captured(actions)
+    }
+
+    /// Compatibility convenience for callers that route Backspace separately.
+    pub fn delete_join_address_char(&mut self, font: &ClonkFont) -> Vec<NetDlgAction> {
+        self.handle_edit_key_down(
+            NetDlgEditKey::Backspace,
+            NetDlgEditModifiers::default(),
+            font,
+        )
+        .actions
+    }
+
+    pub fn handle_clipboard_shortcut(
+        &mut self,
+        shortcut: NetDlgEditClipboardShortcut,
+        clipboard_text: Option<&str>,
+        font: &ClonkFont,
+    ) -> NetDlgEditInputOutcome {
+        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+            return NetDlgEditInputOutcome::passed();
+        }
+        let command = match shortcut {
+            NetDlgEditClipboardShortcut::Copy => NetDlgEditContextCommand::Copy,
+            NetDlgEditClipboardShortcut::Cut => NetDlgEditContextCommand::Cut,
+            NetDlgEditClipboardShortcut::Paste => NetDlgEditContextCommand::Paste,
+            NetDlgEditClipboardShortcut::SelectAll => NetDlgEditContextCommand::SelectAll,
+        };
+        NetDlgEditInputOutcome::captured(self.apply_context_command(command, clipboard_text, font))
+    }
+
+    pub fn apply_context_command(
+        &mut self,
+        command: NetDlgEditContextCommand,
+        clipboard_text: Option<&str>,
+        font: &ClonkFont,
+    ) -> Vec<NetDlgAction> {
+        if self.mode != NetDlgMode::GameList {
+            return Vec::new();
+        }
+        match command {
+            NetDlgEditContextCommand::Copy => self.begin_clipboard_transfer(false),
+            NetDlgEditContextCommand::Cut => self.begin_clipboard_transfer(true),
+            NetDlgEditContextCommand::Paste => clipboard_text
+                .filter(|text| !text.is_empty())
+                .map(|text| self.paste_join_address(text, font))
+                .unwrap_or_default(),
+            NetDlgEditContextCommand::Clear => {
+                self.join_edit.pending_cut = None;
+                if !self.join_edit.delete_selection() {
+                    return Vec::new();
+                }
+                self.join_edit
+                    .ensure_cursor_in_view(self.layout().join_edit, font);
+                vec![NetDlgAction::JoinAddressChanged(
+                    self.join_edit.text.clone(),
+                )]
+            }
+            NetDlgEditContextCommand::SelectAll => {
+                self.join_edit.pending_cut = None;
+                self.join_edit.caret = self.join_edit.text.len();
+                self.join_edit.selection =
+                    (!self.join_edit.text.is_empty()).then_some((0, self.join_edit.text.len()));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Completes a pending cut only after the host successfully wrote the
+    /// matching selection to the native clipboard.
+    pub fn confirm_clipboard_cut(&mut self, font: &ClonkFont) -> Vec<NetDlgAction> {
+        let Some(pending) = self.join_edit.pending_cut.take() else {
+            return Vec::new();
+        };
+        if self.join_edit.selected_range() != Some(pending.range)
+            || self.join_edit.text.get(pending.range.0..pending.range.1)
+                != Some(pending.text.as_str())
+        {
+            return Vec::new();
+        }
+        if !self.join_edit.delete_selection() {
+            return Vec::new();
+        }
+        self.join_edit
+            .ensure_cursor_in_view(self.layout().join_edit, font);
+        vec![NetDlgAction::JoinAddressChanged(
+            self.join_edit.text.clone(),
+        )]
+    }
+
+    pub fn request_context_menu_at(
+        &mut self,
+        point: GuiPoint,
+        clipboard_has_text: bool,
+    ) -> NetDlgEditInputOutcome {
+        self.pointer_position = Some(point);
+        self.hovered = self.hit_button(point);
+        let layout = self.layout();
+        if self.mode != NetDlgMode::GameList || !contains(layout.join_edit, point) {
+            return NetDlgEditInputOutcome::passed();
+        }
+        NetDlgEditInputOutcome::captured(vec![NetDlgAction::OpenJoinAddressContextMenu(
+            self.join_address_context_request(point, clipboard_has_text),
+        )])
+    }
+
+    pub fn request_context_menu_from_key(
+        &mut self,
+        clipboard_has_text: bool,
+    ) -> NetDlgEditInputOutcome {
+        if self.mode != NetDlgMode::GameList || self.focus != NetDlgControl::JoinAddress {
+            return NetDlgEditInputOutcome::passed();
+        }
+        let edit = self.layout().join_edit;
+        let anchor = GuiPoint::new((edit.x + edit.w / 2) as f32, (edit.y + edit.h / 2) as f32);
+        NetDlgEditInputOutcome::captured(vec![NetDlgAction::OpenJoinAddressContextMenu(
+            self.join_address_context_request(anchor, clipboard_has_text),
+        )])
+    }
+
+    /// Non-Windows C4GUI inserts the primary selection through InsertText,
+    /// not Paste: no `|` mapping and no line-break callbacks occur here.
+    pub fn handle_pointer_middle_down(
+        &mut self,
+        point: GuiPoint,
+        primary_selection: Option<&str>,
+        font: &ClonkFont,
+    ) -> NetDlgEditInputOutcome {
+        self.pointer_position = Some(point);
+        self.hovered = self.hit_button(point);
+        let edit = self.layout().join_edit;
+        if self.mode != NetDlgMode::GameList || !contains(edit, point) {
+            return NetDlgEditInputOutcome::passed();
+        }
+        self.join_edit.pending_cut = None;
+        self.join_edit.caret = self.join_edit.character_at(point.x, edit, font);
+        self.join_edit.selection = Some((self.join_edit.caret, self.join_edit.caret));
+        let changed = primary_selection
+            .filter(|text| !text.is_empty())
+            .is_some_and(|text| self.join_edit.insert_raw_text(text));
+        self.join_edit.ensure_cursor_in_view(edit, font);
+        let actions = changed
+            .then(|| NetDlgAction::JoinAddressChanged(self.join_edit.text.clone()))
+            .into_iter()
+            .collect();
+        NetDlgEditInputOutcome::captured(actions)
+    }
+
+    pub fn handle_pointer_move(
+        &mut self,
+        position: GuiPoint,
+        font: &ClonkFont,
+    ) -> Vec<NetDlgAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         let layout = self.layout();
+        if self.join_edit.drag_anchor.is_some() {
+            let character = self
+                .join_edit
+                .character_at(position.x, layout.join_edit, font);
+            self.join_edit
+                .drag_pointer_selection(character, layout.join_edit, font);
+        }
         if self.scrollbar_dragging {
             self.set_scroll_from_pointer(position, &layout);
         } else if self.scrollbar_arrow_captured {
@@ -782,7 +1378,11 @@ impl NetDlgController {
         Vec::new()
     }
 
-    pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+    pub fn handle_pointer_down(
+        &mut self,
+        position: GuiPoint,
+        font: &ClonkFont,
+    ) -> Vec<NetDlgAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         self.pointer_pressed = self.hovered;
@@ -800,19 +1400,31 @@ impl NetDlgController {
 
         let hit = self.hit_control(position);
         match hit {
-            Some(control @ (NetDlgControl::GameList | NetDlgControl::JoinAddress)) => {
-                if control == NetDlgControl::GameList {
-                    self.select_list_row(position);
-                }
-                self.change_focus(control)
+            Some(NetDlgControl::JoinAddress) => {
+                let actions = self.change_focus(NetDlgControl::JoinAddress);
+                let character = self
+                    .join_edit
+                    .character_at(position.x, layout.join_edit, font);
+                self.join_edit
+                    .begin_pointer_selection(character, layout.join_edit, font);
+                actions
+            }
+            Some(NetDlgControl::GameList) => {
+                self.select_list_row(position);
+                self.change_focus(NetDlgControl::GameList)
             }
             _ => Vec::new(),
         }
     }
 
-    pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+    pub fn handle_pointer_up(
+        &mut self,
+        position: GuiPoint,
+        _font: &ClonkFont,
+    ) -> Vec<NetDlgAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
+        self.join_edit.drag_anchor = None;
         if self.scrollbar_dragging {
             let layout = self.layout();
             self.set_scroll_from_pointer(position, &layout);
@@ -841,10 +1453,24 @@ impl NetDlgController {
     /// A native list double-click selects and focuses the row before invoking
     /// the same callback as Return/Join. Only concrete game rows carry a join
     /// target; double-clicking the masterserver status row has no activation.
-    pub fn handle_pointer_double_click(&mut self, position: GuiPoint) -> Vec<NetDlgAction> {
+    pub fn handle_pointer_double_click(
+        &mut self,
+        position: GuiPoint,
+        font: &ClonkFont,
+    ) -> Vec<NetDlgAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         self.pointer_pressed = None;
+        let layout = self.layout();
+        if self.mode == NetDlgMode::GameList && contains(layout.join_edit, position) {
+            let actions = self.change_focus(NetDlgControl::JoinAddress);
+            let character = self
+                .join_edit
+                .character_at(position.x, layout.join_edit, font);
+            self.join_edit
+                .select_word_at(character, layout.join_edit, font);
+            return actions;
+        }
         let Some(index) = self.game_index_at(position) else {
             return Vec::new();
         };
@@ -939,6 +1565,112 @@ impl NetDlgController {
             return Vec::new();
         }
         self.activate(pressed)
+    }
+
+    fn begin_clipboard_transfer(&mut self, cut: bool) -> Vec<NetDlgAction> {
+        let Some((range, text)) = self
+            .join_edit
+            .selected_range()
+            .zip(self.join_edit.selected_text().map(str::to_string))
+        else {
+            self.join_edit.pending_cut = None;
+            return Vec::new();
+        };
+        self.join_edit.pending_cut = cut.then(|| PendingClipboardCut {
+            range,
+            text: text.clone(),
+        });
+        vec![NetDlgAction::ClipboardTransfer { text, cut }]
+    }
+
+    fn paste_join_address(&mut self, clipboard: &str, font: &ClonkFont) -> Vec<NetDlgAction> {
+        let transformed = clipboard.replace('|', "\u{a6}");
+        let mut rest = transformed.as_str();
+        loop {
+            let Some(line_break) = rest.find(['\r', '\n']) else {
+                break;
+            };
+            if line_break == 0 {
+                let skip = rest.chars().next().map_or(0, char::len_utf8);
+                rest = &rest[skip..];
+                continue;
+            }
+
+            let changed = self.join_edit.insert_raw_text(&rest[..line_break]);
+            self.join_edit
+                .ensure_cursor_in_view(self.layout().join_edit, font);
+            let mut actions = Vec::new();
+            if changed {
+                actions.push(NetDlgAction::JoinAddressChanged(
+                    self.join_edit.text.clone(),
+                ));
+            }
+            // CallbackEdit::OnJoinAddressEnter returns IR_Abort, so the first
+            // non-leading pasted line break invokes DoOK and discards the tail.
+            actions.extend(self.join_action());
+            return actions;
+        }
+
+        if rest.is_empty() {
+            return Vec::new();
+        }
+        let changed = self.join_edit.insert_raw_text(rest);
+        self.join_edit
+            .ensure_cursor_in_view(self.layout().join_edit, font);
+        changed
+            .then(|| NetDlgAction::JoinAddressChanged(self.join_edit.text.clone()))
+            .into_iter()
+            .collect()
+    }
+
+    fn join_address_context_request(
+        &self,
+        anchor: GuiPoint,
+        clipboard_has_text: bool,
+    ) -> NetDlgEditContextRequest {
+        let has_selection = self.join_edit.selected_range().is_some();
+        let item = |command, label: &str, tooltip: &str| NetDlgEditContextItem {
+            command,
+            label: label.to_string(),
+            tooltip: tooltip.to_string(),
+        };
+        let mut items = Vec::new();
+        if has_selection {
+            items.push(item(
+                NetDlgEditContextCommand::Cut,
+                "Cut",
+                "Moves the selection to the clipboard.",
+            ));
+            items.push(item(
+                NetDlgEditContextCommand::Copy,
+                "Copy",
+                "Copies the selection to the clipboard.",
+            ));
+        }
+        if clipboard_has_text {
+            items.push(item(
+                NetDlgEditContextCommand::Paste,
+                "Paste",
+                "Inserts the contents of the clipboard.",
+            ));
+        }
+        if has_selection {
+            items.push(item(
+                NetDlgEditContextCommand::Clear,
+                "Clear",
+                "Clears the selection.",
+            ));
+        }
+        let whole_text_selected =
+            self.join_edit.selected_range() == Some((0, self.join_edit.text.len()));
+        if !self.join_edit.text.is_empty() && !whole_text_selected {
+            items.push(item(
+                NetDlgEditContextCommand::SelectAll,
+                "Select all",
+                "Selects the complete text",
+            ));
+        }
+        NetDlgEditContextRequest { anchor, items }
     }
 
     fn layout(&self) -> NetDlgLayout {
@@ -1042,7 +1774,13 @@ impl NetDlgController {
         if self.focus == focus {
             return Vec::new();
         }
+        if self.focus == NetDlgControl::JoinAddress {
+            self.join_edit.blur();
+        }
         self.focus = focus;
+        if focus == NetDlgControl::JoinAddress {
+            self.join_edit.focus();
+        }
         self.key_pressed = None;
         vec![NetDlgAction::FocusChanged(focus)]
     }
@@ -1104,9 +1842,9 @@ impl NetDlgController {
     }
 
     fn join_action(&mut self) -> Vec<NetDlgAction> {
-        if self.focus == NetDlgControl::JoinAddress && !self.join_address.is_empty() {
+        if self.focus == NetDlgControl::JoinAddress && !self.join_edit.text.is_empty() {
             let mut actions = vec![NetDlgAction::QueryAddress {
-                address: self.join_address.clone(),
+                address: self.join_edit.text.clone(),
             }];
             actions.extend(self.change_focus(NetDlgControl::GameList));
             return actions;
@@ -1332,6 +2070,107 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
         && point.y < (rect.y + rect.h) as f32
 }
 
+fn truncate_utf8(text: &str, byte_limit: usize) -> &str {
+    let mut end = text.len().min(byte_limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn previous_boundary(text: &str, position: usize) -> usize {
+    text[..position.min(text.len())]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_boundary(text: &str, position: usize) -> usize {
+    if position >= text.len() {
+        return text.len();
+    }
+    position + text[position..].chars().next().map_or(0, char::len_utf8)
+}
+
+fn char_at(text: &str, position: usize) -> char {
+    text.get(position..)
+        .and_then(|tail| tail.chars().next())
+        .unwrap_or('\0')
+}
+
+fn is_word_spacer(character: char) -> bool {
+    character.is_ascii() && !character.is_ascii_alphanumeric() && character != '_'
+}
+
+/// `Edit::DrawElement` renders its broken-bar cursor at scale 1.5 while the
+/// ordinary edit text remains at scale one.
+fn draw_scaled_caret(
+    surface: &mut Surface,
+    font: &ClonkFont,
+    x: i32,
+    y: i32,
+    clip: IntRect,
+    gamma: Option<&GammaRamp>,
+) {
+    const SCALE: f32 = 1.5;
+    let Some(glyph) = font.glyph('\u{a6}') else {
+        return;
+    };
+    let Ok(width) = u32::try_from(glyph.width) else {
+        return;
+    };
+    let Ok(height) = u32::try_from(font.cell_height) else {
+        return;
+    };
+    if width == 0 || height == 0 || glyph.pixels.len() != width as usize * height as usize {
+        return;
+    }
+
+    let atlas_width = width.max(height).next_power_of_two();
+    let mut pixels = vec![255_u8; atlas_width as usize * height as usize * 4];
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[3] = 0;
+    }
+    for row in 0..height as usize {
+        for column in 0..width as usize {
+            let pixel = glyph.pixels[row * width as usize + column];
+            let destination = (row * atlas_width as usize + column) * 4;
+            let (red, green, blue) = if pixel.a == 0 {
+                (255, 255, 255)
+            } else {
+                (pixel.r, pixel.g, pixel.b)
+            };
+            pixels[destination..destination + 4].copy_from_slice(&[red, green, blue, pixel.a]);
+        }
+    }
+    let image = ImageData::new(atlas_width, height, pixels);
+    let destination = (
+        x as f32,
+        y as f32,
+        width as f32 * SCALE,
+        height as f32 * SCALE,
+    );
+    let left = destination.0.max(clip.x as f32);
+    let top = destination.1.max(clip.y as f32);
+    let right = (destination.0 + destination.2).min((clip.x + clip.w) as f32);
+    let bottom = (destination.1 + destination.3).min((clip.y + clip.h) as f32);
+    if left >= right || top >= bottom {
+        return;
+    }
+    draw_facet_stretch(
+        surface,
+        &image,
+        (
+            (left - destination.0) / SCALE,
+            (top - destination.1) / SCALE,
+            (right - left) / SCALE,
+            (bottom - top) / SCALE,
+        ),
+        (left, top, right - left, bottom - top),
+        gamma,
+    );
+}
+
 /// Renders `C4StartupNetDlg`'s deterministic first-shown state.
 pub struct NetDlgScreen;
 
@@ -1348,7 +2187,17 @@ impl NetDlgScreen {
         config: NetDlgConfig,
         get_ref_phase: u32,
     ) {
-        Self::render_impl(surface, assets, fonts, gamma, config, None, get_ref_phase);
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            gamma,
+            config,
+            None,
+            get_ref_phase,
+            false,
+            false,
+        );
     }
 
     /// Draws the live controller state. Unlike [`Self::render`], this path
@@ -1362,6 +2211,29 @@ impl NetDlgScreen {
         controller: &NetDlgController,
         get_ref_phase: u32,
     ) {
+        Self::render_controller_with_draw_focus(
+            surface,
+            assets,
+            fonts,
+            gamma,
+            controller,
+            get_ref_phase,
+            true,
+        );
+    }
+
+    /// Live rendering with the screen-level `HasDrawFocus` gate. An open
+    /// context menu leaves the edit selected but suppresses its flashing caret.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_controller_with_draw_focus(
+        surface: &mut Surface,
+        assets: &NetDlgAssets,
+        fonts: &ClonkFontSet,
+        gamma: Option<&GammaRamp>,
+        controller: &NetDlgController,
+        get_ref_phase: u32,
+        draw_focus: bool,
+    ) {
         Self::render_impl(
             surface,
             assets,
@@ -1370,6 +2242,8 @@ impl NetDlgScreen {
             controller.config,
             Some(controller),
             get_ref_phase,
+            draw_focus,
+            controller.join_edit.cursor_visible(),
         );
     }
 
@@ -1382,6 +2256,8 @@ impl NetDlgScreen {
         config: NetDlgConfig,
         controller: Option<&NetDlgController>,
         get_ref_phase: u32,
+        draw_focus: bool,
+        cursor_visible: bool,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
         let metrics = NetDlgFontMetrics::from_fonts(fonts);
@@ -1624,45 +2500,78 @@ impl NetDlgScreen {
                 gamma,
             );
 
-            // Join-address edit, empty and unfocused (Edit::DrawElement,
-            // C4GuiEdit.cpp:556-634): background box down to the client-rect
-            // bottom (margins L4 R4 T2 B2, C4GuiEdit.h:102-105), default 3D
-            // frame, no text, no caret.
+            // Join-address `C4GUI::Edit` (C4GuiEdit.cpp:556-634).
             let edit = layout.join_edit;
+            let client = edit_client(edit);
             draw_engine_box(
                 surface,
                 edit.x,
                 edit.y,
                 edit.x + edit.w - 1,
-                edit.y + 2 + (edit.h - 4),
+                client.y + client.h,
                 CLR_DARK_BG,
                 gamma,
             );
             draw_3d_frame(surface, edit, gamma);
-            if let Some(address) = controller.map(|state| state.join_address()) {
+
+            if let Some(controller) = controller {
+                let state = &controller.join_edit;
+                let (text_y0, selection_height) = if client.h <= fonts.text.line_height {
+                    (client.y, client.h)
+                } else {
+                    (
+                        client.y + (client.h - fonts.text.line_height) / 2 + 1,
+                        fonts.text.line_height - 2,
+                    )
+                };
+                let clip = IntRect {
+                    x: client.x - 2,
+                    y: client.y,
+                    w: client.w + 4,
+                    h: client.h + 1,
+                };
+                if let Some((start, end)) = state.selected_range() {
+                    let x1 = client.x + fonts.text.measure(&state.text[..start], false).0
+                        - state.horizontal_scroll;
+                    let x2 = client.x + fonts.text.measure(&state.text[..end], false).0
+                        - state.horizontal_scroll;
+                    let clipped_x1 = x1.max(clip.x);
+                    let clipped_x2 = (x2 - 1).min(clip.x + clip.w - 1);
+                    if clipped_x1 <= clipped_x2 {
+                        draw_engine_box(
+                            surface,
+                            clipped_x1,
+                            text_y0,
+                            clipped_x2,
+                            text_y0 + selection_height - 1,
+                            CLR_EDIT_SELECTION,
+                            gamma,
+                        );
+                    }
+                }
                 draw_clipped_text(
                     surface,
                     &fonts.text,
-                    edit.x + 4,
-                    edit.y + 1,
-                    address,
+                    client.x - state.horizontal_scroll,
+                    text_y0 - 1,
+                    &state.text,
                     CLR_WHITE,
                     TextAlign::Left,
                     gamma,
-                    inclusive_clip(edit),
+                    clip,
                 );
-                if controller.is_some_and(|state| state.focus == NetDlgControl::JoinAddress) {
-                    let caret_x = edit.x + 4 + fonts.text.measure(address, false).0;
-                    draw_clipped_text(
+                if draw_focus && cursor_visible && controller.focus == NetDlgControl::JoinAddress {
+                    let caret_x = client.x
+                        + fonts.text.measure(&state.text[..state.caret], false).0
+                        - fonts.text.measure("\u{a6}", false).0 / 2
+                        - state.horizontal_scroll;
+                    draw_scaled_caret(
                         surface,
                         &fonts.text,
                         caret_x,
-                        edit.y - fonts.text.line_height / 3,
-                        "¦",
-                        CLR_WHITE,
-                        TextAlign::Left,
+                        text_y0 - fonts.text.line_height / 3,
+                        clip,
                         gamma,
-                        inclusive_clip(edit),
                     );
                 }
             }
@@ -1894,6 +2803,8 @@ impl NetDlgScreen {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+
     use super::*;
     use crate::test_support::endeavour_font_set;
     use lc_graphics::PixelFormat;
@@ -1981,10 +2892,17 @@ mod tests {
         crate::GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
     }
 
+    fn text_font() -> &'static ClonkFont {
+        static FONT: OnceLock<ClonkFont> = OnceLock::new();
+        FONT.get_or_init(|| endeavour_font_set().text.clone())
+    }
+
     fn click(controller: &mut NetDlgController, rect: IntRect) -> Vec<NetDlgAction> {
         let point = center(rect);
-        assert!(controller.handle_pointer_down(point).is_empty());
-        controller.handle_pointer_up(point)
+        assert!(controller
+            .handle_pointer_down(point, text_font())
+            .is_empty());
+        controller.handle_pointer_up(point, text_font())
     }
 
     // Callback buttons invoke their C4StartupNetDlg handlers only after a
@@ -2012,7 +2930,7 @@ mod tests {
             "a Join button click must not reinterpret an unfocused edit as a direct query"
         );
         assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit)),
+            controller.handle_pointer_down(center(layout.join_edit), text_font()),
             vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
         );
         assert_eq!(
@@ -2058,8 +2976,12 @@ mod tests {
             (layout.buttons[0].x + layout.buttons[0].w) as f32,
             layout.buttons[0].y as f32,
         );
-        assert!(controller.handle_pointer_down(outside).is_empty());
-        assert!(controller.handle_pointer_up(outside).is_empty());
+        assert!(controller
+            .handle_pointer_down(outside, text_font())
+            .is_empty());
+        assert!(controller
+            .handle_pointer_up(outside, text_font())
+            .is_empty());
     }
 
     #[test]
@@ -2201,7 +3123,7 @@ mod tests {
             vec![NetDlgAction::JoinGame { address: None }]
         );
         assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit)),
+            controller.handle_pointer_down(center(layout.join_edit), text_font()),
             vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
         );
         assert_eq!(
@@ -2268,6 +3190,246 @@ mod tests {
     }
 
     #[test]
+    fn join_edit_keyboard_matches_cpp_caret_selection_words_and_char_in() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_join_address("alpha beta");
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        assert_eq!(controller.join_address_selection(), Some((0, 10)));
+
+        assert_eq!(
+            controller.handle_text_input("x|\n\u{7f}", text_font()),
+            vec![NetDlgAction::JoinAddressChanged("x\u{a6}".into())]
+        );
+        assert_eq!(controller.join_address(), "x\u{a6}");
+        assert_eq!(controller.join_address_caret(), "x\u{a6}".len());
+        assert_eq!(controller.join_address_selection(), None);
+
+        controller.set_join_address("one,_two élan");
+        let key = |controller: &mut NetDlgController, key, shift, control| {
+            controller.handle_edit_key_down(
+                key,
+                NetDlgEditModifiers { shift, control },
+                text_font(),
+            )
+        };
+        assert!(key(&mut controller, NetDlgEditKey::Home, false, false).captured);
+        assert_eq!(controller.join_address_caret(), 0);
+        key(&mut controller, NetDlgEditKey::Right, false, true);
+        assert_eq!(controller.join_address_caret(), 4, "Ctrl+Right skips comma");
+        key(&mut controller, NetDlgEditKey::Right, false, true);
+        assert_eq!(
+            controller.join_address_caret(),
+            9,
+            "underscore is a word char"
+        );
+        key(&mut controller, NetDlgEditKey::Right, true, false);
+        assert_eq!(controller.join_address_selection(), Some((9, 11)));
+        assert_eq!(controller.join_edit.selected_text(), Some("é"));
+        assert_eq!(
+            key(&mut controller, NetDlgEditKey::Delete, false, false).actions,
+            vec![NetDlgAction::JoinAddressChanged("one,_two lan".into())]
+        );
+
+        controller.set_join_address("abcd");
+        key(&mut controller, NetDlgEditKey::Left, true, false);
+        assert_eq!(controller.join_address_selection(), Some((3, 4)));
+        key(&mut controller, NetDlgEditKey::Left, false, false);
+        assert_eq!(
+            controller.join_address_caret(),
+            2,
+            "plain movement clears a selection and still moves from its caret"
+        );
+        let unchanged = controller.join_address().to_string();
+        key(&mut controller, NetDlgEditKey::Delete, true, false);
+        assert_eq!(controller.join_address(), unchanged);
+    }
+
+    #[test]
+    fn join_edit_pointer_midpoints_drag_and_double_click_match_cpp() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_join_address("Wi");
+        controller.handle_key_down(KeyCode::Tab);
+        let edit = controller.layout().join_edit;
+        let client = edit_client(edit);
+        let first_width = text_font().measure("W", false).0;
+        let midpoint = first_width - first_width / 2;
+        let y = (edit.y + edit.h / 2) as f32;
+
+        let tie = GuiPoint::new((client.x + midpoint) as f32, y);
+        controller.handle_pointer_down(tie, text_font());
+        assert_eq!(
+            controller.join_address_caret(),
+            0,
+            "midpoint tie stays left"
+        );
+        controller.handle_pointer_up(tie, text_font());
+
+        let right_half = GuiPoint::new((client.x + midpoint + 1) as f32, y);
+        controller.handle_pointer_down(right_half, text_font());
+        assert_eq!(controller.join_address_caret(), 1);
+        controller.handle_pointer_up(right_half, text_font());
+
+        let far_left = GuiPoint::new((edit.x - 100) as f32, y);
+        let far_right = GuiPoint::new((edit.x + edit.w + 100) as f32, y);
+        controller.handle_pointer_down(GuiPoint::new(client.x as f32, y), text_font());
+        controller.handle_pointer_move(far_right, text_font());
+        assert_eq!(controller.join_address_selection(), Some((0, 2)));
+        controller.pointer_left();
+        assert_eq!(controller.join_edit.drag_anchor, None);
+        assert!(!controller.join_address_contains(far_left));
+        assert!(controller.join_address_contains(tie));
+
+        controller.set_join_address("alpha beta");
+        let beta_x = client.x
+            + text_font().measure("alpha ", false).0
+            + text_font().measure("b", false).0 / 2;
+        controller.handle_pointer_double_click(GuiPoint::new(beta_x as f32, y), text_font());
+        assert_eq!(controller.join_edit.selected_text(), Some("beta"));
+    }
+
+    #[test]
+    fn join_edit_mouse_selection_and_select_all_preserve_cpp_blink_phase() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_join_address("alpha beta gamma");
+        controller.focus = NetDlgControl::JoinAddress;
+        let edit = controller.layout().join_edit;
+        let stale = Instant::now() - std::time::Duration::from_millis(750);
+        controller.join_edit.last_input = stale;
+        controller.join_edit.horizontal_scroll = 13;
+
+        controller.apply_context_command(
+            NetDlgEditContextCommand::SelectAll,
+            None,
+            text_font(),
+        );
+        assert_eq!(controller.join_edit.last_input, stale);
+        assert_eq!(controller.join_edit.horizontal_scroll, 13);
+
+        let first = GuiPoint::new((edit_client(edit).x + 2) as f32, center(edit).y);
+        controller.handle_pointer_down(first, text_font());
+        assert_eq!(controller.join_edit.last_input, stale);
+        controller.handle_pointer_move(
+            GuiPoint::new((edit_client(edit).x + 80) as f32, center(edit).y),
+            text_font(),
+        );
+        assert_eq!(controller.join_edit.last_input, stale);
+        controller.handle_pointer_double_click(first, text_font());
+        assert_eq!(controller.join_edit.last_input, stale);
+    }
+
+    #[test]
+    fn join_edit_clipboard_context_middle_paste_and_multiline_abort_match_cpp() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_join_address("copy me");
+        controller.handle_key_down(KeyCode::Tab);
+
+        let copy = controller.handle_clipboard_shortcut(
+            NetDlgEditClipboardShortcut::Copy,
+            None,
+            text_font(),
+        );
+        assert!(copy.captured);
+        assert_eq!(
+            copy.actions,
+            vec![NetDlgAction::ClipboardTransfer {
+                text: "copy me".into(),
+                cut: false,
+            }]
+        );
+        let cut = controller.handle_clipboard_shortcut(
+            NetDlgEditClipboardShortcut::Cut,
+            None,
+            text_font(),
+        );
+        assert_eq!(
+            cut.actions,
+            vec![NetDlgAction::ClipboardTransfer {
+                text: "copy me".into(),
+                cut: true,
+            }]
+        );
+        assert_eq!(controller.join_address(), "copy me", "cut waits for host");
+        assert_eq!(
+            controller.confirm_clipboard_cut(text_font()),
+            vec![NetDlgAction::JoinAddressChanged(String::new())]
+        );
+
+        controller.set_join_address("old");
+        controller.apply_context_command(NetDlgEditContextCommand::SelectAll, None, text_font());
+        assert_eq!(
+            controller.apply_context_command(
+                NetDlgEditContextCommand::Paste,
+                Some("\r\nhost|name\nignored"),
+                text_font(),
+            ),
+            vec![
+                NetDlgAction::JoinAddressChanged("host\u{a6}name".into()),
+                NetDlgAction::QueryAddress {
+                    address: "host\u{a6}name".into(),
+                },
+                NetDlgAction::FocusChanged(NetDlgControl::GameList),
+            ]
+        );
+        assert_eq!(controller.join_address(), "host\u{a6}name");
+
+        controller.set_join_address("");
+        let edit = controller.layout().join_edit;
+        let middle = controller.handle_pointer_middle_down(
+            center(edit),
+            Some("raw|primary\ntext"),
+            text_font(),
+        );
+        assert!(middle.captured);
+        assert_eq!(controller.join_address(), "raw|primary\ntext");
+        assert_eq!(controller.focused_control(), NetDlgControl::GameList);
+
+        let context = controller.request_context_menu_at(center(edit), true);
+        let [NetDlgAction::OpenJoinAddressContextMenu(request)] = context.actions.as_slice() else {
+            panic!("join edit context request");
+        };
+        assert_eq!(
+            request
+                .items
+                .iter()
+                .map(|item| item.command)
+                .collect::<Vec<_>>(),
+            vec![
+                NetDlgEditContextCommand::Paste,
+                NetDlgEditContextCommand::SelectAll,
+            ]
+        );
+        assert!(!controller.request_context_menu_from_key(true).captured);
+    }
+
+    #[test]
+    fn join_edit_capacity_scroll_and_blink_transition_are_bounded() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(320, 240);
+        controller.set_join_address("W".repeat(300));
+        assert_eq!(controller.join_address().len(), JOIN_EDIT_MAX_PAYLOAD);
+        controller.handle_key_down(KeyCode::Tab);
+        controller.apply_context_command(NetDlgEditContextCommand::SelectAll, None, text_font());
+        controller.handle_edit_key_down(
+            NetDlgEditKey::End,
+            NetDlgEditModifiers::default(),
+            text_font(),
+        );
+        assert!(controller.join_address_horizontal_scroll() > 0);
+        assert!(controller.tick_join_address_cursor());
+        assert!(!controller.tick_join_address_cursor());
+        controller.join_edit.last_input = Instant::now() - std::time::Duration::from_millis(501);
+        assert!(controller.tick_join_address_cursor());
+        assert!(!controller.join_address_cursor_visible());
+    }
+
+    #[test]
     fn discovered_rows_are_selectable_and_disabled_rows_remain_actionable() {
         let mut controller = NetDlgController::new(
             NetDlgConfig {
@@ -2331,7 +3493,7 @@ mod tests {
         ]);
         let layout = net_dlg_layout(1280, 720, &metrics());
         assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit)),
+            controller.handle_pointer_down(center(layout.join_edit), text_font()),
             vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
         );
 
@@ -2343,7 +3505,7 @@ mod tests {
         );
         assert_eq!(controller.game_index_at(point), Some(1));
         assert_eq!(
-            controller.handle_pointer_double_click(point),
+            controller.handle_pointer_double_click(point, text_font()),
             vec![
                 NetDlgAction::FocusChanged(NetDlgControl::GameList),
                 NetDlgAction::JoinGame {
@@ -2397,7 +3559,9 @@ mod tests {
         assert_eq!(controller.list_scroll_offset(), 0);
 
         controller.handle_wheel(point, -96);
-        assert!(controller.handle_pointer_down(point).is_empty());
+        assert!(controller
+            .handle_pointer_down(point, text_font())
+            .is_empty());
         assert_eq!(controller.selected_game(), Some(2));
     }
 
@@ -2452,11 +3616,11 @@ mod tests {
         );
 
         assert_eq!(
-            controller.handle_pointer_down(center(layout.join_edit)),
+            controller.handle_pointer_down(center(layout.join_edit), text_font()),
             vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
         );
         assert_eq!(
-            controller.handle_pointer_down(track),
+            controller.handle_pointer_down(track, text_font()),
             vec![
                 NetDlgAction::FocusChanged(NetDlgControl::GameList),
                 NetDlgAction::GuiSound(NetDlgSound::Command),
@@ -2464,12 +3628,14 @@ mod tests {
         );
         assert!(controller.list_scroll_offset() > 0);
         let below = GuiPoint::new(track.x, (layout.list_scrollbar.y + 10_000) as f32);
-        assert!(controller.handle_pointer_move(below).is_empty());
+        assert!(controller
+            .handle_pointer_move(below, text_font())
+            .is_empty());
         assert_eq!(
             controller.list_scroll_offset(),
             controller.list_max_scroll()
         );
-        assert!(controller.handle_pointer_up(below).is_empty());
+        assert!(controller.handle_pointer_up(below, text_font()).is_empty());
 
         let viewport = GuiPoint::new(
             (layout.list_viewport.x + 4) as f32,
@@ -2481,7 +3647,7 @@ mod tests {
             (layout.list_scrollbar.y + layout.list_scrollbar.h - 8) as f32,
         );
         assert_eq!(
-            controller.handle_pointer_down(bottom_arrow),
+            controller.handle_pointer_down(bottom_arrow, text_font()),
             vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
         );
         assert_eq!(controller.list_scroll_pin, 0);
@@ -2490,19 +3656,19 @@ mod tests {
         assert!(controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_pin, 2);
         assert_eq!(
-            controller.handle_pointer_move(track),
+            controller.handle_pointer_move(track, text_font()),
             vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
         );
         assert!(!controller.tick_scrollbar());
         assert_eq!(
-            controller.handle_pointer_move(bottom_arrow),
+            controller.handle_pointer_move(bottom_arrow, text_font()),
             vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
         );
         assert!(controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_pin, 3);
         let after_held_frames = controller.list_scroll_offset();
         assert_eq!(
-            controller.handle_pointer_up(bottom_arrow),
+            controller.handle_pointer_up(bottom_arrow, text_font()),
             vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
         );
         assert!(!controller.tick_scrollbar());
@@ -2510,7 +3676,9 @@ mod tests {
 
         controller.change_mode(NetDlgMode::Chat);
         let before_hidden_click = controller.list_scroll_offset();
-        assert!(controller.handle_pointer_down(bottom_arrow).is_empty());
+        assert!(controller
+            .handle_pointer_down(bottom_arrow, text_font())
+            .is_empty());
         assert!(!controller.scrollbar_arrow_captured);
         assert!(!controller.tick_scrollbar());
         assert_eq!(controller.list_scroll_offset(), before_hidden_click);
@@ -2539,7 +3707,7 @@ mod tests {
             (layout.list_scrollbar.y + layout.list_scrollbar.h - 8) as f32,
         );
         assert_eq!(
-            controller.handle_pointer_down(bottom_arrow),
+            controller.handle_pointer_down(bottom_arrow, text_font()),
             vec![NetDlgAction::GuiSound(NetDlgSound::ArrowHit)]
         );
         assert!(controller.tick_scrollbar());
@@ -2587,7 +3755,10 @@ mod tests {
                 Some(StartupTooltip::resource("IDS_NET_IP_DESC"))
             );
         }
-        assert_eq!(controller.tooltip_at(center(layout.game_list_caption)), None);
+        assert_eq!(
+            controller.tooltip_at(center(layout.game_list_caption)),
+            None
+        );
 
         assert_eq!(
             click(&mut controller, layout.btn_chat),
@@ -2655,7 +3826,7 @@ mod tests {
         }
         assert!(controller.handle_key_down(KeyCode::Space).is_empty());
         assert!(controller
-            .handle_pointer_down(center(layout.btn_internet))
+            .handle_pointer_down(center(layout.btn_internet), text_font())
             .is_empty());
         assert_eq!(controller.pointer_pressed, Some(NetDlgControl::Internet));
         assert_eq!(
@@ -2677,7 +3848,7 @@ mod tests {
             controller.width,
             controller.height,
             controller.mode,
-            controller.join_address.clone(),
+            controller.join_address().to_string(),
             controller.focus,
             controller.pointer_position,
             controller.hovered,
@@ -2700,7 +3871,7 @@ mod tests {
                 controller.width,
                 controller.height,
                 controller.mode,
-                controller.join_address.clone(),
+                controller.join_address().to_string(),
                 controller.focus,
                 controller.pointer_position,
                 controller.hovered,
@@ -2808,22 +3979,90 @@ mod tests {
 
         controller.set_join_address("127.0.0.1:11111");
         let layout = net_dlg_layout(1280, 720, &metrics());
-        controller.handle_pointer_down(center(layout.join_edit));
+        controller.handle_pointer_down(center(layout.join_edit), text_font());
         let with_address = render(&controller);
         assert_ne!(first_shown.pixels(), with_address.pixels());
 
-        controller.handle_pointer_move(center(layout.buttons[0]));
+        controller.handle_pointer_move(center(layout.buttons[0]), text_font());
         let hovered = render(&controller);
         assert_ne!(with_address.pixels(), hovered.pixels());
-        controller.handle_pointer_down(center(layout.buttons[0]));
+        controller.handle_pointer_down(center(layout.buttons[0]), text_font());
         let pressed = render(&controller);
         assert_ne!(hovered.pixels(), pressed.pixels());
-        controller.handle_pointer_up(center(layout.buttons[0]));
+        controller.handle_pointer_up(center(layout.buttons[0]), text_font());
 
         let actions = click(&mut controller, layout.btn_chat);
         assert!(actions.contains(&NetDlgAction::ModeChanged(NetDlgMode::Chat)));
         let chat = render(&controller);
         assert_ne!(with_address.pixels(), chat.pixels());
+    }
+
+    #[test]
+    fn join_edit_renderer_draws_and_clips_selection_and_caret() {
+        use crate::test_support::load_graphics_png;
+
+        let assets = NetDlgAssets {
+            background: load_graphics_png("StartupNetworkBG.png"),
+            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            gui_caption: load_graphics_png("GUICaption.png"),
+            gui_button: load_graphics_png("GUIButton.png"),
+            gui_button_down: load_graphics_png("GUIButtonDown.png"),
+            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_scroll: load_graphics_png("GUIScroll.png"),
+            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
+        };
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_join_address("alpha beta");
+        controller.focus = NetDlgControl::JoinAddress;
+        controller.join_edit.caret = 5;
+        controller.join_edit.selection = None;
+
+        let render = |controller: &NetDlgController, draw_focus| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            NetDlgScreen::render_controller_with_draw_focus(
+                &mut surface,
+                &assets,
+                &fonts,
+                None,
+                controller,
+                0,
+                draw_focus,
+            );
+            surface
+        };
+        let unselected = render(&controller, false);
+        controller.join_edit.selection = Some((0, 5));
+        let selected = render(&controller, false);
+        controller.join_edit.last_input = Instant::now();
+        let with_caret = render(&controller, true);
+
+        let client = edit_client(controller.layout().join_edit);
+        let clip = IntRect {
+            x: client.x - 2,
+            y: client.y,
+            w: client.w + 4,
+            h: client.h + 1,
+        };
+        let changed_inside_clip = |before: &Surface, after: &Surface| {
+            let changed = before
+                .pixels()
+                .chunks_exact(4)
+                .zip(after.pixels().chunks_exact(4))
+                .enumerate()
+                .filter_map(|(index, (before, after))| (before != after).then_some(index))
+                .collect::<Vec<_>>();
+            assert!(!changed.is_empty());
+            assert!(changed.into_iter().all(|index| {
+                contains(
+                    clip,
+                    GuiPoint::new((index % 1280) as f32, (index / 1280) as f32),
+                )
+            }));
+        };
+        changed_inside_clip(&unselected, &selected);
+        changed_inside_clip(&selected, &with_caret);
     }
 
     #[test]

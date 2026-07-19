@@ -258,10 +258,10 @@ const MOUSE_DRAG_THRESHOLD: f32 = 6.0;
 /// C4Menu::DoDragging starts a menu-element drag at `>= C4MC_DragSensitivity`,
 /// unlike world-origin mouse drags, which use `> C4MC_DragSensitivity`.
 const MENU_DRAG_THRESHOLD: f32 = 5.0;
-/// The SDL/X11 viewport paths synthesize LeftDouble when the second press
+/// The SDL/X11 application paths synthesize LeftDouble when the second press
 /// arrives less than 400 ms after the first (C4FullScreen.cpp:327-350;
 /// C4Viewport.cpp:657-676).
-const INGAME_DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+const CPP_DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 static APP_PATH_CACHE: Mutex<Option<std::result::Result<Arc<AppPaths>, PathsError>>> =
     Mutex::new(None);
 
@@ -8467,6 +8467,7 @@ enum AppContextMenuCommand {
     LobbyTeam { player_id: i32, team_id: i32 },
     LobbyKick(i32),
     LobbySheet(LobbySheet),
+    NetworkJoinEdit(lc_frontend::startup_netdlg::NetDlgEditContextCommand),
     ScenarioSearch(ScenselSearchContextCommand),
     InputDialog(InputDialogContextCommand),
 }
@@ -10035,6 +10036,9 @@ struct GameApp {
     /// their matching key-up so the underlying screen cannot activate.
     message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
     definition_selector_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Physical keys consumed by the join-address Edit until their matching
+    /// release, even if a multiline paste moves focus back to the game list.
+    netdlg_edit_consumed_keys: HashSet<VirtualKeyCode>,
     /// Retain a left/touch gesture if the selector closes before its matching
     /// release so the underlying scenario book cannot receive that release.
     definition_selector_pointer_capture: bool,
@@ -10070,6 +10074,9 @@ struct GameApp {
     /// Last network-game row click for C4StartupNetDlg's list-box
     /// `OnSelDblClick -> DoOK` callback.
     netdlg_last_click: Option<(usize, Instant)>,
+    /// Last join-address edit click for C4GUI::Edit's double-click word
+    /// selection. This is independent from the game-list row gesture.
+    netdlg_join_edit_last_click: Option<Instant>,
     /// The message board's current log line and the frame it expires
     /// (fade-in + strlen delay + fade-out at Speed 1,
     /// src/C4MessageBoard.cpp:163-212).
@@ -10741,6 +10748,32 @@ fn clipboard_text_available() -> bool {
     arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.get_text())
         .is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn primary_clipboard_text() -> Option<String> {
+    use arboard::{GetExtLinux, LinuxClipboardKind};
+
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            clipboard
+                .get()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text()
+        })
+        .ok()
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+fn primary_clipboard_text() -> Option<String> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get_text())
+        .ok()
+}
+
+#[cfg(target_os = "windows")]
+fn primary_clipboard_text() -> Option<String> {
+    None
 }
 
 trait SelectionEdit {
@@ -19222,6 +19255,7 @@ impl GameApp {
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
             definition_selector_consumed_keys: HashSet::new(),
+            netdlg_edit_consumed_keys: HashSet::new(),
             definition_selector_pointer_capture: false,
             game_option_input_consumed_keys: HashSet::new(),
             game_option_input_pointer_capture: None,
@@ -19238,6 +19272,7 @@ impl GameApp {
             definition_selector_last_click: None,
             plrsel_last_click: None,
             netdlg_last_click: None,
+            netdlg_join_edit_last_click: None,
             board_line: None,
             board_log_history: VecDeque::new(),
             board_back_scroll: -1,
@@ -20472,10 +20507,14 @@ impl GameApp {
         self.mark_menu_dirty();
         let mut encoded = [0_u8; 4];
         let text = character.encode_utf8(&mut encoded);
-        let actions = self
-            .startup_network_dialog
-            .as_mut()
-            .map(|dialog| dialog.handle_text_input(text))
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = fonts
+            .as_deref()
+            .and_then(|fonts| {
+                self.startup_network_dialog
+                    .as_mut()
+                    .map(|dialog| dialog.handle_text_input(text, &fonts.text))
+            })
             .unwrap_or_default();
         self.process_network_dialog_actions(actions)
     }
@@ -21392,6 +21431,128 @@ impl GameApp {
             }
             _ => return Ok(false),
         }
+        Ok(true)
+    }
+
+    fn handle_network_join_edit_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        use lc_frontend::startup_netdlg::{
+            NetDlgControl, NetDlgEditClipboardShortcut, NetDlgEditKey, NetDlgEditModifiers,
+        };
+
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkGame {
+            return Ok(false);
+        }
+        if state == ElementState::Released && self.netdlg_edit_consumed_keys.remove(&key) {
+            return Ok(true);
+        }
+        if state != ElementState::Pressed {
+            return Ok(false);
+        }
+
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let edit_focused = self
+            .startup_network_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.focused_control() == NetDlgControl::JoinAddress);
+        // Both StartupNetBack and the Edit cursor bindings use exact modifier
+        // masks. Modified Back/Left outside the edit, and Alt-modified ones
+        // inside it, must not fall through to the modifier-blind GUI mapping.
+        if matches!(key, VirtualKeyCode::Back | VirtualKeyCode::Left)
+            && !modifiers.is_empty()
+            && (!edit_focused || modifiers.contains(ModifiersState::ALT))
+        {
+            self.netdlg_edit_consumed_keys.insert(key);
+            return Ok(true);
+        }
+        if !edit_focused {
+            return Ok(false);
+        }
+        if key == VirtualKeyCode::Apps && modifiers.is_empty() {
+            let outcome = self
+                .startup_network_dialog
+                .as_mut()
+                .map(|dialog| dialog.request_context_menu_from_key(clipboard_text_available()))
+                .unwrap_or_default();
+            if !outcome.captured {
+                return Ok(false);
+            }
+            self.process_network_dialog_actions(outcome.actions)?;
+            return Ok(true);
+        }
+
+        if modifiers.contains(ModifiersState::ALT) {
+            return Ok(false);
+        }
+        let edit_key = match key {
+            VirtualKeyCode::Left => Some(NetDlgEditKey::Left),
+            VirtualKeyCode::Right => Some(NetDlgEditKey::Right),
+            VirtualKeyCode::Home => Some(NetDlgEditKey::Home),
+            VirtualKeyCode::End => Some(NetDlgEditKey::End),
+            VirtualKeyCode::Back => Some(NetDlgEditKey::Backspace),
+            VirtualKeyCode::Delete => Some(NetDlgEditKey::Delete),
+            _ => None,
+        };
+        let shortcut = if modifiers == ModifiersState::CTRL {
+            match key {
+                VirtualKeyCode::C => Some(NetDlgEditClipboardShortcut::Copy),
+                VirtualKeyCode::X => Some(NetDlgEditClipboardShortcut::Cut),
+                VirtualKeyCode::V => Some(NetDlgEditClipboardShortcut::Paste),
+                VirtualKeyCode::A => Some(NetDlgEditClipboardShortcut::SelectAll),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if edit_key.is_none() && shortcut.is_none() {
+            return Ok(false);
+        }
+
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            // The startup bootstrap guard reports missing fonts before this
+            // route. Still consume the Edit-owned key rather than leaking it
+            // to StartupNetBack if that invariant is broken.
+            self.netdlg_edit_consumed_keys.insert(key);
+            return Ok(true);
+        };
+        let clipboard = shortcut
+            .filter(|shortcut| *shortcut == NetDlgEditClipboardShortcut::Paste)
+            .and_then(|_| {
+                arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.get_text())
+                    .ok()
+            });
+        let outcome = self
+            .startup_network_dialog
+            .as_mut()
+            .map(|dialog| {
+                if let Some(edit_key) = edit_key {
+                    dialog.handle_edit_key_down(
+                        edit_key,
+                        NetDlgEditModifiers {
+                            shift: modifiers.contains(ModifiersState::SHIFT),
+                            control: modifiers.contains(ModifiersState::CTRL),
+                        },
+                        &fonts.text,
+                    )
+                } else {
+                    dialog.handle_clipboard_shortcut(
+                        shortcut.expect("checked clipboard shortcut"),
+                        clipboard.as_deref(),
+                        &fonts.text,
+                    )
+                }
+            })
+            .unwrap_or_default();
+        if !outcome.captured {
+            return Ok(false);
+        }
+        self.netdlg_edit_consumed_keys.insert(key);
+        self.process_network_dialog_actions(outcome.actions)?;
         Ok(true)
     }
 
@@ -23652,6 +23813,9 @@ impl GameApp {
                     }
                     return Ok(());
                 }
+                if self.handle_network_join_edit_key(key, state)? {
+                    return Ok(());
+                }
                 if self.startup_view == StartupView::ScenarioBrowser {
                     if self.handle_scenario_rename_key(key, state)? {
                         return Ok(());
@@ -23848,20 +24012,6 @@ impl GameApp {
                         }
                     }
                     if self.handle_scensel_list_navigation_key(key, state)? {
-                        return Ok(());
-                    }
-                }
-                if self.startup_view == StartupView::NetworkGame
-                    && state == ElementState::Pressed
-                    && key == VirtualKeyCode::Back
-                {
-                    let actions = self
-                        .startup_network_dialog
-                        .as_mut()
-                        .map(|dialog| dialog.delete_join_address_char())
-                        .unwrap_or_default();
-                    if !actions.is_empty() {
-                        self.process_network_dialog_actions(actions)?;
                         return Ok(());
                     }
                 }
@@ -30049,10 +30199,14 @@ impl GameApp {
                         }
                     }
                     StartupView::NetworkGame => {
-                        let actions = self
-                            .startup_network_dialog
-                            .as_mut()
-                            .map(|dialog| dialog.handle_pointer_move(point))
+                        let fonts = self.assets.clonk_fonts.clone();
+                        let actions = fonts
+                            .as_deref()
+                            .and_then(|fonts| {
+                                self.startup_network_dialog
+                                    .as_mut()
+                                    .map(|dialog| dialog.handle_pointer_move(point, &fonts.text))
+                            })
                             .unwrap_or_default();
                         self.process_network_dialog_actions(actions)
                     }
@@ -31274,7 +31428,7 @@ impl GameApp {
             ElementState::Pressed => {
                 let now = Instant::now();
                 let is_double = self.ingame_last_left_down.take().is_some_and(|last| {
-                    now.saturating_duration_since(last) < INGAME_DOUBLE_CLICK_INTERVAL
+                    now.saturating_duration_since(last) < CPP_DOUBLE_CLICK_INTERVAL
                 });
                 if is_double {
                     // The platform emits LeftDouble instead of a second
@@ -31437,6 +31591,21 @@ impl GameApp {
                         StartupView::PlayerSelection => {
                             self.open_startup_player_context_menu()?;
                         }
+                        StartupView::NetworkGame => {
+                            let outcome = self
+                                .startup_network_dialog
+                                .as_mut()
+                                .and_then(|dialog| {
+                                    dialog.pointer_position().map(|point| {
+                                        dialog.request_context_menu_at(
+                                            point,
+                                            clipboard_text_available(),
+                                        )
+                                    })
+                                })
+                                .unwrap_or_default();
+                            self.process_network_dialog_actions(outcome.actions)?;
+                        }
                         _ => {}
                     }
                 }
@@ -31533,6 +31702,28 @@ impl GameApp {
             return Ok(());
         }
         if input_dialog_release_latched {
+            return Ok(());
+        }
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::NetworkGame {
+            if button_state == ElementState::Pressed {
+                let primary = primary_clipboard_text();
+                let fonts = self.assets.clonk_fonts.clone();
+                let outcome = fonts
+                    .as_deref()
+                    .and_then(|fonts| {
+                        self.startup_network_dialog.as_mut().and_then(|dialog| {
+                            dialog.pointer_position().map(|point| {
+                                dialog.handle_pointer_middle_down(
+                                    point,
+                                    primary.as_deref(),
+                                    &fonts.text,
+                                )
+                            })
+                        })
+                    })
+                    .unwrap_or_default();
+                self.process_network_dialog_actions(outcome.actions)?;
+            }
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -32686,6 +32877,9 @@ impl GameApp {
                 }
                 match self.startup_view {
                     StartupView::NetworkGame => {
+                        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+                            return Ok(());
+                        };
                         let point = self
                             .startup_network_dialog
                             .as_ref()
@@ -32695,37 +32889,69 @@ impl GameApp {
                                 .as_ref()
                                 .and_then(|dialog| dialog.game_index_at(point))
                         });
-                        let is_double = if button_state == ElementState::Released {
+                        let clicked_edit = point.is_some_and(|point| {
+                            self.startup_network_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.join_address_contains(point))
+                        });
+                        let row_double = if button_state == ElementState::Released {
                             let now = Instant::now();
-                            let is_double = clicked_row.is_some_and(|index| {
+                            let row_double = clicked_row.is_some_and(|index| {
                                 self.netdlg_last_click.is_some_and(|(last_index, at)| {
                                     last_index == index
                                         && now.duration_since(at) < Duration::from_millis(500)
                                 })
                             });
-                            self.netdlg_last_click =
-                                clicked_row.map(|index| (index, now));
-                            is_double
+                            self.netdlg_last_click = (!row_double)
+                                .then(|| clicked_row.map(|index| (index, now)))
+                                .flatten();
+                            row_double
                         } else {
                             false
                         };
-                        let mut actions = self
-                            .startup_network_dialog
-                            .as_mut()
-                            .and_then(|dialog| {
-                                point.map(|point| match button_state {
-                                    ElementState::Pressed => dialog.handle_pointer_down(point),
-                                    ElementState::Released => dialog.handle_pointer_up(point),
+                        let edit_double = if button_state == ElementState::Pressed {
+                            let now = Instant::now();
+                            let edit_double = clicked_edit
+                                && self.netdlg_join_edit_last_click.is_some_and(|at| {
+                                    now.saturating_duration_since(at) < CPP_DOUBLE_CLICK_INTERVAL
+                                });
+                            self.netdlg_join_edit_last_click =
+                                (clicked_edit && !edit_double).then_some(now);
+                            edit_double
+                        } else {
+                            false
+                        };
+                        let mut actions = if edit_double {
+                            self.startup_network_dialog
+                                .as_mut()
+                                .and_then(|dialog| {
+                                    point.map(|point| {
+                                        dialog.handle_pointer_double_click(point, &fonts.text)
+                                    })
                                 })
-                            })
-                            .unwrap_or_default();
-                        if is_double {
+                                .unwrap_or_default()
+                        } else {
+                            self.startup_network_dialog
+                                .as_mut()
+                                .and_then(|dialog| {
+                                    point.map(|point| match button_state {
+                                        ElementState::Pressed => {
+                                            dialog.handle_pointer_down(point, &fonts.text)
+                                        }
+                                        ElementState::Released => {
+                                            dialog.handle_pointer_up(point, &fonts.text)
+                                        }
+                                    })
+                                })
+                                .unwrap_or_default()
+                        };
+                        if row_double {
                             actions.extend(
                                 self.startup_network_dialog
                                     .as_mut()
                                     .and_then(|dialog| {
                                         point.map(|point| {
-                                            dialog.handle_pointer_double_click(point)
+                                            dialog.handle_pointer_double_click(point, &fonts.text)
                                         })
                                     })
                                     .unwrap_or_default(),
@@ -33300,14 +33526,24 @@ impl GameApp {
         }
         match self.startup_view {
             StartupView::NetworkGame => {
-                let actions = self
-                    .startup_network_dialog
-                    .as_mut()
-                    .map(|dialog| match phase {
-                        TouchPhase::Started => dialog.handle_pointer_down(position),
-                        TouchPhase::Moved => dialog.handle_pointer_move(position),
-                        TouchPhase::Ended => dialog.handle_pointer_up(position),
-                        TouchPhase::Cancelled => Vec::new(),
+                let fonts = self.assets.clonk_fonts.clone();
+                let actions = fonts
+                    .as_deref()
+                    .and_then(|fonts| {
+                        self.startup_network_dialog
+                            .as_mut()
+                            .map(|dialog| match phase {
+                                TouchPhase::Started => {
+                                    dialog.handle_pointer_down(position, &fonts.text)
+                                }
+                                TouchPhase::Moved => {
+                                    dialog.handle_pointer_move(position, &fonts.text)
+                                }
+                                TouchPhase::Ended => {
+                                    dialog.handle_pointer_up(position, &fonts.text)
+                                }
+                                TouchPhase::Cancelled => Vec::new(),
+                            })
                     })
                     .unwrap_or_default();
                 self.process_network_dialog_actions(actions)?;
@@ -33624,6 +33860,7 @@ impl GameApp {
                         dialog.pointer_left();
                     }
                     self.netdlg_last_click = None;
+                    self.netdlg_join_edit_last_click = None;
                 }
                 StartupView::PlayerSelection => {
                     if let Some(dialog) = self.startup_player_dialog.as_mut() {
@@ -34383,6 +34620,8 @@ impl GameApp {
         self.startup_game_references.clear();
         self.startup_direct_reference_queries.clear();
         self.netdlg_last_click = None;
+        self.netdlg_join_edit_last_click = None;
+        self.netdlg_edit_consumed_keys.clear();
         self.sync_startup_network_game_rows();
         self.status_text = "Querying game infos…".to_string();
         self.mark_menu_dirty();
@@ -34425,6 +34664,81 @@ impl GameApp {
                 NetDlgAction::FocusChanged(_)
                 | NetDlgAction::ModeChanged(lc_frontend::startup_netdlg::NetDlgMode::GameList)
                 | NetDlgAction::JoinAddressChanged(_) => {}
+                NetDlgAction::OpenJoinAddressContextMenu(request) => {
+                    let entries = request
+                        .items
+                        .into_iter()
+                        .map(|item| {
+                            let (label_key, label, tooltip_key, tooltip) = match item.command {
+                                lc_frontend::startup_netdlg::NetDlgEditContextCommand::Cut => (
+                                    "IDS_DLG_CUT",
+                                    item.label.as_str(),
+                                    "IDS_DLGTIP_CUT",
+                                    item.tooltip.as_str(),
+                                ),
+                                lc_frontend::startup_netdlg::NetDlgEditContextCommand::Copy => (
+                                    "IDS_DLG_COPY",
+                                    item.label.as_str(),
+                                    "IDS_DLGTIP_COPY",
+                                    item.tooltip.as_str(),
+                                ),
+                                lc_frontend::startup_netdlg::NetDlgEditContextCommand::Paste => (
+                                    "IDS_DLG_PASTE",
+                                    item.label.as_str(),
+                                    "IDS_DLGTIP_PASTE",
+                                    item.tooltip.as_str(),
+                                ),
+                                lc_frontend::startup_netdlg::NetDlgEditContextCommand::Clear => (
+                                    "IDS_DLG_CLEAR",
+                                    item.label.as_str(),
+                                    "IDS_DLGTIP_CLEAR",
+                                    item.tooltip.as_str(),
+                                ),
+                                lc_frontend::startup_netdlg::NetDlgEditContextCommand::SelectAll => (
+                                    "IDS_DLG_SELALL",
+                                    item.label.as_str(),
+                                    "IDS_DLGTIP_SELALL",
+                                    item.tooltip.as_str(),
+                                ),
+                            };
+                            ContextMenuEntry::new(startup_resource_string(
+                                self.app_paths.as_ref(),
+                                label_key,
+                                label,
+                            ))
+                            .with_tooltip(startup_resource_string(
+                                self.app_paths.as_ref(),
+                                tooltip_key,
+                                tooltip,
+                            ))
+                            .with_icon(ContextMenuIcon::None)
+                            .with_action(AppContextMenuCommand::NetworkJoinEdit(item.command))
+                        })
+                        .collect();
+                    self.open_context_menu_at(entries, request.anchor)?;
+                }
+                NetDlgAction::ClipboardTransfer { text, cut } => {
+                    match arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(text))
+                    {
+                        Ok(()) if cut => {
+                            let fonts = self.assets.clonk_fonts.clone();
+                            let follow_up = fonts
+                                .as_deref()
+                                .and_then(|fonts| {
+                                    self.startup_network_dialog
+                                        .as_mut()
+                                        .map(|dialog| dialog.confirm_clipboard_cut(&fonts.text))
+                                })
+                                .unwrap_or_default();
+                            self.process_network_dialog_actions(follow_up)?;
+                        }
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to copy join-address edit text");
+                        }
+                    }
+                }
                 NetDlgAction::GuiSound(sound) => self.play_ui_sound(match sound {
                     lc_frontend::startup_netdlg::NetDlgSound::ArrowHit => "ArrowHit",
                     lc_frontend::startup_netdlg::NetDlgSound::Command => "Command",
@@ -34533,6 +34847,38 @@ impl GameApp {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn apply_network_join_edit_context_command(
+        &mut self,
+        command: lc_frontend::startup_netdlg::NetDlgEditContextCommand,
+    ) -> Result<(), EngineError> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::NetworkGame {
+            tracing::error!(?command, "stale join-address context command");
+            return Ok(());
+        }
+        let clipboard = matches!(
+            command,
+            lc_frontend::startup_netdlg::NetDlgEditContextCommand::Paste
+        )
+        .then(|| {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .ok()
+        })
+        .flatten();
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = fonts
+            .as_deref()
+            .and_then(|fonts| {
+                self.startup_network_dialog.as_mut().map(|dialog| {
+                    dialog.apply_context_command(command, clipboard.as_deref(), &fonts.text)
+                })
+            })
+            .unwrap_or_default();
+        self.process_network_dialog_actions(actions)?;
+        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -37099,6 +37445,9 @@ impl GameApp {
                                 ClassicGameLobbyChild::Sheet(sheet),
                             ));
                         }
+                    }
+                    AppContextMenuCommand::NetworkJoinEdit(command) => {
+                        self.apply_network_join_edit_context_command(command)?;
                     }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
@@ -41552,6 +41901,8 @@ impl GameApp {
         self.startup_game_references.clear();
         self.startup_direct_reference_queries.clear();
         self.netdlg_last_click = None;
+        self.netdlg_join_edit_last_click = None;
+        self.netdlg_edit_consumed_keys.clear();
         self.pending_network_join = None;
         let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
@@ -41775,6 +42126,8 @@ impl GameApp {
         self.startup_game_references.clear();
         self.startup_direct_reference_queries.clear();
         self.netdlg_last_click = None;
+        self.netdlg_join_edit_last_click = None;
+        self.netdlg_edit_consumed_keys.clear();
         self.pending_network_join = None;
         self.network_game_advertiser = None;
         self.advertised_game_reference = None;
@@ -43801,10 +44154,15 @@ impl GameApp {
                     .rename_edit
                     .as_mut()
                     .is_some_and(|rename| rename.edit.tick_blink());
+                let netdlg_blink_changed = self
+                    .startup_network_dialog
+                    .as_mut()
+                    .is_some_and(|dialog| dialog.tick_join_address_cursor());
                 if definition_scroll_changed
                     || scrollbar_changed
                     || search_blink_changed
                     || rename_blink_changed
+                    || netdlg_blink_changed
                 {
                     self.mark_menu_dirty();
                 }
@@ -46568,6 +46926,7 @@ impl GameApp {
                     context_menu_open,
                     definition_selector_open,
                     game_option_input_open,
+                    !self.message_dialogs.is_empty(),
                     &self.scenario_game_options,
                     self.scenario_selector_mode,
                     self.startup_options_dialog.as_ref(),
@@ -52654,6 +53013,7 @@ fn render_startup_frame(
     context_menu_open: bool,
     definition_selector_open: bool,
     game_option_input_open: bool,
+    message_dialog_open: bool,
     scenario_game_options: &GameOptionButtons,
     scenario_selector_mode: ScenarioSelectorMode,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
@@ -52775,7 +53135,10 @@ fn render_startup_frame(
                     scenario_game_options.render(
                         surface,
                         &resources,
-                        !context_menu_open && !definition_selector_open && !game_option_input_open,
+                        !context_menu_open
+                            && !definition_selector_open
+                            && !game_option_input_open
+                            && !message_dialog_open,
                         Some(startup_gamma()),
                     )?;
                     true
@@ -52788,13 +53151,17 @@ fn render_startup_frame(
                 network_dialog,
             ) {
                 (Some(dlg_assets), Some(fonts), Some(dialog)) => {
-                    lc_frontend::startup_netdlg::NetDlgScreen::render_controller(
+                    lc_frontend::startup_netdlg::NetDlgScreen::render_controller_with_draw_focus(
                         surface,
                         &dlg_assets,
                         fonts,
                         Some(startup_gamma()),
                         dialog,
                         0,
+                        !context_menu_open
+                            && !definition_selector_open
+                            && !game_option_input_open
+                            && !message_dialog_open,
                     );
                     true
                 }
@@ -72029,13 +72396,14 @@ public func Grant(password) { return GainMissionAccess(password); }
             (net_layout.btn_chat.x + net_layout.btn_chat.w / 2) as f32,
             (net_layout.btn_chat.y + net_layout.btn_chat.h / 2) as f32,
         );
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
         {
             let dialog = app
                 .startup_network_dialog
                 .as_mut()
                 .expect("retained NetDlg");
-            let _ = dialog.handle_pointer_down(chat_point);
-            let _ = dialog.handle_pointer_up(chat_point);
+            let _ = dialog.handle_pointer_down(chat_point, &fonts.text);
+            let _ = dialog.handle_pointer_up(chat_point, &fonts.text);
             let _ = dialog.handle_key_down(KeyCode::Tab);
             let _ = dialog.handle_key_down(KeyCode::Tab);
             assert_eq!(dialog.mode(), lc_frontend::startup_netdlg::NetDlgMode::Chat);
@@ -89524,6 +89892,186 @@ ScenInfoArea=70,5,25,90
             }
             other => panic!("direct join must install the Objects seed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn network_join_edit_routes_window_keys_pointer_selection_and_context() {
+        let mut app = new_classic_menu_app(800, 600);
+        app.open_network_game_dialog();
+        app.startup_network_dialog
+            .as_mut()
+            .expect("network dialog")
+            .set_join_address("replace me");
+
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus join edit");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release join edit focus key");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .join_address_selection(),
+            Some((0, "replace me".len()))
+        );
+
+        app.handle_text_input('|').expect("replace selected address");
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().join_address(),
+            "\u{a6}"
+        );
+
+        app.startup_network_dialog
+            .as_mut()
+            .unwrap()
+            .set_join_address("alpha beta");
+        app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
+            .expect("move edit caret home");
+        app.handle_key(VirtualKeyCode::Home, ElementState::Released)
+            .expect("release edit Home");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold control");
+        app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+            .expect("jump to next word");
+        app.handle_key(VirtualKeyCode::Right, ElementState::Released)
+            .expect("release word jump");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .join_address_caret(),
+            6
+        );
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold shift");
+        app.handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+            .expect("extend selection");
+        app.handle_key(VirtualKeyCode::Right, ElementState::Released)
+            .expect("release selection key");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("delete selection before shift-delete no-op");
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Released)
+            .expect("release Delete");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear modifiers");
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().join_address(),
+            "alpha eta"
+        );
+
+        app.startup_network_dialog
+            .as_mut()
+            .unwrap()
+            .set_join_address("alpha beta");
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(&fonts);
+        let layout = lc_frontend::startup_netdlg::net_dlg_layout(800, 600, &metrics);
+        let beta_x = layout.join_edit.x
+            + 4
+            + fonts.text.measure("alpha ", false).0
+            + fonts.text.measure("b", false).0 / 2;
+        let beta = PhysicalPosition::new(
+            f64::from(beta_x),
+            f64::from(layout.join_edit.y + layout.join_edit.h / 2),
+        );
+        app.handle_cursor_moved(beta).expect("point inside beta");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press join edit");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release join edit");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("second press synthesizes LeftDouble");
+        let dialog = app.startup_network_dialog.as_ref().unwrap();
+        let selection = dialog.join_address_selection().expect("selected word");
+        assert_eq!(&dialog.join_address()[selection.0..selection.1], "beta");
+        assert!(app.netdlg_last_click.is_none());
+        assert!(app.netdlg_join_edit_last_click.is_none());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release join edit double-click");
+
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("open join edit context");
+        let popup = app.context_menu.as_ref().expect("join edit context menu");
+        assert_eq!(
+            popup.layout().panels[0].rows.len(),
+            4 + usize::from(clipboard_text_available())
+        );
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .join_address_selection(),
+            Some(selection),
+            "right click preserves the Edit selection"
+        );
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("release context opening button");
+        app.close_context_menu_silently();
+
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open join-edit context from keyboard");
+        assert!(app.context_menu.is_some());
+        assert!(!app.netdlg_edit_consumed_keys.contains(&VirtualKeyCode::Apps));
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("release context-menu key");
+        app.close_context_menu_silently();
+
+        app.netdlg_join_edit_last_click =
+            Some(Instant::now() - Duration::from_millis(450));
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("450ms edit pair is not a C++ double-click");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .join_address_selection(),
+            None
+        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release non-double edit click");
+
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("focused Left stays inside the edit");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        app.handle_key(VirtualKeyCode::Left, ElementState::Released)
+            .expect("release focused edit Left");
+
+        let list = PhysicalPosition::new(
+            f64::from(layout.game_list.x + layout.game_list.w / 2),
+            f64::from(layout.game_list.y + layout.game_list.h / 2),
+        );
+        app.handle_cursor_moved(list).expect("point inside game list");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("focus game list");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release game-list focus click");
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .focused_control(),
+            lc_frontend::startup_netdlg::NetDlgControl::GameList
+        );
+        for (modifiers, key) in [
+            (ModifiersState::CTRL, VirtualKeyCode::Left),
+            (ModifiersState::SHIFT, VirtualKeyCode::Left),
+            (ModifiersState::ALT, VirtualKeyCode::Left),
+            (ModifiersState::CTRL, VirtualKeyCode::Back),
+        ] {
+            app.handle_modifiers_changed(modifiers)
+                .expect("set modified Back binding mask");
+            app.handle_key(key, ElementState::Pressed)
+                .expect("modified Back binding is inert");
+            app.handle_key(key, ElementState::Released)
+                .expect("release modified Back binding");
+            assert_eq!(app.startup_view, StartupView::NetworkGame);
+        }
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear Back binding modifiers");
+        app.handle_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("plain Left invokes StartupNetBack");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
     }
 
     #[test]
