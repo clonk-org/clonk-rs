@@ -3308,6 +3308,28 @@ impl Engine {
             .then_some(CommandId::Throw)
     }
 
+    /// Whether `point` selects the nearby jump cursor for the player's cursor
+    /// object. UpdateCursorTarget evaluates this after every object cursor, so
+    /// it also overrides Select (C4MouseControl.cpp:522-534).
+    pub fn mouse_jump_zone(&self, owner: i32, point: Vector2) -> bool {
+        if !self.players.contains_key(&owner) {
+            return false;
+        }
+        self.crew_cursor(owner)
+            .and_then(|cursor| self.find_object_index(cursor))
+            .is_some_and(|cursor_index| {
+                let cursor = &self.objects[cursor_index];
+                if cursor.state.container.is_some()
+                    || self.object_procedure(cursor_index) != ActionProcedure::Walk
+                {
+                    return false;
+                }
+                let dx = point.x - cursor.state.position.x;
+                let dy = point.y - cursor.state.position.y;
+                (-25..=-10).contains(&dy) && ((-15..=-1).contains(&dx) || (1..=15).contains(&dx))
+            })
+    }
+
     /// Classify the down cursor which may start a world-object moving drag.
     /// This follows UpdateCursorTarget's OCF priority through the later
     /// Chop/Enter/Build/Select/Attack/Jump overrides, then DragNone's strict
@@ -3370,21 +3392,7 @@ impl Engine {
 
         // The nearby jump cursor is evaluated last and overrides every
         // object cursor (C4MouseControl.cpp:522-534).
-        if self
-            .crew_cursor(owner)
-            .and_then(|cursor| self.find_object_index(cursor))
-            .is_some_and(|cursor_index| {
-                let cursor = &self.objects[cursor_index];
-                if cursor.state.container.is_some()
-                    || self.object_procedure(cursor_index) != ActionProcedure::Walk
-                {
-                    return false;
-                }
-                let dx = point.x - cursor.state.position.x;
-                let dy = point.y - cursor.state.position.y;
-                (-25..=-10).contains(&dy) && ((-15..=-1).contains(&dx) || (1..=15).contains(&dx))
-            })
-        {
+        if self.mouse_jump_zone(owner, point) {
             return None;
         }
         source
@@ -17347,6 +17355,95 @@ protected func ControlContents(idTarget) { return(1); }
             engine.mouse_world_drag_source(1, site, Vector2::new(40, 10)),
             None,
             "the later Build cursor overrides Carryable and Grab"
+        );
+    }
+
+    #[test]
+    fn mouse_jump_zone_matches_classic_bounds_and_cursor_state() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.position = Vector2::new(100, 100);
+
+        assert!(
+            engine.mouse_jump_zone(1, Vector2::new(108, 85)),
+            "+8/-15 is inside the classic jump zone"
+        );
+        for dx in [-15, -1, 1, 15] {
+            for dy in [-25, -10] {
+                assert!(
+                    engine.mouse_jump_zone(1, Vector2::new(100 + dx, 100 + dy)),
+                    "inclusive boundary dx={dx}, dy={dy}"
+                );
+            }
+        }
+        for dx in [-16, 0, 16] {
+            assert!(
+                !engine.mouse_jump_zone(1, Vector2::new(100 + dx, 85)),
+                "excluded horizontal coordinate dx={dx}"
+            );
+        }
+        for dy in [-26, -9] {
+            assert!(
+                !engine.mouse_jump_zone(1, Vector2::new(108, 100 + dy)),
+                "excluded vertical coordinate dy={dy}"
+            );
+        }
+        assert!(
+            !engine.mouse_jump_zone(2, Vector2::new(108, 85)),
+            "an unregistered player has no mouse jump cursor"
+        );
+
+        engine.objects[crew_index].state.container = Some(ObjectId::new(999));
+        assert!(
+            !engine.mouse_jump_zone(1, Vector2::new(108, 85)),
+            "contained cursor objects cannot use the jump zone"
+        );
+        engine.objects[crew_index].state.container = None;
+        engine.objects[crew_index].state.action = ActionState::new("Jump");
+        assert!(
+            !engine.mouse_jump_zone(1, Vector2::new(108, 85)),
+            "only DFA_WALK cursor objects can use the jump zone"
+        );
+    }
+
+    #[test]
+    fn mouse_jump_zone_still_vetoes_world_drag_source() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.position = Vector2::new(100, 100);
+
+        let mut vehicle =
+            Definition::from_script("VEH1", "Vehicle", "#strict\n").expect("vehicle compiles");
+        vehicle.set_grab(1);
+        vehicle.set_category(crate::CATEGORY_VEHICLE);
+        engine
+            .register_definition(vehicle)
+            .expect("register vehicle");
+        let point = Vector2::new(108, 85);
+        let vehicle = engine
+            .spawn_object(SpawnConfig::new("VEH1").with_position(point))
+            .expect("spawn vehicle");
+
+        assert_eq!(
+            engine.mouse_world_drag_source(1, vehicle, point),
+            None,
+            "the last-evaluated jump cursor keeps vetoing a vehicle drag"
+        );
+        engine.objects[crew_index].state.action = ActionState::new("Jump");
+        assert_eq!(
+            engine.mouse_world_drag_source(1, vehicle, point),
+            Some(crate::MouseDragSource::Vehicle),
+            "without the jump cursor the original vehicle drag remains available"
         );
     }
 

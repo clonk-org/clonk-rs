@@ -29169,6 +29169,25 @@ impl GameApp {
         {
             return Ok(());
         }
+        let point = ingame_pointer_world_pixel(pointer);
+        // UpdateCursorTarget evaluates the nearby Jump cursor after Select,
+        // so an eligible jump zone owns the click even over another crew
+        // member (C4MouseControl.cpp:522-534,1129-1132).
+        if self.engine.mouse_jump_zone(pointer.owner, point) {
+            self.show_startup_hint = false;
+            self.submit_or_execute_player_command(PlayerCommandControlData {
+                player: pointer.owner,
+                command: CommandId::Jump as i32,
+                x: point.x,
+                y: point.y,
+                target: 0,
+                target2: 0,
+                data: 0,
+                add_mode: 1,
+                by_client: -1,
+            })?;
+            return Ok(());
+        }
         // C4MC_Cursor_Select queues CID_PlrSelect on LeftUp for both crew and
         // C4D_MouseSelect objects (C4MouseControl.cpp:1106-1129).
         if let Some(target) =
@@ -29188,8 +29207,8 @@ impl GameApp {
         self.submit_or_execute_player_command(PlayerCommandControlData {
             player: pointer.owner,
             command: CommandId::MoveTo as i32,
-            x: pointer.world.x as i32,
-            y: pointer.world.y as i32,
+            x: point.x,
+            y: point.y,
             target: 0,
             target2: 0,
             data: 0,
@@ -92178,6 +92197,221 @@ protected func InputCallback(string answer, int player)
             commands.take_submitted_local(),
             vec![(app.local_owner, ControlEvent::ClearPressed, tick)],
             "one user-driven close queues one clear for the still-open tick"
+        );
+    }
+
+    fn sandbox_pointer_at_world(
+        app: &mut GameApp,
+        owner: i32,
+        world: Vector2,
+    ) -> ViewportPointer {
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        let surface = app.graphics.surface();
+        let mut frame = vec![0_u8; surface.width() as usize * surface.height() as usize * 4];
+        app.render(&mut frame)
+            .expect("render sandbox viewport for mouse projection");
+        let (screen_x, screen_y) = app
+            .graphics
+            .world_to_screen(owner, world)
+            .expect("world point maps into the sandbox viewport");
+        let screen = GuiPoint::new(screen_x, screen_y);
+        let projected = app
+            .graphics
+            .viewport_point_at(screen)
+            .expect("screen point maps back into the sandbox viewport");
+        assert_eq!(projected.owner, owner);
+        assert_eq!(ingame_pointer_world_pixel(projected), world);
+        ViewportPointer {
+            owner,
+            world: FloatVector2::new(world.x as f32, world.y as f32),
+            screen,
+        }
+    }
+
+    #[test]
+    fn mouse_jump_zone_click_queues_exact_jump_control() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let position = app
+            .engine
+            .object_snapshot(cursor)
+            .expect("sandbox cursor remains live")
+            .position;
+        let click = Vector2::new(position.x + 8, position.y - 15);
+        let pointer = sandbox_pointer_at_world(&mut app, owner, click);
+        assert!(app.engine.mouse_jump_zone(owner, click));
+
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        app.handle_ingame_mouse_click(pointer)
+            .expect("jump-zone click queues synchronized command");
+
+        assert_eq!(
+            commands.take_submitted_player_commands(),
+            vec![(
+                tick,
+                PlayerCommandControlData {
+                    player: owner,
+                    command: CommandId::Jump as i32,
+                    x: click.x,
+                    y: click.y,
+                    target: 0,
+                    target2: 0,
+                    data: 0,
+                    add_mode: 1,
+                    by_client: 7,
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn mouse_jump_zone_contained_or_non_walk_falls_back_to_move_to() {
+        for contained in [true, false] {
+            let mut app = new_running_sandbox_app();
+            let owner = app.local_owner;
+            let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+            let position = app
+                .engine
+                .object_snapshot(cursor)
+                .expect("sandbox cursor remains live")
+                .position;
+            let click = Vector2::new(position.x + 8, position.y - 15);
+            if contained {
+                let container = Definition::from_script("MBOX", "Mouse box", "#strict\n")
+                    .expect("container definition compiles");
+                app.engine
+                    .register_definition(container)
+                    .expect("register mouse container");
+                let container = app
+                    .engine
+                    .spawn_object(
+                        SpawnConfig::new("MBOX")
+                            .with_position(Vector2::new(position.x + 80, position.y)),
+                    )
+                    .expect("spawn mouse container");
+                app.engine
+                    .apply_object_update(cursor, ObjectUpdate::new().with_container(container))
+                    .expect("contain sandbox cursor");
+            } else {
+                app.engine
+                    .apply_object_update(cursor, ObjectUpdate::new().with_action("Jump"))
+                    .expect("put sandbox cursor into a non-Walk action");
+            }
+            assert!(
+                !app.engine.mouse_jump_zone(owner, click),
+                "contained={contained} must disable the jump cursor"
+            );
+            let pointer = sandbox_pointer_at_world(&mut app, owner, click);
+            assert_eq!(
+                app.ingame_mouse_select_target(owner, pointer.screen),
+                None,
+                "fallback point must remain a plain movement click"
+            );
+
+            let (manager, _event_tx, mut commands) =
+                NetworkManager::test_stub_with_commands_for_client_id(7);
+            app.network = Some(manager);
+            let tick = app.local_control_submission_tick();
+            app.handle_ingame_mouse_click(pointer)
+                .expect("disabled jump zone queues synchronized movement");
+            assert_eq!(
+                commands.take_submitted_player_commands(),
+                vec![(
+                    tick,
+                    PlayerCommandControlData {
+                        player: owner,
+                        command: CommandId::MoveTo as i32,
+                        x: click.x,
+                        y: click.y,
+                        target: 0,
+                        target2: 0,
+                        data: 0,
+                        add_mode: 1,
+                        by_client: 7,
+                    },
+                )],
+                "contained={contained}"
+            );
+        }
+    }
+
+    #[test]
+    fn mouse_jump_zone_overrides_overlapping_crew_selection() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        let cursor_snapshot = app
+            .engine
+            .object_snapshot(cursor)
+            .expect("sandbox cursor remains live");
+        let click = Vector2::new(
+            cursor_snapshot.position.x + 8,
+            cursor_snapshot.position.y - 15,
+        );
+        let overlap = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(cursor_snapshot.definition_id)
+                    .with_position(click)
+                    .with_owner(owner)
+                    .with_crew_member(true),
+            )
+            .expect("spawn overlapping selectable crew");
+        app.engine
+            .apply_object_update(overlap, ObjectUpdate::new().with_position(click))
+            .expect("place overlapping crew center at the click");
+        let mut crew = app
+            .engine
+            .player(owner)
+            .expect("sandbox player remains live")
+            .crew()
+            .to_vec();
+        crew.push(overlap);
+        app.engine
+            .player_mut(owner)
+            .expect("sandbox player remains live")
+            .set_crew(crew);
+        app.engine
+            .select_crew(owner, [cursor])
+            .expect("retain only the original command selection");
+        app.engine
+            .set_crew_cursor(owner, Some(cursor))
+            .expect("retain original mouse cursor");
+        let pointer = sandbox_pointer_at_world(&mut app, owner, click);
+        assert_eq!(
+            app.ingame_mouse_select_target(owner, pointer.screen),
+            Some(overlap),
+            "the regression point must overlap another selectable crew member"
+        );
+        assert!(app.engine.mouse_jump_zone(owner, click));
+
+        app.handle_ingame_mouse_click(pointer)
+            .expect("jump cursor overrides overlapping selection");
+
+        assert_eq!(app.engine.crew_cursor(owner), Some(cursor));
+        let commands = app
+            .engine
+            .object_snapshot(cursor)
+            .expect("original cursor survives")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "Jump");
+        assert_eq!(commands[0].tx, Some(click.x));
+        assert_eq!(commands[0].ty, Some(click.y));
+        assert_eq!(commands[0].target, None);
+        assert!(
+            app.engine
+                .object_snapshot(overlap)
+                .expect("overlapping crew survives")
+                .command_stack
+                .is_empty(),
+            "the overlap must neither become selected nor receive the jump"
         );
     }
 
