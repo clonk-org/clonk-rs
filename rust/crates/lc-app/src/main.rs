@@ -55659,6 +55659,17 @@ impl GameApp {
                 self.runtime_resource_string("IDS_PRC_NOMISSIONACCESS"),
             ));
         }
+        if selector_mode == ScenarioSelectorMode::NetworkHost
+            && matches!(scenario.kind, ScenarioKind::Scenario)
+        {
+            return self
+                .network_scenario_open_decision(scenario)
+                .map(|decision| match decision {
+                    NetworkScenarioOpenDecision::Error { message, .. } => Some(message),
+                    NetworkScenarioOpenDecision::Proceed
+                    | NetworkScenarioOpenDecision::Warning { .. } => None,
+                });
+        }
         let Some(head) = self.scenario_loader_head_for_start(scenario)? else {
             return Ok(None);
         };
@@ -55668,11 +55679,6 @@ impl GameApp {
             return Ok(Some(
                 self.runtime_resource_string("IDS_PRC_NOMISSIONACCESS"),
             ));
-        }
-        if selector_mode == ScenarioSelectorMode::NetworkHost {
-            // Network too-few-player warnings and replay refusal belong to
-            // the host-staging parity ticket; MissionAccess never does.
-            return Ok(None);
         }
         self.local_scenario_player_count_error_from_head(&head)
     }
@@ -79227,6 +79233,140 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(
             app.definition_selector.is_some(),
             "the same catalog entry proceeds to the start flow after grant"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn l069_network_row_colors_disable_errors_but_not_too_few_warning() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated network-row user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        let scenario_root = paths.scenario_dir().to_path_buf();
+        fs::create_dir_all(&scenario_root).expect("create network-row scenario root");
+        for (name, core) in [
+            (
+                "Replay.c4s",
+                "[Head]\nTitle=Replay row\nReplay=1\nMinPlayer=1\nMaxPlayer=4\n",
+            ),
+            (
+                "TooMany.c4s",
+                "[Head]\nTitle=Too many row\nMinPlayer=1\nMaxPlayer=0\n",
+            ),
+            (
+                "TooFew.c4s",
+                "[Head]\nTitle=Too few row\nMinPlayer=2\nMaxPlayer=4\n",
+            ),
+        ] {
+            let path = scenario_root.join(name);
+            fs::create_dir(&path).expect("create network-row scenario group");
+            fs::write(path.join("Scenario.txt"), core)
+                .expect("write network-row scenario core");
+        }
+
+        let scenarios = resource_scenario::discover(&scenario_root)
+            .expect("discover network-row scenarios")
+            .into_iter()
+            .map(|entry| FrontendScenario::from_resource(entry, "Test scenarios"))
+            .collect::<Vec<_>>();
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("network-row menu");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+
+        let render_row_alphas = |app: &mut GameApp| {
+            let assets = app.assets.scensel_assets().expect("scenario assets");
+            let button_down = app
+                .assets
+                .dialog_image("GUIButtonDown.png")
+                .expect("scenario button-down plank");
+            let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+            let book = app.assets.book_fonts.clone().expect("book fonts");
+            let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+            draw_scensel_dynamic(
+                &mut surface,
+                &mut app.menu_state,
+                &app.scenario_entry_enabled,
+                &assets,
+                &button_down,
+                &fonts,
+                &book,
+                startup_gamma(),
+                true,
+            )
+            .expect("render network-row labels");
+            let layout = lc_frontend::startup_scensel::scen_sel_layout(640, 480, &fonts);
+            let item_h = lc_frontend::startup_scensel::scen_list_item_height(&book.text);
+            let label_x = layout.list.x + 3 + item_h + 2;
+            let label_top = layout.list.y + 3;
+            app.menu_state
+                .visible_entries()
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let row_y = label_top + index as i32 * (item_h + 1);
+                    let max_alpha = (label_x..label_x + 120)
+                        .flat_map(|x| (row_y..row_y + item_h).map(move |y| (x, y)))
+                        .filter_map(|(x, y)| surface.get_pixel(x as u32, y as u32))
+                        .map(|color| color.a)
+                        .max()
+                        .unwrap_or(0);
+                    (entry.identifier.clone(), max_alpha)
+                })
+                .collect::<HashMap<_, _>>()
+        };
+
+        app.open_network_host_scenario_browser();
+        for (identifier, enabled) in [
+            ("Replay.c4s", false),
+            ("TooMany.c4s", false),
+            ("TooFew.c4s", true),
+        ] {
+            assert_eq!(
+                app.scenario_entry_enabled.get(identifier),
+                Some(&enabled),
+                "network CanOpen state for {identifier}"
+            );
+        }
+        let network_alpha = render_row_alphas(&mut app);
+        for identifier in ["Replay.c4s", "TooMany.c4s"] {
+            assert!(
+                network_alpha[identifier] > 0 && network_alpha[identifier] < 200,
+                "{identifier} uses the disabled network row color: {:?}",
+                network_alpha[identifier]
+            );
+        }
+        assert!(
+            network_alpha["TooFew.c4s"] > 200,
+            "network too-few is a warning, so its row stays enabled"
+        );
+
+        app.open_scenario_browser();
+        assert_eq!(
+            app.scenario_entry_enabled.get("Replay.c4s"),
+            Some(&true),
+            "local replay bypasses regular player-count checks"
+        );
+        assert_eq!(
+            app.scenario_entry_enabled.get("TooMany.c4s"),
+            Some(&false)
+        );
+        assert_eq!(
+            app.scenario_entry_enabled.get("TooFew.c4s"),
+            Some(&false),
+            "the same too-few row is fatal in the local selector"
+        );
+        let local_alpha = render_row_alphas(&mut app);
+        assert!(
+            local_alpha["TooFew.c4s"] > 0 && local_alpha["TooFew.c4s"] < 200,
+            "local too-few uses the disabled row color"
         );
         reset_cached_app_paths();
     }
