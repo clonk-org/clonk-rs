@@ -171,6 +171,30 @@ impl SelectedClientPlayer {
                 request
             })
     }
+
+    /// Builds the local AddPlayers packet used by
+    /// `C4PlayerList::CtrlJoinLocalNoNetwork`. Offline player infos retain
+    /// their source filename and carry no network resource.
+    pub fn offline_runtime_add_player_info_update(
+        &self,
+        client_id: i32,
+    ) -> Result<PlayerInfoUpdateRequest, SelectedClientPlayerError> {
+        if !self.player_name_valid {
+            return Err(SelectedClientPlayerError::PlayerNameContainsNul);
+        }
+        let color = self.network_color;
+        Ok(PlayerInfoUpdateRequest {
+            client_id,
+            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![ControlPlayerInfoEntry {
+                name: self.player_name.clone(),
+                filename: self.module_filename.clone(),
+                color,
+                original_color: color,
+                ..Default::default()
+            }],
+        })
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -310,8 +334,8 @@ mod tests {
 
     use lc_engine::{
         player_file::PlayerFile, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
-        CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
-        PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_USER,
+        PlayerInfoUpdateRequest, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+        CLIENT_PLAYER_INFO_FLAG_INITIAL, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_USER,
     };
 
     #[test]
@@ -456,6 +480,22 @@ mod tests {
                     color: 0x65_43_21,
                     original_color: 0x65_43_21,
                     resource: Some(resource),
+                    ..Default::default()
+                }],
+            }
+        );
+        assert_eq!(
+            selected
+                .offline_runtime_add_player_info_update(0)
+                .expect("valid player name builds an offline runtime request"),
+            PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![ControlPlayerInfoEntry {
+                    name: LegacyCString::from_bytes(b"Runtime".to_vec()).unwrap(),
+                    filename: selected.module_filename().clone(),
+                    color: 0x65_43_21,
+                    original_color: 0x65_43_21,
                     ..Default::default()
                 }],
             }

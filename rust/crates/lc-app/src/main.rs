@@ -11607,7 +11607,7 @@ enum ClassicIngameMenuChild {
     ClientDisconnect,
     GoalInfo(String),
     RuleInfo(String),
-    JoinPlayer(String),
+    JoinPlayer { file: String, detail: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11973,6 +11973,10 @@ impl fmt::Display for ClassicParityBoundary {
             Self::ScriptMenuPointerResources { detail } => write!(
                 f,
                 "classic script-menu pointer resources are unavailable: {detail}; refusing world-pointer fallthrough"
+            ),
+            Self::IngameMenuChild(ClassicIngameMenuChild::JoinPlayer { file, detail }) => write!(
+                f,
+                "classic offline in-game player join failed for `{file}`: {detail}; refusing status-text fallback"
             ),
             Self::IngameMenuChild(child) => write!(
                 f,
@@ -27965,15 +27969,30 @@ impl GameApp {
             MenuAction::RuleInfo(id) => {
                 self.submit_game_goal_rule_activation(player, &id)?;
             }
-            MenuAction::JoinPlayer(file) => match self.submit_runtime_network_player(&file) {
-                Ok(()) => {
-                    self.status_text = format!("Joining player {file}");
+            MenuAction::JoinPlayer(file) => {
+                if self.network_is_league || self.engine.replay() {
+                    return Ok(());
                 }
-                Err(error) => {
-                    tracing::warn!(%file, %error, "runtime network player join failed");
-                    self.status_text = format!("Unable to join player: {error}");
+                if self.network.is_some() {
+                    match self.submit_runtime_network_player(&file) {
+                        Ok(()) => {
+                            self.status_text = format!("Joining player {file}");
+                        }
+                        Err(error) => {
+                            tracing::warn!(%file, %error, "runtime network player join failed");
+                            self.status_text = format!("Unable to join player: {error}");
+                        }
+                    }
+                } else if let Err(error) = self.submit_runtime_offline_player(&file) {
+                    tracing::warn!(%file, %error, "runtime offline player join failed");
+                    return Err(classic_ingame_menu_child_error(
+                        ClassicIngameMenuChild::JoinPlayer {
+                            file,
+                            detail: error,
+                        },
+                    ));
                 }
-            },
+            }
             MenuAction::SelectTeam(team) => {
                 self.engine.mark_team_selection_pending(player)?;
                 if self.network.is_some() {
@@ -28021,12 +28040,39 @@ impl GameApp {
     fn available_runtime_player_files(&self) -> Vec<NewPlayerEntry> {
         // ActivateNewPlayer walks DirectoryIterator without reordering and
         // rejects directory groups and files already used by Game.Players
-        // (src/C4MainMenu.cpp:59-121; src/C4PlayerList.cpp:433-451). The
-        // activated startup entries are the app's retained local-file usage
-        // set until full runtime player-file ownership is modeled.
+        // (src/C4MainMenu.cpp:59-121; src/C4PlayerList.cpp:433-451).
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or_else(|| self.offline_local_client_id());
+        let joined_player_paths = self
+            .control_player_infos
+            .retained_rows_snapshot()
+            .1
+            .into_iter()
+            .filter(|(client_id, _, _)| *client_id == local_client_id)
+            .flat_map(|(_, _, players)| players)
+            .filter(|player| player.is_joined() && !player.filename.is_empty())
+            .map(|player| PathBuf::from(player.filename.to_string_lossy().into_owned()))
+            .collect::<Vec<_>>();
         self.startup_player_files
             .iter()
-            .filter(|player| player.path.is_file() && !player.render_model.activated)
+            .filter(|player| {
+                player.path.is_file()
+                    && !player.render_model.activated
+                    && !joined_player_paths.iter().any(|joined| {
+                        match (
+                            offline_player_real_path(joined),
+                            offline_player_real_path(&player.path),
+                        ) {
+                            (Ok(joined), Ok(candidate)) => {
+                                offline_player_paths_identical(&joined, &candidate)
+                            }
+                            _ => offline_player_paths_identical(joined, &player.path),
+                        }
+                    })
+            })
             .map(|player| NewPlayerEntry {
                 file: player.path.to_string_lossy().into_owned(),
                 name: c4_presentation_text(&player.player_file.name),
@@ -29722,6 +29768,90 @@ impl GameApp {
 
     fn submit_runtime_network_player(&mut self, file: &str) -> Result<(), String> {
         self.submit_network_player_path(Path::new(file), file, true)
+    }
+
+    fn submit_runtime_offline_player(&mut self, file: &str) -> Result<(), String> {
+        let source_path = Path::new(file);
+        let player_file = PlayerFile::load_from_path(source_path)
+            .map_err(|error| format!("failed to load {}: {error}", source_path.display()))?;
+        let wire_name = lc_engine::LegacyCString::from_bytes(lc_script::c4_string_bytes(file))
+            .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
+        let selected = SelectedClientPlayer::new(source_path, wire_name, player_file);
+        let alternate_color = selected.alternate_color();
+        let request = selected
+            .offline_runtime_add_player_info_update(self.offline_local_client_id())
+            .map_err(|error| error.to_string())?;
+        self.refresh_current_player_info_teams();
+        let next_info_id = self
+            .control_player_infos
+            .retained_rows_snapshot()
+            .0
+            .wrapping_add(1);
+        let restore_players = Vec::new();
+        let admission = match self.network_team_assignment.as_mut() {
+            Some(team_assignment) => team_assignment
+                .admit_request_with_alternate_colors(
+                    &mut self.control_player_infos,
+                    request,
+                    self.network_max_players,
+                    true,
+                    false,
+                    &restore_players,
+                    |player| (player.id == next_info_id).then_some(alternate_color),
+                )
+                .map_err(|error| error.to_string())?,
+            None => {
+                let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
+                    self.generated_team_name_template.clone(),
+                );
+                self.control_player_infos
+                    .admit_request_with_attributes_and_alternate_colors(
+                        request,
+                        self.network_max_players,
+                        None,
+                        &restore_players,
+                        &mut oracle,
+                        |player| (player.id == next_info_id).then_some(alternate_color),
+                    )
+                    .map_err(|error| error.to_string())?
+            }
+        }
+        .ok_or_else(|| "local player-info admission rejected the player".to_string())?;
+        let lc_engine::PlayerInfoAdmission {
+            mut updated_existing,
+            admitted,
+            joined_player_team_updates,
+        } = admission;
+        for update in joined_player_team_updates {
+            self.engine
+                .apply_admitted_player_team_update(update.info_id, update.team, update.color)
+                .map_err(|error| error.to_string())?;
+        }
+        updated_existing.push(admitted);
+        let tick = self.local_control_submission_tick();
+        let controls = updated_existing
+            .into_iter()
+            .map(NetworkControl::PlayerInfo)
+            .collect();
+        self.apply_ready_controls(tick, controls)
+            .map_err(|error| error.to_string())?;
+        self.snapshot = self.engine.snapshot();
+        Ok(())
+    }
+
+    fn offline_local_client_id(&self) -> i32 {
+        self.engine
+            .player(self.local_owner)
+            .map(|player| player.at_client().get())
+            .filter(|client_id| self.control_clients.contains(*client_id))
+            .or_else(|| {
+                self.control_clients
+                    .snapshot()
+                    .into_iter()
+                    .find(|client| client.activated && !client.observer)
+                    .map(|client| client.client_id)
+            })
+            .unwrap_or(0)
     }
 
     fn submit_runtime_network_player_path(
@@ -50592,11 +50722,43 @@ impl GameApp {
                         // LocalJoinUnjoinedPlayersInQueue. Offline Rust folds
                         // that queued follow-up inline, like the existing
                         // CreateScriptPlayer admission path above.
+                        let local_client_id = self.offline_local_client_id();
                         let joins = self.control_player_infos.issue_unjoined_local_players(
-                            0,
+                            local_client_id,
                             |info| (!info.filename.is_empty()).then(|| info.filename.clone()),
                         );
                         for join in joins {
+                            if self.recording.is_some() {
+                                let mut recorded_join = join.clone();
+                                let recorded = if join.filename.is_empty() {
+                                    Some(recorded_join)
+                                } else {
+                                    let path = PathBuf::from(
+                                        join.filename.to_string_lossy().into_owned(),
+                                    );
+                                    match packed_group_bytes(&path) {
+                                        Ok(player_data) => {
+                                            recorded_join.source =
+                                                lc_engine::JoinPlayerSource::Embedded(player_data);
+                                            Some(recorded_join)
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                info_id = join.info_id,
+                                                path = %path.display(),
+                                                %error,
+                                                "failed to embed offline runtime player in recording"
+                                            );
+                                            None
+                                        }
+                                    }
+                                };
+                                if let Some(recorded) = recorded {
+                                    self.record_control_batch(std::slice::from_ref(
+                                        &lc_engine::ControlPacket::JoinPlayer(recorded),
+                                    ));
+                                }
+                            }
                             self.apply_join_player_control(join)?;
                         }
                     }
@@ -51243,8 +51405,11 @@ impl GameApp {
             .network
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
-        let locally_controlled =
-            local_client_id == Some(join.at_client) && !info.is_script_player();
+        let offline_local = self.network.is_none()
+            && self.control_playback.is_none()
+            && join.at_client == self.offline_local_client_id();
+        let locally_controlled = !info.is_script_player()
+            && (local_client_id == Some(join.at_client) || offline_local);
         let pending_player_big_icon = match &join.source {
             lc_engine::JoinPlayerSource::Resource(core) => self
                 .admission_resources
@@ -51269,7 +51434,8 @@ impl GameApp {
                 None
             }
             lc_engine::JoinPlayerSource::Embedded(_)
-                if local_client_id == Some(join.by_client) =>
+                if local_client_id == Some(join.by_client)
+                    || (offline_local && join.by_client == join.at_client) =>
             {
                 let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
                 load_local_player_big_icon(&path)
@@ -51312,7 +51478,8 @@ impl GameApp {
                 None
             }
             lc_engine::JoinPlayerSource::Embedded(_)
-                if local_client_id == Some(join.by_client) =>
+                if local_client_id == Some(join.by_client)
+                    || (offline_local && join.by_client == join.at_client) =>
             {
                 let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
                 match PlayerFile::load_from_path(&path) {
@@ -117257,6 +117424,180 @@ ScenInfoArea=70,5,25,90
             .items()
             .iter()
             .any(|item| item.action == MenuAction::ActivateNewPlayer));
+    }
+
+    #[test]
+    fn offline_runtime_join_player_local_no_network() {
+        // JoinPlayer:<file> selects CtrlJoinLocalNoNetwork when networking is
+        // disabled. That path loads one local AddPlayers record, applies it as
+        // CID_PlrInfo, and lets LocalJoinUnjoinedPlayersInQueue issue the
+        // filename-backed join for the local control client
+        // (src/C4MainMenu.cpp:761-771; src/C4PlayerList.cpp:320-330;
+        // src/C4PlayerInfo.cpp:693-733).
+        let player_path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        let player_file = PlayerFile::load_from_path(player_path).expect("load player fixture");
+        let mut app = new_synthetic_running_sandbox_app();
+        app.startup_player_files.push(StartupPlayerFile {
+            path: player_path.to_path_buf(),
+            file_name: player_path
+                .file_name()
+                .expect("fixture has a basename")
+                .to_string_lossy()
+                .into_owned(),
+            player_file: player_file.clone(),
+            render_model: lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: player_file.name.clone(),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: player_file.normalized_preferred_color(),
+                score: player_file.score,
+                rounds: player_file.rounds,
+                rounds_won: player_file.rounds_won,
+                rounds_lost: player_file.rounds_lost,
+                total_playing_time: player_file.total_playing_time,
+                comment: String::new(),
+            },
+        });
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        let before_players = app.engine.snapshot().players.len();
+        let before_info_ids = app.control_player_infos.client_info_ids(0);
+        app.status_text = "offline join sentinel".to_string();
+        let recording_directory = tempdir().expect("create recording directory");
+        let recording_path = recording_directory.path().join("001-OfflineRuntime.c4s");
+        install_test_recording_template(&mut app, recording_path.clone());
+        app.start_recording(true)
+            .expect("start offline runtime recording");
+        let recorded_frame = u32::try_from(app.engine.frame()).expect("fixture frame fits u32");
+
+        app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+            player_path.to_string_lossy().into_owned(),
+        ))
+        .expect("offline runtime player joins");
+
+        let joined_info_ids = app
+            .control_player_infos
+            .client_info_ids(0)
+            .into_iter()
+            .filter(|info_id| !before_info_ids.contains(info_id))
+            .collect::<Vec<_>>();
+        let [joined_info_id] = joined_info_ids.as_slice() else {
+            panic!("expected one new local player info, got {joined_info_ids:?}");
+        };
+        let info = app
+            .control_player_infos
+            .get(*joined_info_id)
+            .expect("offline AddPlayers info is retained");
+        assert_eq!(
+            info.filename.as_bytes(),
+            lc_script::c4_string_bytes(player_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(info.name.as_bytes(), lc_script::c4_string_bytes(&player_file.name));
+        assert_eq!(
+            (info.color, info.original_color),
+            (
+                player_file.normalized_preferred_color(),
+                player_file.normalized_preferred_color(),
+            )
+        );
+        assert_eq!(info.resource, None);
+        assert_eq!(
+            info.flags
+                & (lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+                    | lc_engine::PLAYER_INFO_FLAG_JOINED),
+            lc_engine::PLAYER_INFO_FLAG_JOINED
+        );
+
+        let snapshot = app.engine.snapshot();
+        assert_eq!(snapshot.players.len(), before_players + 1);
+        let joined = snapshot
+            .players
+            .iter()
+            .find(|player| player.player_info_id == *joined_info_id)
+            .expect("PlayerInfo execution joins the runtime player");
+        assert_eq!(
+            app.engine
+                .player(joined.id)
+                .expect("joined player remains live")
+                .at_client(),
+            lc_engine::PlayerAtClient::HOST
+        );
+        assert!(snapshot.hud.local_players.contains(&joined.id));
+        assert!(app.local_controls.assignment(joined.id).is_some());
+        assert!(app
+            .physical_viewports
+            .iter()
+            .any(|viewport| viewport.displayed_player == joined.id));
+        assert_eq!(app.status_text, "offline join sentinel");
+        app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
+            .expect("reopen runtime player menu");
+        assert!(app
+            .ingame_menu
+            .as_ref()
+            .expect("other runtime player rows keep the menu open")
+            .items()
+            .iter()
+            .all(|item| {
+                item.action
+                    != MenuAction::JoinPlayer(player_path.to_string_lossy().into_owned())
+            }));
+
+        app.finish_recording()
+            .expect("finish offline runtime recording");
+        let recording = Group::open(&recording_path).expect("open offline runtime recording");
+        let mut playback = ControlRecordPlayback::from_bytes(
+            &recording
+                .read_file("CtrlRec.c4b")
+                .expect("read offline runtime control stream"),
+        )
+        .expect("decode offline runtime control stream");
+        let recorded_controls = playback.take_controls(recorded_frame);
+        assert!(recorded_controls.iter().any(|packet| {
+            matches!(
+                packet,
+                lc_engine::ControlPacket::PlayerInfo(info)
+                    if info.players.iter().any(|player| player.id == *joined_info_id)
+            )
+        }));
+        assert!(recorded_controls.iter().any(|packet| {
+            matches!(
+                packet,
+                lc_engine::ControlPacket::JoinPlayer(join)
+                    if join.info_id == *joined_info_id
+                        && matches!(
+                            &join.source,
+                            lc_engine::JoinPlayerSource::Embedded(data) if !data.is_empty()
+                        )
+            )
+        }));
+
+        let malformed_directory = tempdir().expect("create malformed player directory");
+        let malformed = malformed_directory.path().join("Malformed.c4p");
+        fs::write(&malformed, b"not a packed player group").expect("write malformed player");
+        let before_failure_players = app.engine.snapshot().players;
+        let before_failure_infos = app.control_player_infos.retained_rows_snapshot();
+        let error = app
+            .apply_ingame_menu_action(MenuAction::JoinPlayer(
+                malformed.to_string_lossy().into_owned(),
+            ))
+            .expect_err("malformed offline player returns a typed boundary");
+        let detail = match error {
+            EngineError::ClassicMenuParityBoundary { detail } => detail,
+            other => panic!("offline failure returned the wrong error: {other}"),
+        };
+        assert!(detail.contains("classic offline in-game player join failed"));
+        assert!(detail.contains("failed to load"));
+        assert!(detail.contains(&malformed.to_string_lossy().into_owned()));
+        assert_eq!(app.status_text, "offline join sentinel");
+        assert_eq!(app.engine.snapshot().players, before_failure_players);
+        assert_eq!(
+            app.control_player_infos.retained_rows_snapshot(),
+            before_failure_infos
+        );
     }
 
     #[test]
