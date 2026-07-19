@@ -1466,20 +1466,53 @@ fn load_group_png(group: &Group, name: &str) -> Option<ImageData> {
     decode_png(bytes)
 }
 
-/// Loads the root player `BigIcon.png` retained by the network-resource
-/// optimizer. Missing, oversized, nested, or malformed icons use the active
-/// game `Player` graphic instead.
-pub(crate) fn load_network_player_big_icon(path: &Path) -> Option<ImageData> {
-    let group = Group::open(path).ok()?;
+fn load_player_big_icon_from_group_with_limit(
+    group: &Group,
+    max_size: Option<u64>,
+) -> Option<ImageData> {
     let entry = group.entries().ok()?.into_iter().find(|entry| {
         !entry.is_directory
             && entry.relative_path.components().count() == 1
             && entry.name_bytes.eq_ignore_ascii_case(b"BigIcon.png")
     })?;
-    if entry.size > lc_network::MAX_PLAYER_BIG_ICON_SIZE {
+    if max_size.is_some_and(|max_size| entry.size > max_size) {
         return None;
     }
     decode_png(group.read_entry_bytes_exact(&entry).ok()?)
+}
+
+/// Loads the root `BigIcon.png` from an already-open player group. The runtime
+/// `C4Player::Load` path has no size cap; network inputs must use one of the
+/// capped loaders below after their optimizer/strip boundary.
+pub(crate) fn load_player_big_icon_from_group(group: &Group) -> Option<ImageData> {
+    load_player_big_icon_from_group_with_limit(group, None)
+}
+
+/// Loads the root player `BigIcon.png` directly from a local player file.
+/// This mirrors runtime `C4Player::Load`, which does not apply the lobby/network
+/// 20 KiB cap to the author's original file.
+pub(crate) fn load_local_player_big_icon(path: &Path) -> Option<ImageData> {
+    let group = Group::open(path).ok()?;
+    load_player_big_icon_from_group(&group)
+}
+
+/// Loads the root player `BigIcon.png` retained by the network-resource
+/// optimizer. Missing, oversized, nested, or malformed icons use the active
+/// game fallback graphic instead.
+pub(crate) fn load_network_player_big_icon(path: &Path) -> Option<ImageData> {
+    let group = Group::open(path).ok()?;
+    load_player_big_icon_from_group_with_limit(&group, Some(lc_network::MAX_PLAYER_BIG_ICON_SIZE))
+}
+
+/// Loads a stripped `CID_JoinPlr` player group carried as packed bytes. The
+/// label is diagnostic only; packed controls use the same 20 KiB BigIcon cap
+/// as network player resources.
+pub(crate) fn load_packed_network_player_big_icon(
+    label: PathBuf,
+    data: &[u8],
+) -> Option<ImageData> {
+    let group = Group::from_memory(label, data.to_vec()).ok()?;
+    load_player_big_icon_from_group_with_limit(&group, Some(lc_network::MAX_PLAYER_BIG_ICON_SIZE))
 }
 
 fn decode_png(bytes: Vec<u8>) -> Option<ImageData> {
@@ -1558,6 +1591,67 @@ mod tests {
                 comment: String::new(),
             },
         }
+    }
+
+    fn test_png(image: ImageData) -> Vec<u8> {
+        match encode_image_write(&PlayerImageWrite::Replace(image)).expect("encode test png") {
+            EncodedImageWrite::Replace(bytes) => bytes,
+            EncodedImageWrite::Keep | EncodedImageWrite::Clear => {
+                unreachable!("replace must encode png bytes")
+            }
+        }
+    }
+
+    #[test]
+    fn big_icon_loaders_only_accept_a_direct_root_file() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Player.c4p");
+        fs::create_dir_all(player.join("Nested")).expect("nested player directory");
+        let icon = tiny_image(73);
+        let png = test_png(icon.clone());
+        fs::write(player.join("Nested/BigIcon.png"), &png).expect("nested icon");
+
+        let group = Group::open(&player).expect("open directory player");
+        assert!(load_player_big_icon_from_group(&group).is_none());
+        assert!(load_local_player_big_icon(&player).is_none());
+
+        fs::write(player.join("bIgIcOn.PnG"), png).expect("root icon");
+        assert_eq!(load_local_player_big_icon(&player), Some(icon));
+    }
+
+    #[test]
+    fn big_icon_network_loaders_enforce_the_cap_but_local_load_does_not() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Player.c4p");
+        fs::create_dir_all(&player).expect("directory player");
+        let icon = tiny_image(91);
+        let small_png = test_png(icon.clone());
+
+        let mut oversized_png = small_png.clone();
+        oversized_png.resize(
+            usize::try_from(lc_network::MAX_PLAYER_BIG_ICON_SIZE).expect("cap fits usize") + 1,
+            0,
+        );
+        fs::write(player.join("BigIcon.png"), &oversized_png).expect("oversized local icon");
+        assert_eq!(load_local_player_big_icon(&player), Some(icon.clone()));
+        assert!(load_network_player_big_icon(&player).is_none());
+
+        let mut packed = MutableGroup::new("Player.c4p");
+        packed
+            .add_file("BigIcon.png", oversized_png)
+            .expect("oversized packed icon");
+        let bytes = packed.pack().expect("pack oversized player");
+        assert!(load_packed_network_player_big_icon(PathBuf::from("Player.c4p"), &bytes).is_none());
+
+        let mut packed = MutableGroup::new("Player.c4p");
+        packed
+            .add_file("BigIcon.png", small_png)
+            .expect("small packed icon");
+        let bytes = packed.pack().expect("pack small player");
+        assert_eq!(
+            load_packed_network_player_big_icon(PathBuf::from("Player.c4p"), &bytes),
+            Some(icon)
+        );
     }
 
     #[test]

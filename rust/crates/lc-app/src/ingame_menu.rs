@@ -87,6 +87,10 @@ pub enum MenuSymbol {
     /// `GfxR->fctPlayerClr` (Player.png) with the default blue overlay
     /// (C4MainMenu.cpp:69-70, 686).
     PlayerColor,
+    /// `C4Player::DrawHostility`: the opponent's owner-colored crew image,
+    /// overlaid with Menu.png phase 7 while the menu owner attacks them
+    /// (C4Player.cpp:1149-1165).
+    Hostility { opponent: i32, hostile: bool },
     /// A definition picture (`pDef->Draw(fctSymbol)`, C4MainMenu.cpp:367).
     Definition(String),
 }
@@ -117,6 +121,9 @@ pub enum MenuAction {
     ActivateRules,
     /// "ActivateMenu:Hostility" (C4MainMenu.cpp:743).
     ActivateHostility,
+    /// "SetHostility:<player>" queues `CID_ToggleHostility`
+    /// (C4MainMenu.cpp:773-783).
+    ToggleHostility(i32),
     /// "ActivateMenu:NewPlayer" (C4MainMenu.cpp:744).
     ActivateNewPlayer,
     /// "ActivateMenu:Options" (C4MainMenu.cpp:753).
@@ -173,6 +180,7 @@ pub enum MenuAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuPage {
     Main,
+    Hostility,
     TeamSelection,
     Goals,
     Rules,
@@ -183,6 +191,12 @@ pub enum MenuPage {
     Surrender,
     ClientDisconnect,
     AbortConfirm,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuStyle {
+    Normal,
+    Context,
 }
 
 /// One `C4MenuItem` (C4Menu.h:76-132) as used by C4MainMenu: caption,
@@ -381,6 +395,17 @@ pub struct NewPlayerEntry {
     pub name: String,
 }
 
+/// One native-order hostility row (`C4MainMenu::DoRefillInternal`,
+/// C4MainMenu.cpp:138-168). Hostility is directional: both declarations are
+/// needed to reproduce the row caption and its tooltip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostilityEntry {
+    pub opponent: i32,
+    pub name: String,
+    pub hostile: bool,
+    pub opponent_hostile: bool,
+}
+
 /// One ordered `C4TeamList` row as displayed by the initial team-selection
 /// menu (`C4MainMenu.cpp:175-232`). `caption` is the already composed
 /// `C4Team::GetNameWithParticipants()` text (or "New Team").
@@ -398,6 +423,7 @@ pub struct IngameMenuState {
     /// `None` mirrors the pre-`Init` `NO_OWNER` state.
     player: Option<i32>,
     page: MenuPage,
+    style: MenuStyle,
     caption: String,
     symbol: MenuSymbol,
     items: Vec<MenuItem>,
@@ -422,6 +448,9 @@ pub struct IngameMenuState {
     /// sets `ResetMenuPositions` whenever a viewport output rect changes,
     /// including split-screen relayouts that do not resize the OS window.
     last_area: Cell<Option<Rect>>,
+    /// Normal menus keep their initialized row count when a refill shrinks;
+    /// C4Menu only invalidates `LocationSet` on growth (C4Menu.cpp:961-968).
+    normal_lines: Cell<Option<i32>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,6 +473,7 @@ impl IngameMenuState {
         Self {
             player: None,
             page,
+            style: MenuStyle::Context,
             caption: caption.into(),
             symbol,
             items,
@@ -455,6 +485,7 @@ impl IngameMenuState {
             scroll_selection: Cell::new(None),
             location: Cell::new(None),
             last_area: Cell::new(None),
+            normal_lines: Cell::new(None),
         }
     }
 
@@ -629,6 +660,76 @@ impl IngameMenuState {
             false,
             None,
         ))
+    }
+
+    fn hostility_items(entries: &[HostilityEntry]) -> Vec<MenuItem> {
+        entries
+            .iter()
+            .map(|entry| {
+                let caption = if entry.hostile {
+                    format!("Attack {}", entry.name)
+                } else {
+                    format!("Don't attack {}", entry.name)
+                };
+                let relation = if entry.opponent_hostile {
+                    "hostile"
+                } else {
+                    "friendly"
+                };
+                let not_attacked = if entry.hostile { "" } else { "not " };
+                MenuItem::new(
+                    caption,
+                    MenuSymbol::Hostility {
+                        opponent: entry.opponent,
+                        hostile: entry.hostile,
+                    },
+                    MenuAction::ToggleHostility(entry.opponent),
+                    Some(&format!(
+                        "{} is currently {} and will {}be attacked.",
+                        entry.name, relation, not_attacked
+                    )),
+                )
+            })
+            .collect()
+    }
+
+    /// `C4MainMenu::ActivateHostility` and its first refill
+    /// (C4MainMenu.cpp:138-168,717-732).
+    pub fn hostility_menu(entries: &[HostilityEntry]) -> Self {
+        let mut menu = Self::new(
+            MenuPage::Hostility,
+            "Attack",
+            MenuSymbol::Menu(7),
+            Self::hostility_items(entries),
+            true,
+            Some(MenuAction::ActivateMain),
+        );
+        menu.style = MenuStyle::Normal;
+        menu
+    }
+
+    /// Native `ClearItems(false)` + `AdjustSelection` refill. Keeping the
+    /// menu instance preserves its permanent state, dragged position,
+    /// selection timer and numeric selection across the Tick35 rebuild.
+    pub fn refill_hostility(&mut self, entries: &[HostilityEntry]) {
+        debug_assert_eq!(self.page, MenuPage::Hostility);
+        let previous_count = self.items.len();
+        self.items = Self::hostility_items(entries);
+        if self.selection >= self.items.len() {
+            self.selection = self.items.len().saturating_sub(1);
+            self.time_on_selection = 0;
+            self.scroll_selection.set(None);
+        } else if previous_count == 0 && !self.items.is_empty() {
+            // Native empty menus retain Selection=-1. AdjustSelection picks
+            // row zero when the first item appears and resets its tooltip age.
+            self.time_on_selection = 0;
+        }
+        if self.items.len() > previous_count {
+            self.location.set(None);
+            self.last_area.set(None);
+            self.normal_lines.set(None);
+            self.scroll_selection.set(None);
+        }
     }
 
     /// `C4MainMenu::ActivateOptions` (C4MainMenu.cpp:553-580).
@@ -913,7 +1014,15 @@ impl IngameMenuState {
     }
 
     pub fn caption(&self) -> &str {
-        &self.caption
+        if self.style == MenuStyle::Normal {
+            self.items
+                .get(self.selection)
+                .map(|item| item.caption.as_str())
+                .filter(|caption| !caption.is_empty())
+                .unwrap_or(&self.caption)
+        } else {
+            &self.caption
+        }
     }
 
     pub fn items(&self) -> &[MenuItem] {
@@ -971,6 +1080,7 @@ impl IngameMenuState {
     pub(crate) fn reset_location(&mut self) {
         self.location.set(None);
         self.last_area.set(None);
+        self.normal_lines.set(None);
         self.scroll_selection.set(None);
     }
 
@@ -1005,9 +1115,9 @@ impl IngameMenuState {
         self.time_on_selection = self.time_on_selection.saturating_add(1);
     }
 
-    /// `C4Menu::Control` (C4Menu.cpp:433-484) for a one-column menu: all
-    /// four directions move the selection by one with wrap-around; Enter
-    /// activates; COM_MenuClose closes with the close command.
+    /// `C4Menu::Control` (C4Menu.cpp:433-484): left/right move one cell and
+    /// up/down move one row (`Columns`, five for normal icon menus), with the
+    /// native incomplete-grid wrapping behavior.
     pub fn handle_command(
         &mut self,
         command: ControlCommand,
@@ -1020,12 +1130,20 @@ impl IngameMenuState {
             return None;
         }
         match command {
-            ControlCommand::MenuUp | ControlCommand::MenuLeft => {
+            ControlCommand::MenuLeft => {
                 self.move_selection(-1);
                 None
             }
-            ControlCommand::MenuDown | ControlCommand::MenuRight => {
+            ControlCommand::MenuRight => {
                 self.move_selection(1);
+                None
+            }
+            ControlCommand::MenuUp => {
+                self.move_selection_vertical(-1);
+                None
+            }
+            ControlCommand::MenuDown => {
+                self.move_selection_vertical(1);
                 None
             }
             ControlCommand::MenuSelect
@@ -1054,9 +1172,35 @@ impl IngameMenuState {
             return;
         }
         let len = self.items.len() as i32;
-        self.selection = (self.selection as i32 + delta).rem_euclid(len) as usize;
-        self.time_on_selection = 0;
-        self.scroll_selection.set(None);
+        let selection = (self.selection as i32 + delta).rem_euclid(len) as usize;
+        if selection != self.selection {
+            self.selection = selection;
+            self.time_on_selection = 0;
+            self.scroll_selection.set(None);
+        }
+    }
+
+    fn move_selection_vertical(&mut self, direction: i32) {
+        if self.items.is_empty() {
+            return;
+        }
+        let columns = match self.style {
+            MenuStyle::Normal => 5,
+            MenuStyle::Context => 1,
+        };
+        let selection = self.selection as i32;
+        let count = self.items.len() as i32;
+        let mut delta = direction * columns;
+        if delta < 0 && selection + delta < 0 {
+            while selection + delta + columns < count {
+                delta += columns;
+            }
+        } else if delta > 0 && selection + delta >= count {
+            while selection + delta - columns >= 0 {
+                delta -= columns;
+            }
+        }
+        self.move_selection(delta);
     }
 
     /// Draws the menu with the classic C4Menu context-style furniture. The
@@ -1139,7 +1283,7 @@ impl IngameMenuState {
     }
 
     /// Menu geometry per `C4Menu::InitLocation`/`InitSize`
-    /// (C4Menu.cpp:642-783) for `C4MN_Style_Context`, one column.
+    /// (C4Menu.cpp:642-783), including the five-column 35px normal grid.
     fn layout(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> MenuLayout {
         if self
             .last_area
@@ -1147,31 +1291,47 @@ impl IngameMenuState {
             .is_some_and(|previous| previous != area)
         {
             self.location.set(None);
+            self.normal_lines.set(None);
             self.scroll_selection.set(None);
         }
-        // ItemHeight = max(C4MN_SymbolSize, font line height) (C4Menu.cpp:650).
-        let item_height = MN_SYMBOL_SIZE.max(font.line_height());
-        // Caption contributes ItemHeight + 16 (C4Menu.cpp:652-655).
-        let mut item_width = font.text_width(&self.caption) + item_height + 16;
-        for item in &self.items {
-            // symbol width == item height in context menus (C4Menu.cpp:137-139).
-            item_width = item_width.max(font.text_width(&item.caption) + item_height);
-        }
-        item_width += 3; // (C4Menu.cpp:664)
+        let (columns, cell_width, item_height, client_width) = match self.style {
+            MenuStyle::Normal => (5, SYMBOL_SIZE, SYMBOL_SIZE, 5 * SYMBOL_SIZE),
+            MenuStyle::Context => {
+                // ItemHeight = max(C4MN_SymbolSize, font line height).
+                let item_height = MN_SYMBOL_SIZE.max(font.line_height());
+                // Caption contributes ItemHeight + 16 (C4Menu.cpp:652-655).
+                let mut item_width = font.text_width(&self.caption) + item_height + 16;
+                for item in &self.items {
+                    item_width = item_width.max(font.text_width(&item.caption) + item_height);
+                }
+                item_width += 3; // keep text off the right border
+                (1, item_width, item_height, item_width)
+            }
+        };
 
         let area_w = area.width as i32;
         let area_h = area.height as i32;
-        // Lines = item count clamped to the viewport (C4Menu.cpp:715-720).
-        let lines = (self.items.len() as i32)
+        let item_count = i32::try_from(self.items.len()).unwrap_or(i32::MAX);
+        let row_count = item_count / columns + i32::from(item_count % columns != 0);
+        // Lines = row count clamped to the viewport (C4Menu.cpp:715-720).
+        let computed_lines = row_count
             .min(((area_h - 100) / item_height.max(1)).max(1))
             .max(1);
+        let lines = if self.style == MenuStyle::Normal {
+            self.normal_lines.get().unwrap_or_else(|| {
+                self.normal_lines.set(Some(computed_lines));
+                computed_lines
+            })
+        } else {
+            computed_lines
+        };
 
         // Margins: title bar on top (Dialog::GetMarginTop,
         // C4GuiDialogs.h:95), C4MN_FrameWidth left/right/bottom plus the
         // extra bar when menu controls are drawn (C4Menu.h:262-264).
         let title_height = font.line_height().max(MIN_WOOD_BAR_HGT);
         let extra_height = if gfx.show_commands { MN_SYMBOL_SIZE } else { 0 };
-        let width = item_width + 2 * MN_FRAME_WIDTH;
+        let width = client_width + 2 * MN_FRAME_WIDTH;
         let height = lines * item_height + title_height + extra_height + MN_FRAME_WIDTH;
 
         // Alignment Left|Bottom (C4Menu.cpp:734-745): X = C4SymbolSize,
@@ -1192,9 +1352,7 @@ impl IngameMenuState {
         }
 
         let client_height = lines.saturating_mul(item_height);
-        let content_height = i32::try_from(self.items.len())
-            .unwrap_or(i32::MAX)
-            .saturating_mul(item_height);
+        let content_height = row_count.saturating_mul(item_height);
         let max_scroll = content_height.saturating_sub(client_height).max(0);
         let mut scroll_y = self.scroll_y.get().clamp(0, max_scroll);
 
@@ -1205,6 +1363,8 @@ impl IngameMenuState {
             if lines > 1 && !self.items.is_empty() {
                 let selection_y = i32::try_from(self.selection)
                     .unwrap_or(i32::MAX)
+                    .checked_div(columns)
+                    .unwrap_or_default()
                     .saturating_mul(item_height);
                 scroll_y = scroll_range_in_view(
                     scroll_y,
@@ -1220,9 +1380,11 @@ impl IngameMenuState {
 
         MenuLayout {
             bounds: Rect::new(x, y, width as u32, height as u32),
-            item_width,
+            client_width,
+            cell_width,
             item_height,
             title_height,
+            columns,
             lines,
             scroll_y,
             max_scroll,
@@ -1251,9 +1413,11 @@ fn scroll_range_in_view(
 /// Computed menu geometry (see [`IngameMenuState::layout`]).
 struct MenuLayout {
     bounds: Rect,
-    item_width: i32,
+    client_width: i32,
+    cell_width: i32,
     item_height: i32,
     title_height: i32,
+    columns: i32,
     lines: i32,
     scroll_y: i32,
     max_scroll: i32,
@@ -1273,7 +1437,7 @@ impl MenuLayout {
         Rect::new(
             self.bounds.x + MN_FRAME_WIDTH,
             self.bounds.y + self.title_height,
-            self.item_width as u32,
+            self.client_width as u32,
             self.lines.saturating_mul(self.item_height) as u32,
         )
     }
@@ -1289,16 +1453,22 @@ impl MenuLayout {
     }
 
     fn item_rect(&self, index: usize) -> Option<Rect> {
-        let row_y = i32::try_from(index)
-            .unwrap_or(i32::MAX)
+        let index = i32::try_from(index).unwrap_or(i32::MAX);
+        let column_x = index
+            .rem_euclid(self.columns)
+            .saturating_mul(self.cell_width);
+        let row_y = index
+            .checked_div(self.columns)
+            .unwrap_or_default()
             .saturating_mul(self.item_height)
             .saturating_sub(self.scroll_y);
         let client = self.client_rect();
+        let x = client.x.saturating_add(column_x);
         let y = client.y.saturating_add(row_y);
         let bottom = y.saturating_add(self.item_height);
         let client_bottom = client.y.saturating_add(client.height as i32);
         (bottom > client.y && y < client_bottom)
-            .then(|| Rect::new(client.x, y, self.item_width as u32, self.item_height as u32))
+            .then(|| Rect::new(x, y, self.cell_width as u32, self.item_height as u32))
     }
 }
 
@@ -1317,6 +1487,8 @@ pub struct IngameMenuGraphics {
     pub hud: HudGraphics,
     /// Runtime player colors keyed by C4Player number.
     pub owner_colors: HashMap<i32, Color>,
+    /// Resource-backed `C4Player::BigIcon` surfaces keyed by player number.
+    pub hostility_big_icons: HashMap<i32, ImageData>,
     /// Menu.png (35x35 phases, C4GraphicsResource.cpp:219).
     pub menu: Option<ImageData>,
     /// Options.png (35x35 phases, C4GraphicsResource.cpp:224).
@@ -1345,6 +1517,8 @@ pub struct IngameMenuGraphics {
     /// `Config.Graphics.ShowCommands` (C4Config.cpp:449) — draws the bottom
     /// command bar (C4Menu.cpp:851-880).
     pub show_commands: bool,
+    /// `Config.Graphics.ShowPortraits`, used by `C4Player::DrawHostility`.
+    pub show_portraits: bool,
     /// `C4Menu::HasMouse()` passed to `Dialog::SetTitle`: reserves and draws
     /// the title-bar close button only for the controlling mouse player.
     pub show_close_button: bool,
@@ -1397,10 +1571,62 @@ impl IngameMenuGraphics {
                 .player
                 .as_ref()
                 .map(|img| (img, Rect::new(0, 0, img.width(), img.height()))),
+            MenuSymbol::Hostility { .. } => None,
             MenuSymbol::Definition(id) => self
                 .definition_icons
                 .get(id)
                 .map(|img| (img, Rect::new(0, 0, img.width(), img.height()))),
+        }
+    }
+
+    fn draw_hostility_symbol(
+        &self,
+        surface: &mut Surface,
+        opponent: i32,
+        hostile: bool,
+        dest: Rect,
+        gamma: Option<&GammaRamp>,
+    ) {
+        if let Some(big_icon) = self
+            .show_portraits
+            .then(|| self.hostility_big_icons.get(&opponent))
+            .flatten()
+        {
+            draw_image_region_aspect(
+                surface,
+                big_icon,
+                Rect::new(0, 0, big_icon.width(), big_icon.height()),
+                dest,
+                false,
+                gamma,
+            );
+        } else if let Some(crew) = self.hud.crew.as_ref() {
+            let owner = self
+                .owner_colors
+                .get(&opponent)
+                .copied()
+                .filter(|color| color.r != 0 || color.g != 0 || color.b != 0)
+                .unwrap_or_else(|| Color::opaque(0, 0, 0xff));
+            let colored = lc_frontend::hud::colorize_by_owner(crew, owner);
+            draw_image_region_aspect(
+                surface,
+                &colored,
+                Rect::new(0, 0, colored.width(), colored.height()),
+                dest,
+                false,
+                gamma,
+            );
+        }
+        if hostile {
+            if let Some(menu) = self.menu.as_ref() {
+                draw_image_region(
+                    surface,
+                    menu,
+                    Rect::new(35 * 7, 0, 35, 35),
+                    dest,
+                    gamma,
+                );
+            }
         }
     }
 }
@@ -1509,8 +1735,12 @@ fn draw_menu(
         .map(|clip| clip.intersection(client).unwrap_or(Rect::new(0, 0, 0, 0)))
         .unwrap_or(client);
     surface.set_clip(client_clip);
-    let first = usize::try_from(layout.scroll_y / layout.item_height).unwrap_or_default();
-    let visible = layout.lines as usize + usize::from(layout.scroll_y % layout.item_height != 0);
+    let first_row = usize::try_from(layout.scroll_y / layout.item_height).unwrap_or_default();
+    let visible_rows = layout.lines as usize
+        + usize::from(layout.scroll_y % layout.item_height != 0);
+    let columns = usize::try_from(layout.columns).unwrap_or(1);
+    let first = first_row.saturating_mul(columns);
+    let visible = visible_rows.saturating_mul(columns);
     for (index, item) in menu.items().iter().enumerate().skip(first).take(visible) {
         let Some(row_rect) = layout.item_rect(index) else {
             continue;
@@ -1522,31 +1752,37 @@ fn draw_menu(
             fill_rect(surface, row_rect, SELECTION_COLOR, gamma);
         }
         // Symbol square at the left, width == item height (C4Menu.cpp:156-166).
-        if let Some((image, src)) = gfx.symbol_source(&item.symbol) {
+        let symbol_rect = Rect::new(
+            row_rect.x,
+            item_y,
+            layout.item_height as u32,
+            row_rect.height,
+        );
+        if let MenuSymbol::Hostility { opponent, hostile } = &item.symbol {
+            gfx.draw_hostility_symbol(surface, *opponent, *hostile, symbol_rect, gamma);
+        } else if let Some((image, src)) = gfx.symbol_source(&item.symbol) {
             draw_image_region_aspect(
                 surface,
                 image,
                 src,
-                Rect::new(
-                    row_rect.x,
-                    item_y,
-                    layout.item_height as u32,
-                    row_rect.height,
-                ),
+                symbol_rect,
                 matches!(item.symbol, MenuSymbol::PlayerColor),
                 gamma,
             );
         }
-        // Caption (C4MN_Style_Context: FontRegular, left, C4Menu.cpp:170-172).
-        font.draw_with_gamma(
-            surface,
-            row_rect.x + layout.item_height,
-            item_y,
-            &item.caption,
-            MESSAGE_COLOR,
-            TextAlign::Left,
-            gamma,
-        );
+        // Normal menus are icon-only; their selected caption is installed in
+        // the title. Context menus draw the caption alongside the symbol.
+        if menu.style == MenuStyle::Context {
+            font.draw_with_gamma(
+                surface,
+                row_rect.x + layout.item_height,
+                item_y,
+                &item.caption,
+                MESSAGE_COLOR,
+                TextAlign::Left,
+                gamma,
+            );
+        }
     }
     match previous_clip {
         Some(clip) => surface.set_clip(clip),
@@ -2077,6 +2313,152 @@ mod tests {
     }
 
     #[test]
+    fn hostility_menu_matches_directional_cpp_rows_and_refill() {
+        let mut menu = IngameMenuState::hostility_menu(&[
+            HostilityEntry {
+                opponent: 7,
+                name: "Ada".to_string(),
+                hostile: false,
+                opponent_hostile: true,
+            },
+            HostilityEntry {
+                opponent: 9,
+                name: "Bob".to_string(),
+                hostile: true,
+                opponent_hostile: false,
+            },
+        ]);
+
+        assert_eq!(menu.page(), MenuPage::Hostility);
+        assert_eq!(menu.caption(), "Don't attack Ada");
+        assert_eq!(captions(&menu), vec!["Don't attack Ada", "Attack Bob"]);
+        assert_eq!(menu.items()[0].action, MenuAction::ToggleHostility(7));
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Ada is currently hostile and will not be attacked.")
+        );
+        assert_eq!(
+            menu.items()[1].info_caption.as_deref(),
+            Some("Bob is currently friendly and will be attacked.")
+        );
+        assert!(matches!(
+            menu.items()[1].symbol,
+            MenuSymbol::Hostility {
+                opponent: 9,
+                hostile: true
+            }
+        ));
+        assert!(menu.is_permanent());
+        assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
+
+        menu.set_selection(1);
+        assert_eq!(menu.caption(), "Attack Bob");
+        menu.refill_hostility(&[HostilityEntry {
+            opponent: 7,
+            name: "Ada".to_string(),
+            hostile: true,
+            opponent_hostile: true,
+        }]);
+        assert_eq!(captions(&menu), vec!["Attack Ada"]);
+        assert_eq!(menu.caption(), "Attack Ada");
+        assert_eq!(menu.selection(), 0);
+
+        let entries = (0..7)
+            .map(|opponent| HostilityEntry {
+                opponent,
+                name: opponent.to_string(),
+                hostile: false,
+                opponent_hostile: false,
+            })
+            .collect::<Vec<_>>();
+        let mut grid = IngameMenuState::hostility_menu(&entries);
+        grid.handle_command(ControlCommand::MenuUp, CommandKind::Press);
+        assert_eq!(grid.selection(), 5, "up wraps to the last row in column zero");
+        grid.handle_command(ControlCommand::MenuDown, CommandKind::Press);
+        assert_eq!(grid.selection(), 0);
+        grid.set_selection(2);
+        grid.handle_command(ControlCommand::MenuUp, CommandKind::Press);
+        assert_eq!(grid.selection(), 2, "an incomplete column has no second row");
+    }
+
+    #[test]
+    fn hostility_symbol_renderer_matches_cpp_portrait_color_and_overlay_layers() {
+        let opponent = 7;
+        let portrait = Color::opaque(0xe0, 0x10, 0x20);
+        let owner = Color::opaque(0x10, 0xc0, 0x20);
+        let attack = Color::opaque(0xf0, 0xd0, 0x10);
+        let mut gfx = IngameMenuGraphics {
+            hud: HudGraphics {
+                crew: Some(ImageData::new(1, 1, vec![0, 0, 0xff, 0xff])),
+                ..HudGraphics::default()
+            },
+            owner_colors: HashMap::from([(opponent, owner)]),
+            hostility_big_icons: HashMap::from([(
+                opponent,
+                ImageData::new(1, 1, vec![portrait.r, portrait.g, portrait.b, portrait.a]),
+            )]),
+            menu: Some(ImageData::new(
+                35 * 8,
+                35,
+                [attack.r, attack.g, attack.b, attack.a].repeat(35 * 8 * 35),
+            )),
+            show_portraits: true,
+            ..IngameMenuGraphics::default()
+        };
+        let draw = |gfx: &IngameMenuGraphics, hostile| {
+            let mut surface = Surface::new(1, 1, lc_graphics::PixelFormat::Rgba8888);
+            gfx.draw_hostility_symbol(
+                &mut surface,
+                opponent,
+                hostile,
+                Rect::new(0, 0, 1, 1),
+                None,
+            );
+            surface.get_pixel(0, 0)
+        };
+
+        assert_eq!(draw(&gfx, false), Some(portrait));
+        gfx.show_portraits = false;
+        assert_eq!(draw(&gfx, false), Some(owner));
+        assert_eq!(draw(&gfx, true), Some(attack));
+    }
+
+    #[test]
+    fn hostility_normal_grid_keeps_initialized_height_until_growth() {
+        use lc_graphics::BitmapFont;
+
+        let entries = |count| {
+            (0..count)
+                .map(|opponent| HostilityEntry {
+                    opponent,
+                    name: opponent.to_string(),
+                    hostile: false,
+                    opponent_hostile: false,
+                })
+                .collect::<Vec<_>>()
+        };
+        let font_backend = BitmapFont::new();
+        let font = HudFont::Fallback(&font_backend);
+        let gfx = IngameMenuGraphics::default();
+        let area = Rect::new(0, 0, 640, 480);
+        let mut menu = IngameMenuState::hostility_menu(&entries(7));
+
+        assert_eq!(menu.layout(area, &font, &gfx).lines, 2);
+        menu.refill_hostility(&entries(1));
+        assert_eq!(
+            menu.layout(area, &font, &gfx).lines,
+            2,
+            "normal refill shrink retains C4Menu's initialized client height"
+        );
+        menu.refill_hostility(&entries(11));
+        assert_eq!(
+            menu.layout(area, &font, &gfx).lines,
+            3,
+            "growth invalidates LocationSet and recomputes the normal grid"
+        );
+    }
+
+    #[test]
     fn team_switch_entry_is_typed_instead_of_a_successful_no_op() {
         let cond = MainMenuConditions {
             team_switch_allowed: true,
@@ -2131,6 +2513,25 @@ mod tests {
         assert_eq!(menu.selection(), 1);
         menu.handle_command(ControlCommand::MenuLeft, CommandKind::Press);
         assert_eq!(menu.selection(), 0);
+    }
+
+    #[test]
+    fn hostility_refill_resets_tooltip_age_when_first_row_appears() {
+        let mut menu = IngameMenuState::hostility_menu(&[]);
+        for _ in 0..INFO_CAPTION_DELAY {
+            menu.tick();
+        }
+        assert_eq!(menu.time_on_selection, INFO_CAPTION_DELAY);
+
+        menu.refill_hostility(&[HostilityEntry {
+            opponent: 7,
+            name: "Ada".to_string(),
+            hostile: true,
+            opponent_hostile: false,
+        }]);
+
+        assert_eq!(menu.selection(), 0);
+        assert_eq!(menu.time_on_selection, 0);
     }
 
     // C4Menu::Enter on a non-permanent menu closes it before the command

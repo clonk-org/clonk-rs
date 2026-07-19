@@ -62,9 +62,9 @@ use gamepad::{
     LegacyGamepadButton, SourcedGamepadEvent,
 };
 use ingame_menu::{
-    DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState,
-    MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
-    TeamSelectionEntry, UpperBoardMode,
+    DisplayFlags, GoalRuleEntry, HostilityEntry, IngameMenuGraphics, IngameMenuPointerTarget,
+    IngameMenuState, MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags,
+    SaveSlotState, TeamSelectionEntry, UpperBoardMode,
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use lc_app::{
@@ -202,8 +202,9 @@ use startup_player_files::{
     PlayerActivationRefusal, PlayerImageWrite, SavedStartupPlayer, StartupCrewFile,
     StartupCrewMutationError, StartupPlayerFile, delete_crew_file, delete_player_file,
     crew_file_name_for_title, discover_crew_files, discover_player_files, discover_player_files_in,
-    load_network_player_big_icon, persist_activations, rename_crew, save_player_properties,
-    set_crew_death_message, set_crew_participation,
+    load_local_player_big_icon, load_network_player_big_icon,
+    load_packed_network_player_big_icon, load_player_big_icon_from_group, persist_activations,
+    rename_crew, save_player_properties, set_crew_death_message, set_crew_participation,
 };
 use time::{OffsetDateTime, macros::format_description};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -4968,6 +4969,9 @@ impl FrontendAssets {
                 missing.push(name);
             }
         }
+        if self.hud_graphics.crew.is_none() {
+            missing.push("Crew.png");
+        }
         if missing.is_empty() {
             Ok(())
         } else {
@@ -5684,6 +5688,7 @@ fn run_integration_test(
             "savegame" => Some(MenuAction::ActivateSavegame),
             "goals" => Some(MenuAction::ActivateGoals),
             "rules" => Some(MenuAction::ActivateRules),
+            "hostility" => Some(MenuAction::ActivateHostility),
             "surrender" => Some(MenuAction::ActivateSurrender),
             "abort" => Some(MenuAction::Abort),
             _ => None,
@@ -10287,6 +10292,11 @@ struct GameApp {
     ingame_menu: PlayerIngameMenus,
     /// Cached Graphics.c4g sheets for the in-game menu renderer.
     ingame_menu_gfx: Option<IngameMenuGraphics>,
+    /// `C4Player::BigIcon` equivalents keyed by stable C4PlayerInfo ID. The
+    /// renderer projects these onto the current runtime player numbers.
+    runtime_player_big_icons: HashMap<i32, ImageData>,
+    /// Player-info sources already checked without finding a usable BigIcon.
+    runtime_player_big_icon_misses: HashSet<i32>,
     /// Per-viewport-owner async C4Menu::TimeOnSelection presentation state.
     /// This is deliberately outside the deterministic engine menu state
     /// (C4Menu.cpp:804-821).
@@ -11579,7 +11589,6 @@ enum ClassicStartupAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicIngameMenuChild {
-    Hostility,
     TeamSelection,
     Observer,
     NewPlayer,
@@ -20209,6 +20218,8 @@ impl GameApp {
             object_menu: None,
             ingame_menu: PlayerIngameMenus::default(),
             ingame_menu_gfx: None,
+            runtime_player_big_icons: HashMap::new(),
+            runtime_player_big_icon_misses: HashSet::new(),
             script_menu_presentations: BTreeMap::new(),
             menu_viewport_rects: BTreeMap::new(),
             display_flags: load_display_flags(paths),
@@ -26944,6 +26955,130 @@ impl GameApp {
         }
     }
 
+    fn hostility_entries_for_player(&self, player: i32) -> Option<Vec<HostilityEntry>> {
+        let owner = self.engine.player(player)?;
+        Some(
+            self.engine
+                .players()
+                .filter(|opponent| {
+                    opponent.id() != player
+                        && !self
+                            .control_player_infos
+                            .get(opponent.player_info_id())
+                            .is_some_and(|info| {
+                                info.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE != 0
+                            })
+                })
+                .map(|opponent| HostilityEntry {
+                    opponent: opponent.id(),
+                    name: c4_presentation_text(opponent.name()),
+                    hostile: owner.is_hostile_towards(opponent.id()),
+                    opponent_hostile: opponent.is_hostile_towards(player),
+                })
+                .collect(),
+        )
+    }
+
+    fn hostility_opponent_is_user(&self, opponent: i32) -> bool {
+        let Some(opponent) = self.engine.player(opponent) else {
+            return false;
+        };
+        self.control_player_infos
+            .get(opponent.player_info_id())
+            .map_or(true, |info| {
+                info.player_type == lc_engine::PLAYER_INFO_TYPE_USER
+            })
+    }
+
+    /// Populate the app-owned counterpart of `C4Player::BigIcon` from the
+    /// same local player selection or completed network resource that
+    /// created the runtime player. Cache by PlayerInfo ID because runtime
+    /// numbers may be recreated while loading a savegame.
+    fn hydrate_runtime_player_big_icons(&mut self) {
+        if !self.display_flags.portraits {
+            return;
+        }
+        let pending = self
+            .engine
+            .players()
+            .map(|player| player.player_info_id())
+            .filter(|info_id| {
+                !self.runtime_player_big_icons.contains_key(info_id)
+                    && !self.runtime_player_big_icon_misses.contains(info_id)
+            })
+            .collect::<HashSet<_>>();
+
+        for info_id in pending {
+            let Some(info) = self.control_player_infos.get(info_id).cloned() else {
+                continue;
+            };
+            if let Some(startup) = self.startup_player_files.iter().find(|startup| {
+                lc_script::c4_string_bytes(&startup.file_name) == info.filename.as_bytes()
+            }) {
+                if let Some(icon) = startup.render_model.big_icon.clone() {
+                    self.runtime_player_big_icons.insert(info_id, icon);
+                } else {
+                    self.runtime_player_big_icon_misses.insert(info_id);
+                }
+                continue;
+            }
+
+            let has_resource = info.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE != 0;
+            let complete_path = info.resource.as_ref().and_then(|resource| {
+                self.admission_resources
+                    .complete_path(resource.id)
+                    .map(Path::to_path_buf)
+            });
+            if let Some(path) = complete_path {
+                if let Some(icon) = load_network_player_big_icon(&path) {
+                    self.runtime_player_big_icons.insert(info_id, icon);
+                } else {
+                    self.runtime_player_big_icon_misses.insert(info_id);
+                }
+            } else if !has_resource {
+                // Fileless script/scenario players have no player-group
+                // BigIcon to discover later.
+                self.runtime_player_big_icon_misses.insert(info_id);
+            }
+        }
+    }
+
+    fn cache_joined_player_big_icon(&mut self, info_id: i32, icon: Option<&ImageData>) {
+        self.runtime_player_big_icon_misses.remove(&info_id);
+        if let Some(icon) = icon {
+            self.runtime_player_big_icons.insert(info_id, icon.clone());
+        } else {
+            self.runtime_player_big_icons.remove(&info_id);
+            self.runtime_player_big_icon_misses.insert(info_id);
+        }
+    }
+
+    fn activate_hostility_menu_for_player(&mut self, player: i32) {
+        let menu = self
+            .hostility_entries_for_player(player)
+            .map(|entries| IngameMenuState::hostility_menu(&entries));
+        self.ingame_menu.replace(player, menu);
+    }
+
+    fn refresh_hostility_menus(&mut self) {
+        let players = self
+            .ingame_menu
+            .iter()
+            .filter_map(|(player, menu)| {
+                (menu.page() == ingame_menu::MenuPage::Hostility).then_some(player)
+            })
+            .collect::<Vec<_>>();
+        for player in players {
+            let Some(entries) = self.hostility_entries_for_player(player) else {
+                self.close_ingame_menu_for_player(player);
+                continue;
+            };
+            if let Some(menu) = self.ingame_menu.get_mut(player) {
+                menu.refill_hostility(&entries);
+            }
+        }
+    }
+
     /// `C4FullScreen::ShowAbortDlg`: keep the confirmation unique, suppress
     /// it while evaluation is visible, and expose Restart only to the control
     /// host (or a cinematic film), as `C4AbortGameDialog` does.
@@ -27530,9 +27665,37 @@ impl GameApp {
                     .replace(player, Some(IngameMenuState::client_disconnect_menu()));
             }
             MenuAction::ActivateHostility => {
-                return Err(classic_ingame_menu_child_error(
-                    ClassicIngameMenuChild::Hostility,
-                ));
+                self.activate_hostility_menu_for_player(player);
+            }
+            MenuAction::ToggleHostility(opponent) => {
+                if !self.engine.team_configuration().allow_hostility_change
+                    || !self.hostility_opponent_is_user(opponent)
+                {
+                    return Ok(());
+                }
+                if self.network.is_some() {
+                    let tick = self.local_control_submission_tick();
+                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                        network.submit_toggle_hostility(tick, player, opponent)
+                    }) {
+                        tracing::warn!(player, opponent, %error, "failed to queue hostility toggle");
+                    }
+                } else {
+                    let by_client = self
+                        .engine
+                        .player(player)
+                        .map(|player| player.at_client().get())
+                        .unwrap_or(-1);
+                    let control = lc_engine::ToggleHostilityControlData {
+                        opponent,
+                        player,
+                        by_client,
+                    };
+                    self.record_control_batch(std::slice::from_ref(
+                        &lc_engine::ControlPacket::ToggleHostility(control),
+                    ));
+                    let _ = self.engine.execute_toggle_hostility_control(&control)?;
+                }
             }
             MenuAction::ActivateHostDisconnect => {
                 return Err(classic_ingame_menu_child_error(
@@ -28331,6 +28494,7 @@ impl GameApp {
             self.ingame_menu_gfx = Some(IngameMenuGraphics {
                 hud: hud.as_ref().clone(),
                 owner_colors: HashMap::new(),
+                hostility_big_icons: HashMap::new(),
                 menu: hud
                     .menu
                     .clone()
@@ -28352,6 +28516,7 @@ impl GameApp {
                 menu_location: None,
                 menu_scroll_y: 0,
                 show_commands: self.display_flags.show_commands,
+                show_portraits: self.display_flags.portraits,
                 show_close_button: false,
                 show_command_keys: self.display_flags.show_command_keys,
                 throw_key,
@@ -50605,6 +50770,40 @@ impl GameApp {
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let locally_controlled =
             local_client_id == Some(join.at_client) && !info.is_script_player();
+        let pending_player_big_icon = match &join.source {
+            lc_engine::JoinPlayerSource::Resource(core) => self
+                .admission_resources
+                .complete_path(core.id)
+                .and_then(|path| {
+                    if locally_controlled {
+                        load_local_player_big_icon(path)
+                    } else {
+                        load_network_player_big_icon(path)
+                    }
+                })
+                .or_else(|| {
+                    self.control_playback
+                        .is_some()
+                        .then(|| self.replay_record_player_group(core).ok())
+                        .flatten()
+                        .and_then(|group| load_player_big_icon_from_group(&group))
+                }),
+            lc_engine::JoinPlayerSource::Embedded(_)
+                if info.is_script_player() && join.filename.is_empty() =>
+            {
+                None
+            }
+            lc_engine::JoinPlayerSource::Embedded(_)
+                if local_client_id == Some(join.by_client) =>
+            {
+                let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
+                load_local_player_big_icon(&path)
+            }
+            lc_engine::JoinPlayerSource::Embedded(data) => load_packed_network_player_big_icon(
+                PathBuf::from(join.filename.to_string_lossy().into_owned()),
+                data,
+            ),
+        };
         let player_file = match &join.source {
             lc_engine::JoinPlayerSource::Resource(core) => {
                 // Rust has no stable local temp path to serialize while this
@@ -50708,6 +50907,10 @@ impl GameApp {
                 control.runtime_control(),
             ) {
             Ok(joined) if locally_controlled => {
+                self.cache_joined_player_big_icon(
+                    join.info_id,
+                    pending_player_big_icon.as_ref(),
+                );
                 // InitializePlayer callbacks run before JoinPlayer creates
                 // the new local viewport. Apply their physical mutations to
                 // the pre-existing list before CreateViewport sorts it.
@@ -50746,6 +50949,10 @@ impl GameApp {
                 self.check_fullscreen_physical_viewports(game_running);
             }
             Ok(joined) => {
+                self.cache_joined_player_big_icon(
+                    join.info_id,
+                    pending_player_big_icon.as_ref(),
+                );
                 let _ = self.apply_pending_viewport_presentation_requests();
                 let player_info_changed = self.control_player_infos.mark_joined(
                     join.info_id,
@@ -51065,6 +51272,12 @@ impl GameApp {
                     self.handle_game_over()?;
                 }
                 self.refresh_object_menu();
+                // C4Menu::Execute refills permanent hostility pages whenever
+                // Game.iTick35 wraps, picking up joins, removals and changed
+                // visibility even when no hostility control just executed.
+                if self.engine.frame() % 35 == 0 {
+                    self.refresh_hostility_menus();
+                }
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
                 for menu in self.ingame_menu.values_mut() {
                     menu.tick();
@@ -56333,9 +56546,35 @@ impl GameApp {
             {
                 let show_commands = self.display_flags.show_commands;
                 let show_command_keys = self.display_flags.show_command_keys;
+                let show_portraits = self.display_flags.portraits;
+                self.hydrate_runtime_player_big_icons();
+                let owner_colors = self
+                    .engine
+                    .players()
+                    .map(|player| {
+                        let color = player
+                            .color()
+                            .map(|RgbColor { r, g, b }| Color::opaque(r, g, b))
+                            .unwrap_or_else(|| Color::opaque(0, 0, 0xff));
+                        (player.id(), color)
+                    })
+                    .collect();
+                let hostility_big_icons = self
+                    .engine
+                    .players()
+                    .filter_map(|player| {
+                        self.runtime_player_big_icons
+                            .get(&player.player_info_id())
+                            .cloned()
+                            .map(|icon| (player.id(), icon))
+                    })
+                    .collect();
                 let gfx = self.ensure_ingame_menu_gfx();
                 gfx.show_commands = show_commands;
                 gfx.show_command_keys = show_command_keys;
+                gfx.show_portraits = show_portraits;
+                gfx.owner_colors = owner_colors;
+                gfx.hostility_big_icons = hostility_big_icons;
             }
             for player in players {
                 let area = self.graphics.viewport_rect(player).unwrap_or_else(|| {
@@ -57852,10 +58091,10 @@ impl GameApp {
         stripped.pack().map_err(|error| error.to_string())
     }
 
-    fn replay_record_player_file(
+    fn replay_record_player_group(
         &self,
         core: &lc_engine::NetworkResourceCore,
-    ) -> std::result::Result<PlayerFile, String> {
+    ) -> std::result::Result<Group, String> {
         let record_path = self
             .active_scenario
             .as_ref()
@@ -57863,9 +58102,17 @@ impl GameApp {
             .ok_or_else(|| "active replay has no record-group path".to_string())?;
         let target = recorded_player_resource_name(core);
         let record = open_group_path_for_folder_map(record_path).map_err(|error| error.to_string())?;
-        let player_group = record
+        record
             .open_child(path_from_group_name_bytes(&target))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())
+    }
+
+    fn replay_record_player_file(
+        &self,
+        core: &lc_engine::NetworkResourceCore,
+    ) -> std::result::Result<PlayerFile, String> {
+        let target = recorded_player_resource_name(core);
+        let player_group = self.replay_record_player_group(core)?;
         let bytes = match player_group.raw_image() {
             Ok(bytes) => bytes,
             Err(_) if player_group.is_directory() => MutableGroup::from_group(&player_group)
@@ -58012,6 +58259,8 @@ impl GameApp {
         }
         self.active_game_graphics = None;
         self.ingame_menu_gfx = None;
+        self.runtime_player_big_icons.clear();
+        self.runtime_player_big_icon_misses.clear();
         self.active_global_gui_overrides.clear();
         self.close_context_menu_silently();
         self.network_start_wait = None;
@@ -59271,6 +59520,8 @@ impl GameApp {
         }
 
         self.engine = engine;
+        self.runtime_player_big_icons.clear();
+        self.runtime_player_big_icon_misses.clear();
         if !replay {
             if let Err(error) = self.prepare_recording_for(&scenario, &scenario_data) {
                 let league_host = self.network_is_league
@@ -59369,6 +59620,7 @@ impl GameApp {
                             continue;
                         }
                     };
+                    let player_big_icon = load_local_player_big_icon(selected.source_path());
                     let config = match lc_engine::prepare_join_player_config(
                         lc_engine::JoinPlayerPreparation {
                             join: &join,
@@ -59423,6 +59675,10 @@ impl GameApp {
                     ) {
                         Ok(joined) => {
                             debug_assert_eq!(joined.number(), predicted_owner);
+                            self.cache_joined_player_big_icon(
+                                join.info_id,
+                                player_big_icon.as_ref(),
+                            );
                             self.control_player_infos.mark_joined(
                                 join.info_id,
                                 joined.number(),
@@ -59665,6 +59921,8 @@ impl GameApp {
 
         self.active_game_graphics = None;
         self.ingame_menu_gfx = None;
+        self.runtime_player_big_icons.clear();
+        self.runtime_player_big_icon_misses.clear();
         self.active_global_gui_overrides.clear();
         self.finish_recording();
         self.recording_template = None;
@@ -97819,7 +98077,6 @@ ScenInfoArea=70,5,25,90
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
         let unsupported = [
-            (MenuAction::ActivateHostility, "Hostility"),
             (MenuAction::ActivateTeamSelection, "TeamSelection"),
             (MenuAction::ActivateObserver, "Observer"),
             (MenuAction::ActivateHostDisconnect, "HostDisconnect"),
@@ -97838,6 +98095,201 @@ ScenInfoArea=70,5,25,90
             assert!(app.ingame_menu.is_none());
             assert!(app.status_text.is_empty());
         }
+    }
+
+    #[test]
+    fn hostility_menu_lists_other_players_and_toggles_hostility() {
+        let mut app = new_state_only_running_sandbox_app();
+        let owner = app.local_owner;
+        let ada = 17;
+        let bot = 18;
+        let hidden = 19;
+        let ada_info = 117;
+        let bot_info = 118;
+        let hidden_info = 119;
+
+        app.engine
+            .register_player(PlayerConfig::new(ada, "Ada").with_player_info_id(ada_info))
+            .expect("register visible user");
+        app.engine
+            .register_player(PlayerConfig::new(bot, "Bot").with_player_info_id(bot_info))
+            .expect("register visible script player");
+        app.engine
+            .register_player(
+                PlayerConfig::new(hidden, "Hidden").with_player_info_id(hidden_info),
+            )
+            .expect("register invisible user");
+        app.engine
+            .player_mut(owner)
+            .expect("menu owner")
+            .set_at_client(lc_engine::PlayerAtClient::new(3));
+        app.engine
+            .player_mut(ada)
+            .expect("Ada")
+            .set_hostile_towards(owner, true);
+        app.engine
+            .player_mut(owner)
+            .expect("menu owner")
+            .set_hostile_towards(bot, true);
+        let mut teams = app.engine.team_configuration();
+        teams.allow_hostility_change = true;
+        app.engine.set_team_configuration(teams);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: ada_info,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_USER,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: bot_info,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: hidden_info,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_USER,
+                        flags: lc_engine::PLAYER_INFO_FLAG_INVISIBLE,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+        app.snapshot = app.engine.snapshot();
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(3);
+        app.network = Some(manager);
+
+        app.apply_ingame_menu_action(MenuAction::ActivateHostility)
+            .expect("open hostility page");
+        let menu = app
+            .ingame_menu
+            .get(owner)
+            .expect("hostility page remains open");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::Hostility);
+        assert_eq!(menu.caption(), "Don't attack Ada");
+        assert!(menu.is_permanent());
+        assert_eq!(menu.close_action(), Some(&MenuAction::ActivateMain));
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Don't attack Ada", "Attack Bot"]
+        );
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Ada is currently hostile and will not be attacked.")
+        );
+        assert_eq!(
+            menu.items()[1].info_caption.as_deref(),
+            Some("Bot is currently friendly and will be attacked.")
+        );
+        assert!(matches!(
+            menu.items()[1].symbol,
+            ingame_menu::MenuSymbol::Hostility {
+                opponent,
+                hostile: true
+            } if opponent == bot
+        ));
+
+        let tick = app.local_control_submission_tick();
+        let outcome = {
+            let menu = app.ingame_menu.get_mut(owner).expect("hostility page");
+            menu.set_selection(0);
+            menu.handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+                .expect("select Ada row")
+        };
+        assert!(matches!(
+            outcome,
+            MenuOutcome::Action {
+                action: MenuAction::ToggleHostility(opponent),
+                close_menu: false
+            } if opponent == ada
+        ));
+        app.execute_ingame_menu_outcome_for_player(owner, outcome)
+            .expect("queue hostility toggle");
+        let control = lc_engine::ToggleHostilityControlData {
+            opponent: ada,
+            player: owner,
+            by_client: 3,
+        };
+        assert_eq!(
+            commands.take_submitted_internal_player_scripts(),
+            vec![(
+                tick,
+                lc_engine::ControlPacket::ToggleHostility(control)
+            )]
+        );
+        assert!(!app
+            .engine
+            .player(owner)
+            .expect("menu owner")
+            .is_hostile_towards(ada));
+        assert_eq!(
+            app.ingame_menu.get(owner).expect("permanent page").items()[0].caption,
+            "Don't attack Ada"
+        );
+
+        app.apply_ready_controls(tick, vec![NetworkControl::ToggleHostility(control)])
+            .expect("execute synchronized hostility toggle");
+        assert!(app
+            .engine
+            .player(owner)
+            .expect("menu owner")
+            .is_hostile_towards(ada));
+        assert_eq!(
+            app.ingame_menu.get(owner).expect("permanent page").items()[0].caption,
+            "Don't attack Ada",
+            "native waits for C4Menu::Execute's Tick35 refill"
+        );
+        app.refresh_hostility_menus();
+        assert_eq!(
+            app.ingame_menu.get(owner).expect("Tick35-refreshed page").items()[0].caption,
+            "Attack Ada"
+        );
+
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(bot))
+            .expect("script-player row is rejected");
+        assert!(commands
+            .take_submitted_internal_player_scripts()
+            .is_empty());
+
+        teams.allow_hostility_change = false;
+        app.engine.set_team_configuration(teams);
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(ada))
+            .expect("disabled hostility change is ignored");
+        assert!(commands
+            .take_submitted_internal_player_scripts()
+            .is_empty());
+        assert!(app
+            .engine
+            .player(owner)
+            .expect("menu owner")
+            .is_hostile_towards(ada));
+
+        teams.allow_hostility_change = true;
+        app.engine.set_team_configuration(teams);
+        app.network = None;
+        app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleHostility(ada))
+            .expect("execute local hostility toggle");
+        assert!(!app
+            .engine
+            .player(owner)
+            .expect("menu owner")
+            .is_hostile_towards(ada));
+        assert_eq!(
+            app.ingame_menu.get(owner).expect("permanent page").items()[0].caption,
+            "Attack Ada",
+            "local execution also waits for the periodic refill"
+        );
+        app.refresh_hostility_menus();
+        assert_eq!(
+            app.ingame_menu.get(owner).expect("locally refreshed page").items()[0].caption,
+            "Don't attack Ada"
+        );
     }
 
     #[test]
@@ -140677,6 +141129,7 @@ func ControlDig() { dig_count = 1; return(1); }
             vec![
                 IngameMenuState::main_menu(&MainMenuConditions::default())
                     .expect("default player main menu"),
+                IngameMenuState::hostility_menu(&[]),
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
@@ -140707,19 +141160,20 @@ func ControlDig() { dig_count = 1; return(1); }
         let default_pages = every_player_menu_page();
         let rebound_pages = every_player_menu_page();
         let sound_pages = every_player_menu_page();
-        assert_eq!(default_pages.len(), 12);
+        assert_eq!(default_pages.len(), 13);
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
-            ingame_menu::MenuPage::Goals => 1,
-            ingame_menu::MenuPage::Rules => 2,
-            ingame_menu::MenuPage::NewPlayer => 3,
-            ingame_menu::MenuPage::Savegame => 4,
-            ingame_menu::MenuPage::Options => 5,
-            ingame_menu::MenuPage::Display => 6,
-            ingame_menu::MenuPage::Surrender => 7,
-            ingame_menu::MenuPage::ClientDisconnect => 8,
-            ingame_menu::MenuPage::AbortConfirm => 9,
-            ingame_menu::MenuPage::TeamSelection => 10,
+            ingame_menu::MenuPage::Hostility => 1,
+            ingame_menu::MenuPage::Goals => 2,
+            ingame_menu::MenuPage::Rules => 3,
+            ingame_menu::MenuPage::NewPlayer => 4,
+            ingame_menu::MenuPage::Savegame => 5,
+            ingame_menu::MenuPage::Options => 6,
+            ingame_menu::MenuPage::Display => 7,
+            ingame_menu::MenuPage::Surrender => 8,
+            ingame_menu::MenuPage::ClientDisconnect => 9,
+            ingame_menu::MenuPage::AbortConfirm => 10,
+            ingame_menu::MenuPage::TeamSelection => 11,
         };
         let test_music_bytes = silent_pcm_wav(10);
         let load_test_music = |app: &GameApp| {
@@ -140753,7 +141207,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .control
             .control_style = true;
         let mut sound_app = new_lightweight_running_sandbox_app();
-        let mut covered = [false; 11];
+        let mut covered = [false; 12];
         for ((default_menu, rebound_menu), sound_menu) in default_pages
             .into_iter()
             .zip(rebound_pages)
@@ -142236,6 +142690,7 @@ func ControlDig() { dig_count = 1; return(1); }
             vec![
                 IngameMenuState::main_menu(&MainMenuConditions::default())
                     .expect("default player main menu"),
+                IngameMenuState::hostility_menu(&[]),
                 IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
                     id: 1,
                     caption: "Team".to_string(),
@@ -142267,21 +142722,22 @@ func ControlDig() { dig_count = 1; return(1); }
         let rebound_pages = every_player_menu_page();
         assert_eq!(
             default_pages.len(),
-            12,
-            "eleven MenuPage roots plus both AbortConfirm button variants"
+            13,
+            "twelve MenuPage roots plus both AbortConfirm button variants"
         );
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
-            ingame_menu::MenuPage::TeamSelection => 1,
-            ingame_menu::MenuPage::Goals => 2,
-            ingame_menu::MenuPage::Rules => 3,
-            ingame_menu::MenuPage::NewPlayer => 4,
-            ingame_menu::MenuPage::Savegame => 5,
-            ingame_menu::MenuPage::Options => 6,
-            ingame_menu::MenuPage::Display => 7,
-            ingame_menu::MenuPage::Surrender => 8,
-            ingame_menu::MenuPage::ClientDisconnect => 9,
-            ingame_menu::MenuPage::AbortConfirm => 10,
+            ingame_menu::MenuPage::Hostility => 1,
+            ingame_menu::MenuPage::TeamSelection => 2,
+            ingame_menu::MenuPage::Goals => 3,
+            ingame_menu::MenuPage::Rules => 4,
+            ingame_menu::MenuPage::NewPlayer => 5,
+            ingame_menu::MenuPage::Savegame => 6,
+            ingame_menu::MenuPage::Options => 7,
+            ingame_menu::MenuPage::Display => 8,
+            ingame_menu::MenuPage::Surrender => 9,
+            ingame_menu::MenuPage::ClientDisconnect => 10,
+            ingame_menu::MenuPage::AbortConfirm => 11,
         };
         let mut default_app = new_running_sandbox_app();
         let mut rebound_app = new_running_sandbox_app();
@@ -142294,7 +142750,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("local player")
             .control
             .control_style = true;
-        let mut covered_pages = [false; 11];
+        let mut covered_pages = [false; 12];
 
         for (default_menu, rebound_menu) in default_pages.into_iter().zip(rebound_pages) {
             let page = default_menu.page();
@@ -144946,6 +145402,14 @@ func ControlDig() { dig_count = 1; return(1); }
             );
             let saved_frame = app.snapshot.frame;
             let saved_game_time = app.snapshot.game_time;
+            let saved_player_info_id = app
+                .engine
+                .player(app.local_owner)
+                .expect("local player before save")
+                .player_info_id();
+            let saved_big_icon = ImageData::new(1, 1, vec![12, 34, 56, 255]);
+            app.runtime_player_big_icons
+                .insert(saved_player_info_id, saved_big_icon.clone());
 
             app.quick_save().expect("quick save succeeds");
             assert!(
@@ -144984,6 +145448,11 @@ func ControlDig() { dig_count = 1; return(1); }
                 "quick load should restore Game.Time"
             );
             assert_eq!(app.game_time_seconds(), saved_game_time.max(0) as u64);
+            assert_eq!(
+                app.runtime_player_big_icons.get(&saved_player_info_id),
+                Some(&saved_big_icon),
+                "in-round restore keeps C4Player::BigIcon by stable player-info ID"
+            );
             assert!(
                 matches!(app.mode, AppMode::Running),
                 "quick load should keep the game running"
