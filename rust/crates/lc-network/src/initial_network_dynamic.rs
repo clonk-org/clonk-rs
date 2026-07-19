@@ -22,7 +22,8 @@ const GROUP_MAKER_MAX_BYTES: usize = 30;
 #[derive(Debug, Clone)]
 pub struct InitialNetworkDynamicSpec<'a> {
     pub group_filename: &'a str,
-    pub maker: &'a str,
+    /// Native C4 bytes copied into the packed group header.
+    pub maker: &'a [u8],
     pub scenario: &'a Scenario,
     pub scenario_title: &'a str,
     pub definition_modules: &'a [String],
@@ -83,7 +84,7 @@ pub fn compose_initial_network_dynamic(
     }
 
     let mut group = MutableGroup::new(spec.group_filename);
-    group.set_maker(spec.maker);
+    group.set_maker_bytes(spec.maker);
 
     // SaveCore writes Parameters before Scenario; SaveData follows with Game.
     // Preserve that timestamp-producing sequence even though Close later sorts
@@ -127,14 +128,13 @@ pub fn compose_initial_network_dynamic(
     })
 }
 
-fn packed_maker(maker: &str) -> Vec<u8> {
-    let bytes = maker.as_bytes();
-    let length = bytes
+fn packed_maker(maker: &[u8]) -> Vec<u8> {
+    let length = maker
         .iter()
         .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len())
+        .unwrap_or(maker.len())
         .min(GROUP_MAKER_MAX_BYTES);
-    bytes[..length].to_vec()
+    maker[..length].to_vec()
 }
 
 fn dynamic_entry(

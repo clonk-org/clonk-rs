@@ -82,6 +82,43 @@ pub fn load_configured_mission_access(
     load_configured_mission_access_from_path(&paths.config_file())
 }
 
+/// Reads one exact-case legacy config value without requiring the complete
+/// file to be UTF-8. The returned bytes have the same escaped-string and
+/// fixed-buffer decoding used by classic `C4Config`.
+pub fn configured_native_value(config: &[u8], section: &str, key: &str) -> Option<LegacyCString> {
+    let mut in_section = false;
+    let mut selected_section = false;
+    for raw_line in config.split(|byte| *byte == b'\n') {
+        let line = raw_line
+            .split(|byte| *byte == b'\r')
+            .next()
+            .unwrap_or_default();
+        let structural = trim_ascii(line);
+        if structural.starts_with(b"[") && structural.ends_with(b"]") {
+            if in_section {
+                break;
+            }
+            let matches = &structural[1..structural.len() - 1] == section.as_bytes();
+            in_section = matches && !selected_section;
+            selected_section |= matches;
+            continue;
+        }
+        if !in_section || structural.starts_with(b"#") || structural.starts_with(b";") {
+            continue;
+        }
+        let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        if trim_ascii(&line[..equals]) == key.as_bytes() {
+            return LegacyCString::from_bytes(decode_general_config_string(
+                &line[equals + 1..],
+                CFG_MAX_STRING,
+            ));
+        }
+    }
+    None
+}
+
 fn load_configured_mission_access_from_path(
     config_path: &Path,
 ) -> Result<String, ConfiguredClientPlayersError> {
@@ -177,13 +214,14 @@ fn load_module(module: &[u8], exe_roots: &[PathBuf]) -> Option<SelectedClientPla
     let player_file = PlayerFile::load(&group).ok()?;
     let player_text = group.read_file("Player.txt").ok()?;
     let player_name = player_name_from_core(&player_text);
-    let network_color = player_color_from_core(&player_text);
+    let (network_color, alternate_color) = player_colors_from_core(&player_text);
     Some(SelectedClientPlayer::from_configured(
         source_path,
         module_filename,
         resource_wire_name,
         legacy_string(&player_name),
         network_color,
+        alternate_color,
         player_file,
     ))
 }
@@ -435,11 +473,12 @@ fn player_name_from_core(player_text: &[u8]) -> Vec<u8> {
     strip_c4_markup(name.as_deref().unwrap_or(b"Neuling"))
 }
 
-fn player_color_from_core(player_text: &[u8]) -> u32 {
+fn player_colors_from_core(player_text: &[u8]) -> (u32, u32) {
     let mut in_preferences = false;
     let mut selected_preferences = false;
     let mut pref_color = None;
     let mut pref_color_dw = None;
+    let mut pref_color2_dw = None;
     for raw_line in player_text.split(|byte| *byte == b'\n') {
         let line = raw_line
             .split(|byte| *byte == b'\r')
@@ -466,14 +505,17 @@ fn player_color_from_core(player_text: &[u8]) -> u32 {
             pref_color = Some(parse_cpp_u32(&line[equals + 1..]).unwrap_or(0));
         } else if key == b"ColorDw" && pref_color_dw.is_none() {
             pref_color_dw = Some(parse_cpp_u32(&line[equals + 1..]).unwrap_or(0));
+        } else if key == b"AlternateColorDw" && pref_color2_dw.is_none() {
+            pref_color2_dw = Some(parse_cpp_u32(&line[equals + 1..]).unwrap_or(0));
         }
     }
     let pref_color_dw = pref_color_dw.unwrap_or(0xff);
-    if pref_color_dw == 0 {
+    let network_color = if pref_color_dw == 0 {
         cpp_preferred_color_value(pref_color.unwrap_or(0))
     } else {
         pref_color_dw & 0x00ff_ffff
-    }
+    };
+    (network_color, pref_color2_dw.unwrap_or(0) & 0x00ff_ffff)
 }
 
 fn cpp_preferred_color_value(index: u32) -> u32 {
@@ -1046,8 +1088,29 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         // GetPrefColorValue after exact-name INI compilation (pristine
         // 9ffa0a5d src/C4InfoCore.cpp:90-100,103-121,164-173).
         assert_eq!(
-            super::player_color_from_core(b"[Preferences]\nColor=3\nColorDw=0\n"),
+            super::player_colors_from_core(b"[Preferences]\nColor=3\nColorDw=0\n").0,
             0x00fc_f41c
+        );
+    }
+
+    #[test]
+    fn host_local_alternate_color_uses_exact_key_and_24_bit_mask() {
+        // C4PlayerInfoCore compiles AlternateColorDw with exact INI names,
+        // defaults it to zero and masks alpha before C4PlayerInfo retains it
+        // as the non-synchronized conflict-resolution fallback.
+        assert_eq!(
+            super::player_colors_from_core(
+                b"[Preferences]\nColorDw=1193046\nAlternateColorDw=4289449455\n"
+            ),
+            (0x0012_3456, 0x00ab_cdef)
+        );
+        assert_eq!(
+            super::player_colors_from_core(
+                b"[preferences]\nAlternateColorDw=11259375\n\
+                  [Preferences]\nalternatecolordw=11259375\n"
+            )
+            .1,
+            0
         );
     }
 
@@ -1246,11 +1309,36 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         assert_eq!(loaded.players()[0].module_filename().as_bytes(), module);
         assert_eq!(loaded.players()[0].resource_wire_name().as_bytes(), module);
         assert_eq!(loaded.players()[0].player_name().as_bytes(), b"Al\x82ce");
+        assert_eq!(loaded.players()[0].alternate_color(), 0x00ab_cdef);
         assert!(loaded.players()[0]
             .source_path()
             .as_os_str()
             .as_bytes()
             .ends_with(module));
+    }
+
+    #[test]
+    fn configured_native_value_reads_cp1252_and_escaped_values_without_utf8() {
+        let config =
+            b"[General]\nName=\"M\x81ker\"\n\n[Network]\nComment=\"Gr\xfc\\337e\"\nPortTCP=12345\n";
+        assert_eq!(
+            super::configured_native_value(config, "General", "Name")
+                .expect("native maker")
+                .as_bytes(),
+            b"M\x81ker"
+        );
+        assert_eq!(
+            super::configured_native_value(config, "Network", "Comment")
+                .expect("native comment")
+                .as_bytes(),
+            b"Gr\xfc\xdfe"
+        );
+        assert_eq!(
+            super::configured_native_value(config, "Network", "PortTCP")
+                .expect("numeric value")
+                .as_bytes(),
+            b"12345"
+        );
     }
 
     fn write_player(path: &Path, name: &[u8]) {
@@ -1262,7 +1350,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         );
         let mut player = b"[Player]\nName=".to_vec();
         player.extend_from_slice(name);
-        player.extend_from_slice(b"\n[Preferences]\nColorDw=1193046\n");
+        player.extend_from_slice(b"\n[Preferences]\nColorDw=1193046\nAlternateColorDw=11259375\n");
         group
             .add_file_with_metadata("Player.txt", player, 1, false)
             .expect("add Player.txt");

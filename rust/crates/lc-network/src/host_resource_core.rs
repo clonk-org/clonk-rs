@@ -15,7 +15,7 @@ use crate::ResourceFileOwnership;
 
 const STOCK_CHUNK_SIZE: u32 = 100 * 1024;
 const DEFAULT_MAX_LOAD_FILE_SIZE: u32 = 100 * 1024 * 1024;
-const MAX_PLAYER_BIG_ICON_SIZE: u64 = 20 * 1024;
+pub const MAX_PLAYER_BIG_ICON_SIZE: u64 = 20 * 1024;
 static NEXT_STAGED_PATH: AtomicU64 = AtomicU64::new(0);
 
 /// Values of `C4Network2ResType` used during pregame publication

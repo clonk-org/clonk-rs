@@ -11,9 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
 use lc_graphics::clonk_font::TextAlign;
-#[cfg(test)]
-use lc_graphics::PixelFormat;
-use lc_graphics::{GammaRamp, Surface};
+use lc_graphics::{Color, GammaRamp, PixelFormat, Surface};
 use lc_gui::Rect as GuiRect;
 
 use crate::classic_gui::{
@@ -40,6 +38,8 @@ const ICON_LABEL_SPACING: i32 = 2;
 const READY_COOLDOWN: Duration = Duration::from_secs(2);
 const SOUND_ICON_SHOW_TIME: Duration = Duration::from_secs(1);
 const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
+
+const CLASSIC_ROSTER_ICON_EXTENT: u32 = 40;
 
 const STANDARD_ICON_WIDTH: u32 = 240;
 const STANDARD_ICON_HEIGHT: u32 = 360;
@@ -273,6 +273,65 @@ pub enum LobbyRosterIcon {
     Raster(ImageData),
 }
 
+/// Compose the colored 40x40 fallback surface created by
+/// `C4PlayerInfoListBox::PlayerListItem::UpdateIcon` when a complete player
+/// resource has no usable `BigIcon.png`.
+///
+/// Returning the composed surface, rather than the native `Player` raster,
+/// also keeps a later savegame-join overlay in the classic 40-pixel source
+/// coordinate system.
+pub fn compose_classic_lobby_player_fallback_icon(
+    player: &ImageData,
+    owner_color: Color,
+) -> Result<ImageData> {
+    ensure!(
+        player.width() > 0 && player.height() > 0,
+        "active Player raster must not be empty"
+    );
+    let player = blacken_transparent_pixels(player);
+    let colored = crate::hud::colorize_by_owner(&player, owner_color);
+    let extent = i32::try_from(CLASSIC_ROSTER_ICON_EXTENT).expect("40 fits i32");
+    let bounds = IntRect {
+        x: 0,
+        y: 0,
+        w: extent,
+        h: extent,
+    };
+    let fitted = aspect_fit_roster_raster(colored.width(), colored.height(), bounds);
+    let mut surface = Surface::new(
+        CLASSIC_ROSTER_ICON_EXTENT,
+        CLASSIC_ROSTER_ICON_EXTENT,
+        PixelFormat::Rgba8888,
+    );
+    draw_facet_stretch(
+        &mut surface,
+        &colored,
+        (0.0, 0.0, colored.width() as f32, colored.height() as f32),
+        (
+            fitted.x as f32,
+            fitted.y as f32,
+            fitted.w as f32,
+            fitted.h as f32,
+        ),
+        None,
+    );
+    Ok(ImageData::new(
+        CLASSIC_ROSTER_ICON_EXTENT,
+        CLASSIC_ROSTER_ICON_EXTENT,
+        surface.pixels().to_vec(),
+    ))
+}
+
+/// Savegame player joined by this lobby player. The classic lobby composites
+/// the owner-colored crew graphic into the lower-left half of the base icon.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LobbyJoinedPlayerOverlay {
+    /// Uncolored `Crew.png`/`fctCrewClr` raster with ClrByOwner pixels.
+    pub crew: ImageData,
+    /// Final joined-player lobby color as RGBA.
+    pub color: [u8; 4],
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LobbyTeamValue {
     pub id: i32,
@@ -315,6 +374,7 @@ pub struct LobbyPlayerRow {
     /// Final lobby-name RGBA color.
     pub color: [u8; 4],
     pub icon: LobbyRosterIcon,
+    pub joined_player_overlay: Option<LobbyJoinedPlayerOverlay>,
     pub team: Option<LobbyTeamValue>,
     pub league_score: Option<String>,
     /// One through nine, matching `Ico_Rank1..Ico_Rank9`.
@@ -3933,6 +3993,16 @@ impl GameLobby {
             resources,
             gamma,
         )?;
+        if let Some(overlay) = &player.joined_player_overlay {
+            draw_joined_player_overlay(
+                surface,
+                row.icon,
+                layout.roster_client,
+                &player.icon,
+                overlay,
+                gamma,
+            )?;
+        }
         let player_name = crate::c4_presentation_text(&player.name);
         draw_clipped_text(
             surface,
@@ -4400,9 +4470,145 @@ fn draw_roster_icon(
                 image.width() > 0 && image.height() > 0,
                 "lobby roster raster icon must not be empty"
             );
-            draw_image_clipped(surface, image, rect, clip, gamma);
+            let fitted = aspect_fit_roster_raster(image.width(), image.height(), rect);
+            draw_image_clipped(surface, image, fitted, clip, gamma);
         }
     }
+    Ok(())
+}
+
+/// `C4GUI::Icon` is a `Picture(..., fAspect=true)`, so custom player
+/// rasters retain their aspect ratio inside the square roster-icon bounds.
+/// Keep the integer comparisons and centering used by `C4Facet::Draw`.
+fn aspect_fit_roster_raster(source_width: u32, source_height: u32, bounds: IntRect) -> IntRect {
+    if source_width == 0 || source_height == 0 || bounds.w <= 0 || bounds.h <= 0 {
+        return bounds;
+    }
+    let source_width = i64::from(source_width);
+    let source_height = i64::from(source_height);
+    let bounds_width = i64::from(bounds.w);
+    let bounds_height = i64::from(bounds.h);
+    let mut fitted = bounds;
+    if 100 * bounds_width / source_width < 100 * bounds_height / source_height {
+        let height = source_height * bounds_width / source_width;
+        fitted.h = i32::try_from(height).unwrap_or(bounds.h);
+        fitted.y += (bounds.h - fitted.h) / 2;
+    } else if 100 * bounds_height / source_height < 100 * bounds_width / source_width {
+        let width = source_width * bounds_height / source_height;
+        fitted.w = i32::try_from(width).unwrap_or(bounds.w);
+        fitted.x += (bounds.w - fitted.w) / 2;
+    }
+    fitted
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JoinedPlayerOverlayLayout {
+    shadow: IntRect,
+    colored: IntRect,
+    clip: IntRect,
+}
+
+/// `C4PlayerInfoListBox::PlayerListItem::UpdateIcon` draws into the base
+/// icon's source surface before `C4GUI::Picture` aspect-fits that surface.
+/// Calculate in source coordinates first, then map into the fitted row icon.
+fn joined_player_overlay_layout(
+    icon: &LobbyRosterIcon,
+    crew: &ImageData,
+    bounds: IntRect,
+    clip: IntRect,
+) -> Option<JoinedPlayerOverlayLayout> {
+    let (source_width, source_height, fitted) = match icon {
+        LobbyRosterIcon::Standard(_) => (
+            CLASSIC_ROSTER_ICON_EXTENT,
+            CLASSIC_ROSTER_ICON_EXTENT,
+            bounds,
+        ),
+        LobbyRosterIcon::Raster(image) => (
+            image.width(),
+            image.height(),
+            aspect_fit_roster_raster(image.width(), image.height(), bounds),
+        ),
+    };
+    if source_width == 0
+        || source_height == 0
+        || crew.width() == 0
+        || crew.height() == 0
+        || fitted.w <= 0
+        || fitted.h <= 0
+    {
+        return None;
+    }
+    let size_max = source_width.max(source_height);
+    let crew_height = size_max / 2;
+    if crew_height >= source_height {
+        return None;
+    }
+    let overlay_bounds = IntRect {
+        x: 0,
+        y: i32::try_from(crew_height).ok()?,
+        w: i32::try_from(size_max / 2).ok()?,
+        h: i32::try_from(source_height - crew_height).ok()?,
+    };
+    let colored_source = aspect_fit_roster_raster(crew.width(), crew.height(), overlay_bounds);
+    let shadow_source = aspect_fit_roster_raster(
+        crew.width(),
+        crew.height(),
+        IntRect {
+            x: 2,
+            ..overlay_bounds
+        },
+    );
+
+    let map = |source: IntRect| {
+        let map_axis = |start: i32, extent: i32, source_start: i32, source_extent: u32| {
+            start
+                + i32::try_from(
+                    i64::from(source_start) * i64::from(extent) / i64::from(source_extent),
+                )
+                .unwrap_or_default()
+        };
+        let left = map_axis(fitted.x, fitted.w, source.x, source_width);
+        let top = map_axis(fitted.y, fitted.h, source.y, source_height);
+        let right = map_axis(fitted.x, fitted.w, source.x + source.w, source_width);
+        let bottom = map_axis(fitted.y, fitted.h, source.y + source.h, source_height);
+        IntRect {
+            x: left,
+            y: top,
+            w: right - left,
+            h: bottom - top,
+        }
+    };
+
+    Some(JoinedPlayerOverlayLayout {
+        shadow: map(shadow_source),
+        colored: map(colored_source),
+        clip: intersection(clip, fitted),
+    })
+}
+fn draw_joined_player_overlay(
+    surface: &mut Surface,
+    bounds: IntRect,
+    clip: IntRect,
+    icon: &LobbyRosterIcon,
+    overlay: &LobbyJoinedPlayerOverlay,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
+    ensure!(
+        overlay.crew.width() > 0 && overlay.crew.height() > 0,
+        "joined-player crew raster must not be empty"
+    );
+    let Some(layout) = joined_player_overlay_layout(icon, &overlay.crew, bounds, clip) else {
+        return Ok(());
+    };
+    let [red, green, blue, alpha] = overlay.color;
+    let colored = crate::hud::colorize_by_owner(&overlay.crew, Color::new(red, green, blue, alpha));
+    let mut shadow_pixels = Vec::with_capacity(colored.pixels().len());
+    for pixel in colored.pixels().chunks_exact(4) {
+        shadow_pixels.extend_from_slice(&[0, 0, 0, pixel[3]]);
+    }
+    let shadow = ImageData::new(colored.width(), colored.height(), shadow_pixels);
+    draw_image_clipped(surface, &shadow, layout.shadow, layout.clip, gamma);
+    draw_image_clipped(surface, &colored, layout.colored, layout.clip, gamma);
     Ok(())
 }
 
@@ -4700,6 +4906,7 @@ mod tests {
             name: format!("Player {id}"),
             color: COLOR_WHITE,
             icon: LobbyRosterIcon::Standard(7),
+            joined_player_overlay: None,
             team: None,
             league_score: None,
             league_rank: None,
@@ -4730,6 +4937,174 @@ mod tests {
             icon: LobbyRosterIcon::Standard(7),
             can_add_player,
         })
+    }
+
+    #[test]
+    fn roster_raster_aspect_fit_matches_c4facet_integer_math() {
+        let wide = aspect_fit_roster_raster(
+            60,
+            30,
+            IntRect {
+                x: 4,
+                y: 8,
+                w: 20,
+                h: 20,
+            },
+        );
+        assert_eq!(
+            wide,
+            IntRect {
+                x: 4,
+                y: 13,
+                w: 20,
+                h: 10
+            }
+        );
+
+        let tall = aspect_fit_roster_raster(
+            30,
+            60,
+            IntRect {
+                x: 4,
+                y: 8,
+                w: 20,
+                h: 20,
+            },
+        );
+        assert_eq!(
+            tall,
+            IntRect {
+                x: 9,
+                y: 8,
+                w: 10,
+                h: 20
+            }
+        );
+
+        let square = aspect_fit_roster_raster(
+            64,
+            64,
+            IntRect {
+                x: 4,
+                y: 8,
+                w: 20,
+                h: 20,
+            },
+        );
+        assert_eq!(
+            square,
+            IntRect {
+                x: 4,
+                y: 8,
+                w: 20,
+                h: 20
+            }
+        );
+    }
+
+    #[test]
+    fn classic_player_fallback_composes_to_40px_before_join_overlay() {
+        let player = ImageData::new(2, 1, vec![0, 0, 255, 255, 200, 20, 10, 255]);
+        let icon = compose_classic_lobby_player_fallback_icon(&player, Color::opaque(12, 34, 56))
+            .expect("non-empty active Player raster");
+        assert_eq!((icon.width(), icon.height()), (40, 40));
+        let pixel = |x: u32, y: u32| {
+            let start = ((y * icon.width() + x) * 4) as usize;
+            &icon.pixels()[start..start + 4]
+        };
+        assert_eq!(pixel(5, 9), [0, 0, 0, 0]);
+        assert_eq!(pixel(5, 20), [12, 34, 56, 255]);
+        assert_eq!(pixel(30, 20), [200, 20, 10, 255]);
+        assert_eq!(pixel(5, 30), [0, 0, 0, 0]);
+
+        let crew = ImageData::new(1, 1, vec![0, 0, 255, 255]);
+        let bounds = IntRect {
+            x: 0,
+            y: 0,
+            w: 40,
+            h: 40,
+        };
+        let layout =
+            joined_player_overlay_layout(&LobbyRosterIcon::Raster(icon), &crew, bounds, bounds)
+                .expect("40x40 fallback accepts a joined-player overlay");
+        assert_eq!(
+            layout,
+            JoinedPlayerOverlayLayout {
+                shadow: IntRect {
+                    x: 2,
+                    y: 20,
+                    w: 20,
+                    h: 20,
+                },
+                colored: IntRect {
+                    x: 0,
+                    y: 20,
+                    w: 20,
+                    h: 20,
+                },
+                clip: bounds,
+            }
+        );
+    }
+
+    #[test]
+    fn joined_player_overlay_matches_cpp_lower_half_shadow_aspect_and_clip() {
+        let crew = ImageData::new(2, 1, vec![0, 0, 255, 255, 0, 0, 255, 255]);
+        let icon = LobbyRosterIcon::Standard(7);
+        let bounds = IntRect {
+            x: 4,
+            y: 3,
+            w: 40,
+            h: 40,
+        };
+        let clip = IntRect {
+            x: 4,
+            y: 3,
+            w: 22,
+            h: 34,
+        };
+        let layout = joined_player_overlay_layout(&icon, &crew, bounds, clip)
+            .expect("non-empty crew overlay");
+        assert_eq!(
+            layout,
+            JoinedPlayerOverlayLayout {
+                shadow: IntRect {
+                    x: 6,
+                    y: 28,
+                    w: 20,
+                    h: 10,
+                },
+                colored: IntRect {
+                    x: 4,
+                    y: 28,
+                    w: 20,
+                    h: 10,
+                },
+                clip,
+            }
+        );
+
+        let mut surface = Surface::new(48, 48, PixelFormat::Rgba8888);
+        draw_joined_player_overlay(
+            &mut surface,
+            bounds,
+            clip,
+            &icon,
+            &LobbyJoinedPlayerOverlay {
+                crew,
+                color: [255, 0, 0, 255],
+            },
+            None,
+        )
+        .expect("overlay render");
+
+        assert_eq!(surface.get_pixel(4, 27), Some(Color::transparent()));
+        assert_eq!(surface.get_pixel(4, 28), Some(Color::opaque(255, 0, 0)));
+        assert_eq!(surface.get_pixel(23, 36), Some(Color::opaque(255, 0, 0)));
+        assert_eq!(surface.get_pixel(24, 28), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(surface.get_pixel(25, 28), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(surface.get_pixel(26, 28), Some(Color::transparent()));
+        assert_eq!(surface.get_pixel(4, 37), Some(Color::transparent()));
     }
 
     #[test]

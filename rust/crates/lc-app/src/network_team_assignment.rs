@@ -115,11 +115,30 @@ impl NetworkTeamAssignmentState {
         enabled: bool,
         restore_players: &[ControlPlayerInfoEntry],
     ) -> Result<Vec<PlayerInfoControlData>, NetworkTeamControlError> {
+        self.set_team_colors_with_alternate_colors(player_infos, enabled, restore_players, |_| None)
+    }
+
+    pub(crate) fn set_team_colors_with_alternate_colors(
+        &mut self,
+        player_infos: &mut ControlPlayerInfoRegistry,
+        enabled: bool,
+        restore_players: &[ControlPlayerInfoEntry],
+        alternate_color: impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
+    ) -> Result<Vec<PlayerInfoControlData>, NetworkTeamControlError> {
         if self.teams.team_colors == enabled {
             return Ok(Vec::new());
         }
-        let updates = player_infos.update_team_colors(&self.teams, enabled, restore_players)?;
-        self.teams.team_colors = enabled;
+        let mut updated_teams = self.teams.clone();
+        updated_teams.team_colors = enabled;
+        let mut oracle =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
+        let updates = player_infos.refresh_player_attributes_with_alternate_colors(
+            Some(&updated_teams),
+            restore_players,
+            &mut oracle,
+            alternate_color,
+        )?;
+        self.teams = updated_teams;
         Ok(updates)
     }
 
@@ -132,18 +151,41 @@ impl NetworkTeamAssignmentState {
         has_or_will_have_lobby: bool,
         restore_players: &[ControlPlayerInfoEntry],
     ) -> Result<Option<PlayerInfoAdmission>, NetworkTeamControlError> {
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-            self.generated_team_name_template.clone(),
-        );
-        Ok(player_infos.admit_request_with_teams_and_attributes(
+        self.admit_request_with_alternate_colors(
+            player_infos,
             request,
             max_players,
-            &mut self.teams,
             by_host,
             has_or_will_have_lobby,
             restore_players,
-            &mut oracle,
-        )?)
+            |_| None,
+        )
+    }
+
+    pub(crate) fn admit_request_with_alternate_colors(
+        &mut self,
+        player_infos: &mut ControlPlayerInfoRegistry,
+        request: PlayerInfoUpdateRequest,
+        max_players: usize,
+        by_host: bool,
+        has_or_will_have_lobby: bool,
+        restore_players: &[ControlPlayerInfoEntry],
+        alternate_color: impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
+    ) -> Result<Option<PlayerInfoAdmission>, NetworkTeamControlError> {
+        let mut oracle =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
+        Ok(
+            player_infos.admit_request_with_teams_and_attributes_and_alternate_colors(
+                request,
+                max_players,
+                &mut self.teams,
+                by_host,
+                has_or_will_have_lobby,
+                restore_players,
+                &mut oracle,
+                alternate_color,
+            )?,
+        )
     }
 }
 

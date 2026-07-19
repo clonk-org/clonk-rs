@@ -3,18 +3,17 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lc_network::HostInitialResourceSource;
 use lc_resources::LanguagePacks;
 
 use crate::prepared_host_bootstrap::{
-    prepare_host_bootstrap, PrepareHostBootstrapError, PreparedHostBootstrap,
-    PreparedHostBootstrapConfig, PreparedHostBootstrapSpec, PreparedLeagueHostConfig,
+    prepare_host_bootstrap_with_team_assignment_oracle, PrepareHostBootstrapError,
+    PreparedHostBootstrap, PreparedHostBootstrapConfig, PreparedHostBootstrapSpec,
+    PreparedHostPlayerSource, PreparedLeagueHostConfig, ProcessInitialHostTeamAssignmentOracle,
 };
 
 #[derive(Debug, Clone)]
 pub struct NetworkHostPreparation {
     pub scenario_path: PathBuf,
-    pub scenario_title: String,
     pub install_roots: Vec<PathBuf>,
     pub languages: Vec<String>,
     pub language_packs: LanguagePacks,
@@ -25,7 +24,8 @@ pub struct NetworkHostPreparation {
     pub host_nick: String,
     pub network_comment: String,
     pub netpuncher_address: String,
-    pub player_sources: Vec<HostInitialResourceSource>,
+    pub generated_team_name_template: lc_engine::LegacyCString,
+    pub player_sources: Vec<PreparedHostPlayerSource>,
     pub config: PreparedHostBootstrapConfig,
     pub league: Option<PreparedLeagueHostConfig>,
 }
@@ -37,25 +37,29 @@ impl NetworkHostPreparation {
     pub fn prepare(self) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
         let start_unix_seconds = unix_seconds_now();
         let random_seed_unix_seconds = unix_seconds_now();
-        prepare_host_bootstrap(PreparedHostBootstrapSpec {
-            scenario_path: &self.scenario_path,
-            scenario_title: &self.scenario_title,
-            install_roots: &self.install_roots,
-            languages: &self.languages,
-            language_packs: &self.language_packs,
-            network_work_path: &self.network_work_path,
-            network_directory: &self.network_directory,
-            start_unix_seconds,
-            random_seed_unix_seconds,
-            group_maker: &self.group_maker,
-            host_name: &self.host_name,
-            host_nick: &self.host_nick,
-            network_comment: &self.network_comment,
-            netpuncher_address: &self.netpuncher_address,
-            player_sources: &self.player_sources,
-            config: self.config,
-            league: self.league.as_ref(),
-        })
+        let mut team_assignment =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template);
+        prepare_host_bootstrap_with_team_assignment_oracle(
+            PreparedHostBootstrapSpec {
+                scenario_path: &self.scenario_path,
+                install_roots: &self.install_roots,
+                languages: &self.languages,
+                language_packs: &self.language_packs,
+                network_work_path: &self.network_work_path,
+                network_directory: &self.network_directory,
+                start_unix_seconds,
+                random_seed_unix_seconds,
+                group_maker: &self.group_maker,
+                host_name: &self.host_name,
+                host_nick: &self.host_nick,
+                network_comment: &self.network_comment,
+                netpuncher_address: &self.netpuncher_address,
+                player_sources: &self.player_sources,
+                config: self.config,
+                league: self.league.as_ref(),
+            },
+            &mut team_assignment,
+        )
     }
 }
 

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ClientCoreControlData, InitialNetworkGameData, LegacyCString, NetworkResourceCore, Scenario,
-    ScenarioError,
+    parse_initial_network_game_data, ClientCoreControlData, InitialNetworkGameData, LegacyCString,
+    NetworkResourceCore, Scenario, ScenarioError,
 };
 use lc_network::{
     compose_initial_network_dynamic, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
@@ -43,7 +43,7 @@ fn pristine_tutorial01_initial_dynamic_matches_cpp_component_oracle() {
 
     let dynamic = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
         group_filename: "DynTutorial01.c4s",
-        maker: "OracleHost",
+        maker: b"OracleHost",
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
@@ -94,6 +94,47 @@ fn pristine_tutorial01_initial_dynamic_matches_cpp_component_oracle() {
 }
 
 #[test]
+fn savegame_runtime_sections_contribute_exact_game_entry_crc() {
+    let content = content_root();
+    let scenario_path = content.join("Tutorial.c4f/Tutorial01.c4s");
+    let resolver = ContentResolver {
+        root: content.clone(),
+    };
+    let scenario = Scenario::load_from_path_with_seed(&scenario_path, &resolver, 424_242)
+        .expect("pristine Tutorial01 loads");
+    let definitions = vec!["Objects.c4d".to_owned(), "Tutorial.c4f".to_owned()];
+    let game_text = b"[Sky]\r\nX=65536\r\n\r\n\
+[Effects]\r\nGlobalEffects=Fog(1,100,7,3,0,FOGG)\r\n\r\n\
+[Scoreboard]\r\nRows=1\r\nCols=1\r\nCell0_0String=\"Scores\"\r\nCell0_0Value=-1\r\n";
+    let game = parse_initial_network_game_data(game_text);
+    let parameters = tutorial_parameters();
+    let defaults = tutorial_defaults();
+
+    let dynamic = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
+        group_filename: "DynTutorial01.c4s",
+        maker: b"OracleHost",
+        scenario: &scenario,
+        scenario_title: "A Clonk",
+        definition_modules: &definitions,
+        scenario_origin: "Tutorial.c4f/Tutorial01.c4s",
+        game: &game,
+        original_game_text: None,
+        parameters: &parameters,
+        scenario_defaults: &defaults,
+    })
+    .expect("savegame initial network dynamic composes");
+
+    let game_entry = dynamic
+        .entries
+        .iter()
+        .find(|entry| entry.name == "Game.txt")
+        .expect("opaque runtime sections keep Game.txt present");
+    assert_eq!(game_entry.payload, game_text);
+    // C4Group file entries chain CRC32(payload) with CRC32("Game.txt").
+    assert_eq!(game_entry.contents_crc, 0x7a00_9287);
+}
+
+#[test]
 fn composition_rejects_non_scenario_group_names_without_a_sort_fallback() {
     let content = content_root();
     let scenario_path = content.join("Tutorial.c4f/Tutorial01.c4s");
@@ -108,7 +149,7 @@ fn composition_rejects_non_scenario_group_names_without_a_sort_fallback() {
 
     let error = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
         group_filename: "Dynamic.bin",
-        maker: "OracleHost",
+        maker: b"OracleHost",
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
@@ -146,7 +187,7 @@ fn composition_propagates_parameter_errors_without_building_a_partial_group() {
 
     let error = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
         group_filename: "DynTutorial01.c4s",
-        maker: "OracleHost",
+        maker: b"OracleHost",
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,
@@ -183,7 +224,7 @@ fn cpp_omits_game_entry_when_initial_game_component_is_all_default() {
 
     let dynamic = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
         group_filename: "DynTutorial01.c4s",
-        maker: "OracleHost",
+        maker: b"OracleHost",
         scenario: &scenario,
         scenario_title: "A Clonk",
         definition_modules: &definitions,

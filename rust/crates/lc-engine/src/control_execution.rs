@@ -566,7 +566,9 @@ enum AttributeBlockingPacket {
 struct AttributeConflictMarks {
     current: bool,
     original: bool,
+    alternate: bool,
     low_priority_original: Option<AttributeBlockingPacket>,
+    low_priority_alternate: Option<AttributeBlockingPacket>,
     original_other_player_id: Option<i32>,
 }
 
@@ -716,6 +718,7 @@ impl ControlPlayerInfoRegistry {
         teams: Option<&InitialNetworkTeamMetadata>,
         restore_players: &[ControlPlayerInfoEntry],
         include_possible_team_colors: bool,
+        alternate_color: &impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
     ) -> Result<(), TeamColorUpdateError> {
         let mut players = Vec::new();
         let mut existing_packet_ranges = Vec::new();
@@ -743,8 +746,9 @@ impl ControlPlayerInfoRegistry {
             .enumerate()
             .filter_map(|(player_index, &player)| {
                 (Self::player_color_is_resolver_mutable(player, teams)
-                    && player.color != player.original_color)
-                    .then_some((player_index, player))
+                    && player.color != player.original_color
+                    && alternate_color(player).is_none())
+                .then_some((player_index, player))
             })
             .collect::<Vec<_>>();
         if shifted_players.is_empty() {
@@ -770,6 +774,7 @@ impl ControlPlayerInfoRegistry {
                     AttributeBlockingPacket::Restore,
                     ResolvedPlayerAttribute::Color,
                     true,
+                    None,
                 );
             }
             for other in restore_players {
@@ -783,6 +788,7 @@ impl ControlPlayerInfoRegistry {
                     AttributeBlockingPacket::Restore,
                     ResolvedPlayerAttribute::Color,
                     true,
+                    None,
                 );
             }
             if original_marks.original
@@ -986,16 +992,39 @@ impl ControlPlayerInfoRegistry {
         restore_players: &[ControlPlayerInfoEntry],
         oracle: &mut impl InitialHostTeamAssignmentOracle,
     ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
+        self.admit_request_with_attributes_and_alternate_colors(
+            request,
+            max_players,
+            teams,
+            restore_players,
+            oracle,
+            |_| None,
+        )
+    }
+
+    /// Host-local counterpart of [`Self::admit_request_with_attributes`].
+    /// `dwAlternateColor` is not synchronized, so callers identify locally
+    /// loaded rows and supply that sidecar value while admission is resolved.
+    pub fn admit_request_with_attributes_and_alternate_colors(
+        &mut self,
+        request: PlayerInfoUpdateRequest,
+        max_players: usize,
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+        alternate_color: impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
+    ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
         let mut updated_registry = self.clone();
         let Some(mut admitted) = updated_registry.admit_request(request, max_players) else {
             return Ok(None);
         };
         updated_registry.update_savegame_assignments(&mut admitted, restore_players);
-        let admission = updated_registry.resolve_admitted_player_attributes(
+        let admission = updated_registry.resolve_admitted_player_attributes_with_alternate_colors(
             admitted,
             teams,
             restore_players,
             oracle,
+            alternate_color,
         )?;
         *self = updated_registry;
         Ok(Some(admission))
@@ -1036,6 +1065,33 @@ impl ControlPlayerInfoRegistry {
         restore_players: &[ControlPlayerInfoEntry],
         oracle: &mut impl InitialHostTeamAssignmentOracle,
     ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
+        self.admit_request_with_teams_and_attributes_and_alternate_colors(
+            request,
+            max_players,
+            teams,
+            by_host,
+            has_or_will_have_lobby,
+            restore_players,
+            oracle,
+            |_| None,
+        )
+    }
+
+    /// Host-local counterpart of
+    /// [`Self::admit_request_with_teams_and_attributes`] retaining the
+    /// unsynchronized `dwAlternateColor` sidecar through team assignment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_request_with_teams_and_attributes_and_alternate_colors(
+        &mut self,
+        request: PlayerInfoUpdateRequest,
+        max_players: usize,
+        teams: &mut InitialNetworkTeamMetadata,
+        by_host: bool,
+        has_or_will_have_lobby: bool,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+        alternate_color: impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
+    ) -> Result<Option<PlayerInfoAdmission>, TeamColorUpdateError> {
         let mut updated_registry = self.clone();
         let mut updated_teams = teams.clone();
         let Some(mut admitted) = updated_registry.admit_request(request, max_players) else {
@@ -1061,6 +1117,7 @@ impl ControlPlayerInfoRegistry {
             Some(&preflight_teams),
             restore_players,
             preflight_oracle.used_process_randomness(),
+            &alternate_color,
         )?;
         if preflight_oracle.generated_team {
             updated_registry
@@ -1089,12 +1146,14 @@ impl ControlPlayerInfoRegistry {
                 }
             })
             .collect();
-        let mut admission = updated_registry.resolve_admitted_player_attributes(
-            admitted,
-            Some(&updated_teams),
-            restore_players,
-            oracle,
-        )?;
+        let mut admission = updated_registry
+            .resolve_admitted_player_attributes_with_alternate_colors(
+                admitted,
+                Some(&updated_teams),
+                restore_players,
+                oracle,
+                alternate_color,
+            )?;
         admission.joined_player_team_updates = joined_player_team_updates;
         *self = updated_registry;
         *teams = updated_teams;
@@ -1307,10 +1366,31 @@ impl ControlPlayerInfoRegistry {
     /// the admitted packet remains separate in the returned result.
     pub fn resolve_admitted_player_attributes(
         &mut self,
+        admitted: PlayerInfoControlData,
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Result<PlayerInfoAdmission, TeamColorUpdateError> {
+        self.resolve_admitted_player_attributes_with_alternate_colors(
+            admitted,
+            teams,
+            restore_players,
+            oracle,
+            |_| None,
+        )
+    }
+
+    /// Initial local host players retain `C4PlayerInfo::dwAlternateColor`
+    /// outside the synchronized player-info row. The callback resolves that
+    /// process-local value from a stable row identity (normally the player
+    /// resource ID) while the regular wire model remains unchanged.
+    pub fn resolve_admitted_player_attributes_with_alternate_colors(
+        &mut self,
         mut admitted: PlayerInfoControlData,
         teams: Option<&InitialNetworkTeamMetadata>,
         restore_players: &[ControlPlayerInfoEntry],
         oracle: &mut impl InitialHostTeamAssignmentOracle,
+        alternate_color: impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
     ) -> Result<PlayerInfoAdmission, TeamColorUpdateError> {
         let mut admitted_forced_color_changed = false;
         for player in &mut admitted.players {
@@ -1339,6 +1419,7 @@ impl ControlPlayerInfoRegistry {
             teams,
             restore_players,
             false,
+            &alternate_color,
         )?;
 
         let existing_count = self.clients.len();
@@ -1355,6 +1436,7 @@ impl ControlPlayerInfoRegistry {
             teams,
             restore_players,
             oracle,
+            &alternate_color,
         )?;
 
         let resolved_admitted = resolving_packets
@@ -1393,6 +1475,21 @@ impl ControlPlayerInfoRegistry {
         restore_players: &[ControlPlayerInfoEntry],
         oracle: &mut impl InitialHostTeamAssignmentOracle,
     ) -> Result<Vec<PlayerInfoControlData>, TeamColorUpdateError> {
+        self.refresh_player_attributes_with_alternate_colors(teams, restore_players, oracle, |_| {
+            None
+        })
+    }
+
+    /// Host-local counterpart of [`Self::refresh_player_attributes`]. Every
+    /// retained packet is revisited, so the callback must cover previously
+    /// loaded local rows as well as the packet that triggered the refresh.
+    pub fn refresh_player_attributes_with_alternate_colors(
+        &mut self,
+        teams: Option<&InitialNetworkTeamMetadata>,
+        restore_players: &[ControlPlayerInfoEntry],
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+        alternate_color: impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
+    ) -> Result<Vec<PlayerInfoControlData>, TeamColorUpdateError> {
         let mut updated_clients = self.clients.clone();
         let mut updated_packets = HashSet::new();
         for (client_index, client) in updated_clients.iter_mut().enumerate() {
@@ -1429,6 +1526,7 @@ impl ControlPlayerInfoRegistry {
             teams,
             restore_players,
             oracle,
+            &alternate_color,
         )?);
         let touched_clients = updated_clients
             .iter()
@@ -1450,6 +1548,7 @@ impl ControlPlayerInfoRegistry {
         teams: Option<&InitialNetworkTeamMetadata>,
         restore_players: &[ControlPlayerInfoEntry],
         oracle: &mut impl InitialHostTeamAssignmentOracle,
+        alternate_color: &impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
     ) -> Result<HashSet<usize>, TeamColorUpdateError> {
         let mut check_packets = (0..primary_count).collect::<Vec<_>>();
         if let Some(secondary_index) = secondary_index {
@@ -1485,6 +1584,7 @@ impl ControlPlayerInfoRegistry {
                         player_index,
                         &mut check_packets,
                         oracle,
+                        alternate_color,
                     )?;
                 }
                 if !attributes_fixed
@@ -1538,9 +1638,11 @@ impl ControlPlayerInfoRegistry {
         player_index: usize,
         check_packets: &mut Vec<usize>,
         oracle: &mut impl InitialHostTeamAssignmentOracle,
+        alternate_color: &impl Fn(&ControlPlayerInfoEntry) -> Option<u32>,
     ) -> Result<(), TeamColorUpdateError> {
         let mut tries = 0;
         loop {
+            let alternate = alternate_color(&packets[packet_index].players[player_index]);
             let marks = Self::mark_attribute_conflicts(
                 packets,
                 primary_count,
@@ -1550,10 +1652,12 @@ impl ControlPlayerInfoRegistry {
                 player_index,
                 ResolvedPlayerAttribute::Color,
                 tries == 0,
+                alternate,
             );
-            let player = &packets[packet_index].players[player_index];
-            let current = player.color;
-            let original = player.original_color;
+            let (current, original, player_id) = {
+                let player = &packets[packet_index].players[player_index];
+                (player.color, player.original_color, player.id)
+            };
 
             if tries == 0 && current != original {
                 if !marks.original {
@@ -1561,14 +1665,26 @@ impl ControlPlayerInfoRegistry {
                     Self::readd_blocking_packet(check_packets, marks.low_priority_original);
                     break;
                 }
-                // AlternateColorDw is host-local and is not present in the
-                // synchronized Rust row. This is the sole branch where its
-                // value can change native behavior: current differs from the
-                // original and the original cannot be reclaimed.
-                return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
-                    player_id: player.id,
-                    other_player_id: marks.original_other_player_id.unwrap_or(0),
-                });
+                match alternate {
+                    Some(alternate)
+                        if alternate != 0 && current != alternate && !marks.alternate =>
+                    {
+                        packets[packet_index].players[player_index].color = alternate;
+                        Self::readd_blocking_packet(check_packets, marks.low_priority_alternate);
+                        break;
+                    }
+                    Some(_) => {
+                        // The exact host-local value is known to be absent,
+                        // already current, or blocked. Native keeps a free
+                        // current color and otherwise enters its random loop.
+                    }
+                    None => {
+                        return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
+                            player_id,
+                            other_player_id: marks.original_other_player_id.unwrap_or(0),
+                        });
+                    }
+                }
             }
             if !marks.current {
                 break;
@@ -1606,6 +1722,7 @@ impl ControlPlayerInfoRegistry {
                 player_index,
                 ResolvedPlayerAttribute::Name,
                 tries == 0,
+                None,
             );
             if tries == 0 {
                 original_conflict = marks.original;
@@ -1653,6 +1770,7 @@ impl ControlPlayerInfoRegistry {
         resolve_player_index: usize,
         attribute: ResolvedPlayerAttribute,
         test_original: bool,
+        alternate_color: Option<u32>,
     ) -> AttributeConflictMarks {
         let resolve = &packets[resolve_packet_index].players[resolve_player_index];
         let mut marks = AttributeConflictMarks::default();
@@ -1669,6 +1787,7 @@ impl ControlPlayerInfoRegistry {
                     AttributeBlockingPacket::Resolving(packet_index),
                     attribute,
                     test_original,
+                    alternate_color,
                 );
             }
         }
@@ -1684,6 +1803,7 @@ impl ControlPlayerInfoRegistry {
                     AttributeBlockingPacket::Restore,
                     attribute,
                     test_original,
+                    alternate_color,
                 );
             }
         }
@@ -1699,6 +1819,7 @@ impl ControlPlayerInfoRegistry {
                     AttributeBlockingPacket::Resolving(secondary_index),
                     attribute,
                     test_original,
+                    alternate_color,
                 );
             }
         }
@@ -1716,6 +1837,7 @@ impl ControlPlayerInfoRegistry {
         check_packet: AttributeBlockingPacket,
         attribute: ResolvedPlayerAttribute,
         test_original: bool,
+        alternate_color: Option<u32>,
     ) {
         if check_location == Some((resolve_packet_index, resolve_player_index))
             || (resolve.id != 0 && resolve.id == check.id)
@@ -1731,17 +1853,37 @@ impl ControlPlayerInfoRegistry {
         {
             marks.current = true;
         }
-        if !test_original
-            || !Self::players_have_original_attribute_conflict(resolve, check, attribute)
-        {
+        if !test_original {
             return;
         }
-        marks.original_other_player_id.get_or_insert(check.id);
-        if resolve_has_higher_priority && !marks.original && marks.low_priority_original.is_none() {
-            marks.low_priority_original = Some(check_packet);
-        } else {
-            marks.low_priority_original = None;
-            marks.original = true;
+
+        if Self::players_have_original_attribute_conflict(resolve, check, attribute) {
+            marks.original_other_player_id.get_or_insert(check.id);
+            if resolve_has_higher_priority
+                && !marks.original
+                && marks.low_priority_original.is_none()
+            {
+                marks.low_priority_original = Some(check_packet);
+            } else {
+                marks.low_priority_original = None;
+                marks.original = true;
+            }
+        }
+
+        if attribute == ResolvedPlayerAttribute::Color
+            && alternate_color.is_some_and(|alternate| {
+                alternate != 0 && player_colors_conflict(check.color, alternate)
+            })
+        {
+            if resolve_has_higher_priority
+                && !marks.alternate
+                && marks.low_priority_alternate.is_none()
+            {
+                marks.low_priority_alternate = Some(check_packet);
+            } else {
+                marks.low_priority_alternate = None;
+                marks.alternate = true;
+            }
         }
     }
 
@@ -4861,6 +5003,118 @@ mod tests {
     }
 
     #[test]
+    fn known_host_local_alternate_color_is_resolved_by_resource_identity() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            1,
+            [PlayerInfoControlData {
+                client_id: 1,
+                players: vec![ControlPlayerInfoEntry {
+                    id: 1,
+                    name: LegacyCString::from_bytes(b"Blocker".to_vec()).unwrap(),
+                    color: 0x00f4_0000,
+                    original_color: 0x00f4_0000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        let resource_id = 77;
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+        let admission = registry
+            .admit_request_with_attributes_and_alternate_colors(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                        color: 0x0000_c800,
+                        original_color: 0x00f4_0000,
+                        resource: Some(NetworkResourceCore {
+                            id: resource_id,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+                |player| {
+                    player
+                        .resource
+                        .as_ref()
+                        .filter(|resource| resource.id == resource_id)
+                        .map(|_| 0x0000_00e8)
+                },
+            )
+            .expect("known C4PlayerInfo::dwAlternateColor resolves the conflict")
+            .expect("candidate receives an ID before attribute resolution");
+
+        assert_eq!(admission.admitted.players[0].color, 0x0000_00e8);
+        assert_ne!(
+            admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
+        assert!(oracle.ranges.is_empty());
+    }
+
+    #[test]
+    fn known_zero_alternate_color_enters_the_native_random_fallback() {
+        let named = |id, name: &[u8], color| ControlPlayerInfoEntry {
+            id,
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            color,
+            original_color: color,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            2,
+            [PlayerInfoControlData {
+                client_id: 1,
+                players: vec![
+                    named(1, b"Original blocker", 0x00f4_0000),
+                    named(2, b"Current blocker", 0x0000_00f4),
+                ],
+                ..Default::default()
+            }],
+        );
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [10, 20, 30].into(),
+            ranges: Vec::new(),
+        };
+
+        let admission = registry
+            .admit_request_with_attributes_and_alternate_colors(
+                PlayerInfoUpdateRequest {
+                    client_id: 2,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![ControlPlayerInfoEntry {
+                        name: LegacyCString::from_bytes(b"Candidate".to_vec()).unwrap(),
+                        color: 0x0000_00f4,
+                        original_color: 0x00f4_0000,
+                        ..Default::default()
+                    }],
+                },
+                8,
+                None,
+                &[],
+                &mut oracle,
+                |_| Some(0),
+            )
+            .expect("wire-deserialized zero alternate is complete native state")
+            .expect("candidate is admitted");
+
+        assert_eq!(admission.admitted.players[0].color, 0x001e_140a);
+        assert_eq!(oracle.ranges, vec![302, 302, 302]);
+    }
+
+    #[test]
     fn runtime_team_admission_preflights_alternate_error_before_random_draw() {
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.replace_snapshot(
@@ -6985,6 +7239,7 @@ mod tests {
             total_playing_time: 1_234,
             pref_color: 4,
             pref_color_dw: 0x00aa_bbcc,
+            pref_color2_dw: 0,
             pref_position: 2,
             pref_control: 0,
             pref_mouse: true,

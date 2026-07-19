@@ -117,7 +117,8 @@ pub use message::{
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
 };
 pub use network_game_data::{
-    parse_landscape_game_data, serialize_initial_network_game, InitialNetworkGameData,
+    parse_initial_network_game_data, parse_landscape_game_data, serialize_initial_network_game,
+    InitialNetworkCompiledSections, InitialNetworkGameApplyError, InitialNetworkGameData,
     InitialNetworkGameError, InitialNetworkMessageBoardCommand, LandscapeGameData,
     MessageBoardCommandRestriction,
     UnsupportedInitialNetworkGameState, INITIAL_NETWORK_DEFAULT_SYNC_RATE,
@@ -18864,6 +18865,110 @@ impl Engine {
         self.control_rate = timing.control_rate;
     }
 
+    /// Installs the exact runtime fields compiled from a network savegame.
+    /// The caller must invoke this after the static scenario landscape,
+    /// physics, weather and sky setup, but before definition scripts or
+    /// loaded objects can observe the game state.
+    #[doc(hidden)]
+    pub fn apply_initial_network_game_data(
+        &mut self,
+        data: &InitialNetworkGameData,
+    ) -> Result<(), InitialNetworkGameApplyError> {
+        data.validate_runtime_application()?;
+
+        self.game_time = data.time;
+        self.frame = data.frame as u64;
+        self.control_tick = data.control_tick;
+        self.sync_rate = data.sync_rate;
+        self.next_object_id = self
+            .next_object_id
+            .max(data.object_enumeration_index as u64 + 1);
+
+        self.set_structures_need_energy(data.rules & 1 != 0);
+        self.set_construction_needs_material(data.rules & 2 != 0);
+        self.flag_removeable = data.rules & 4 != 0;
+        self.structures_snow_in = data.rules & 8 != 0;
+        self.set_team_home_base_rule(data.rules & 16 != 0);
+
+        let playlist = (!data.play_list.is_empty()).then(|| data.play_list.clone());
+        self.audio_registry.restore_music_playlist(playlist.clone());
+        self.pending_audio.push(AudioCommand::SetMusicPlaylist {
+            playlist,
+            restart: false,
+        });
+        let music_level = data.music_level.clamp(0, 100) as u8;
+        let music_level = self.audio_registry.restore_music_level(music_level);
+        self.pending_audio
+            .push(AudioCommand::SetMusicLevel { level: music_level });
+
+        if data.current_scenario_section.is_empty() {
+            self.current_scenario_section = "main".to_string();
+            self.last_scenario_section_flags = None;
+        } else {
+            self.current_scenario_section = data.current_scenario_section.clone();
+            // The loaded section name is save-persistent even though the
+            // transient section-load flag word is not part of Game.txt.
+            self.last_scenario_section_flags = Some(0);
+        }
+        self.pending_object_order_commands
+            .retain(|command| !matches!(command, ObjectOrderCommand::ResortUnsortedSweep));
+        if data.resort_any_object {
+            self.pending_object_order_commands
+                .push(ObjectOrderCommand::ResortUnsortedSweep);
+        }
+        self.next_mission = data.next_mission.clone();
+        self.message_board_commands = data.message_board_commands.clone();
+        self.scenario_script_go = data.script_go;
+        self.scenario_script_counter = data.script_counter;
+
+        // Weather::CompileFunc owns only these live values. Scenario C4S
+        // fields such as Wind.Std, season bounds and precipitation remain
+        // installed so later Tick1000/season/weather behavior uses the
+        // original scenario configuration just like C++.
+        self.environment.season = data.environment.season;
+        self.environment.year_speed = data.environment.year_speed;
+        self.environment.season_delay = data.environment.season_delay;
+        self.environment.wind = data.environment.wind;
+        self.environment.wind_target = data.environment.wind_target;
+        self.environment.temperature = data.environment.temperature;
+        self.environment.temperature_range = data.environment.temperature_range;
+        self.environment.climate = data.environment.climate;
+        self.environment.meteorite = data.environment.meteorite;
+        self.environment.volcano = data.environment.volcano;
+        self.environment.earthquake = data.environment.earthquake;
+        self.environment.lightning = data.environment.lightning;
+        self.environment.no_gamma = data.environment.no_gamma;
+        self.gamma = data.gamma;
+        Ok(())
+    }
+
+    /// Install the final `C4Sky` frame after the caller has combined the
+    /// earlier-compiled runtime words with C4Sky::Init's later resource and
+    /// SkyScrollMode adjustments. The scenario surface/fade settings travel
+    /// in `frame.settings`; the resulting fixed words remain authoritative.
+    pub(crate) fn apply_initial_network_sky_frame(&mut self, frame: &SkyFrame) {
+        self.sky = Some(sky::SkyState::from_frame(frame));
+    }
+
+    /// Install the compiled scoreboard before any startup callback can query
+    /// it. Presentation requests remain suppressed until shared GUI mode.
+    pub(crate) fn apply_initial_network_scoreboard(&mut self, scoreboard: ScoreboardState) {
+        *self.scoreboard.borrow_mut() = scoreboard;
+    }
+
+    /// C++ denumerates script globals and global effects after all objects are
+    /// loaded and before `InitializeDef`. Values supplied here have already
+    /// resolved legacy string/object enumeration through that same live object
+    /// set.
+    pub(crate) fn apply_initial_network_post_object_state(
+        &mut self,
+        script_globals: &ScriptGlobalState,
+        global_effects: Vec<EffectState>,
+    ) {
+        self.restore_script_globals(script_globals);
+        self.global_effects = global_effects;
+    }
+
     fn defer_runtime_flash_boundary(&mut self, error: EngineError) -> Option<EngineError> {
         match error {
             EngineError::RuntimeFlashProducerBoundary { producer, .. } => {
@@ -23575,6 +23680,12 @@ impl Engine {
         if let Some(points) = self.environment.season_gamma_control_points() {
             let _ = self.gamma.set_ramp(1, points);
         }
+    }
+
+    /// `C4Weather::Init(false)` for a compiled savegame: no scenario-value
+    /// evaluation or weather mutation, only the final season-gamma refresh.
+    pub(crate) fn refresh_loaded_weather_gamma_control(&mut self) {
+        self.refresh_season_gamma_control();
     }
 
     fn apply_environment_delta(&mut self, delta: &EnvironmentDelta) {
@@ -44479,6 +44590,13 @@ impl Engine {
         // C4Game runs it before Objects.SyncClearance (C4Game.cpp:3676-3680).
         self.pxs_system.sync_clearance();
         for object in &mut self.objects {
+            // C4GameObjects moves C4OS_INACTIVE rows to its separate
+            // InactiveObjects list while loading. Objects.SyncClearance walks
+            // only the main list, so dormant rows retain their saved fixed
+            // state until StatusActivate re-adds them.
+            if object.state.status == ObjectStatus::Inactive {
+                continue;
+            }
             // C4Object::SyncClearance (C4Object.cpp:3803-3823).
             object.state.t_attach = 0;
             object.frame_t_attach = 0;
@@ -44500,6 +44618,9 @@ impl Engine {
         // after every object has had its velocity cleared so cross-object OCF
         // probes observe the fully cleared state.
         for index in 0..self.objects.len() {
+            if self.objects[index].state.status == ObjectStatus::Inactive {
+                continue;
+            }
             self.refresh_object_ocf(index);
         }
     }

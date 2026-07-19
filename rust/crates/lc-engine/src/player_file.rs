@@ -428,6 +428,9 @@ pub struct PlayerFile {
     pub pref_color: i32,
     /// `[Preferences] ColorDw` — 24-bit RGB preference (default 0xff).
     pub pref_color_dw: u32,
+    /// `[Preferences] AlternateColorDw` — host-local fallback color used by
+    /// `C4PlayerInfoListAttributeConflictResolver` (default 0 / absent).
+    pub pref_color2_dw: u32,
     /// `[Preferences] Position` — preferred start position (default 0).
     pub pref_position: i32,
     /// `[Preferences] Control` — raw preferred control set. Synthetic cores
@@ -460,6 +463,7 @@ impl Default for PlayerFile {
             total_playing_time: 0,
             pref_color: 0,
             pref_color_dw: 0xff,
+            pref_color2_dw: 0,
             pref_position: 0,
             pref_control: 0,
             pref_mouse: true,
@@ -486,6 +490,12 @@ impl PlayerFile {
             .and_then(|index| PLAYER_COLORS.get(index))
             .copied()
             .unwrap_or(0xaaaaaa)
+    }
+
+    /// `C4PlayerInfoCore::Load` masks AlternateColorDw to 24-bit RGB. Zero
+    /// remains meaningful: it tells the host that no alternate was selected.
+    pub fn normalized_alternate_color(&self) -> u32 {
+        self.pref_color2_dw & 0x00ff_ffff
     }
 
     pub fn load(group: &Group) -> Result<Self, ScenarioError> {
@@ -544,6 +554,7 @@ impl PlayerFile {
                 .and_then(|value| parse_leading_i32(&value))
                 .map(|value| value as u32)
                 .unwrap_or(0xff),
+            pref_color2_dw: exact_int("Preferences", "AlternateColorDw", 0) as u32 & 0x00ff_ffff,
             pref_position: int("Preferences", "Position", 0),
             pref_control: exact_int("Preferences", "Control", 1),
             pref_mouse: exact_int("Preferences", "Mouse", 1) != 0,
@@ -739,7 +750,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("player dir");
         std::fs::write(
             root.join("Player.txt"),
-            "[Player]\nName=Tyler\nRank=3\nScore=250\nRounds=11\nRoundsWon=7\nRoundsLost=4\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nControl=3\nMouse=0\nAutoStopControl=1\n",
+            "[Player]\nName=Tyler\nRank=3\nScore=250\nRounds=11\nRoundsWon=7\nRoundsLost=4\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nAlternateColorDw=4289449455\nPosition=2\nControl=3\nMouse=0\nAutoStopControl=1\n",
         )
         .expect("write core");
 
@@ -768,6 +779,8 @@ mod tests {
         assert_eq!(player.total_playing_time, 1_234);
         assert_eq!(player.pref_color, 4);
         assert_eq!(player.pref_color_dw, 12345678);
+        assert_eq!(player.pref_color2_dw, 0x00ab_cdef);
+        assert_eq!(player.normalized_alternate_color(), 0x00ab_cdef);
         assert_eq!(player.pref_position, 2);
         assert_eq!(player.pref_control, 3);
         assert!(!player.pref_mouse);
@@ -1108,6 +1121,7 @@ mod tests {
         assert_eq!(player.total_playing_time, 0);
         assert_eq!(player.pref_color, 0);
         assert_eq!(player.pref_color_dw, 0xff);
+        assert_eq!(player.pref_color2_dw, 0);
         assert_eq!(player.pref_position, 0);
         assert_eq!(
             player.pref_control, 1,

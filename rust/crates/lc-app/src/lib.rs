@@ -9,7 +9,7 @@ pub use client_network_scenario::{
 };
 pub use client_start_barrier::ClientStartBarrier;
 pub use configured_client_players::{
-    load_configured_client_players, load_configured_mission_access,
+    configured_native_value, load_configured_client_players, load_configured_mission_access,
     load_snapshotted_client_players, snapshot_configured_client_player_selection,
     ConfiguredClientPlayerSelection, ConfiguredClientPlayers, ConfiguredClientPlayersError,
 };
@@ -36,6 +36,7 @@ pub struct SelectedClientPlayer {
     player_name: LegacyCString,
     player_name_valid: bool,
     network_color: u32,
+    alternate_color: u32,
     player_file: PlayerFile,
 }
 
@@ -47,6 +48,7 @@ impl SelectedClientPlayer {
     ) -> Self {
         let player_name = LegacyCString::from_bytes(lc_script::c4_string_bytes(&player_file.name));
         let network_color = player_file.normalized_preferred_color();
+        let alternate_color = player_file.normalized_alternate_color();
         Self {
             source_path: source_path.into(),
             module_filename: wire_name.clone(),
@@ -54,6 +56,7 @@ impl SelectedClientPlayer {
             player_name: player_name.clone().unwrap_or_default(),
             player_name_valid: player_name.is_some(),
             network_color,
+            alternate_color,
             player_file,
         }
     }
@@ -64,6 +67,7 @@ impl SelectedClientPlayer {
         resource_wire_name: LegacyCString,
         player_name: LegacyCString,
         network_color: u32,
+        alternate_color: u32,
         player_file: PlayerFile,
     ) -> Self {
         Self {
@@ -73,6 +77,7 @@ impl SelectedClientPlayer {
             player_name,
             player_name_valid: true,
             network_color,
+            alternate_color,
             player_file,
         }
     }
@@ -95,6 +100,16 @@ impl SelectedClientPlayer {
 
     pub fn player_name(&self) -> &LegacyCString {
         &self.player_name
+    }
+
+    pub fn network_color(&self) -> u32 {
+        self.network_color
+    }
+
+    /// Host-local `C4PlayerInfo::dwAlternateColor`. This is intentionally
+    /// absent from synchronized `ControlPlayerInfoEntry` serialization.
+    pub fn alternate_color(&self) -> u32 {
+        self.alternate_color
     }
 
     pub fn player_file(&self) -> &PlayerFile {
@@ -307,6 +322,7 @@ mod tests {
             total_playing_time: 0,
             pref_color: 4,
             pref_color_dw: 0x12_34_56,
+            pref_color2_dw: 0x00ab_cdef,
             pref_position: 0,
             pref_control: 0,
             pref_mouse: true,
@@ -330,6 +346,7 @@ mod tests {
         assert_eq!(selected.source_path(), Path::new(&source_path));
         assert_eq!(selected.wire_name(), &wire_name);
         assert_eq!(selected.player_file(), &player_file);
+        assert_eq!(selected.alternate_color(), 0x00ab_cdef);
         assert_eq!(
             selected
                 .initial_player_info_update(7, resource.clone())
@@ -393,6 +410,7 @@ mod tests {
                 total_playing_time: 0,
                 pref_color: 4,
                 pref_color_dw: 0x65_43_21,
+                pref_color2_dw: 0,
                 pref_position: 0,
                 pref_control: 0,
                 pref_mouse: true,
@@ -448,6 +466,7 @@ mod tests {
             total_playing_time: 0,
             pref_color: 0,
             pref_color_dw: 0x11_22_33,
+            pref_color2_dw: 0,
             pref_position: 0,
             pref_control: 0,
             pref_mouse: true,
@@ -535,6 +554,7 @@ mod tests {
             total_playing_time: 0,
             pref_color: 0,
             pref_color_dw: 0x11_22_33,
+            pref_color2_dw: 0,
             pref_position: 0,
             pref_control: 0,
             pref_mouse: true,
@@ -550,6 +570,7 @@ mod tests {
                 raw(b"Shared.c4p"),
                 raw(b"One"),
                 0x11_22_33,
+                0,
                 player_file("One"),
             ),
             super::SelectedClientPlayer::from_configured(
@@ -558,6 +579,7 @@ mod tests {
                 raw(b"Shared.c4p"),
                 raw(b"Two"),
                 0x11_22_33,
+                0,
                 player_file("Two"),
             ),
             super::SelectedClientPlayer::from_configured(
@@ -566,6 +588,7 @@ mod tests {
                 raw(b"Renamed.c4p"),
                 raw(b"Three"),
                 0x11_22_33,
+                0,
                 player_file("Three"),
             ),
         ];

@@ -83,6 +83,11 @@ impl ScoreboardCell {
 pub struct ScoreboardState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rows: Vec<Vec<ScoreboardCell>>,
+    /// `C4Scoreboard` can compile a nonzero column count with zero rows. The
+    /// ordinary rectangular representation has nowhere to retain that count,
+    /// so keep it only for this empty-row shape.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    empty_row_columns: usize,
     #[serde(default, skip_serializing_if = "is_zero")]
     show_count: i32,
 }
@@ -93,7 +98,7 @@ impl ScoreboardState {
     }
 
     pub fn column_count(&self) -> usize {
-        self.rows.first().map_or(0, Vec::len)
+        self.rows.first().map_or(self.empty_row_columns, Vec::len)
     }
 
     pub fn cell(&self, row: usize, column: usize) -> Option<&ScoreboardCell> {
@@ -132,7 +137,41 @@ impl ScoreboardState {
     }
 
     pub(crate) fn is_default(&self) -> bool {
-        self.rows.is_empty() && self.show_count == 0
+        self.rows.is_empty() && self.empty_row_columns == 0 && self.show_count == 0
+    }
+
+    /// Rebuild the exact row-major matrix emitted by
+    /// `C4Scoreboard::CompileFunc`. Unlike `SetCell`, this deliberately keeps
+    /// duplicate header keys, allocated empty strings and degenerate
+    /// zero-row/zero-column dimensions accepted by the C++ compiler.
+    pub(crate) fn from_compiled_cells(
+        row_count: usize,
+        column_count: usize,
+        show_count: i32,
+        cells: Vec<(Option<String>, i32)>,
+    ) -> Option<Self> {
+        let expected = row_count.checked_mul(column_count)?;
+        if cells.len() != expected {
+            return None;
+        }
+        let rows = if column_count == 0 {
+            vec![Vec::new(); row_count]
+        } else {
+            cells
+                .chunks_exact(column_count)
+                .map(|row| {
+                    row.iter()
+                        .cloned()
+                        .map(|(text, value)| ScoreboardCell { text, value })
+                        .collect()
+                })
+                .collect()
+        };
+        Some(Self {
+            rows,
+            empty_row_columns: (row_count == 0).then_some(column_count).unwrap_or(0),
+            show_count,
+        })
     }
 
     pub(crate) fn set_cell(
@@ -145,10 +184,16 @@ impl ScoreboardState {
         // SetCell first materializes the shared title corner
         // (C4Scoreboard.cpp:141-147).
         if self.rows.is_empty() {
-            self.rows = vec![vec![ScoreboardCell {
-                text: None,
-                value: SCOREBOARD_CAPTION,
-            }]];
+            if self.empty_row_columns == 0 {
+                self.rows = vec![vec![ScoreboardCell {
+                    text: None,
+                    value: SCOREBOARD_CAPTION,
+                }]];
+            } else {
+                self.rows = vec![vec![ScoreboardCell::default(); self.empty_row_columns]];
+                self.empty_row_columns = 0;
+                self.rows[0][0].value = SCOREBOARD_CAPTION;
+            }
         }
 
         let column = self
@@ -230,6 +275,10 @@ const fn is_zero(value: &i32) -> bool {
     *value == 0
 }
 
+const fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SCOREBOARD_CAPTION, ScoreboardState};
@@ -293,5 +342,45 @@ mod tests {
             "negative disables the user toggle"
         );
         assert!(!scoreboard.should_be_shown());
+    }
+
+    #[test]
+    fn compiled_matrix_keeps_duplicate_keys_and_degenerate_dimensions() {
+        let scoreboard = ScoreboardState::from_compiled_cells(
+            2,
+            2,
+            3,
+            vec![
+                (Some("Title".into()), -1),
+                (Some("First".into()), 7),
+                (Some("Row".into()), 7),
+                (Some(String::new()), 42),
+            ],
+        )
+        .expect("compiled matrix shape");
+        assert_eq!((scoreboard.row_count(), scoreboard.column_count()), (2, 2));
+        assert_eq!(
+            scoreboard.cell(0, 1).map(super::ScoreboardCell::value),
+            Some(7)
+        );
+        assert_eq!(
+            scoreboard.cell(1, 0).map(super::ScoreboardCell::value),
+            Some(7)
+        );
+        assert_eq!(
+            scoreboard.cell(1, 1).and_then(super::ScoreboardCell::text),
+            Some("")
+        );
+
+        let mut no_rows =
+            ScoreboardState::from_compiled_cells(0, 3, 1, Vec::new()).expect("zero-row matrix");
+        assert_eq!((no_rows.row_count(), no_rows.column_count()), (0, 3));
+        no_rows.set_cell(
+            SCOREBOARD_CAPTION,
+            SCOREBOARD_CAPTION,
+            Some("Now live".into()),
+            0,
+        );
+        assert_eq!((no_rows.row_count(), no_rows.column_count()), (1, 3));
     }
 }

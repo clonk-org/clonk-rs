@@ -12,7 +12,8 @@ pub mod prepared_host_bootstrap;
 use prepared_host_bootstrap::{
     prepare_host_bootstrap, prepare_host_bootstrap_with_team_assignment_oracle,
     PrepareHostBootstrapError, PreparedHostBootstrapConfig, PreparedHostBootstrapSpec,
-    PreparedHostUseError,
+    PreparedHostPlayerIdentity, PreparedHostPlayerSource, PreparedHostUseError,
+    PreparedLeagueHostConfig,
 };
 
 #[test]
@@ -36,7 +37,6 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
 
     let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &scenario_path,
-        scenario_title: "The First Tutorial",
         install_roots: &install_roots,
         languages: &languages,
         language_packs: &language_packs,
@@ -92,7 +92,11 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     let reference = prepared
         .initial_host_game_reference(true, &[tcp_address])
         .expect("prepared host builds the exact post-admission reference");
-    assert_eq!(reference.summary().title, "The First Tutorial");
+    assert_eq!(
+        reference.summary().title,
+        "A Clonk",
+        "C++ reloads the selected scenario Title component instead of trusting caller display text"
+    );
     assert_eq!(reference.summary().host_name, "NetworkName");
     assert_eq!(reference.summary().host_nick, "NetworkNick");
     assert_eq!(reference.summary().state, "Lobby");
@@ -434,39 +438,115 @@ LastPlayerID=9\n\
 }
 
 #[test]
-fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
+fn embedded_parameters_and_ignored_rosters_prepare_before_typed_runtime_guards() {
     let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture
+            .scenario_text
+            .replace("MaxPlayer=2", "MaxPlayer=2\nMaxPlayerLeague=5"),
+    )
+    .unwrap();
 
     fs::write(
         fixture.scenario_path.join("Parameters.txt"),
-        b"[Parameters]\nRandomSeed=7\n",
+        b"[Parameters]\n\
+RandomSeed=7\n\
+StartupPlayerCount=3\n\
+MaxPlayers=5\n\
+UseFairCrew=1\n\
+FairCrewForced=1\n\
+FairCrewStrength=1234\n\
+AllowDebug=0\n\
+IsNetworkGame=1\n\
+ControlRate=4\n\
+AutoFrameSkip=1\n\
+Rules=RULE=2\n\
+Goals=GOAL=3\n\
+League=Embedded Cup\n\
+\n\
+\x20\x20[Client]\n\
+\x20\x20ID=9\n\
+\x20\x20Activated=1\n\
+\x20\x20Name=Saved Client\n",
     )
     .unwrap();
-    assert!(matches!(
-        prepare(&fixture, &[]),
-        Err(PrepareHostBootstrapError::ScenarioParametersUnsupported)
-    ));
+    let embedded = prepare(&fixture, &[]).expect("embedded Parameters.txt compiles");
+    let parameters = &embedded
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters;
+    assert_eq!(parameters.random_seed, 7);
+    assert_eq!(parameters.startup_player_count, 3);
+    assert_eq!(parameters.max_players, 5);
+    assert!(parameters.use_fair_crew);
+    assert!(parameters.fair_crew_forced);
+    assert_eq!(parameters.fair_crew_strength, 1234);
+    assert!(!parameters.allow_debug);
+    assert!(parameters.is_network_game);
+    assert_eq!(parameters.control_rate, 4);
+    assert!(parameters.auto_frame_skip);
+    assert_eq!(parameters.rules[0].id.as_bytes(), b"RULE");
+    assert_eq!(parameters.rules[0].count, 2);
+    assert_eq!(parameters.goals[0].id.as_bytes(), b"GOAL");
+    assert_eq!(parameters.goals[0].count, 3);
+    assert!(
+        parameters.league.is_empty(),
+        "InitLeague clears embedded League"
+    );
+    assert_eq!(parameters.clients.clients.len(), 1);
+    assert_eq!(parameters.clients.clients[0].client_id, 0);
+    assert_eq!(parameters.clients.clients[0].name.as_bytes(), b"Host Name");
+
+    let dynamic_file = embedded
+        .host_config()
+        .resource_files
+        .last()
+        .expect("embedded dynamic resource");
+    let dynamic = Group::open(&dynamic_file.path).expect("open embedded dynamic");
+    let dynamic_parameters = dynamic.read_file("Parameters.txt").unwrap();
+    assert!(dynamic_parameters
+        .windows(b"League=\"Embedded Cup\"".len())
+        .any(|window| window == b"League=\"Embedded Cup\""));
+    assert!(!dynamic_parameters
+        .windows(b"Saved Client".len())
+        .any(|window| window == b"Saved Client"));
     fs::remove_file(fixture.scenario_path.join("Parameters.txt")).unwrap();
 
+    fs::write(fixture.scenario_path.join("Parameters.txt"), b"").unwrap();
+    let empty = prepare(&fixture, &[]).expect("zero-byte Parameters.txt is absent to C++");
+    let parameters = &empty
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .unwrap()
+        .parameters;
+    assert_eq!(parameters.random_seed, 1_700_000_000);
+    assert_eq!(parameters.control_rate, 1);
+    assert!(parameters.is_network_game);
+    assert_eq!(parameters.max_players, 2);
+    fs::remove_file(fixture.scenario_path.join("Parameters.txt")).unwrap();
     fs::write(fixture.scenario_path.join("Game.txt"), b"[Game]\nTime=1\n").unwrap();
-    assert!(matches!(
-        prepare(&fixture, &[]),
-        Err(PrepareHostBootstrapError::ScenarioGameStateUnsupported)
-    ));
+    let runtime = prepare(&fixture, &[]).expect("ordinary Game.txt runtime compiles");
+    assert!(runtime.has_initial_game_data());
+    assert_eq!(runtime.initial_game_data().time, 1);
 
     // C4Game compiles all Game.txt sections before the initial network save;
     // the compatibility tail only controls what is re-appended afterwards.
-    // A runtime section after the first [Player marker must not bypass the
-    // supported-subset guard (src/C4Game.cpp:1899-1911,2030-2074).
+    // A runtime section after the first [Player marker is still compiled;
+    // the initial-save hack merely re-appends the complete player tail.
     fs::write(
         fixture.scenario_path.join("Game.txt"),
         b"[Player1]\nName=Clonk\n\n[Game]\nTime=1\n",
     )
     .unwrap();
-    assert!(matches!(
-        prepare(&fixture, &[]),
-        Err(PrepareHostBootstrapError::ScenarioGameStateUnsupported)
-    ));
+    let runtime_after_player =
+        prepare(&fixture, &[]).expect("runtime section after Player tail compiles");
+    assert!(runtime_after_player.has_initial_game_data());
+    assert_eq!(runtime_after_player.initial_game_data().time, 1);
+
     fs::remove_file(fixture.scenario_path.join("Game.txt")).unwrap();
 
     fs::write(
@@ -491,28 +571,29 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
         b"[PlayerInfoList]\n",
     )
     .unwrap();
-    assert!(matches!(
-        prepare(&fixture, &[]),
-        Err(PrepareHostBootstrapError::ScenarioPlayerInfosUnsupported)
-    ));
+    prepare(&fixture, &[]).expect("non-replay startup ignores PlayerInfos.txt");
     fs::remove_file(fixture.scenario_path.join("PlayerInfos.txt")).unwrap();
 
-    // An active Teams.txt without entries enables generated teams. Keep that
-    // localization/process-random surface rejected rather than fabricating a
-    // team name or color (pristine 9ffa0a5d src/C4Teams.cpp:605-611;
-    // src/C4Network2Players.cpp:189-205).
+    // An active Teams.txt without entries enables C++'s generated-team path.
+    // Initial local players must run the real injected assignment oracle.
     fs::write(
         fixture.scenario_path.join("Teams.txt"),
         b"[Teams]\nActive=1\n",
     )
     .unwrap();
-    assert!(matches!(
-        prepare(
-            &fixture,
-            &[player_source(PathBuf::from("Alice.c4p"), b"Alice.c4p")],
-        ),
-        Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported)
-    ));
+    let player_path = fixture.install_roots[0].join("Alice.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(player_path.join("Player.txt"), b"[Player]\nName=Alice\n").unwrap();
+    let generated = prepare(&fixture, &[player_source(player_path, b"Alice.c4p")])
+        .expect("generated teams admit configured participants");
+    let parameters = &generated
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .unwrap()
+        .parameters;
+    assert_eq!(parameters.player_infos.clients[0].players[0].team, 1);
+    assert_eq!(parameters.teams.teams[0].id, 1);
     fs::remove_file(fixture.scenario_path.join("Teams.txt")).unwrap();
 
     // CMarkup::StripMarkup consumes `}}` pairs even without an opening tag;
@@ -539,10 +620,425 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
             .replace("[Head]", "[Head]\nSaveGame=1"),
     )
     .unwrap();
-    assert!(matches!(
-        prepare(&fixture, &[]),
-        Err(PrepareHostBootstrapError::SavegameUnsupported)
+    prepare(&fixture, &[]).expect("savegame head is hostable");
+}
+
+#[test]
+fn embedded_league_name_is_display_only_without_configured_signup() {
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture
+            .scenario_text
+            .replace("MaxPlayer=2", "MaxPlayer=7\nMaxPlayerLeague=3"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.scenario_path.join("Teams.txt"),
+        b"[Teams]\nActive=1\nAllowTeamSwitch=1\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.scenario_path.join("Parameters.txt"),
+        b"[Parameters]\n\
+MaxPlayers=6\n\
+UseFairCrew=0\n\
+FairCrewForced=0\n\
+FairCrewStrength=321\n\
+AllowDebug=1\n\
+League=Embedded Cup\n",
+    )
+    .unwrap();
+
+    let prepared =
+        prepare(&fixture, &[]).expect("embedded display league loads without configured signup");
+    let snapshot = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData");
+    let parameters = &snapshot.parameters;
+    assert_eq!(parameters.max_players, 6);
+    assert!(parameters.allow_debug);
+    assert!(!parameters.use_fair_crew);
+    assert!(!parameters.fair_crew_forced);
+    assert_eq!(parameters.fair_crew_strength, 321);
+    assert_eq!(parameters.teams.allow_team_switch, 1);
+    assert!(
+        parameters.league.is_empty(),
+        "InitLeague clears the display league after CreateDynamic"
+    );
+    assert!(parameters.league_address.is_empty());
+    assert_eq!(prepared.host_config().max_players, 6);
+    assert_eq!(prepared.admission().max_players(), 6);
+
+    let dynamic_file = prepared
+        .host_config()
+        .resource_files
+        .last()
+        .expect("dynamic resource");
+    let dynamic = Group::open(&dynamic_file.path).expect("open dynamic");
+    let source = dynamic.read_file("Parameters.txt").unwrap();
+    for expected in [
+        b"MaxPlayers=6\r\n".as_slice(),
+        b"FairCrewStrength=321\r\n".as_slice(),
+        b"League=\"Embedded Cup\"\r\n".as_slice(),
+    ] {
+        assert!(
+            source
+                .windows(expected.len())
+                .any(|window| window == expected),
+            "initial dynamic is missing {}",
+            String::from_utf8_lossy(expected).trim()
+        );
+    }
+    for forbidden in [
+        b"MaxPlayers=3\r\n".as_slice(),
+        b"UseFairCrew=true\r\n".as_slice(),
+        b"FairCrewForced=true\r\n".as_slice(),
+        b"FairCrewStrength=20000\r\n".as_slice(),
+        b"AllowDebug=false\r\n".as_slice(),
+    ] {
+        assert!(
+            !source
+                .windows(forbidden.len())
+                .any(|window| window == forbidden),
+            "embedded display League must not add {}",
+            String::from_utf8_lossy(forbidden).trim()
+        );
+    }
+}
+
+#[test]
+fn embedded_league_name_preserves_all_compiled_parameter_values() {
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture
+            .scenario_text
+            .replace("MaxPlayer=2", "MaxPlayer=8\nMaxPlayerLeague=4"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.scenario_path.join("Parameters.txt"),
+        b"[Parameters]\n\
+MaxPlayers=7\n\
+UseFairCrew=0\n\
+FairCrewForced=1\n\
+FairCrewStrength=777\n\
+AllowDebug=1\n\
+League=Embedded Cup\n",
+    )
+    .unwrap();
+
+    let prepared = prepare(&fixture, &[])
+        .expect("embedded parameter values survive a display-only league name");
+    let parameters = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters;
+    assert_eq!(parameters.max_players, 7);
+    assert!(parameters.allow_debug);
+    assert!(!parameters.use_fair_crew);
+    assert!(parameters.fair_crew_forced);
+    assert_eq!(parameters.fair_crew_strength, 777);
+    assert!(parameters.league.is_empty());
+
+    let dynamic_file = prepared
+        .host_config()
+        .resource_files
+        .last()
+        .expect("dynamic resource");
+    let dynamic = Group::open(&dynamic_file.path).expect("open dynamic");
+    let source = dynamic.read_file("Parameters.txt").unwrap();
+    assert!(source
+        .windows(b"League=\"Embedded Cup\"".len())
+        .any(|window| window == b"League=\"Embedded Cup\""));
+    assert!(source
+        .windows(b"FairCrewStrength=777".len())
+        .any(|window| window == b"FairCrewStrength=777"));
+    assert!(source
+        .windows(b"MaxPlayers=7".len())
+        .any(|window| window == b"MaxPlayers=7"));
+    assert!(!source
+        .windows(b"UseFairCrew=true".len())
+        .any(|window| window == b"UseFairCrew=true"));
+    assert!(!source
+        .windows(b"AllowDebug=false".len())
+        .any(|window| window == b"AllowDebug=false"));
+}
+
+#[test]
+fn savegame_zero_max_uses_restore_count_and_canonicalizes_runtime_game_text() {
+    let fixture = minimal_install(Some(
+        b"[Game]\nTime=123\nFrame=41\nControlTick=37\nTick2=1\nTick3=2\nTick5=1\nTick10=1\nTick35=6\nTick255=41\nTick500=41\nTick1000=41\n\n\
+[Script]\nGlobals=1;i17\nGlobalNamed=1;saved=i23\n\n\
+[Sky]\nX=65536\nParX=12\nParY=13\nParMode=1\n\n\
+[Effects]\nGlobalEffects=Fog(1,100,7,3,0,FOGG)[1;i5]\n\n\
+[Scoreboard]\nRows=1\nCols=1\nDlgShow=1\nCell0_0String=\"Scores\"\nCell0_0Value=-1\n",
     ));
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture
+            .scenario_text
+            .replace("MaxPlayer=2", "SaveGame=1\nMinPlayer=3\nMaxPlayer=0"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.scenario_path.join("SavePlayerInfos.txt"),
+        b"[PlayerInfoList]\n\
+LastPlayerID=2\n\
+\n\
+\x20\x20[Client]\n\
+\x20\x20ID=5\n\
+\n\
+\x20\x20\x20\x20[Player]\n\
+\x20\x20\x20\x20Name=One\n\
+\x20\x20\x20\x20ID=1\n\
+\x20\x20\x20\x20Type=User\n\
+\n\
+\x20\x20\x20\x20[Player]\n\
+\x20\x20\x20\x20Name=Two\n\
+\x20\x20\x20\x20ID=2\n\
+\x20\x20\x20\x20Type=User\n",
+    )
+    .unwrap();
+
+    let prepared = prepare(&fixture, &[]).expect("savegame restore rows prepare");
+    let snapshot = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData");
+    assert_eq!(
+        snapshot.parameters.restore_player_infos.clients[0]
+            .players
+            .len(),
+        2
+    );
+    assert_eq!(snapshot.parameters.max_players, 2);
+    assert_eq!(prepared.host_config().max_players, 2);
+    assert_eq!(prepared.admission().max_players(), 2);
+    assert_eq!(snapshot.dynamic_tick, 37);
+    assert_eq!(prepared.host_config().start_tick, 37);
+    assert_eq!(prepared.host_config().initial_status.target_tick, 37);
+    let reference = prepared
+        .initial_host_game_reference(true, &[])
+        .expect("savegame reference");
+    assert_eq!(reference.metadata().time, 123);
+    assert_eq!(reference.metadata().frame, 41);
+
+    let dynamic_file = prepared
+        .host_config()
+        .resource_files
+        .last()
+        .expect("dynamic resource");
+    let dynamic = Group::open(&dynamic_file.path).expect("open dynamic");
+    let game = dynamic.read_file("Game.txt").unwrap();
+    assert!(game
+        .windows(b"Time=123\r\n".len())
+        .any(|window| window == b"Time=123\r\n"));
+    assert!(game
+        .windows(b"Globals=1;i17\r\n".len())
+        .any(|window| window == b"Globals=1;i17\r\n"));
+    assert!(game
+        .windows(b"GlobalEffects=Fog(1,100,7,3,0,FOGG)[1;i5]\r\n".len())
+        .any(|window| window == b"GlobalEffects=Fog(1,100,7,3,0,FOGG)[1;i5]\r\n"));
+    assert!(game
+        .windows(b"Cell0_0String=\"Scores\"\r\n".len())
+        .any(|window| window == b"Cell0_0String=\"Scores\"\r\n"));
+    assert!(!game
+        .windows(b"MessageBoardCommands=".len())
+        .any(|window| window == b"MessageBoardCommands="));
+    assert_ne!(game, b"[Game]\nTime=123\n");
+}
+
+#[test]
+fn old_style_savegame_player_files_restore_rows_and_capacity() {
+    let game = b"[PlayerFiles]\r\n\
+Player1=Old.c4p\r\n\
+Player2=Missing.c4p\r\n\
+\r\n\
+[Player1]\r\n\
+Index=4\r\n";
+    let fixture = minimal_install(Some(game));
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture
+            .scenario_text
+            .replace("MaxPlayer=2", "SaveGame=1\nMaxPlayer=0"),
+    )
+    .unwrap();
+    let old_player = fixture.scenario_path.join("Old.c4p");
+    fs::create_dir_all(&old_player).unwrap();
+    fs::write(
+        old_player.join("Player.txt"),
+        b"[Player]\nName=Old Player\n\n[Preferences]\nColorDw=1193046\n",
+    )
+    .unwrap();
+
+    let prepared = prepare(&fixture, &[]).expect("old-style savegame prepares");
+    let snapshot = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("old-style JoinData");
+    assert_eq!(snapshot.parameters.max_players, 1);
+    assert_eq!(prepared.admission().max_players(), 1);
+    assert_eq!(snapshot.parameters.restore_player_infos.last_player_id, 1);
+    let restore = &snapshot.parameters.restore_player_infos.clients[0];
+    assert_eq!(restore.client_id, -1);
+    assert_eq!(restore.players.len(), 1, "unreadable old player is skipped");
+    assert_eq!(restore.players[0].id, 1);
+    assert_eq!(restore.players[0].name.as_bytes(), b"Old Player");
+    assert_eq!(restore.players[0].game_number, 4);
+    assert!(restore.players[0].is_joined());
+    assert_eq!(restore.players[0].color, 0x0012_3456);
+}
+
+#[test]
+fn non_ascii_localized_scenario_title_prepares_as_native_c4_bytes() {
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("TitleUS.txt"),
+        b"US:S\xe4uresee\n",
+    )
+    .unwrap();
+    let prepared = prepare(&fixture, &[]).expect("CP1252 localized title prepares");
+    let host = prepared.host_config();
+    let snapshot = host
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .clone();
+    assert_eq!(snapshot.parameters.title.as_bytes(), b"S\xe4uresee");
+
+    let wire = lc_network::encode_join_data_envelope(&lc_network::JoinDataEnvelope {
+        client_id: 0,
+        start_control_tick: snapshot.dynamic_tick,
+        status: host.initial_status,
+        dynamic: snapshot.dynamic,
+        parameters: snapshot.parameters,
+    })
+    .expect("JoinData encodes");
+    let decoded = lc_network::decode_join_data_envelope(&wire).expect("JoinData decodes");
+    assert_eq!(decoded.parameters.title.as_bytes(), b"S\xe4uresee");
+
+    let dynamic_file = host.resource_files.last().expect("dynamic resource");
+    let dynamic = Group::open(&dynamic_file.path).expect("open dynamic");
+    let scenario = dynamic.read_file("Scenario.txt").unwrap();
+    assert!(scenario
+        .windows(b"Title=S\xe4uresee\r\n".len())
+        .any(|window| window == b"Title=S\xe4uresee\r\n"));
+    assert!(!scenario
+        .windows(b"Title=S\xc3\xa4uresee\r\n".len())
+        .any(|window| window == b"Title=S\xc3\xa4uresee\r\n"));
+}
+
+#[test]
+fn non_ascii_scenario_head_fallback_prepares_as_native_c4_bytes() {
+    let fixture = minimal_install(None);
+    let (prefix, suffix) = fixture
+        .scenario_text
+        .split_once("Title=Fixture")
+        .expect("fixture title");
+    let mut scenario = prefix.as_bytes().to_vec();
+    scenario.extend_from_slice(b"Title=S\xe4uresee");
+    scenario.extend_from_slice(suffix.as_bytes());
+    fs::write(fixture.scenario_path.join("Scenario.txt"), scenario).unwrap();
+
+    let prepared = prepare(&fixture, &[]).expect("CP1252 Head.Title prepares");
+    let host = prepared.host_config();
+    let snapshot = host
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData");
+    assert_eq!(snapshot.parameters.title.as_bytes(), b"S\xe4uresee");
+
+    let dynamic_file = host.resource_files.last().expect("dynamic resource");
+    let dynamic = Group::open(&dynamic_file.path).expect("open dynamic");
+    let scenario = dynamic.read_file("Scenario.txt").unwrap();
+    assert!(scenario
+        .windows(b"Title=S\xe4uresee\r\n".len())
+        .any(|window| window == b"Title=S\xe4uresee\r\n"));
+}
+
+#[test]
+fn native_host_metadata_and_player_filename_prepare_as_c4_bytes() {
+    let fixture = minimal_install(None);
+    let player_path = fixture.install_roots[0].join("NativePlayer.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(player_path.join("Player.txt"), b"[Player]\nName=Andr\xe9\n").unwrap();
+    let player_sources = [PreparedHostPlayerSource::from(player_source(
+        player_path,
+        b"Spieler-\xe4.c4p",
+    ))];
+    let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let language_packs = LanguagePacks::default();
+
+    let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
+        scenario_path: &fixture.scenario_path,
+        install_roots: &fixture.install_roots,
+        languages: &languages,
+        language_packs: &language_packs,
+        network_directory: fixture.network.path(),
+        network_work_path: "Network",
+        start_unix_seconds: 1_699_999_999,
+        random_seed_unix_seconds: 1_700_000_000,
+        group_maker: "Mäker",
+        host_name: "Höst",
+        host_nick: "Nïck",
+        network_comment: "Grüße",
+        netpuncher_address: "netpuncher.openclonk.org:11115",
+        player_sources: &player_sources,
+        config: PreparedHostBootstrapConfig {
+            control_mode: 0,
+            control_rate: 1,
+            async_max_wait: 2,
+            fair_crew: false,
+            fair_crew_strength: 0,
+            auto_frame_skip: false,
+            max_load_file_size: 100 * 1024 * 1024,
+            no_runtime_join: true,
+            enable_upnp: true,
+            network_tcp_port: 11_112,
+            network_udp_port: 11_113,
+        },
+        league: None,
+    })
+    .expect("native host metadata prepares");
+
+    assert_eq!(prepared.host_config().group_maker.as_bytes(), b"M\xe4ker");
+    assert_eq!(
+        prepared.host_config().local_core.name.as_bytes(),
+        b"H\xf6st"
+    );
+    assert_eq!(
+        prepared.host_config().local_core.nick.as_bytes(),
+        b"N\xefck"
+    );
+    assert_eq!(
+        prepared.initial_host_player_info_control().players[0]
+            .filename
+            .as_bytes(),
+        b"Spieler-\xe4.c4p"
+    );
+    let reference = prepared
+        .initial_host_game_reference(true, &[])
+        .expect("native reference");
+    assert_eq!(reference.metadata().comment.as_bytes(), b"Gr\xfc\xdfe");
+    let dynamic = Group::open(
+        &prepared
+            .host_config()
+            .resource_files
+            .last()
+            .expect("dynamic resource")
+            .path,
+    )
+    .expect("open native-maker dynamic");
+    assert_eq!(dynamic.maker_bytes(), Some(b"M\xe4ker".as_slice()));
 }
 
 #[test]
@@ -601,6 +1097,13 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
     let player_core = player.resource.as_ref().expect("player resource core");
     assert_eq!(player_core.resource_type, 3);
     assert_eq!(player_core.id, snapshot.dynamic.id + 1);
+    assert_eq!(
+        prepared
+            .local_player_alternate_colors_by_resource()
+            .get(&player_core.id),
+        Some(&0),
+        "the host retains the local C4PlayerInfo alternate-color default"
+    );
     assert_eq!(snapshot.parameters.startup_player_count, 0);
     assert_eq!(snapshot.parameters.player_infos.last_player_id, 1);
     assert_eq!(snapshot.parameters.player_infos.clients.len(), 1);
@@ -649,6 +1152,112 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
         admitted.players[0].id, 2,
         "runtime assignment must continue after the installed host player"
     );
+}
+
+#[test]
+fn configured_player_identity_reaches_initial_host_info_without_generic_reparse() {
+    // C4PlayerInfoCore caps PrefName at 30 bytes before stripping markup and
+    // uses exact-case INI lookup. The generic PlayerFile representation keeps
+    // different raw values, so preparation must carry the configured loader's
+    // already-normalized name and default color through NRT_Player
+    // publication (pristine 9ffa0a5d src/C4InfoCore.cpp:90-125,146-173;
+    // src/C4PlayerInfo.cpp:70-104,357-395).
+    let fixture = minimal_install(None);
+    let player_path = fixture.install_roots[0].join("Players.c4f/Marked.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=<i>ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789</i>\n\
+[Preferences]\ncolor=3\ncolordw=1193046\n",
+    )
+    .unwrap();
+    let selected = PreparedHostPlayerSource {
+        resource: player_source(player_path, b"Players.c4f/Marked.c4p"),
+        identity: Some(PreparedHostPlayerIdentity {
+            // The first 30 source bytes are `<i>` plus 27 visible bytes; the
+            // configured loader then strips the opening markup tag.
+            player_name: lc_engine::LegacyCString::from_bytes(
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0".to_vec(),
+            )
+            .unwrap(),
+            // Lowercase Color/ColorDw keys are ignored by C++.
+            network_color: 0xff,
+            alternate_color: 0,
+        }),
+    };
+
+    let prepared = prepare_typed(&fixture, &[selected]).expect("configured identity prepares");
+    let player = &prepared.initial_host_player_info_control().players[0];
+    assert_eq!(player.name.as_bytes(), b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0");
+    assert_eq!(player.color, 0xff);
+    assert_eq!(player.original_color, 0xff);
+    assert_eq!(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .player_infos
+            .clients[0]
+            .players[0]
+            .name
+            .as_bytes(),
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0"
+    );
+}
+
+#[test]
+fn master_server_only_host_defers_local_player_until_start_response() {
+    // C4Network2::InitLeague creates a Start request for master-server signup
+    // as well as league signup. Local PlayerInfo admission therefore waits
+    // until that response path has had its chance to change MaxPlayers, even
+    // when league authentication itself is disabled.
+    let fixture = minimal_install(None);
+
+    let player_path = fixture.install_roots[0].join("Players.c4f/Alice.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Alice\n[Preferences]\nColorDw=1193046\n",
+    )
+    .unwrap();
+    let players = [PreparedHostPlayerSource::from(player_source(
+        player_path,
+        b"Players.c4f/Alice.c4p",
+    ))];
+    let league = PreparedLeagueHostConfig {
+        endpoint: "https://master.invalid/league.php".to_string(),
+        transport: lc_network::LeagueHttpTransportConfig::default(),
+        update_period_secs: 120,
+        league_server_signup: false,
+    };
+    let mut prepared = prepare_typed_with_names_and_league_impl(
+        &fixture,
+        &players,
+        "Host Name",
+        "Host Nick",
+        "netpuncher.openclonk.org:11115",
+        Some(&league),
+    )
+    .expect("master-server-only host prepares");
+
+    assert!(prepared
+        .initial_host_player_info_control()
+        .players
+        .is_empty());
+    let pending = prepared
+        .pending_initial_league_players()
+        .expect("Start response still gates local admission")
+        .to_vec();
+    assert_eq!(pending.len(), 1);
+    let mut oracle = RecordingInitialHostTeamAssignmentOracle::default();
+    assert!(prepared
+        .finalize_initial_league_players(pending, &mut oracle, |_| true)
+        .expect("Start response finalizes the local player"));
+    assert_eq!(prepared.initial_host_player_info_control().players.len(), 1);
+    assert_eq!(prepared.initial_host_player_info_control().players[0].id, 1);
+    assert!(prepared.pending_initial_league_players().is_none());
 }
 
 #[test]
@@ -709,13 +1318,15 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
         b"[Player]\nName=Alice\n\n[Preferences]\nColor=3\nColorDw=0\n",
     )
     .unwrap();
-    let player_sources = vec![player_source(player_path, b"Alice.c4p")];
+    let player_sources = vec![PreparedHostPlayerSource::from(player_source(
+        player_path,
+        b"Alice.c4p",
+    ))];
     let mut oracle = RecordingInitialHostTeamAssignmentOracle::default();
 
     let prepared = prepare_host_bootstrap_with_team_assignment_oracle(
         PreparedHostBootstrapSpec {
             scenario_path: &scenario_path,
-            scenario_title: "Regicide",
             install_roots: &install_roots,
             languages: &languages,
             language_packs: &language_packs,
@@ -922,6 +1533,18 @@ fn unreadable_selected_player_does_not_hide_later_valid_players() {
     assert_eq!(players[0].id, 1);
     assert_eq!(players[0].name.as_bytes(), b"Bob");
     assert_eq!(players[0].filename.as_bytes(), b"Players.c4f/Bob.c4p");
+    let dynamic_id = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .dynamic
+        .id;
+    assert_eq!(
+        players[0].resource.as_ref().expect("published Bob").id,
+        dynamic_id + 1,
+        "LoadFromLocalFile rejects the missing module before AddByFile allocates an ID"
+    );
 
     let mut installed = Vec::new();
     let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
@@ -1026,7 +1649,7 @@ fn player_section_tail_is_the_only_original_game_text_preserved() {
     let game = dynamic.read_file("Game.txt").unwrap();
 
     assert!(game.ends_with(b"[Player1]\r\nName=Clonk\r\n"));
-    assert!(game
+    assert!(!game
         .windows(b"SetGameSpeed(%d)".len())
         .any(|line| { line == b"SetGameSpeed(%d)" }));
 }
@@ -1077,11 +1700,78 @@ fn prepare_with_names(
     host_nick: &str,
     netpuncher_address: &str,
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
+    prepare_with_names_impl(
+        fixture,
+        player_sources,
+        host_name,
+        host_nick,
+        netpuncher_address,
+    )
+}
+
+fn prepare_with_names_impl(
+    fixture: &MinimalInstall,
+    player_sources: &[HostInitialResourceSource],
+    host_name: &str,
+    host_nick: &str,
+    netpuncher_address: &str,
+) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
+    let player_sources = player_sources
+        .iter()
+        .cloned()
+        .map(PreparedHostPlayerSource::from)
+        .collect::<Vec<_>>();
+    prepare_typed_with_names_impl(
+        fixture,
+        &player_sources,
+        host_name,
+        host_nick,
+        netpuncher_address,
+    )
+}
+
+fn prepare_typed(
+    fixture: &MinimalInstall,
+    player_sources: &[PreparedHostPlayerSource],
+) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
+    prepare_typed_with_names_impl(
+        fixture,
+        player_sources,
+        "Host Name",
+        "Host Nick",
+        "netpuncher.openclonk.org:11115",
+    )
+}
+
+fn prepare_typed_with_names_impl(
+    fixture: &MinimalInstall,
+    player_sources: &[PreparedHostPlayerSource],
+    host_name: &str,
+    host_nick: &str,
+    netpuncher_address: &str,
+) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
+    prepare_typed_with_names_and_league_impl(
+        fixture,
+        player_sources,
+        host_name,
+        host_nick,
+        netpuncher_address,
+        None,
+    )
+}
+
+fn prepare_typed_with_names_and_league_impl(
+    fixture: &MinimalInstall,
+    player_sources: &[PreparedHostPlayerSource],
+    host_name: &str,
+    host_nick: &str,
+    netpuncher_address: &str,
+    league: Option<&PreparedLeagueHostConfig>,
+) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
     prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &fixture.scenario_path,
-        scenario_title: "Fixture",
         install_roots: &fixture.install_roots,
         languages: &languages,
         language_packs: &language_packs,
@@ -1108,7 +1798,7 @@ fn prepare_with_names(
             network_tcp_port: 11_112,
             network_udp_port: 11_113,
         },
-        league: None,
+        league,
     })
 }
 

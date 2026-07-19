@@ -38,6 +38,6 @@ pub use scenario::{
     discover_with_languages_and_packs, ScenarioDiscoveryError, ScenarioEntry, ScenarioEntryKind,
 };
 pub use script_strings::{
-    decode_legacy_script_text, localize_script_source,
+    decode_legacy_script_text, encode_legacy_script_text, localize_script_source,
     localize_script_source_with_components,
 };

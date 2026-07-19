@@ -16,6 +16,31 @@ pub fn decode_legacy_script_text(data: &[u8]) -> String {
         })
 }
 
+/// Encodes presentation/configuration text into the Windows-1252 system
+/// charset used by classic native strings. Returns `None` when a scalar is
+/// not representable instead of accepting replacement output.
+pub fn encode_legacy_script_text(text: &str) -> Option<Vec<u8>> {
+    const C4_RAW_BYTE_ESCAPE_BASE: u32 = 0xF0000;
+    const C4_RAW_BYTE_ESCAPE_END: u32 = C4_RAW_BYTE_ESCAPE_BASE + u8::MAX as u32;
+
+    let mut output = Vec::with_capacity(text.len());
+    for character in text.chars() {
+        let scalar = u32::from(character);
+        if (C4_RAW_BYTE_ESCAPE_BASE..=C4_RAW_BYTE_ESCAPE_END).contains(&scalar) {
+            output.push((scalar - C4_RAW_BYTE_ESCAPE_BASE) as u8);
+            continue;
+        }
+        let mut utf8 = [0; 4];
+        let (bytes, _, had_errors) =
+            encoding_rs::WINDOWS_1252.encode(character.encode_utf8(&mut utf8));
+        if had_errors {
+            return None;
+        }
+        output.extend_from_slice(&bytes);
+    }
+    Some(output)
+}
+
 /// Applies the group's C4Script string table before parsing the source.
 ///
 /// Candidate order and textual replacement mirror
@@ -296,5 +321,19 @@ mod tests {
             decode_legacy_script_text(&[b'G', b'r', 0xfc, 0xdf, b'e']),
             "Grüße"
         );
+    }
+
+    #[test]
+    fn legacy_text_encoder_uses_windows_1252_without_replacement() {
+        assert_eq!(
+            encode_legacy_script_text("Mäker €"),
+            Some(vec![b'M', 0xe4, b'k', b'e', b'r', b' ', 0x80])
+        );
+        let native = lc_script::c4_string_from_bytes(&[b'M', 0x81, b'k']);
+        assert_eq!(
+            encode_legacy_script_text(&native),
+            Some(vec![b'M', 0x81, b'k'])
+        );
+        assert_eq!(encode_legacy_script_text("snowman ☃"), None);
     }
 }

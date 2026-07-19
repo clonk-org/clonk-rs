@@ -48,7 +48,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
 
     let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
         network_directory: network.clone(),
-        group_maker: "OracleHost".to_owned(),
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
         max_load_file_size: 100 * 1024 * 1024,
         scenario: source(scenario.clone(), b"Missions/Scenario.c4s"),
         definitions: vec![
@@ -213,7 +213,7 @@ fn cpp_host_publication_reuses_network_core_for_repeated_game_resource_file() {
 
     let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
         network_directory: network,
-        group_maker: "OracleHost".to_owned(),
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
         max_load_file_size: 100 * 1024 * 1024,
         scenario: source(scenario, b"Scenario.c4s"),
         definitions: vec![
@@ -271,7 +271,7 @@ fn league_initial_publication_hashes_scenario_and_all_game_resources_only() {
 
     let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
         network_directory: network,
-        group_maker: "OracleHost".to_owned(),
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
         max_load_file_size: 100 * 1024 * 1024,
         scenario: source(scenario, b"Scenario.c4s"),
         definitions: vec![source(definition, b"Objects.c4d")],
@@ -310,6 +310,53 @@ fn league_initial_publication_hashes_scenario_and_all_game_resources_only() {
     assert_eq!(
         publication.player_cores,
         vec![publication.resource_files[5].core.clone()]
+    );
+}
+
+#[test]
+fn failed_player_publication_consumes_its_reserved_resource_id() {
+    // AddByFile increments nextResID before SetByFile/GetStandalone can fail;
+    // C4ClientPlayerInfos then drops only that player and continues with the
+    // next module (pristine 9ffa0a5d src/C4Network2Res.cpp:1451-1465;
+    // src/C4PlayerInfo.cpp:377-395).
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let valid_player = packed_source(&sources, "valid.c4p", "Player", b"player");
+    let missing_player = sources.join("missing.c4p");
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: Vec::new(),
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: vec![
+            source(missing_player, b"Missing.c4p"),
+            source(valid_player, b"Valid.c4p"),
+        ],
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(publication.join_snapshot.dynamic.id, 2);
+    assert_eq!(publication.player_cores.len(), 1);
+    assert_eq!(publication.player_cores[0].id, 4);
+    assert_eq!(
+        publication
+            .resource_files
+            .iter()
+            .map(|resource| resource.core.id)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 4]
     );
 }
 

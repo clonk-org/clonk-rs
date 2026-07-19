@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -23,14 +23,18 @@ use serde::{Deserialize, Serialize};
 use crate::landscape::{
     LandscapeRasterState, RuntimeTexMapLookup, RuntimeTexMapMaterial, RuntimeTexMapState,
 };
-use crate::network_game_data::{parse_landscape_game_data, LandscapeGameData};
+use crate::network_game_data::{
+    decode_legacy_game_string, parse_landscape_game_data, InitialNetworkGameApplyError,
+    InitialNetworkGameData, LandscapeGameData,
+};
 use crate::{
-    ActionState, CommandDirection, Definition, DefinitionActionFacet, DefinitionActionGraphics,
-    DefinitionComponent, DefinitionId, DefinitionPicture, DefinitionPictureImage, DefinitionRect,
-    DefinitionSpriteImage, Direction, EffectState, Engine, EngineError, EnvironmentSettings,
-    FULL_CON, Landscape, LegacyCString, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
-    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2, action::ActionSpec,
-    LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
+    action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
+    DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture,
+    DefinitionPictureImage, DefinitionRect, DefinitionSpriteImage, Direction, EffectState,
+    EffectVarValue, Engine, EngineError, EnvironmentSettings, Landscape, LegacyCString,
+    MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, ScoreboardState,
+    ScriptGlobalState, SkyFrame, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2,
+    FULL_CON, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC,
 };
 use crate::action::is_builtin_idle_name;
 
@@ -105,6 +109,10 @@ pub enum ScenarioError {
     InvalidSky(String),
     #[error("engine error while applying scenario: {0}")]
     Engine(#[from] EngineError),
+    #[error("invalid saved Game.txt runtime state: {0}")]
+    InitialNetworkGameApply(#[from] InitialNetworkGameApplyError),
+    #[error("invalid saved Game.txt compiled runtime section: {0}")]
+    InitialNetworkRuntime(String),
     #[error("initial network Scenario.txt serialization requires a legacy Scenario.txt core")]
     InitialNetworkScenarioUnsupported,
     #[error("initial record Scenario.txt serialization requires a legacy Scenario.txt core")]
@@ -417,6 +425,9 @@ pub struct Scenario {
     /// Game.txt. Its presence also suppresses the fresh ScenarioInit gravity
     /// overwrite when the scenario is applied.
     runtime_landscape: Option<LandscapeGameData>,
+    /// The C4Aul string enumeration loaded from `Strings.txt`. Compiled
+    /// Globals/GlobalNamed/effect variables refer to these integer IDs.
+    legacy_string_table: HashMap<i32, String>,
     /// The `[Landscape] Gravity` C4SVal — evaluated through the synced
     /// ledger at apply time (C4Landscape::ScenarioInit, C4Landscape.cpp:66).
     gravity: LegacyC4SVal,
@@ -769,7 +780,11 @@ pub struct ScenarioLoaderHead {
     save_game: bool,
     replay: bool,
     savegame_definition_override: ScenarioSavegameDefinitionOverride,
+    /// Unicode presentation text decoded from the native scenario component.
     scenario_title: String,
+    /// Exact native bytes copied by `C4ComponentHost::GetLanguageString` into
+    /// `Game.Parameters.ScenarioTitle`.
+    scenario_title_native: LegacyCString,
 }
 
 impl ScenarioLoaderHead {
@@ -791,6 +806,7 @@ impl ScenarioLoaderHead {
             manifest,
             savegame_definition_override,
             String::new(),
+            LegacyCString::default(),
         ))
     }
 
@@ -814,14 +830,26 @@ impl ScenarioLoaderHead {
             Some(group),
             manifest.core.head.origin.as_deref(),
         );
-        let scenario_title = match load_loader_scenario_title(&components, languages)? {
-            Some(title) => title,
-            None => validate_name_ex_no_empty(manifest.core.head.title.clone())?,
-        };
+        let (scenario_title, scenario_title_native) =
+            match load_loader_scenario_title(&components, languages)? {
+                Some(title) => title,
+                None => {
+                    if let Some(native) = manifest.head_title_native.as_ref() {
+                        let native = validate_name_ex_no_empty_bytes(native.as_bytes());
+                        (decode_legacy_script_text(native.as_bytes()), native)
+                    } else {
+                        let title = validate_name_ex_no_empty(manifest.core.head.title.clone())?;
+                        let native = LegacyCString::from_bytes(title.as_bytes().to_vec())
+                            .expect("a parsed Scenario.txt title contains no NUL");
+                        (title, native)
+                    }
+                }
+            };
         Ok(Self::from_manifest(
             manifest,
             savegame_definition_override,
             scenario_title,
+            scenario_title_native,
         ))
     }
 
@@ -829,6 +857,7 @@ impl ScenarioLoaderHead {
         manifest: LegacyScenarioManifest,
         savegame_definition_override: ScenarioSavegameDefinitionOverride,
         scenario_title: String,
+        scenario_title_native: LegacyCString,
     ) -> Self {
         Self {
             loader: ScenarioLoaderMetadata {
@@ -845,6 +874,7 @@ impl ScenarioLoaderHead {
             replay: manifest.core.head.replay != 0,
             savegame_definition_override,
             scenario_title,
+            scenario_title_native,
         }
     }
 
@@ -900,6 +930,13 @@ impl ScenarioLoaderHead {
     /// Effective `Game.Parameters.ScenarioTitle` at loader initialization.
     pub fn scenario_title(&self) -> &str {
         &self.scenario_title
+    }
+
+    /// Exact native bytes used by C++ for synchronized parameters and the
+    /// initial network save. This remains byte-preserving even when
+    /// `scenario_title()` decodes legacy CP1252 for presentation.
+    pub fn scenario_title_bytes(&self) -> &[u8] {
+        self.scenario_title_native.as_bytes()
     }
 }
 
@@ -2341,7 +2378,6 @@ impl Scenario {
             .map(|core| {
                 core.initial_network_save(scenario_title, definition_modules, scenario_origin)
                     .serialize()
-                    .into_bytes()
             })
             .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)
     }
@@ -2365,7 +2401,6 @@ impl Scenario {
             .map(|core| {
                 core.initial_record_save(record_title, definition_modules, scenario_origin)
                     .serialize()
-                    .into_bytes()
             })
             .ok_or(ScenarioError::InitialRecordScenarioUnsupported)
     }
@@ -2682,6 +2717,7 @@ impl Scenario {
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
+        let legacy_string_table = load_legacy_string_table(group)?;
         let initial_spawns = if has_unresolved_savegame_definitions {
             // Object IDs cannot be decoded truthfully until the legacy
             // DefinitionFiles text has been interpreted by a runtime loader.
@@ -2782,6 +2818,7 @@ impl Scenario {
             scenario_sections,
             physics,
             runtime_landscape,
+            legacy_string_table,
             gravity,
             environment: Some(environment),
             weather_init: Some(weather_init),
@@ -2969,7 +3006,7 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, true, None, None, true)
+        self.apply_before_players_with_final_synchronize(engine, true, None, None, None, true)
     }
 
     /// Applies a fresh or restored scenario after installing the authoritative
@@ -2986,6 +3023,7 @@ impl Scenario {
             true,
             Some(team_configuration),
             None,
+            None,
             true,
         )
     }
@@ -2999,7 +3037,7 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, true, None, None, false)
+        self.apply_before_players_with_final_synchronize(engine, true, None, None, None, false)
     }
 
     #[doc(hidden)]
@@ -3013,6 +3051,7 @@ impl Scenario {
             true,
             Some(team_configuration),
             None,
+            None,
             false,
         )
     }
@@ -3024,7 +3063,7 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, false, None, None, true)
+        self.apply_before_players_with_final_synchronize(engine, false, None, None, None, true)
     }
 
     /// Network variant of
@@ -3039,6 +3078,7 @@ impl Scenario {
             engine,
             false,
             Some(team_configuration),
+            None,
             None,
             true,
         )
@@ -3059,8 +3099,43 @@ impl Scenario {
             false,
             Some(team_configuration),
             Some(teams),
+            None,
             true,
         )
+    }
+
+    /// Network initialization with the already-compiled Game.txt state, or
+    /// InitSystem defaults when the component was absent. State is installed
+    /// after static resource setup and before definition callbacks; the later
+    /// fresh/savegame Sky and Weather branches retain their native ordering.
+    #[doc(hidden)]
+    pub fn apply_before_network_final_init_with_game_data(
+        &self,
+        engine: &mut Engine,
+        game_data: &InitialNetworkGameData,
+        team_configuration: Option<crate::TeamConfiguration>,
+        team_registry: Option<Vec<TeamInfo>>,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(
+            engine,
+            false,
+            team_configuration,
+            team_registry,
+            Some(game_data),
+            true,
+        )
+    }
+
+    /// Validate every compiled runtime block while host preparation is still
+    /// side-effect free. GO reparses the retained canonical bytes and applies
+    /// the same staged state after resources and objects exist.
+    pub fn validate_initial_network_game_data(
+        &self,
+        game_data: &InitialNetworkGameData,
+    ) -> Result<(), ScenarioError> {
+        game_data.validate_runtime_application()?;
+        InitialNetworkRuntimeState::parse(game_data)?;
+        Ok(())
     }
 
     fn apply_before_players_with_final_synchronize(
@@ -3069,8 +3144,12 @@ impl Scenario {
         final_synchronize: bool,
         team_configuration_override: Option<crate::TeamConfiguration>,
         team_registry_override: Option<Vec<TeamInfo>>,
+        initial_network_game: Option<&InitialNetworkGameData>,
         execute_post_init_map_callbacks: bool,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
+        let mut initial_network_runtime = initial_network_game
+            .map(InitialNetworkRuntimeState::parse)
+            .transpose()?;
         engine.clear_scenario_script();
         // C4Scenario::Load/ConvertGoals and C4Landscape::Init have completed
         // before any definition/scenario initialization callback can query
@@ -3147,11 +3226,10 @@ impl Scenario {
         // has a Landscape block (defaults), so the draw is unconditional
         // on the legacy path; skipping it shifted every weather value by
         // one ledger position (the 402 Breeze/Still wind class).
-        let runtime_savegame = self.runtime_landscape.is_some()
-            && self
-                .legacy_core
-                .as_ref()
-                .is_some_and(|core| core.head.save_game != 0);
+        let runtime_savegame = self
+            .legacy_core
+            .as_ref()
+            .is_some_and(|core| core.head.save_game != 0);
         let scenario_gravity = (self.weather_init.is_some() && !runtime_savegame)
             .then(|| engine.evaluate_scenario_gravity(self.gravity));
         if let Some(mut physics) = self.physics {
@@ -3181,6 +3259,25 @@ impl Scenario {
         engine.set_base_extinguish_enabled(self.base_extinguish_enabled);
         engine.set_base_regenerate_energy_price(self.base_regenerate_energy_price);
         engine.set_landscape_insert_thrust(self.landscape_insert_thrust);
+
+        if let Some(game_data) = initial_network_game {
+            engine.apply_initial_network_game_data(game_data)?;
+            if let Some(runtime) = initial_network_runtime.as_mut() {
+                if let Some(sky) = runtime.sky.take() {
+                    let settings = engine.sky_settings().cloned().unwrap_or_default();
+                    let sky_scroll_mode = self
+                        .legacy_core
+                        .as_ref()
+                        .map_or(0, |core| core.landscape.sky_scroll_mode);
+                    engine.apply_initial_network_sky_frame(&sky.into_frame(
+                        settings,
+                        runtime_savegame,
+                        sky_scroll_mode,
+                    ));
+                }
+                engine.apply_initial_network_scoreboard(std::mem::take(&mut runtime.scoreboard));
+            }
+        }
 
         for step in &self.definition_load_steps {
             let definition = match step {
@@ -3506,6 +3603,18 @@ impl Scenario {
             engine.finish_legacy_object_load();
         }
 
+        if let Some(runtime) = initial_network_runtime.take() {
+            let object_numbers = engine
+                .objects
+                .iter()
+                .filter(|object| object.state.status != ObjectStatus::Deleted)
+                .map(|object| object.id.as_u64())
+                .collect::<HashSet<_>>();
+            let (script_globals, global_effects) =
+                runtime.resolve_post_object_state(&object_numbers, &self.legacy_string_table);
+            engine.apply_initial_network_post_object_state(&script_globals, global_effects);
+        }
+
         // Every surviving C4Def receives ~InitializeDef after loaded-object
         // denumeration and before the legacy environment placers run
         // (C4Game.cpp:2505-2520).
@@ -3536,7 +3645,12 @@ impl Scenario {
                 engine.clear_runtime_map_creator();
             }
         }
-        if let Some(weather_init) = self.weather_init.as_ref() {
+        if runtime_savegame {
+            // Savegames run Weather.Init(false): retain every compiled live
+            // value and RNG position, but refresh the season gamma after
+            // InitializeDef and placement callbacks have completed.
+            engine.refresh_loaded_weather_gamma_control();
+        } else if let Some(weather_init) = self.weather_init.as_ref() {
             // C4Weather::Init runs at the END of C4Game::InitGame after
             // Landscape.ScenarioInit's Gravity draw and the placements
             // (C4Game.cpp:2507).
@@ -3879,6 +3993,7 @@ impl Scenario {
             scenario_sections: Vec::new(),
             physics,
             runtime_landscape: None,
+            legacy_string_table: HashMap::new(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment,
             weather_init: None,
@@ -3915,6 +4030,10 @@ impl Scenario {
 struct LegacyScenarioManifest {
     title: Option<String>,
     description: Option<String>,
+    /// Exact `[Head] Title` bytes after the Scenario.txt compiler's RCT_All
+    /// leading-space handling. Group-backed loads always populate this; direct
+    /// string fixtures leave it absent.
+    head_title_native: Option<LegacyCString>,
     definition_specs: Vec<String>,
     ground_height_hint: Option<i32>,
     core: LegacyScenarioCore,
@@ -5933,7 +6052,7 @@ impl LegacyScenarioCore {
         saved
     }
 
-    fn serialize(&self) -> String {
+    fn serialize(&self) -> Vec<u8> {
         let mut writer = LegacyScenarioIniWriter::default();
         writer.push_section("Head", serialize_legacy_head(&self.head));
         writer.push_section(
@@ -5964,7 +6083,7 @@ type LegacyIniFields = Vec<(&'static str, String)>;
 
 #[derive(Default)]
 struct LegacyScenarioIniWriter {
-    output: String,
+    output: Vec<u8>,
 }
 
 impl LegacyScenarioIniWriter {
@@ -5973,20 +6092,21 @@ impl LegacyScenarioIniWriter {
             return;
         }
         if !self.output.is_empty() {
-            self.output.push_str("\r\n");
+            self.output.extend_from_slice(b"\r\n");
         }
-        self.output.push('[');
-        self.output.push_str(name);
-        self.output.push_str("]\r\n");
+        self.output.push(b'[');
+        self.output.extend_from_slice(name.as_bytes());
+        self.output.extend_from_slice(b"]\r\n");
         for (key, value) in fields {
-            self.output.push_str(key);
-            self.output.push('=');
-            self.output.push_str(&value);
-            self.output.push_str("\r\n");
+            self.output.extend_from_slice(key.as_bytes());
+            self.output.push(b'=');
+            self.output
+                .extend_from_slice(&lc_script::c4_string_bytes(&value));
+            self.output.extend_from_slice(b"\r\n");
         }
     }
 
-    fn finish(self) -> String {
+    fn finish(self) -> Vec<u8> {
         self.output
     }
 }
@@ -6701,9 +6821,31 @@ fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifes
     // StdCompiler receives Scenario.txt as a C string. A packed component may
     // carry its terminating NUL in the stored size; anything after the first
     // NUL is invisible to C++ and must not influence loader metadata.
-    let visible_len = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    let text = lc_script::c4_string_from_bytes(&bytes[..visible_len]);
-    parse_legacy_scenario_text(&text)
+    let visible_len = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let visible = &bytes[..visible_len];
+    let text = lc_script::c4_string_from_bytes(visible);
+    let mut manifest = parse_legacy_scenario_text(&text)?;
+
+    // Parse a byte-for-byte Latin-1 projection of just the title as well. The
+    // INI grammar is ASCII, so this retains the exact value bytes while finding
+    // the same Head field independently of the script string representation.
+    // Avoid semantically compiling the duplicate projection: an unrelated
+    // non-ASCII field must not create a second failure surface.
+    let native_text = bytes_as_latin1_string(visible);
+    let native_tree = LegacyIniTree::parse(&native_text);
+    let native_title = native_tree
+        .first_section(0, "Head")
+        .and_then(|head| native_tree.value(head, "Title"))
+        .map(parse_rct_all)
+        .unwrap_or_else(|| "Default Title".to_string())
+        .chars()
+        .map(|character| character as u8)
+        .collect::<Vec<_>>();
+    manifest.head_title_native = LegacyCString::from_bytes(native_title);
+    Ok(manifest)
 }
 
 fn overlay_legacy_scenario_manifest(
@@ -6720,6 +6862,7 @@ fn overlay_legacy_scenario_manifest(
     Ok(LegacyScenarioManifest {
         title: base.title.clone(),
         description: base.description.clone(),
+        head_title_native: base.head_title_native.clone(),
         definition_specs,
         ground_height_hint,
         core,
@@ -6786,7 +6929,7 @@ fn try_read_group_file_case_insensitive(
 fn load_loader_scenario_title<S: AsRef<str>>(
     components: &ComponentGroups,
     languages: &[S],
-) -> Result<Option<String>, ScenarioError> {
+) -> Result<Option<(String, LegacyCString)>, ScenarioError> {
     let candidates = languages
         .iter()
         .map(|language| format!("Title{}.txt", language.as_ref()))
@@ -6795,19 +6938,27 @@ fn load_loader_scenario_title<S: AsRef<str>>(
         let Some(component) = components.read(&candidate)? else {
             continue;
         };
-        let source = decode_legacy_script_text(&component.bytes);
-        let source = source.split_once('\0').map_or(source.as_str(), |(prefix, _)| prefix);
+        let source = component
+            .bytes
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default();
         for language in languages {
             let needle = format!("{}:", language.as_ref());
-            if let Some(position) = cpp_ssearch_end(source.as_bytes(), needle.as_bytes()) {
+            if let Some(position) = cpp_ssearch_end(source, needle.as_bytes()) {
                 let value = &source[position..];
                 // C4ComponentHost first searches the complete remainder for
                 // CR and only falls back to LF when no CR exists anywhere.
                 let end = value
-                    .find('\r')
-                    .or_else(|| value.find('\n'))
+                    .iter()
+                    .position(|byte| *byte == b'\r')
+                    .or_else(|| value.iter().position(|byte| *byte == b'\n'))
                     .unwrap_or(value.len());
-                return Ok(Some(value[..end].to_string()));
+                let native = value[..end].to_vec();
+                let presentation = decode_legacy_script_text(&native);
+                let native = LegacyCString::from_bytes(native)
+                    .expect("the title component was truncated before its first NUL");
+                return Ok(Some((presentation, native)));
             }
         }
         // C4ComponentHost keeps the first existing component even when it
@@ -6848,6 +6999,23 @@ fn validate_name_ex_no_empty(mut value: String) -> Result<String, ScenarioError>
         value.truncate(120);
     }
     Ok(value)
+}
+
+fn validate_name_ex_no_empty_bytes(value: &[u8]) -> LegacyCString {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    let mut value = value[start..end].to_vec();
+    if value.is_empty() {
+        value.extend_from_slice(b"Unknown");
+    }
+    value.truncate(120);
+    LegacyCString::from_bytes(value).expect("a Scenario.txt title contains no interior NUL")
 }
 
 /// Splits legacy compiler input on LF, CRLF, or lone CR without changing the
@@ -7173,6 +7341,7 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
     Ok(LegacyScenarioManifest {
         title,
         description,
+        head_title_native: None,
         definition_specs,
         ground_height_hint,
         core,
@@ -10830,7 +10999,28 @@ impl LegacyObjectRecord {
     }
 
     fn apply_property(&mut self, key: &str, value: &str) -> Result<(), ScenarioError> {
-        let normalized_key = key.trim().to_ascii_lowercase();
+        let key = key.trim();
+        let normalized_key = key.to_ascii_lowercase();
+        // StdCompilerINIRead naming is exact-case. Keep the older generic
+        // object parser behavior outside this motion-state slice, but do not
+        // let a misspelled movement key alter state that C++ leaves at its
+        // compile default.
+        let exact_motion_key = match normalized_key.as_str() {
+            "x" => Some("X"),
+            "y" => Some("Y"),
+            "xdir" => Some("XDir"),
+            "ydir" => Some("YDir"),
+            "fixx" => Some("FixX"),
+            "fixy" => Some("FixY"),
+            "fixr" => Some("FixR"),
+            "rdir" => Some("RDir"),
+            "mobile" => Some("Mobile"),
+            "rotation" => Some("Rotation"),
+            _ => None,
+        };
+        if exact_motion_key.is_some_and(|expected| key != expected) {
+            return Ok(());
+        }
         let trimmed_value = value.trim();
         match normalized_key.as_str() {
             "id" => {
@@ -11467,16 +11657,14 @@ impl LegacyObjectRecord {
                 ))
                 .with_fixed_velocity(fixed);
         }
-        if fix_x.is_some() || fix_y.is_some() {
-            // Exact sub-pixel position (FixX/FixY, C4Object.cpp:2762-2763).
-            // C++ keeps the integer X/Y and the fixed coords INDEPENDENT
-            // after load (no reconciliation); a missing key means Fix0 —
-            // engine-saved files always carry both for nonzero positions.
-            config = config.with_fixed_position(crate::math::FixedVec2 {
-                x: fix_x.unwrap_or_default(),
-                y: fix_y.unwrap_or_default(),
-            });
-        }
+        // Exact sub-pixel position (FixX/FixY, C4Object.cpp:2762-2763).
+        // C++ keeps integer X/Y and fixed coords independent after load;
+        // each missing naming value compiles as Fix0. Supplying the zero pair
+        // is observable for inactive rows, which never receive SyncClearance.
+        config = config.with_fixed_position(crate::math::FixedVec2 {
+            x: fix_x.unwrap_or_default(),
+            y: fix_y.unwrap_or_default(),
+        });
         if let Some(rotation) = rotation {
             config = config.with_rotation(rotation);
         }
@@ -11855,22 +12043,515 @@ fn parse_i32(value: &str) -> Result<i32, String> {
     i32::try_from(parsed).map_err(|_| "value out of range for i32".to_string())
 }
 
-/// A serialized C4Fixed (Fixed.h:247-266): an `f` prefix means the int32
-/// is FLOAT BITS converted via ftofix (FLOAT_TO_FIXED); `F` or no prefix
-/// means the raw fixed-point value. GoldRush's hanging stalactites carry
-/// `YDir=f1067030938` = 1.2 px/frame — misread as a raw int it becomes a
-/// shattering hit speed.
 /// Objects.txt `LocalNamed=` (C4ValueMapData::CompileFunc,
 /// C4ValueMap.cpp:236-295): `<count>;name=<value>,name=<value>,...` where
 /// each value uses the C4Value type-char encoding (GetC4VID,
 /// C4Value.cpp:368-394). A zero count writes no separator and no entries.
+#[derive(Debug, Default)]
+struct InitialNetworkRuntimeState {
+    sky: Option<InitialNetworkSkyState>,
+    script_globals: SerializedScriptGlobalState,
+    global_effects: Vec<SerializedEffectState>,
+    scoreboard: ScoreboardState,
+}
+
+#[derive(Debug)]
+struct InitialNetworkSkyState {
+    fixed: [i32; 4],
+    modulation: u32,
+    parallax_x: i32,
+    parallax_y: i32,
+    parallax_mode: i32,
+    back_color: u32,
+    back_color_enabled: bool,
+}
+
+#[derive(Debug, Default)]
+struct SerializedScriptGlobalState {
+    numbered: Vec<SerializedC4Value>,
+    named: Vec<(String, SerializedC4Value)>,
+}
+
+#[derive(Debug)]
+struct SerializedEffectState {
+    number: i32,
+    name: String,
+    priority: i32,
+    interval: i32,
+    timer: i32,
+    command_target: i32,
+    command_id: Option<String>,
+    vars: Vec<SerializedC4Value>,
+}
+
+impl InitialNetworkRuntimeState {
+    fn parse(data: &InitialNetworkGameData) -> Result<Self, ScenarioError> {
+        Ok(Self {
+            sky: data
+                .compiled_sections
+                .sky()
+                .map(parse_initial_network_sky)
+                .transpose()?,
+            script_globals: data
+                .compiled_sections
+                .script_engine()
+                .map(parse_initial_network_script_globals)
+                .transpose()?
+                .unwrap_or_default(),
+            global_effects: data
+                .compiled_sections
+                .effects()
+                .map(parse_initial_network_effects)
+                .transpose()?
+                .unwrap_or_default(),
+            scoreboard: data
+                .compiled_sections
+                .scoreboard()
+                .map(parse_initial_network_scoreboard)
+                .transpose()?
+                .unwrap_or_default(),
+        })
+    }
+
+    fn resolve_post_object_state(
+        self,
+        object_numbers: &HashSet<u64>,
+        strings: &HashMap<i32, String>,
+    ) -> (ScriptGlobalState, Vec<EffectState>) {
+        let resolution = SerializedC4ValueResolution {
+            object_numbers,
+            strings,
+        };
+        let numbered = self
+            .script_globals
+            .numbered
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                i32::try_from(index)
+                    .ok()
+                    .map(|index| (index, value.resolve(&resolution)))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let named = self
+            .script_globals
+            .named
+            .into_iter()
+            .map(|(name, value)| (name, value.resolve(&resolution)))
+            .collect::<BTreeMap<_, _>>();
+        let effects = self
+            .global_effects
+            .into_iter()
+            .map(|effect| effect.resolve(&resolution))
+            .collect();
+        (ScriptGlobalState { numbered, named }, effects)
+    }
+}
+
+impl InitialNetworkSkyState {
+    /// C4Game compiles the runtime words before C4Landscape::Init calls
+    /// C4Sky::Init. Fresh games reset scroll position/speed/parallax there;
+    /// savegames retain them. A loaded bitmap then applies SkyScrollMode on
+    /// top in both cases (C4Game.cpp:2654-2665; C4Sky.cpp:71-125).
+    fn into_frame(
+        self,
+        mut settings: SkySettings,
+        savegame: bool,
+        sky_scroll_mode: i32,
+    ) -> SkyFrame {
+        let fixed = if savegame { self.fixed } else { [0; 4] };
+        settings.parallax_x = if savegame { self.parallax_x } else { 10 };
+        settings.parallax_y = if savegame { self.parallax_y } else { 10 };
+        settings.parallax_mode = if savegame && self.parallax_mode == 1 {
+            SkyParallaxMode::Wind
+        } else {
+            SkyParallaxMode::Fixed
+        };
+        if settings.has_surface {
+            match sky_scroll_mode {
+                1 => {
+                    settings.parallax_mode = SkyParallaxMode::Wind;
+                    settings.parallax_y = 20;
+                }
+                2 => {
+                    settings.parallax_x = 20;
+                    settings.parallax_y = 20;
+                }
+                _ => {}
+            }
+        }
+        settings.modulation = Some(self.modulation);
+        settings.back_color_raw = self.back_color;
+        settings.back_color = self.back_color_enabled.then_some(self.back_color);
+        settings.base_xdir = crate::math::fixtof(crate::math::C4Fixed::from_raw(fixed[2]));
+        settings.base_ydir = crate::math::fixtof(crate::math::C4Fixed::from_raw(fixed[3]));
+        SkyFrame {
+            settings,
+            offset_x: crate::math::fixtof(crate::math::C4Fixed::from_raw(fixed[0])),
+            offset_y: crate::math::fixtof(crate::math::C4Fixed::from_raw(fixed[1])),
+            fixed: Some(fixed),
+        }
+    }
+}
+
+impl SerializedEffectState {
+    fn resolve(self, resolution: &SerializedC4ValueResolution<'_>) -> EffectState {
+        // C4EnumeratedObjectPtr only recognizes the old pointer-offset
+        // spelling inside the complete C4EnumPointer1..C4EnumPointer2 range.
+        // A modern, raw object number above that range must not be shifted
+        // (C4EnumeratedObjectPtr.cpp:32-42).
+        let command_target = if (1_000_000_000..=1_001_000_000).contains(&self.command_target) {
+            self.command_target - 1_000_000_000
+        } else {
+            self.command_target
+        };
+        let command_target = u64::try_from(command_target)
+            .ok()
+            .filter(|number| *number != 0 && resolution.object_numbers.contains(number))
+            .and_then(|number| i32::try_from(number).ok());
+        EffectState {
+            number: self.number,
+            name: self.name,
+            priority: self.priority,
+            interval: self.interval,
+            timer: self.timer,
+            command_target,
+            command_id: self.command_id,
+            vars: self
+                .vars
+                .into_iter()
+                .map(|value| effect_var_from_value(value.resolve(resolution)))
+                .collect(),
+            // A compiled effect has already run its synchronous Start call.
+            start_dispatched: true,
+        }
+    }
+}
+
+fn initial_network_section_tree(
+    bytes: &[u8],
+    name: &str,
+) -> Result<(LegacyIniTree, usize), ScenarioError> {
+    let source = lc_script::c4_string_from_bytes(bytes);
+    let tree = LegacyIniTree::parse(&source);
+    let section = tree.first_section(0, name).ok_or_else(|| {
+        ScenarioError::InitialNetworkRuntime(format!(
+            "retained [{name}] block has no [{name}] section"
+        ))
+    })?;
+    Ok((tree, section))
+}
+
+fn parse_initial_network_sky(bytes: &[u8]) -> Result<InitialNetworkSkyState, ScenarioError> {
+    let (tree, section) = initial_network_section_tree(bytes, "Sky")?;
+    Ok(InitialNetworkSkyState {
+        fixed: [
+            ini_i32(&tree, section, "X", 0),
+            ini_i32(&tree, section, "Y", 0),
+            ini_i32(&tree, section, "XDir", 0),
+            ini_i32(&tree, section, "YDir", 0),
+        ],
+        modulation: ini_u32(&tree, section, "Modulation", 0x00ff_ffff),
+        parallax_x: ini_i32(&tree, section, "ParX", 10),
+        parallax_y: ini_i32(&tree, section, "ParY", 10),
+        parallax_mode: ini_i32(&tree, section, "ParMode", 0),
+        back_color: ini_u32(&tree, section, "BackClr", 0),
+        back_color_enabled: ini_bool(&tree, section, "BackClrEnabled", false),
+    })
+}
+
+fn parse_initial_network_script_globals(
+    bytes: &[u8],
+) -> Result<SerializedScriptGlobalState, ScenarioError> {
+    let (tree, section) = initial_network_section_tree(bytes, "Script")?;
+    let numbered = match tree.value(section, "Globals") {
+        Some(value) => parse_local_slots(value, 1).map_err(|error| {
+            ScenarioError::InitialNetworkRuntime(format!("[Script] Globals: {error}"))
+        })?,
+        None => parse_nested_script_globals(bytes)?,
+    };
+    let named = match tree.value(section, "GlobalNamed") {
+        Some(value) => parse_local_named(value, 1).map_err(|error| {
+            ScenarioError::InitialNetworkRuntime(format!("[Script] GlobalNamed: {error}"))
+        })?,
+        None => parse_nested_script_global_named(bytes)?,
+    };
+    Ok(SerializedScriptGlobalState { numbered, named })
+}
+
+fn nested_script_entries(bytes: &[u8], target: &str) -> Option<Vec<(String, String)>> {
+    let source = lc_script::c4_string_from_bytes(bytes);
+    let mut target_indent = None;
+    let mut entries = Vec::new();
+    for line in legacy_ini_lines(&source) {
+        let indent = line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+            .count();
+        let trimmed = line.trim_start_matches([' ', '\t']);
+        if let Some(name) = trimmed
+            .strip_prefix('[')
+            .and_then(|value| value.split_once(']'))
+            .map(|(name, _)| name)
+        {
+            if target_indent.is_some_and(|target_indent| indent <= target_indent) {
+                break;
+            }
+            if name == target {
+                target_indent = Some(indent);
+            }
+            continue;
+        }
+        if target_indent.is_none() {
+            continue;
+        }
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        entries.push((name.trim().to_string(), value.to_string()));
+    }
+    target_indent.map(|_| entries)
+}
+
+fn parse_nested_script_globals(bytes: &[u8]) -> Result<Vec<SerializedC4Value>, ScenarioError> {
+    let Some(entries) = nested_script_entries(bytes, "Globals") else {
+        return Ok(Vec::new());
+    };
+    if let Some((_, value)) = entries
+        .iter()
+        .find(|(name, _)| matches!(name.as_str(), "Value" | "Values" | "Data"))
+    {
+        return parse_local_slots(value, 1).map_err(|error| {
+            ScenarioError::InitialNetworkRuntime(format!("[Script][Globals]: {error}"))
+        });
+    }
+    let mut indexed = Vec::new();
+    for (name, encoded) in entries {
+        let index = name.parse::<usize>().map_err(|_| {
+            ScenarioError::InitialNetworkRuntime(format!(
+                "[Script][Globals] invalid slot name `{name}`"
+            ))
+        })?;
+        let value = parse_nested_script_c4value(&encoded)?;
+        indexed.push((index, value));
+    }
+    indexed.sort_by_key(|(index, _)| *index);
+    let size = indexed
+        .last()
+        .map_or(0, |(index, _)| index.saturating_add(1));
+    let mut values = (0..size)
+        .map(|_| SerializedC4Value::Value(lc_script::Value::Nil))
+        .collect::<Vec<_>>();
+    for (index, value) in indexed {
+        values[index] = value;
+    }
+    Ok(values)
+}
+
+fn parse_nested_script_global_named(
+    bytes: &[u8],
+) -> Result<Vec<(String, SerializedC4Value)>, ScenarioError> {
+    let Some(entries) = nested_script_entries(bytes, "GlobalNamed") else {
+        return Ok(Vec::new());
+    };
+    if let Some((_, value)) = entries
+        .iter()
+        .find(|(name, _)| matches!(name.as_str(), "Value" | "Values" | "Data"))
+    {
+        return parse_local_named(value, 1).map_err(|error| {
+            ScenarioError::InitialNetworkRuntime(format!("[Script][GlobalNamed]: {error}"))
+        });
+    }
+    entries
+        .into_iter()
+        .map(|(name, encoded)| Ok((name, parse_nested_script_c4value(&encoded)?)))
+        .collect()
+}
+
+fn parse_nested_script_c4value(encoded: &str) -> Result<SerializedC4Value, ScenarioError> {
+    let encoded = encoded.trim();
+    if encoded.chars().next().is_some_and(|type_char| {
+        matches!(
+            type_char,
+            'A' | 'i' | 'b' | 'o' | 'O' | 'I' | 'S' | 'a' | 'm'
+        )
+    }) {
+        return parse_serialized_c4value(encoded, 1).map_err(|error| {
+            ScenarioError::InitialNetworkRuntime(format!("nested Script C4Value: {error}"))
+        });
+    }
+    let value = parse_i32(encoded).map_err(|error| {
+        ScenarioError::InitialNetworkRuntime(format!(
+            "nested Script value `{encoded}` is neither typed nor an integer ({error})"
+        ))
+    })?;
+    Ok(SerializedC4Value::Value(if value == 0 {
+        lc_script::Value::Nil
+    } else {
+        lc_script::Value::Int(value)
+    }))
+}
+
+fn parse_initial_network_effects(
+    bytes: &[u8],
+) -> Result<Vec<SerializedEffectState>, ScenarioError> {
+    let (tree, section) = initial_network_section_tree(bytes, "Effects")?;
+    let Some(serialized) = tree.value(section, "GlobalEffects") else {
+        return Ok(Vec::new());
+    };
+    split_outside_delimiter(serialized.trim(), ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|effect| !effect.is_empty())
+        .map(parse_initial_network_effect)
+        .collect()
+}
+
+fn parse_initial_network_effect(serialized: &str) -> Result<SerializedEffectState, ScenarioError> {
+    let error = |detail: String| {
+        ScenarioError::InitialNetworkRuntime(format!(
+            "[Effects] GlobalEffects `{serialized}`: {detail}"
+        ))
+    };
+    let open = serialized
+        .find('(')
+        .ok_or_else(|| error("missing `(`".to_string()))?;
+    let close = serialized[open + 1..]
+        .find(')')
+        .map(|index| open + 1 + index)
+        .ok_or_else(|| error("missing `)`".to_string()))?;
+    let name = serialized[..open].trim();
+    if name.is_empty() {
+        return Err(error("missing effect name".to_string()));
+    }
+    let fields = split_outside_delimiter(&serialized[open + 1..close], ',');
+    if fields.len() != 6 {
+        return Err(error(format!(
+            "expected 6 header fields, found {}",
+            fields.len()
+        )));
+    }
+    let int_field = |index: usize, label: &str| {
+        parse_std_i32(fields[index])
+            .ok_or_else(|| error(format!("invalid {label} value `{}`", fields[index].trim())))
+    };
+    let command_id = fields[5].trim();
+    let command_id = if command_id == "NONE" {
+        None
+    } else if lc_script::c4_string_bytes(command_id).len() == 4 {
+        Some(command_id.to_string())
+    } else {
+        None
+    };
+    let tail = serialized[close + 1..].trim();
+    let vars = if tail.is_empty() {
+        Vec::new()
+    } else {
+        let inner = tail
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .ok_or_else(|| error(format!("invalid effect variable list `{tail}`")))?;
+        parse_local_slots(inner, 1).map_err(|parse_error| error(parse_error.to_string()))?
+    };
+    Ok(SerializedEffectState {
+        name: name.to_string(),
+        number: int_field(0, "number")?,
+        priority: int_field(1, "priority")?,
+        timer: int_field(2, "time")?,
+        interval: int_field(3, "interval")?,
+        command_target: int_field(4, "command target")?,
+        command_id,
+        vars,
+    })
+}
+
+fn parse_initial_network_scoreboard(bytes: &[u8]) -> Result<ScoreboardState, ScenarioError> {
+    let (tree, section) = initial_network_section_tree(bytes, "Scoreboard")?;
+    let rows = ini_i32(&tree, section, "Rows", 0);
+    let columns = ini_i32(&tree, section, "Cols", 0);
+    let show_count = ini_i32(&tree, section, "DlgShow", 0);
+    let row_count = usize::try_from(rows).map_err(|_| {
+        ScenarioError::InitialNetworkRuntime(format!("[Scoreboard] negative Rows value {rows}"))
+    })?;
+    let column_count = usize::try_from(columns).map_err(|_| {
+        ScenarioError::InitialNetworkRuntime(format!("[Scoreboard] negative Cols value {columns}"))
+    })?;
+    let cell_count = row_count.checked_mul(column_count).ok_or_else(|| {
+        ScenarioError::InitialNetworkRuntime(format!(
+            "[Scoreboard] dimensions {rows}x{columns} overflow the host address space"
+        ))
+    })?;
+    let mut cells = Vec::new();
+    cells.try_reserve_exact(cell_count).map_err(|_| {
+        ScenarioError::InitialNetworkRuntime(format!(
+            "[Scoreboard] dimensions {rows}x{columns} cannot be allocated"
+        ))
+    })?;
+    for row in 0..row_count {
+        for column in 0..column_count {
+            let string_key = format!("Cell{column}_{row}String");
+            let value_key = format!("Cell{column}_{row}Value");
+            let text = tree
+                .value(section, &string_key)
+                .map(decode_legacy_game_string)
+                .ok_or_else(|| {
+                    ScenarioError::InitialNetworkRuntime(format!(
+                        "[Scoreboard] missing required `{string_key}`"
+                    ))
+                })?;
+            let value = tree
+                .value(section, &value_key)
+                .and_then(parse_std_i32)
+                .ok_or_else(|| {
+                    ScenarioError::InitialNetworkRuntime(format!(
+                        "[Scoreboard] missing or invalid required `{value_key}`"
+                    ))
+                })?;
+            cells.push((Some(text), value));
+        }
+    }
+    ScoreboardState::from_compiled_cells(row_count, column_count, show_count, cells).ok_or_else(
+        || {
+            ScenarioError::InitialNetworkRuntime(format!(
+                "[Scoreboard] dimensions {rows}x{columns} disagree with the compiled cell matrix"
+            ))
+        },
+    )
+}
+
+fn effect_var_from_value(value: lc_script::Value) -> EffectVarValue {
+    use lc_script::Value;
+    match value {
+        Value::Int(value) => EffectVarValue::Int(value),
+        Value::Bool(value) => EffectVarValue::Bool(value),
+        Value::String(value) => EffectVarValue::String(value),
+        Value::C4Id(value) => EffectVarValue::C4Id(value),
+        Value::Object(value) => EffectVarValue::Object(value),
+        Value::Array(values) => {
+            EffectVarValue::Array(values.into_iter().map(effect_var_from_value).collect())
+        }
+        Value::Proplist(values) => EffectVarValue::Proplist(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), effect_var_from_value(value.clone())))
+                .collect(),
+        ),
+        Value::Nil => EffectVarValue::Nil,
+    }
+}
+
 #[derive(Debug)]
 enum SerializedC4Value {
     Value(lc_script::Value),
+    /// Untyped legacy C4V_Any word. Values in the old enumerated-pointer
+    /// range are denumerated when the referenced object exists; otherwise
+    /// C4Value::GuessType leaves these serialized words as integers.
+    Any(i32),
     ObjectNumber(i32),
     StringTableIndex(i32),
     Array(Vec<SerializedC4Value>),
-    Unsupported(String),
+    Map(Vec<(SerializedC4Value, SerializedC4Value)>),
 }
 
 struct SerializedC4ValueResolution<'a> {
@@ -11886,6 +12567,17 @@ impl SerializedC4Value {
         use lc_script::Value;
         match self {
             Self::Value(value) => value,
+            Self::Any(number) => {
+                if (1_000_000_000..=1_001_000_000).contains(&number) {
+                    let object_number = number - 1_000_000_000;
+                    if let Ok(object_number) = u64::try_from(object_number) {
+                        if resolution.object_numbers.contains(&object_number) {
+                            return Value::Object(object_number);
+                        }
+                    }
+                }
+                serialized_any_fallback(number)
+            }
             Self::ObjectNumber(number) => {
                 // Old pointer-enumeration saves add C4EnumPointer1. For an
                 // explicitly C4V_C4ObjectEnum value C++ subtracts it from any
@@ -11908,20 +12600,63 @@ impl SerializedC4Value {
                     .map(|value| value.resolve(resolution))
                     .collect(),
             ),
+            Self::Map(entries) => {
+                let mut values = lc_script::ValueMap::with_capacity(entries.len());
+                for (key, value) in entries {
+                    // C4ValueHash owns both its key and value slots. When a
+                    // direct C4V_C4ObjectEnum cannot be denumerated, Set0
+                    // calls CheckRemoveFromMap and erases the whole entry.
+                    // Nested missing objects are still recursively nilled.
+                    if key.is_missing_direct_object(resolution)
+                        || value.is_missing_direct_object(resolution)
+                    {
+                        continue;
+                    }
+                    values.insert_key(key.resolve(resolution), value.resolve(resolution));
+                }
+                Value::Proplist(values)
+            }
             Self::StringTableIndex(index) => resolution
                 .strings
                 .get(&index)
                 .cloned()
                 .map(Value::String)
                 .unwrap_or(Value::Nil),
-            Self::Unsupported(encoded) => {
-                tracing::warn!(
-                    value = encoded,
-                    "LocalNamed C4Value type not modeled yet; reading as nil"
-                );
-                Value::Nil
-            }
         }
+    }
+
+    fn is_missing_direct_object(&self, resolution: &SerializedC4ValueResolution<'_>) -> bool {
+        let Self::ObjectNumber(number) = self else {
+            return false;
+        };
+        let number = if *number >= 1_000_000_000 {
+            *number - 1_000_000_000
+        } else {
+            *number
+        };
+        u64::try_from(number)
+            .ok()
+            .is_none_or(|number| !resolution.object_numbers.contains(&number))
+    }
+}
+
+fn serialized_any_fallback(number: i32) -> lc_script::Value {
+    if number == 0 {
+        return lc_script::Value::Nil;
+    }
+    // GuessType checks packed literal IDs before falling back to int. The
+    // numeric 1..9999 spelling is deliberately excluded by its >=10000 gate
+    // (C4Value.cpp:299-330; C4Id.cpp:55-67).
+    let raw = number as u32;
+    if raw >= 10_000
+        && raw
+            .to_le_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+    {
+        lc_script::Value::C4Id(lc_script::c4_id_from_raw(raw as usize))
+    } else {
+        lc_script::Value::Int(number)
     }
 }
 
@@ -11952,8 +12687,8 @@ fn parse_local_slots(value: &str, line: usize) -> Result<Vec<SerializedC4Value>,
         }
         let values = split_outside_brackets(values_text)
             .into_iter()
+            .take(size)
             .map(str::trim)
-            .filter(|encoded| !encoded.is_empty())
             .map(|encoded| parse_serialized_c4value(encoded, line))
             .collect::<Result<Vec<_>, _>>()?;
         (size, values)
@@ -11963,15 +12698,11 @@ fn parse_local_slots(value: &str, line: usize) -> Result<Vec<SerializedC4Value>,
         let first = parse_i32(first).map_err(|error| {
             parse_error(format!("invalid legacy Locals value `{first}` ({error})"))
         })?;
-        let mut values = vec![SerializedC4Value::Value(if first == 0 {
-            lc_script::Value::Nil
-        } else {
-            lc_script::Value::Int(first)
-        })];
+        let mut values = vec![SerializedC4Value::Any(first)];
         values.extend(
             encoded
+                .take(C4_MAX_VARIABLE - 1)
                 .map(str::trim)
-                .filter(|entry| !entry.is_empty())
                 .map(|entry| parse_serialized_c4value(entry, line))
                 .collect::<Result<Vec<_>, _>>()?,
         );
@@ -11989,14 +12720,42 @@ fn parse_local_named(
     line: usize,
 ) -> Result<Vec<(String, SerializedC4Value)>, ScenarioError> {
     let trimmed = value.trim();
-    let Some((_count, rest)) = trimmed.split_once(';') else {
+    let (count_text, rest) = trimmed
+        .split_once(';')
+        .map_or((trimmed, None), |(count, rest)| (count, Some(rest)));
+    let count = parse_std_i32(count_text).unwrap_or(0);
+    if count == 0 {
+        // C4ValueMapData returns immediately for a zero/defaulted count and
+        // never consumes a trailing payload.
         return Ok(Vec::new());
-    };
+    }
+    let count = usize::try_from(count).map_err(|_| {
+        ScenarioError::LegacyObjectsParse(format!(
+            "Objects.txt line {}: invalid negative LocalNamed count `{}`",
+            line, count_text
+        ))
+    })?;
+    let rest = rest.ok_or_else(|| {
+        ScenarioError::LegacyObjectsParse(format!(
+            "Objects.txt line {}: LocalNamed count {} is missing `;`",
+            line, count
+        ))
+    })?;
+    let mut parts = split_outside_brackets(rest).into_iter();
     let mut entries = Vec::new();
-    for part in split_outside_brackets(rest) {
+    for index in 0..count {
+        let part = parts.next().ok_or_else(|| {
+            ScenarioError::LegacyObjectsParse(format!(
+                "Objects.txt line {}: LocalNamed declares {} entries but contains {}",
+                line, count, index
+            ))
+        })?;
         let part = part.trim();
         if part.is_empty() {
-            continue;
+            return Err(ScenarioError::LegacyObjectsParse(format!(
+                "Objects.txt line {}: LocalNamed entry {} is empty",
+                line, index
+            )));
         }
         let Some((name, encoded)) = part.split_once('=') else {
             return Err(ScenarioError::LegacyObjectsParse(format!(
@@ -12009,19 +12768,29 @@ fn parse_local_named(
             parse_serialized_c4value(encoded.trim(), line)?,
         ));
     }
+    // StdCompiler reads exactly iValueCnt entries. Any remaining bytes in
+    // the named value are ignored, so trailing entries must not leak into
+    // the live name map.
     Ok(entries)
 }
 
 /// Split on commas outside `[...]` (array payloads carry their own commas).
 fn split_outside_brackets(text: &str) -> Vec<&str> {
+    split_outside_delimiter(text, ',')
+}
+
+fn split_outside_delimiter(text: &str, delimiter: char) -> Vec<&str> {
     let mut parts = Vec::new();
-    let mut depth = 0usize;
+    let mut square_depth = 0usize;
+    let mut round_depth = 0usize;
     let mut start = 0;
     for (index, ch) in text.char_indices() {
         match ch {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
+            '[' => square_depth += 1,
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '(' => round_depth += 1,
+            ')' => round_depth = round_depth.saturating_sub(1),
+            ch if ch == delimiter && square_depth == 0 && round_depth == 0 => {
                 parts.push(&text[start..index]);
                 start = index + 1;
             }
@@ -12033,12 +12802,12 @@ fn split_outside_brackets(text: &str) -> Vec<&str> {
 }
 
 /// One serialized C4Value (C4Value::CompileFunc, C4Value.cpp:717-800 +
-/// GetC4VID :368-394): `A`=any (zero data reads back nil, nonzero guesses
-/// int), `i`=int, `b`=bool, `O`=enumerated object number (0 = no object),
+/// GetC4VID :368-394): `A`=any (zero reads nil; old pointer-range words
+/// denumerate before remaining nonzero values guess int), `i`=int, `b`=bool,
+/// `o`/`O`=enumerated object number (0 = no object),
 /// `I`=C4ID stored as its signed 32-bit payload, `a[size;elems]`=array with
 /// trailing nils omitted on write, and `S` indexes the scenario Strings.txt.
-/// `m` (a generic C4Value-keyed map) is not modeled yet and reads as nil with
-/// a warning.
+/// `m[count;key=value;...]` retains arbitrary typed keys in insertion order.
 fn parse_serialized_c4value(
     encoded: &str,
     line: usize,
@@ -12057,13 +12826,10 @@ fn parse_serialized_c4value(
             .map_err(|err| parse_error(format!("invalid C4Value payload `{}` ({})", encoded, err)))
     };
     match type_char {
-        'A' => Ok(SerializedC4Value::Value(match int_payload()? {
-            0 => Value::Nil,
-            other => Value::Int(other),
-        })),
+        'A' => Ok(SerializedC4Value::Any(int_payload()?)),
         'i' => Ok(SerializedC4Value::Value(Value::Int(int_payload()?))),
         'b' => Ok(SerializedC4Value::Value(Value::Bool(int_payload()? != 0))),
-        'O' => Ok(SerializedC4Value::ObjectNumber(int_payload()?)),
+        'o' | 'O' => Ok(SerializedC4Value::ObjectNumber(int_payload()?)),
         'I' => Ok(SerializedC4Value::Value(match int_payload()? {
             0 => Value::Nil,
             raw => Value::C4Id(lc_script::c4_id_from_raw(raw as isize as usize)),
@@ -12079,15 +12845,20 @@ fn parse_serialized_c4value(
                     ))
                 })?;
             let (size_text, elements_text) = inner.split_once(';').unwrap_or((inner, ""));
-            let size = parse_i32(size_text.trim())
-                .map_err(|err| {
-                    parse_error(format!("invalid array size in `{}` ({})", encoded, err))
-                })?
-                .clamp(0, 100_000) as usize;
+            let size = parse_i32(size_text.trim()).map_err(|err| {
+                parse_error(format!("invalid array size in `{}` ({})", encoded, err))
+            })?;
+            if !(0..=1_000_000).contains(&size) {
+                return Err(parse_error(format!(
+                    "array size {} in `{}` exceeds C4ValueList::MaxSize",
+                    size, encoded
+                )));
+            }
+            let size = size as usize;
             let mut elements: Vec<SerializedC4Value> = split_outside_brackets(elements_text)
                 .into_iter()
+                .take(size)
                 .map(str::trim)
-                .filter(|element| !element.is_empty())
                 .map(|element| parse_serialized_c4value(element, line))
                 .collect::<Result<_, _>>()?;
             // Trailing nils are omitted on write; restore the full size.
@@ -12097,11 +12868,68 @@ fn parse_serialized_c4value(
             Ok(SerializedC4Value::Array(elements))
         }
         'S' => Ok(SerializedC4Value::StringTableIndex(int_payload()?)),
-        'm' => Ok(SerializedC4Value::Unsupported(encoded.to_string())),
-        other => Err(parse_error(format!(
-            "unknown C4Value type char `{}` in `{}`",
-            other, encoded
+        'm' => {
+            let inner = payload
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .ok_or_else(|| {
+                    parse_error(format!(
+                        "invalid C4Value map `{}` (expected m[...])",
+                        encoded
+                    ))
+                })?;
+            let (count_text, entries_text) = inner.split_once(';').unwrap_or((inner, ""));
+            let count = parse_i32(count_text.trim()).map_err(|err| {
+                parse_error(format!("invalid map size in `{}` ({})", encoded, err))
+            })?;
+            if count < 0 {
+                return Err(parse_error(format!("negative map size in `{}`", encoded)));
+            }
+            let count = count as usize;
+            let mut serialized_entries = split_outside_delimiter(entries_text, ';').into_iter();
+            let mut entries = Vec::new();
+            for index in 0..count {
+                let entry = serialized_entries.next().ok_or_else(|| {
+                    parse_error(format!(
+                        "map `{}` declares {} entries but contains {}",
+                        encoded, count, index
+                    ))
+                })?;
+                let entry = entry.trim();
+                let equals = entry
+                    .char_indices()
+                    .scan((0usize, 0usize), |depth, (index, ch)| {
+                        match ch {
+                            '[' => depth.0 += 1,
+                            ']' => depth.0 = depth.0.saturating_sub(1),
+                            '(' => depth.1 += 1,
+                            ')' => depth.1 = depth.1.saturating_sub(1),
+                            '=' if depth.0 == 0 && depth.1 == 0 => return Some(Some(index)),
+                            _ => {}
+                        }
+                        Some(None)
+                    })
+                    .flatten()
+                    .next()
+                    .ok_or_else(|| parse_error(format!("map entry `{entry}` missing `=`")))?;
+                let key = parse_serialized_c4value(entry[..equals].trim(), line)?;
+                let value = parse_serialized_c4value(entry[equals + 1..].trim(), line)?;
+                entries.push((key, value));
+            }
+            Ok(SerializedC4Value::Map(entries))
+        }
+        // Character only consumes an alphabetic byte. A raw number therefore
+        // falls back to C4V_Any without consuming its first digit; an unknown
+        // alphabetic type byte is consumed and GetC4VFromID also returns Any.
+        // C4V_pC4Value is the one nonserializable exception.
+        'V' => Err(parse_error(format!(
+            "nonserializable C4Value reference in `{}`",
+            encoded
         ))),
+        other if other.is_ascii_alphabetic() => Ok(SerializedC4Value::Any(int_payload()?)),
+        _ => Ok(SerializedC4Value::Any(parse_i32(encoded.trim()).map_err(
+            |err| parse_error(format!("invalid C4Value payload `{}` ({})", encoded, err)),
+        )?)),
     }
 }
 
@@ -12160,15 +12988,22 @@ fn parse_legacy_object_components(
         .collect()
 }
 
+/// A serialized C4Fixed (Fixed.h:247-266): lowercase `f` means the int32
+/// contains float bits converted through `FLOAT_TO_FIXED`; any other
+/// alphabetic format byte leaves the following int32 raw. A missing format
+/// byte is the old raw representation. GoldRush's hanging stalactites carry
+/// `YDir=f1067030938` = 1.2 px/frame.
 fn parse_c4fixed(value: &str) -> Result<crate::math::C4Fixed, String> {
     let trimmed = value.trim();
-    let (float_bits, rest) = match trimmed.as_bytes().first() {
-        Some(b'f') => (true, &trimmed[1..]),
-        Some(b'F') => (false, &trimmed[1..]),
-        _ => (false, trimmed),
+    // StdCompilerINIRead::Character consumes any alphabetic format byte.
+    // Only lowercase `f` requests the legacy float-bit conversion; every
+    // other letter (including `F`) leaves the following int32 word raw.
+    let (format, rest) = match trimmed.as_bytes().first().copied() {
+        Some(format) if format.is_ascii_alphabetic() => (Some(format), &trimmed[1..]),
+        _ => (None, trimmed),
     };
-    let raw = parse_i32(rest)?;
-    if float_bits {
+    let raw = parse_std_i32(rest).ok_or_else(|| "invalid int32 value".to_string())?;
+    if format == Some(b'f') {
         Ok(crate::math::ftofix(f32::from_bits(raw as u32)))
     } else {
         Ok(crate::math::C4Fixed::from_raw(raw))
@@ -15089,6 +15924,22 @@ RandomTeamCount=2
 
         let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
         assert_eq!(head.scenario_title(), "Caf\u{e9}");
+        assert_eq!(head.scenario_title_bytes(), b"Caf\xe9");
+    }
+
+    #[test]
+    fn loader_head_fallback_title_preserves_native_cp1252_bytes() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            b"[Head]\nTitle=S\xe4uresee\n",
+        )
+        .expect("legacy scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        assert_eq!(head.scenario_title(), "S\u{e4}uresee");
+        assert_eq!(head.scenario_title_bytes(), b"S\xe4uresee");
     }
 
     #[test]
@@ -15109,7 +15960,7 @@ RandomTeamCount=2
     }
 
     #[test]
-    fn loader_head_title_fails_when_byte_limit_splits_utf8() {
+    fn loader_head_fallback_title_truncates_native_bytes_like_cpp() {
         let directory = tempdir().expect("scenario directory");
         let title = format!("{}é", "A".repeat(119));
         std::fs::write(
@@ -15119,10 +15970,9 @@ RandomTeamCount=2
         .expect("scenario core");
         let group = Group::open(directory.path()).expect("scenario group");
 
-        assert!(matches!(
-            ScenarioLoaderHead::load_from_group(&group),
-            Err(ScenarioError::LoaderTitleTruncationBoundary { limit: 120 })
-        ));
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let source = title.as_bytes();
+        assert_eq!(head.scenario_title_bytes(), &source[..120]);
     }
 
     #[test]
@@ -17571,6 +18421,7 @@ global func Step(state, frame, random)
             scenario_sections: Vec::new(),
             physics: None,
             runtime_landscape: None,
+            legacy_string_table: HashMap::new(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
             weather_init: None,
@@ -17700,6 +18551,7 @@ global func Step(state, frame, random)
             scenario_sections: Vec::new(),
             physics: None,
             runtime_landscape: None,
+            legacy_string_table: HashMap::new(),
             gravity: LegacyC4SVal::new(100, 0, 10, 200),
             environment: None,
             weather_init: None,
@@ -22689,6 +23541,245 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn network_savegame_runtime_state_precedes_initialize_def_and_skips_fresh_weather() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some((
+                "PROB",
+                "static restored_named;\n\
+                 static observed_saved_weather;\n\
+                 func InitializeDef() {\n\
+                     observed_saved_weather = [restored_named, GetWind(), GetSeason(), GetTemperature()];\n\
+                 }\n",
+            )),
+            "// no scenario script\n",
+        );
+        let core =
+            std::fs::read_to_string(scenario_dir.join("Scenario.txt")).expect("read scenario core");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            core.replacen(
+                "Title=Resilience",
+                "Title=Resilience\nSaveGame=1\nNoInitialize=1",
+                1,
+            ),
+        )
+        .expect("mark fixture as a savegame");
+
+        let mut gamma = crate::GammaControlState::default();
+        assert!(gamma.set_ramp(0, [0x010203, 0x405060, 0xa0b0c0]));
+        let scalar_game_data = InitialNetworkGameData {
+            time: 91,
+            frame: 37,
+            control_tick: 12,
+            sync_rate: 73,
+            tick2: 1,
+            tick3: 1,
+            tick5: 2,
+            tick10: 7,
+            tick35: 2,
+            tick255: 37,
+            tick500: 37,
+            tick1000: 37,
+            object_enumeration_index: 4_000,
+            rules: 1 | 2 | 4 | 8 | 16,
+            play_list: "Saved*.ogg".to_string(),
+            current_scenario_section: "Saved".to_string(),
+            resort_any_object: true,
+            music_enabled: true,
+            music_level: 43,
+            next_mission: crate::NextMissionState {
+                path: "Next.c4s".to_string(),
+                text: "Continue".to_string(),
+                description: "Saved mission".to_string(),
+            },
+            message_board_commands: Vec::new(),
+            script_go: true,
+            script_counter: 9,
+            environment: crate::EnvironmentSettings {
+                wind: 73,
+                wind_target: -21,
+                season: 44,
+                year_speed: 5,
+                season_delay: 17,
+                temperature: -8,
+                temperature_range: 29,
+                climate: 12,
+                lightning: 3,
+                meteorite: 4,
+                volcano: 5,
+                earthquake: 6,
+                no_gamma: true,
+                ..crate::EnvironmentSettings::default()
+            },
+            gamma,
+            landscape: None,
+            compiled_sections: Default::default(),
+        };
+        let mut game_source = crate::serialize_initial_network_game(&scalar_game_data, None)
+            .expect("savegame runtime serializes")
+            .expect("nondefault runtime emits Game.txt");
+        let counter = b"Counter=9\r\n";
+        let insertion = game_source
+            .windows(counter.len())
+            .position(|window| window == counter)
+            .map(|position| position + counter.len())
+            .expect("serialized Script counter");
+        game_source.splice(
+            insertion..insertion,
+            b"Globals=2;i17,S0\r\nGlobalNamed=1;restored_named=i23\r\n"
+                .iter()
+                .copied(),
+        );
+        game_source.extend_from_slice(
+            b"\r\n[Sky]\r\nX=65536\r\nY=-65536\r\nXDir=32768\r\nYDir=-32768\r\nModulation=4278255360\r\nParX=12\r\nParY=13\r\nParMode=1\r\nBackClr=-16711936\r\nBackClrEnabled=true\r\n\r\n\
+[Effects]\r\nGlobalEffects=Fog(1,100,7,3,0,FOGG)[3;i5,b1,m[1;i7=S0]]\r\n\r\n\
+[Scoreboard]\r\nRows=2\r\nCols=2\r\nDlgShow=1\r\nCell0_0String=\"Scores\"\r\nCell0_0Value=-1\r\nCell1_0String=\"Round\"\r\nCell1_0Value=1234\r\nCell0_1String=\"Alice\"\r\nCell0_1Value=7\r\nCell1_1String=\"42\"\r\nCell1_1Value=42\r\n",
+        );
+        let game_data = crate::parse_initial_network_game_data(&game_source);
+        assert!(!game_source
+            .windows(b"[Landscape]".len())
+            .any(|window| window == b"[Landscape]"));
+        std::fs::write(scenario_dir.join("Game.txt"), &game_source)
+            .expect("write savegame runtime");
+        std::fs::write(scenario_dir.join("Strings.txt"), b"saved text\r\n")
+            .expect("write compiled string table");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let mut scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("savegame loads");
+        // SaveGame alone selects Weather.Init(false). Keep this explicit
+        // zero-runtime-landscape shape as a regression for the old Rust gate.
+        scenario.runtime_landscape = None;
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply_before_network_final_init_with_game_data(&mut engine, &game_data, None, None)
+            .expect("network savegame applies");
+
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("observed_saved_weather")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Array(vec![
+                lc_script::Value::Int(23),
+                lc_script::Value::Int(73),
+                lc_script::Value::Int(44),
+                lc_script::Value::Int(-8),
+            ])),
+            "InitializeDef observes compiled weather, not fresh Weather.Init values"
+        );
+        assert_eq!(engine.game_time(), 91);
+        assert_eq!(engine.frame(), 37);
+        assert_eq!(engine.control_tick, 12);
+        assert_eq!(engine.sync_rate, 73);
+        assert_eq!(engine.next_object_id, 4_001);
+        assert_eq!(engine.environment.wind, 73);
+        assert_eq!(engine.environment.wind_target, -21);
+        assert_eq!(engine.environment.season, 44);
+        assert_eq!(engine.environment.temperature, -8);
+        assert_eq!(engine.gamma_controls(), &gamma);
+        assert!(engine.structures_need_energy);
+        assert!(engine.construction_needs_material);
+        assert!(engine.flag_removeable);
+        assert!(engine.structures_snow_in);
+        assert!(engine.team_home_base_rule);
+        assert_eq!(engine.music_playlist(), "Saved*.ogg");
+        assert_eq!(engine.music_level(), 43);
+        assert!(engine.scenario_script_go);
+        assert_eq!(engine.scenario_script_counter, 9);
+        assert_eq!(
+            engine
+                .script_global_slots
+                .borrow()
+                .get(&0)
+                .map(|value| value.borrow().clone()),
+            Some(lc_script::Value::Int(17))
+        );
+        assert_eq!(
+            engine
+                .script_global_slots
+                .borrow()
+                .get(&1)
+                .map(|value| value.borrow().clone()),
+            Some(lc_script::Value::String("saved text".to_string()))
+        );
+        assert_eq!(engine.global_effects.len(), 1);
+        assert_eq!(engine.global_effects[0].name, "Fog");
+        assert_eq!(engine.global_effects[0].timer, 7);
+        assert_eq!(engine.global_effects[0].interval, 3);
+        assert_eq!(engine.global_effects[0].command_id.as_deref(), Some("FOGG"));
+        assert_eq!(
+            engine.global_effects[0].vars,
+            vec![
+                EffectVarValue::Int(5),
+                EffectVarValue::Bool(true),
+                EffectVarValue::Proplist(vec![(
+                    lc_script::Value::Int(7),
+                    EffectVarValue::String("saved text".to_string()),
+                )]),
+            ]
+        );
+        let sky = engine
+            .sky
+            .as_ref()
+            .expect("compiled sky restored")
+            .snapshot();
+        assert_eq!(sky.fixed, Some([65_536, -65_536, 32_768, -32_768]));
+        assert_eq!(sky.settings.parallax_x, 12);
+        assert_eq!(sky.settings.parallax_y, 13);
+        assert_eq!(sky.settings.parallax_mode, SkyParallaxMode::Wind);
+        assert_eq!(sky.settings.modulation, Some(4_278_255_360));
+        assert_eq!(sky.settings.back_color_raw, 0xff00_ff00);
+        assert_eq!(sky.settings.back_color, Some(0xff00_ff00));
+        let scoreboard = engine.scoreboard_snapshot();
+        assert_eq!((scoreboard.row_count(), scoreboard.column_count()), (2, 2));
+        assert_eq!(scoreboard.show_count(), 1);
+        assert_eq!(
+            scoreboard.cell(1, 1).and_then(crate::ScoreboardCell::text),
+            Some("42")
+        );
+        assert_eq!(
+            scoreboard.cell(1, 1).map(crate::ScoreboardCell::value),
+            Some(42)
+        );
+        assert!(engine.pending_object_order_commands.iter().any(|command| {
+            matches!(
+                command,
+                crate::compat::ObjectOrderCommand::ResortUnsortedSweep
+            )
+        }));
+
+        // A missing Game.txt skips C4Game::Compile altogether. Network GO
+        // still has to stage InitSystem/C4Weather::Default state; otherwise
+        // the Rust setup above would leak scenario-derived weather and rules
+        // into a SaveGame whose Weather.Init(false) never replaces them.
+        let mut default_engine = Engine::with_seed(0);
+        scenario
+            .apply_before_network_final_init_with_game_data(
+                &mut default_engine,
+                &InitialNetworkGameData::default(),
+                None,
+                None,
+            )
+            .expect("missing-Game defaults apply");
+        assert_eq!(default_engine.environment.wind, 0);
+        assert_eq!(default_engine.environment.wind_target, 0);
+        assert_eq!(default_engine.environment.season, 0);
+        assert_eq!(default_engine.environment.temperature, 0);
+        assert!(default_engine.environment.no_gamma);
+        assert!(!default_engine.structures_need_energy);
+        assert!(!default_engine.construction_needs_material);
+        assert!(!default_engine.flag_removeable);
+        assert!(!default_engine.structures_snow_in);
+        assert!(!default_engine.team_home_base_rule);
+    }
+
+    #[test]
     fn definition_initialize_uses_numeric_c4id_order() {
         // C4ID is a little-endian integer: ZAAA sorts before ABBB even
         // though lexical ordering says the opposite (C4DefList::SortByID).
@@ -24025,6 +25116,51 @@ public func ActualizePhase(pClonk)
         );
         assert_eq!(parse_c4fixed("F78643").expect("parses").val(), 78643);
         assert_eq!(parse_c4fixed("123").expect("parses").val(), 123);
+        assert_eq!(
+            parse_c4fixed("x78643")
+                .expect("unknown alphabetic format stays raw")
+                .val(),
+            78643
+        );
+        assert!(
+            parse_c4fixed("ff1067030938").is_err(),
+            "Character consumes exactly one format byte before the integer"
+        );
+    }
+
+    #[test]
+    fn legacy_object_motion_property_names_are_exact_case() {
+        let mut wrong_case = parse_legacy_objects(
+            "[Object]\nid=GOOD\nNumber=1\nx=9\ny=10\nxdir=F1\nYDIR=F2\nFixx=F3\nfixY=F4\nFIXR=F5\nRdir=F6\nmobile=true\nrotation=7\n",
+        )
+        .expect("wrong-case properties are ignored like unexpected INI names");
+        let wrong_case = wrong_case.remove(0);
+        assert_eq!(wrong_case.x, None);
+        assert_eq!(wrong_case.y, None);
+        assert_eq!(wrong_case.xdir, None);
+        assert_eq!(wrong_case.ydir, None);
+        assert_eq!(wrong_case.fix_x, None);
+        assert_eq!(wrong_case.fix_y, None);
+        assert_eq!(wrong_case.fix_r, None);
+        assert_eq!(wrong_case.rdir, None);
+        assert_eq!(wrong_case.mobile, None);
+        assert_eq!(wrong_case.rotation, None);
+
+        let mut exact = parse_legacy_objects(
+            "[Object]\nid=GOOD\nNumber=1\nX=9\nY=10\nXDir=F1\nYDir=F2\nFixX=F3\nFixY=F4\nFixR=F5\nRDir=F6\nMobile=true\nRotation=7\n",
+        )
+        .expect("canonical motion properties parse");
+        let exact = exact.remove(0);
+        assert_eq!(exact.x, Some(9));
+        assert_eq!(exact.y, Some(10));
+        assert_eq!(exact.xdir.map(crate::math::C4Fixed::val), Some(1));
+        assert_eq!(exact.ydir.map(crate::math::C4Fixed::val), Some(2));
+        assert_eq!(exact.fix_x.map(crate::math::C4Fixed::val), Some(3));
+        assert_eq!(exact.fix_y.map(crate::math::C4Fixed::val), Some(4));
+        assert_eq!(exact.fix_r.map(crate::math::C4Fixed::val), Some(5));
+        assert_eq!(exact.rdir.map(crate::math::C4Fixed::val), Some(6));
+        assert_eq!(exact.mobile, Some(true));
+        assert_eq!(exact.rotation, Some(7));
     }
 
     #[test]
@@ -24571,6 +25707,245 @@ public func ActualizePhase(pClonk)
         assert!(
             !flag(&engine, 81),
             "movement clears the stale flag on dry land"
+        );
+    }
+
+    #[test]
+    fn nested_script_global_compatibility_sections_stage_for_restore() {
+        let data = crate::parse_initial_network_game_data(
+            b"[Script]\r\nGo=true\r\n  [Globals]\r\n  0=17\r\n  2=b1\r\n  [GlobalNamed]\r\n  saved=23\r\n",
+        );
+        let runtime =
+            InitialNetworkRuntimeState::parse(&data).expect("nested compatibility spelling stages");
+        let (globals, effects) =
+            runtime.resolve_post_object_state(&HashSet::new(), &HashMap::new());
+        assert!(effects.is_empty());
+        assert_eq!(globals.numbered.get(&0), Some(&lc_script::Value::Int(17)));
+        assert_eq!(globals.numbered.get(&1), Some(&lc_script::Value::Nil));
+        assert_eq!(
+            globals.numbered.get(&2),
+            Some(&lc_script::Value::Bool(true))
+        );
+        assert_eq!(globals.named.get("saved"), Some(&lc_script::Value::Int(23)));
+    }
+
+    #[test]
+    fn compiled_sky_runs_before_bitmap_scroll_mode_like_cpp() {
+        let data = crate::parse_initial_network_game_data(
+            b"[Sky]\r\n\r\n[Effects]\r\n\r\n[Scoreboard]\r\n",
+        );
+        let mut runtime =
+            InitialNetworkRuntimeState::parse(&data).expect("header-only compiler blocks stage");
+        assert!(runtime.global_effects.is_empty());
+        assert_eq!(
+            (
+                runtime.scoreboard.row_count(),
+                runtime.scoreboard.column_count()
+            ),
+            (0, 0)
+        );
+
+        let mut scenario_settings = SkySettings::default().with_surface(128, 64);
+        scenario_settings.parallax_mode = SkyParallaxMode::Wind;
+        scenario_settings.parallax_x = 37;
+        scenario_settings.parallax_y = 41;
+        scenario_settings.modulation = Some(0x1234_5678);
+        scenario_settings.back_color = Some(0x1122_3344);
+        scenario_settings.back_color_raw = 0x1122_3344;
+        let mut engine = Engine::with_seed(0);
+        engine.set_sky(scenario_settings.clone());
+        let frame = runtime
+            .sky
+            .take()
+            .expect("explicit empty Sky remains present")
+            .into_frame(scenario_settings, true, 1);
+        engine.apply_initial_network_sky_frame(&frame);
+
+        let restored = engine
+            .sky
+            .as_ref()
+            .expect("sky remains initialized")
+            .snapshot();
+        assert!(
+            restored.settings.has_surface,
+            "scenario surface is retained"
+        );
+        assert_eq!(restored.fixed, Some([0, 0, 0, 0]));
+        assert_eq!(restored.settings.parallax_mode, SkyParallaxMode::Wind);
+        assert_eq!(
+            (restored.settings.parallax_x, restored.settings.parallax_y),
+            (10, 20),
+            "bitmap SkyScrollMode runs after the compiled member defaults"
+        );
+        assert_eq!(restored.settings.modulation, Some(0x00ff_ffff));
+        assert_eq!(restored.settings.back_color_raw, 0);
+        assert_eq!(restored.settings.back_color, None);
+
+        let data = crate::parse_initial_network_game_data(
+            b"[Sky]\r\nX=65536\r\nY=-65536\r\nXDir=32768\r\nYDir=-32768\r\nModulation=305419896\r\nParX=37\r\nParY=41\r\nParMode=1\r\nBackClr=287454020\r\nBackClrEnabled=true\r\n",
+        );
+        let mut runtime = InitialNetworkRuntimeState::parse(&data).expect("compiled sky stages");
+        let scenario_settings = SkySettings::default().with_surface(128, 64);
+        let fresh = runtime
+            .sky
+            .take()
+            .expect("compiled Sky remains present")
+            .into_frame(scenario_settings, false, 2);
+        assert_eq!(fresh.fixed, Some([0, 0, 0, 0]));
+        assert_eq!(fresh.settings.parallax_mode, SkyParallaxMode::Fixed);
+        assert_eq!(
+            (fresh.settings.parallax_x, fresh.settings.parallax_y),
+            (20, 20),
+            "fresh Sky::Init resets runtime parallax before mode 2 applies"
+        );
+        assert_eq!(fresh.settings.modulation, Some(0x1234_5678));
+        assert_eq!(fresh.settings.back_color, Some(0x1122_3344));
+    }
+
+    #[test]
+    fn initial_runtime_denumeration_matches_any_maps_and_effect_targets() {
+        let objects = HashSet::from([7_u64, 1_001_000_001_u64]);
+        let strings = HashMap::new();
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &objects,
+            strings: &strings,
+        };
+
+        assert_eq!(
+            parse_serialized_c4value("A1000000007", 1)
+                .expect("legacy any parses")
+                .resolve(&resolution),
+            lc_script::Value::Object(7),
+            "C4V_Any words in the legacy pointer range denumerate"
+        );
+        assert_eq!(
+            parse_serialized_c4value("A1000000009", 1)
+                .expect("missing legacy any parses")
+                .resolve(&resolution),
+            lc_script::Value::Int(1_000_000_009),
+            "a missing C4V_Any pointer is guessed back to int"
+        );
+        assert_eq!(
+            parse_serialized_c4value("A1001000001", 1)
+                .expect("raw any parses")
+                .resolve(&resolution),
+            lc_script::Value::Int(1_001_000_001),
+            "words above C4EnumPointer2 are never shifted"
+        );
+        let packed_id = i32::from_le_bytes(*b"TEST");
+        assert_eq!(
+            parse_serialized_c4value(&format!("A{packed_id}"), 1)
+                .expect("packed any ID parses")
+                .resolve(&resolution),
+            lc_script::Value::C4Id("TEST".to_string()),
+            "GuessType recognizes packed IDs before its integer fallback"
+        );
+        let old_slots =
+            parse_local_slots("1000000007,17", 1).expect("old pre-size C4ValueList parses");
+        assert_eq!(old_slots.len(), 10);
+        assert_eq!(
+            old_slots
+                .into_iter()
+                .take(2)
+                .map(|value| value.resolve(&resolution))
+                .collect::<Vec<_>>(),
+            vec![lc_script::Value::Object(7), lc_script::Value::Int(17)],
+            "old slot zero and untyped following values retain C4V_Any semantics"
+        );
+
+        let resolved = parse_serialized_c4value("m[4;i1=O9;O9=i2;i3=a[1;O9];i4=A1000000007]", 1)
+            .expect("map parses")
+            .resolve(&resolution);
+        let lc_script::Value::Proplist(resolved) = resolved else {
+            panic!("expected resolved map");
+        };
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            resolved.get_key(&lc_script::Value::Int(3)),
+            Some(&lc_script::Value::Array(vec![lc_script::Value::Nil])),
+            "nested missing objects become nil without removing the parent entry"
+        );
+        assert_eq!(
+            resolved.get_key(&lc_script::Value::Int(4)),
+            Some(&lc_script::Value::Object(7))
+        );
+
+        assert_eq!(
+            parse_serialized_c4value("a[1;i3,O9]", 1)
+                .expect("array ignores extra elements")
+                .resolve(&resolution),
+            lc_script::Value::Array(vec![lc_script::Value::Int(3)])
+        );
+        let extra_map = parse_serialized_c4value("m[1;i5=i6;broken]", 1)
+            .expect("map ignores entries after its declared count")
+            .resolve(&resolution);
+        let lc_script::Value::Proplist(extra_map) = extra_map else {
+            panic!("expected one-entry map");
+        };
+        assert_eq!(extra_map.len(), 1);
+        assert_eq!(
+            extra_map.get_key(&lc_script::Value::Int(5)),
+            Some(&lc_script::Value::Int(6))
+        );
+
+        let effect = |command_target| SerializedEffectState {
+            number: 1,
+            name: "Probe".to_string(),
+            priority: 1,
+            interval: 1,
+            timer: 0,
+            command_target,
+            command_id: None,
+            vars: Vec::new(),
+        };
+        assert_eq!(
+            effect(1_000_000_007).resolve(&resolution).command_target,
+            Some(7)
+        );
+        assert_eq!(
+            effect(1_001_000_001).resolve(&resolution).command_target,
+            Some(1_001_000_001),
+            "modern raw effect targets above C4EnumPointer2 stay raw"
+        );
+    }
+
+    #[test]
+    fn local_named_consumes_exactly_the_declared_count() {
+        let entries =
+            parse_local_named("1;kept=i1,ignored=i2", 1).expect("trailing values are ignored");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "kept");
+        assert!(parse_local_named("0;ignored=i2", 1)
+            .expect("zero count returns before payload")
+            .is_empty());
+        assert!(parse_local_named("2;only=i1", 1).is_err());
+    }
+
+    #[test]
+    fn compiled_scoreboard_requires_every_allocated_cell_field() {
+        for source in [
+            b"[Scoreboard]\r\nRows=1\r\nCols=1\r\nCell0_0Value=7\r\n".as_slice(),
+            b"[Scoreboard]\r\nRows=1\r\nCols=1\r\nCell0_0String=Title\r\n".as_slice(),
+        ] {
+            let data = crate::parse_initial_network_game_data(source);
+            assert!(
+                InitialNetworkRuntimeState::parse(&data).is_err(),
+                "C++ rejects a partially compiled scoreboard matrix"
+            );
+        }
+
+        let data = crate::parse_initial_network_game_data(
+            b"[Scoreboard]\r\nRows=1\r\nCols=1\r\nCell0_0String=Title\r\nCell0_0Value=7\r\n",
+        );
+        let runtime = InitialNetworkRuntimeState::parse(&data)
+            .expect("complete compiled scoreboard validates");
+        assert_eq!(
+            runtime.scoreboard.cell(0, 0).and_then(|cell| cell.text()),
+            Some("Title")
+        );
+        assert_eq!(
+            runtime.scoreboard.cell(0, 0).map(|cell| cell.value()),
+            Some(7)
         );
     }
 
@@ -25337,7 +26712,7 @@ public func ActualizePhase(pClonk)
         // 80: Mobile=1 flying right at 0.7 px/frame from x=15.25 —
         //     saved pairs keep x == fixtoi(fix_x) (round-to-nearest), so
         //     the sub-pixel stays under half. itofix(15)+0.25 = 999424;
-        //     XDir 0.7 = F45875.
+        //     XDir 0.7 = legacy float bits f1060320051 -> raw 45875.
         // 81: Mobile absent (false) with STALE saved dirs — C++ keeps the
         //     dirs but never moves; the frame-10 pulse wipes them.
         // 82: rotating: Rotation=90, FixR = 90.25 deg (F5914624),
@@ -25345,11 +26720,14 @@ public func ActualizePhase(pClonk)
         std::fs::write(
             scenario_dir.join("Objects.txt"),
             "[Object]\nid=GOOD\nNumber=80\nStatus=1\nX=15\nY=5\n\
-             FixX=F999424\nFixY=F327680\nXDir=F45875\nMobile=1\n\n\
+             FixX=F999424\nFixY=F327680\nXDir=f1060320051\nMobile=1\n\n\
              [Object]\nid=GOOD\nNumber=81\nStatus=1\nX=25\nY=5\n\
              FixX=F1654784\nFixY=F327680\nXDir=F45875\n\n\
              [Object]\nid=GOOD\nNumber=82\nStatus=1\nX=35\nY=5\n\
-             Rotation=90\nFixR=F5914624\nRDir=F6554\nMobile=1\n",
+             Rotation=90\nFixR=F5914624\nRDir=F6554\nMobile=1\n\n\
+             [Object]\nid=GOOD\nNumber=83\nStatus=2\nX=45\nY=5\n\
+             FixX=F2965504\nFixY=F327680\nRotation=12\nFixR=F802816\nXDir=F45875\nMobile=1\n\n\
+             [Object]\nid=GOOD\nNumber=84\nStatus=2\nX=55\nY=5\n",
         )
         .expect("write objects");
 
@@ -25370,6 +26748,11 @@ public func ActualizePhase(pClonk)
         // Ingestion snapshot before any tick.
         let mover = idx_of(&engine, 80);
         assert!(engine.objects[mover].state.mobile, "Mobile=1 sticks");
+        assert_eq!(
+            engine.objects[mover].fixed_velocity.x.val(),
+            45_875,
+            "lowercase-f float bits survive parsing and loaded spawn exactly"
+        );
         // FixX/FixY load verbatim (C4Object.cpp:2762) but the game-start
         // SyncClearance collapses them to itofix(x,y) before InitPlayers
         // (C4Object.cpp:3810, C4Game.cpp:474) — 15 px exactly.
@@ -25411,6 +26794,23 @@ public func ActualizePhase(pClonk)
             engine.objects[spinner].rotation_velocity.val(),
             6_554,
             "RDir restores the angular velocity (C4Object.cpp:2767)"
+        );
+        let inactive_saved = idx_of(&engine, 83);
+        assert_eq!(
+            engine.objects[inactive_saved].fixed_position.x.val(),
+            2_965_504,
+            "SyncClearance skips C4GameObjects::InactiveObjects"
+        );
+        assert_eq!(engine.objects[inactive_saved].fixed_rotation.val(), 802_816);
+        assert_eq!(
+            engine.objects[inactive_saved].fixed_velocity.x.val(),
+            45_875
+        );
+        let inactive_default = idx_of(&engine, 84);
+        assert_eq!(
+            engine.objects[inactive_default].fixed_position,
+            crate::math::FixedVec2::ZERO,
+            "missing FixX/FixY retain C4Object::Default Fix0 when no action resolves"
         );
 
         // Frame 1: the Mobile mover integrates from its game-start

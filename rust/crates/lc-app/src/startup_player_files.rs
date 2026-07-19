@@ -1398,6 +1398,26 @@ fn parse_leading_i32(value: &str) -> Option<i32> {
 
 fn load_group_png(group: &Group, name: &str) -> Option<ImageData> {
     let bytes = group.read_file(name).ok()?;
+    decode_png(bytes)
+}
+
+/// Loads the root player `BigIcon.png` retained by the network-resource
+/// optimizer. Missing, oversized, nested, or malformed icons use the active
+/// game `Player` graphic instead.
+pub(crate) fn load_network_player_big_icon(path: &Path) -> Option<ImageData> {
+    let group = Group::open(path).ok()?;
+    let entry = group.entries().ok()?.into_iter().find(|entry| {
+        !entry.is_directory
+            && entry.relative_path.components().count() == 1
+            && entry.name_bytes.eq_ignore_ascii_case(b"BigIcon.png")
+    })?;
+    if entry.size > lc_network::MAX_PLAYER_BIG_ICON_SIZE {
+        return None;
+    }
+    decode_png(group.read_entry_bytes_exact(&entry).ok()?)
+}
+
+fn decode_png(bytes: Vec<u8>) -> Option<ImageData> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(Transformations::EXPAND | Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;

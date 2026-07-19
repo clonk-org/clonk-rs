@@ -25,7 +25,7 @@ pub struct HostInitialResourceSource {
 #[derive(Debug, Clone)]
 pub struct HostInitialResourcePublicationSpec {
     pub network_directory: PathBuf,
-    pub group_maker: String,
+    pub group_maker: LegacyCString,
     pub max_load_file_size: u32,
     pub scenario: HostInitialResourceSource,
     pub definitions: Vec<HostInitialResourceSource>,
@@ -160,16 +160,24 @@ pub fn publish_host_initial_resources(
     publications.next_id += 1;
 
     let mut player_cores = Vec::with_capacity(spec.players.len());
+    let mut player_resource_sources = Vec::with_capacity(spec.players.len());
     for player in &spec.players {
-        let core = publications.publish_or_reuse(player, HostResourceType::Player, &spec)?;
-        player_cores.push(core);
+        match publications.publish_or_reuse(player, HostResourceType::Player, &spec) {
+            Ok(core) => {
+                player_resource_sources.push((player.path.clone(), core.clone()));
+                player_cores.push(core);
+            }
+            Err(HostInitialResourcePublicationError::ResourceCore {
+                resource_type: HostResourceType::Player,
+                ..
+            }) => {
+                // C4ClientPlayerInfos drops only the module whose
+                // ResList.AddByFile failed and continues the participant
+                // list. Required game resources remain all-or-error.
+            }
+            Err(error) => return Err(error),
+        }
     }
-    let player_resource_sources = spec
-        .players
-        .iter()
-        .zip(&player_cores)
-        .map(|(source, core)| (source.path.clone(), core.clone()))
-        .collect();
 
     let mut parameters = spec.parameters.clone();
     parameters.scenario = scenario_core;
@@ -215,7 +223,7 @@ fn publish_source(
     spec: &HostInitialResourcePublicationSpec,
     temporary_files: &mut TemporaryFiles,
 ) -> Result<HostResourcePublication, HostInitialResourcePublicationError> {
-    let mut core_spec = HostResourceCoreSpec::new(
+    let mut core_spec = HostResourceCoreSpec::new_with_raw_group_maker(
         resource_type,
         resource_id,
         source.wire_name.clone(),
@@ -282,14 +290,18 @@ impl SourcePublications {
             return Ok(core.clone());
         }
 
+        // C4Network2ResList::AddByFile reserves nextResID before SetByFile
+        // and GetStandalone. A failed player therefore leaves an ID hole even
+        // though its row is skipped and later modules continue.
+        let resource_id = self.next_id;
+        self.next_id += 1;
         let publication = publish_source(
             source,
             resource_type,
-            self.next_id,
+            resource_id,
             spec,
             &mut self.temporary_files,
         )?;
-        self.next_id += 1;
         let core = publication.core.clone();
         self.published_sources
             .insert(source.path.clone(), core.clone());

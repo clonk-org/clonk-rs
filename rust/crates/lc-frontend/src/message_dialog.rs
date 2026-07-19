@@ -112,15 +112,6 @@ impl MessageDialogButton {
             Self::No => MessageDialogResult::No,
         }
     }
-
-    pub const fn hotkey(self) -> Option<char> {
-        match self {
-            Self::Ok => Some('O'),
-            Self::Yes => Some('Y'),
-            Self::No => Some('N'),
-            Self::Retry | Self::Cancel => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +256,7 @@ pub struct MessageDialogState {
     caption: String,
     message: String,
     buttons: MessageDialogButtons,
+    button_labels: Vec<(MessageDialogButton, String)>,
     icon: MessageDialogIcon,
     size: MessageDialogSize,
     default_no: bool,
@@ -296,6 +288,7 @@ impl MessageDialogState {
             caption,
             message: message.into(),
             buttons,
+            button_labels: Vec::new(),
             icon,
             size,
             default_no,
@@ -352,6 +345,31 @@ impl MessageDialogState {
             checked,
         });
         self
+    }
+
+    /// Overrides one stock button label with the active language resource.
+    /// C++ constructs OK/Cancel/Yes/No from `IDS_DLG_*` and Retry from
+    /// `IDS_BTN_RETRY`, so this lives on the dialog instance rather than in
+    /// process-global frontend state. The raw `&` marker is retained for
+    /// both underlined drawing and localized accelerator dispatch.
+    pub fn set_button_label(&mut self, button: MessageDialogButton, label: impl Into<String>) {
+        let label = label.into();
+        if let Some((_, existing)) = self
+            .button_labels
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == button)
+        {
+            *existing = label;
+        } else {
+            self.button_labels.push((button, label));
+        }
+    }
+
+    pub fn button_label(&self, button: MessageDialogButton) -> &str {
+        self.button_labels
+            .iter()
+            .find_map(|(candidate, label)| (*candidate == button).then_some(label.as_str()))
+            .unwrap_or_else(|| button.label())
     }
 
     pub fn with_us_dont_show_again(self, checked: bool) -> Self {
@@ -427,7 +445,7 @@ impl MessageDialogState {
         self.buttons
             .ordered()
             .into_iter()
-            .find(|button| button.hotkey() == Some(character))
+            .find(|button| expand_hotkey_markup(self.button_label(*button)).1 == Some(character))
             .map(MessageDialogButton::result)
     }
 
@@ -778,7 +796,7 @@ impl MessageDialogState {
             resources.skin.draw_button(
                 surface,
                 button.rect,
-                button.button.label(),
+                self.button_label(button.button),
                 resources.fonts,
                 ClassicButtonState {
                     pressed: active && self.target_pressed(target),
@@ -1730,6 +1748,32 @@ mod tests {
         assert_eq!(yes.handle_hotkey('y'), Some(MessageDialogResult::Yes));
         assert_eq!(yes.handle_hotkey('N'), Some(MessageDialogResult::No));
         assert_eq!(yes.handle_hotkey('X'), None);
+    }
+
+    #[test]
+    fn button_labels_accept_per_dialog_language_resources() {
+        let mut dialog = MessageDialogState::new(
+            "message",
+            "caption",
+            MessageDialogButtons::OK_CANCEL,
+            MessageDialogIcon::NOTIFY,
+            MessageDialogSize::Regular,
+            false,
+        );
+        dialog.set_button_label(MessageDialogButton::Ok, "&OK");
+        dialog.set_button_label(MessageDialogButton::Cancel, "&Abbrechen");
+
+        assert_eq!(dialog.button_label(MessageDialogButton::Ok), "&OK");
+        assert_eq!(
+            dialog.button_label(MessageDialogButton::Cancel),
+            "&Abbrechen"
+        );
+        assert_eq!(dialog.handle_hotkey('A'), Some(MessageDialogResult::Cancel));
+        assert_eq!(dialog.handle_hotkey('C'), None);
+        assert_eq!(
+            dialog.button_label(MessageDialogButton::Retry),
+            MessageDialogButton::Retry.label()
+        );
     }
 
     #[test]

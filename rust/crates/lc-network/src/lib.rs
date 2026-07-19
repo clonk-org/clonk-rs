@@ -99,10 +99,6 @@ pub use forward_packet::{
     decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
     ForwardPacketCodecError, MAX_FORWARD_CLIENTS, PID_FORWARD, PID_FORWARD_REQUEST,
 };
-pub use host_resource_core::{
-    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
-    HostResourcePublication, HostResourceType,
-};
 pub use host_game_reference::{
     encode_player_info_list_ini, HostGameReference, HostGameReferenceError,
     HostGameReferenceMetadata,
@@ -111,6 +107,10 @@ pub use host_initial_resources::{
     publish_host_initial_resources, HostInitialResourcePublication,
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource,
+};
+pub use host_resource_core::{
+    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
+    HostResourceType, MAX_PLAYER_BIG_ICON_SIZE,
 };
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,

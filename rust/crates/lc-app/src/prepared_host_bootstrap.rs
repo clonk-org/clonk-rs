@@ -5,6 +5,7 @@
 //! admission after control and the initial local player packet are ready
 //! (`src/C4Network2.cpp:222-278`; `src/C4Game.cpp:3847-3876`).
 
+use std::collections::HashMap;
 use std::fs;
 use std::os::raw::c_int;
 use std::path::{Component, Path, PathBuf};
@@ -12,28 +13,31 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use lc_engine::player_file::PlayerFile;
-use lc_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead};
+use lc_engine::scenario::{
+    LegacyDefinitionResolver, ScenarioGameParameterValues, ScenarioLoaderHead, ScenarioLobbyIdEntry,
+};
 use lc_engine::{
-    CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED, ClientCoreControlData,
-    ControlPlayerInfoEntry,
-    InitialHostTeamAssignmentOracle, InitialNetworkGameData, InitialNetworkTeam,
-    InitialNetworkTeamMetadata, LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
-    PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError, TeamColorUpdateError,
-    assign_initial_host_player_teams,
+    assign_initial_host_player_teams, parse_initial_network_game_data, ClientCoreControlData,
+    ControlPlayerInfoEntry, InitialHostTeamAssignmentOracle, InitialNetworkGameApplyError,
+    InitialNetworkGameData, InitialNetworkTeam, InitialNetworkTeamMetadata, LegacyCString,
+    NetworkResourceCore, PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
+    TeamColorUpdateError, CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED,
+    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_JOINED,
 };
 use lc_network::{
-    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, ClientPlayerInfosSnapshot, HostConfig,
+    compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
+    join_team_list_snapshot, publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
-    InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
-    JoinTeamListSnapshot, LeagueHttpTransportConfig, LeagueStartResponse, NETWORK_STATE_GO,
-    NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
-    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE, NetworkAddress, NetworkGameReference, NetworkProtocol,
-    NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership, compose_initial_network_dynamic,
-    fill_scenario_derived_join_parameters, join_team_list_snapshot, publish_host_initial_resources,
+    InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry,
+    JoinGameParametersEnvelope, JoinTeamListSnapshot, LeagueHttpTransportConfig,
+    LeagueStartResponse, NetworkAddress, NetworkGameReference, NetworkProtocol, NetworkStatus,
+    PlayerInfoListSnapshot, ResourceFileOwnership, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
+    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+    NETWORK_STATE_PAUSE,
 };
-use lc_resources::localize_script_source_with_components;
+use lc_resources::{decode_legacy_script_text, localize_script_source_with_components};
 use lc_resources::{Group, GroupError, LanguagePacks};
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -69,11 +73,41 @@ pub struct PreparedLeagueHostConfig {
     pub league_server_signup: bool,
 }
 
+/// C++-normalized identity captured while loading one configured participant.
+///
+/// `C4PlayerInfoCore::Load` applies fixed-buffer truncation, exact-case INI
+/// lookup, preferred-color defaults, and markup stripping before
+/// `C4PlayerInfo` is constructed. Keep that result beside the resource source
+/// so host preparation does not derive a different identity by reopening the
+/// file through the generic player-file model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedHostPlayerIdentity {
+    pub player_name: LegacyCString,
+    pub network_color: u32,
+    pub alternate_color: u32,
+}
+
+/// One selected host participant and, when it came from the classic config
+/// loader, the already-normalized identity that belongs to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedHostPlayerSource {
+    pub resource: HostInitialResourceSource,
+    pub identity: Option<PreparedHostPlayerIdentity>,
+}
+
+impl From<HostInitialResourceSource> for PreparedHostPlayerSource {
+    fn from(resource: HostInitialResourceSource) -> Self {
+        Self {
+            resource,
+            identity: None,
+        }
+    }
+}
+
 /// Every process-global input used by the supported preparation path.
 #[derive(Debug, Clone, Copy)]
 pub struct PreparedHostBootstrapSpec<'a> {
     pub scenario_path: &'a Path,
-    pub scenario_title: &'a str,
     /// Ordered assembled install roots. Earlier roots shadow later roots.
     pub install_roots: &'a [PathBuf],
     /// Ordered legacy language fallbacks used while loading scenario-owned
@@ -104,7 +138,7 @@ pub struct PreparedHostBootstrapSpec<'a> {
     pub netpuncher_address: &'a str,
     /// Selected participant files in C++ module order, with their exact
     /// `Config.AtExeRelativePath` wire spellings.
-    pub player_sources: &'a [HostInitialResourceSource],
+    pub player_sources: &'a [PreparedHostPlayerSource],
     pub config: PreparedHostBootstrapConfig,
     pub league: Option<&'a PreparedLeagueHostConfig>,
 }
@@ -214,6 +248,8 @@ impl Drop for PreparedTemporaryFiles {
 #[derive(Debug, Clone)]
 pub struct PreparedHostBootstrap {
     host_config: HostConfig,
+    initial_game: InitialNetworkGameData,
+    has_initial_game: bool,
     admission: PreparedHostAdmission,
     start_time: i32,
     initial_host_player_info_control: PlayerInfoControlData,
@@ -227,6 +263,10 @@ pub struct PreparedHostBootstrap {
     league: Option<PreparedLeagueHostConfig>,
     stream_address: LegacyCString,
     local_player_resources: Vec<(NetworkResourceCore, PathBuf)>,
+    /// `C4PlayerInfo::dwAlternateColor` is deliberately absent from the
+    /// synchronized compiler. Keep the host process's values beside their
+    /// stable resource identities for every later attribute-resolution pass.
+    local_player_alternate_colors_by_resource: HashMap<i32, u32>,
     pending_initial_league_players: Option<PendingInitialLeaguePlayers>,
     lifetime: Arc<PreparedHostLifetime>,
 }
@@ -234,14 +274,57 @@ pub struct PreparedHostBootstrap {
 #[derive(Debug, Clone)]
 struct PendingInitialLeaguePlayers {
     players: Vec<ControlPlayerInfoEntry>,
+    alternate_colors_by_resource: HashMap<i32, u32>,
     restore_players: Vec<ControlPlayerInfoEntry>,
     restore_last_player_id: i32,
     team_metadata: InitialNetworkTeamMetadata,
 }
 
+#[derive(Debug, Clone)]
+enum PreparedLocalPlayerIdentity {
+    Configured(PreparedHostPlayerIdentity),
+    Generic(PlayerFile),
+}
+
+impl PreparedLocalPlayerIdentity {
+    fn player_name(&self) -> LegacyCString {
+        match self {
+            Self::Configured(identity) => identity.player_name.clone(),
+            Self::Generic(player) => legacy_c4_string(&player.name),
+        }
+    }
+
+    fn network_color(&self) -> u32 {
+        match self {
+            Self::Configured(identity) => identity.network_color,
+            Self::Generic(player) => player.normalized_preferred_color(),
+        }
+    }
+
+    fn alternate_color(&self) -> Option<u32> {
+        match self {
+            Self::Configured(identity) => Some(identity.alternate_color),
+            Self::Generic(player) => Some(player.normalized_alternate_color()),
+        }
+    }
+}
+
 impl PreparedHostBootstrap {
     pub fn host_config(&self) -> &HostConfig {
         &self.host_config
+    }
+
+    /// Runtime state compiled from the already-opened `Game.txt`, or the
+    /// InitSystem defaults retained when that component was absent. GO must
+    /// consume this frozen value rather than reopening a mutable source group.
+    pub fn initial_game_data(&self) -> &InitialNetworkGameData {
+        &self.initial_game
+    }
+
+    /// Whether host preparation found a readable, nonempty `Game.txt` in the
+    /// source scenario.
+    pub fn has_initial_game_data(&self) -> bool {
+        self.has_initial_game
     }
 
     /// Claims the resource-bearing configuration for exactly one live host.
@@ -387,8 +470,8 @@ impl PreparedHostBootstrap {
         };
         let metadata = HostGameReferenceMetadata {
             icon: self.reference_icon,
-            time: 0,
-            frame: 0,
+            time: self.initial_game.time,
+            frame: self.initial_game.frame,
             league_performance: 0,
             comment: self.reference_comment.clone(),
             addresses: addresses.to_vec(),
@@ -403,6 +486,10 @@ impl PreparedHostBootstrap {
     /// `C4Network2Players::Init` before joining is opened.
     pub fn initial_host_player_info_control(&self) -> &PlayerInfoControlData {
         &self.initial_host_player_info_control
+    }
+
+    pub(crate) fn local_player_alternate_colors_by_resource(&self) -> &HashMap<i32, u32> {
+        &self.local_player_alternate_colors_by_resource
     }
 
     pub fn pending_initial_league_players(&self) -> Option<&[ControlPlayerInfoEntry]> {
@@ -429,6 +516,7 @@ impl PreparedHostBootstrap {
         })?;
         let (control, team_metadata, last_player_id) = finalize_initial_host_player_info(
             authenticated_players,
+            &pending.alternate_colors_by_resource,
             pending.restore_last_player_id,
             max_players,
             &pending.restore_players,
@@ -512,22 +600,10 @@ impl PreparedHostBootstrap {
 
 #[derive(Debug, Error)]
 pub enum PrepareHostBootstrapError {
-    #[error("local player startup requiring generated scenario teams is not supported yet")]
-    GeneratedPlayerTeamsUnsupported,
-    #[error("the selected local player did not produce a published player resource")]
-    LocalPlayerPublicationMissing,
     #[error("the selected local player could not be admitted into the scenario player slots")]
     LocalPlayerAdmissionRejected,
     #[error("initial local player attributes could not be resolved: {0}")]
     LocalPlayerAttributeConflict(#[source] TeamColorUpdateError),
-    #[error("scenario Parameters.txt is nonempty and cannot be applied exactly yet")]
-    ScenarioParametersUnsupported,
-    #[error("scenario Game.txt has non-player runtime data that cannot be applied exactly yet")]
-    ScenarioGameStateUnsupported,
-    #[error("scenario PlayerInfos.txt/replay player state is not supported")]
-    ScenarioPlayerInfosUnsupported,
-    #[error("savegame network hosting is not supported by the exact initial-host subset")]
-    SavegameUnsupported,
     #[error("replay network hosting is rejected by C++")]
     ReplayUnsupported,
     #[error("a scenario already marked NetworkGame cannot be direct-started as a host")]
@@ -566,6 +642,10 @@ pub enum PrepareHostBootstrapError {
     UnixSecondsOutOfRange { field: &'static str, value: i64 },
     #[error("scenario max-player value {0} cannot be represented by HostConfig")]
     MaxPlayersOutOfRange(i32),
+    #[error("saved control tick {0} cannot be represented by HostConfig")]
+    ControlTickOutOfRange(i32),
+    #[error("saved Game.txt runtime state cannot be applied: {0}")]
+    InvalidGameRuntime(#[from] InitialNetworkGameApplyError),
     #[error("the prepared host has no initial JoinData snapshot")]
     MissingJoinSnapshot,
     #[error("scenario metadata could not be prepared: {0}")]
@@ -676,47 +756,6 @@ impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle 
     }
 }
 
-struct GeneratedTeamDetectingOracle<'a, O> {
-    inner: &'a mut O,
-    generated_team_requested: bool,
-}
-
-impl<'a, O> GeneratedTeamDetectingOracle<'a, O> {
-    fn new(inner: &'a mut O) -> Self {
-        Self {
-            inner,
-            generated_team_requested: false,
-        }
-    }
-}
-
-impl<O: InitialHostTeamAssignmentOracle> InitialHostTeamAssignmentOracle
-    for GeneratedTeamDetectingOracle<'_, O>
-{
-    fn safe_random(&mut self, range: i32) -> i32 {
-        self.inner.safe_random(range)
-    }
-
-    fn generate_team(
-        &mut self,
-        id: i32,
-        _existing_teams: &[InitialNetworkTeam],
-    ) -> InitialNetworkTeam {
-        self.generated_team_requested = true;
-        // The caller rejects this preview. Avoid consuming process RNG merely
-        // to construct data that cannot commit.
-        InitialNetworkTeam {
-            id,
-            name: LegacyCString::default(),
-            player_start_index: 0,
-            player_ids: Vec::new(),
-            color: 0,
-            icon_spec: LegacyCString::default(),
-            max_players: 0,
-        }
-    }
-}
-
 /// `C4PlayerInfoList::CreateRestoreInfosForJoinedScriptPlayers`: append a
 /// copy of each still-unclaimed restore script player to the first (host)
 /// packet in restore-list storage order.
@@ -754,6 +793,7 @@ fn swap_remove_rejected_players(
 
 fn finalize_initial_host_player_info(
     initial_players: Vec<ControlPlayerInfoEntry>,
+    alternate_colors_by_resource: &HashMap<i32, u32>,
     restore_last_player_id: i32,
     max_players: usize,
     restore_players: &[ControlPlayerInfoEntry],
@@ -779,20 +819,23 @@ fn finalize_initial_host_player_info(
             max_players,
         )
         .ok_or(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)?;
-    let generated_team_requested = {
-        let mut oracle = GeneratedTeamDetectingOracle::new(team_assignment_oracle);
-        assign_initial_host_player_teams(&mut team_metadata, &mut control.players, &mut oracle);
-        oracle.generated_team_requested
-    };
-    if generated_team_requested {
-        return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
-    }
+    assign_initial_host_player_teams(
+        &mut team_metadata,
+        &mut control.players,
+        team_assignment_oracle,
+    );
     let admission = player_allocator
-        .resolve_admitted_player_attributes(
+        .resolve_admitted_player_attributes_with_alternate_colors(
             control,
             Some(&team_metadata),
             restore_players,
             team_assignment_oracle,
+            |player| {
+                player
+                    .resource
+                    .as_ref()
+                    .and_then(|resource| alternate_colors_by_resource.get(&resource.id).copied())
+            },
         )
         .map_err(PrepareHostBootstrapError::LocalPlayerAttributeConflict)?;
     assert!(
@@ -809,6 +852,64 @@ fn finalize_initial_host_player_info(
     player_allocator.recheck_team_players(&mut team_metadata);
     let (last_player_id, _) = player_allocator.retained_rows_snapshot();
     Ok((control, team_metadata, last_player_id))
+}
+fn join_data_id_list(
+    entries: &[ScenarioLobbyIdEntry],
+) -> Result<Vec<JoinDataIdListEntry>, InitialNetworkMetadataError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let bytes: [u8; 4] = entry.id().as_bytes().try_into().map_err(|_| {
+                InitialNetworkMetadataError::InvalidScenarioId(entry.id().to_string())
+            })?;
+            let id = JoinDataC4Id::from_bytes(bytes).ok_or_else(|| {
+                InitialNetworkMetadataError::InvalidScenarioId(entry.id().to_string())
+            })?;
+            Ok(JoinDataIdListEntry {
+                id,
+                count: entry.count(),
+            })
+        })
+        .collect()
+}
+
+/// Applies the `mkParAdapt(*this, pScenario)` compiler result used when an
+/// embedded Parameters.txt exists. Client rows are deliberately omitted:
+/// `C4Game::InitNetworkHost` clears that saved list and installs the fresh
+/// local host before creating the initial dynamic.
+fn apply_embedded_game_parameters(
+    parameters: &mut JoinGameParametersEnvelope,
+    embedded: &ScenarioGameParameterValues,
+) -> Result<(), InitialNetworkMetadataError> {
+    parameters.random_seed = embedded.random_seed();
+    parameters.startup_player_count = embedded.startup_player_count();
+    parameters.max_players = embedded.max_players();
+    parameters.use_fair_crew = embedded.use_fair_crew();
+    parameters.fair_crew_forced = embedded.fair_crew_forced();
+    parameters.fair_crew_strength = embedded.fair_crew_strength();
+    parameters.allow_debug = embedded.allow_debug();
+    parameters.is_network_game = embedded.is_network_game();
+    parameters.control_rate = embedded.control_rate();
+    parameters.auto_frame_skip = embedded.auto_frame_skip();
+    parameters.rules = join_data_id_list(embedded.rules())?;
+    parameters.goals = join_data_id_list(embedded.goals())?;
+    parameters.league = legacy_c4_string(embedded.league());
+    Ok(())
+}
+
+fn enforce_league_rules(
+    parameters: &mut JoinGameParametersEnvelope,
+    teams: &mut InitialNetworkTeamMetadata,
+    max_players_league: i32,
+) {
+    parameters.allow_debug = false;
+    teams.allow_team_switch = false;
+    if !parameters.fair_crew_forced {
+        parameters.use_fair_crew = true;
+        parameters.fair_crew_forced = true;
+        parameters.fair_crew_strength = 20_000;
+    }
+    parameters.max_players = max_players_league;
 }
 
 /// Builds the exact currently-supported initial host state without opening a
@@ -833,13 +934,22 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             source,
         }
     })?;
+    // C4Game resolves the presentation title from the native Title component,
+    // but copies the component bytes verbatim into synchronized parameters.
+    // Resolve it again here because the app-facing selector model deliberately
+    // retains only Unicode presentation text.
+    let loader_head = ScenarioLoaderHead::load_from_group_with_languages_and_packs(
+        &scenario_group,
+        spec.languages,
+        spec.language_packs,
+    )?;
+    let scenario_title_native =
+        LegacyCString::from_bytes(loader_head.scenario_title_bytes().to_vec())
+            .expect("a resolved scenario title contains no interior NUL");
+    let scenario_title_c4 = lc_script::c4_string_from_bytes(scenario_title_native.as_bytes());
     let original_game_text = validate_scenario_group(&scenario_group)?;
-    let restore_player_infos = load_restore_player_infos(&scenario_group, &spec)?;
-    let restore_players = restore_player_infos
-        .clients
-        .iter()
-        .flat_map(|client| client.players.iter().cloned())
-        .collect::<Vec<_>>();
+    let has_embedded_parameters = read_direct_entry(&scenario_group, "Parameters.txt")?
+        .is_some_and(|source| !source.is_empty());
     let scenario = Scenario::load_from_group_with_languages(
         &scenario_group,
         &InstallRootDefinitionResolver {
@@ -848,7 +958,26 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         },
         spec.languages,
     )?;
-
+    let lobby_metadata = scenario
+        .lobby_metadata()
+        .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)?;
+    let embedded_parameters = has_embedded_parameters
+        .then(|| lobby_metadata.embedded_game_parameter_values())
+        .flatten();
+    let is_save_game = lobby_metadata.head().is_save_game();
+    let max_players_league = lobby_metadata.head().max_players_league();
+    let restore_player_infos = load_restore_player_infos(
+        &scenario_group,
+        &spec,
+        is_save_game
+            .then_some(original_game_text.as_deref())
+            .flatten(),
+    )?;
+    let restore_players = restore_player_infos
+        .clients
+        .iter()
+        .flat_map(|client| client.players.iter().cloned())
+        .collect::<Vec<_>>();
     let (scenario_origin, scenario_wire_name, dynamic_group_filename, dynamic_wire_name) =
         network_names(
             spec.scenario_path,
@@ -856,29 +985,44 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             spec.network_work_path,
         )?;
     let scenario_metadata = scenario.initial_network_scenario_metadata()?;
-    let team_metadata = scenario.initial_network_team_metadata()?;
-    if !spec.player_sources.is_empty() && team_metadata.auto_generate_teams {
-        return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
-    }
+
+    let mut team_metadata = scenario.initial_network_team_metadata()?;
     let local_players = spec
         .player_sources
         .iter()
-        .filter_map(|source| match PlayerFile::load_from_path(&source.path) {
-            Ok(player) => Some((source.clone(), player)),
-            Err(error) => {
-                // C4ClientPlayerInfos drops only this failed module and
-                // continues the ordered participant list.
-                tracing::warn!(
-                    path = %source.path.display(),
-                    %error,
-                    "skipping unreadable initial host player"
-                );
-                None
-            }
+        .filter_map(|selected| {
+            let identity = match selected.identity.as_ref() {
+                Some(identity) => PreparedLocalPlayerIdentity::Configured(identity.clone()),
+                None => match PlayerFile::load_from_path(&selected.resource.path) {
+                    Ok(player) => PreparedLocalPlayerIdentity::Generic(player),
+                    Err(error) => {
+                        // Generic callers have not already loaded a classic
+                        // player core. Match C4ClientPlayerInfos by dropping
+                        // only this failed module and continuing the ordered
+                        // participant list.
+                        tracing::warn!(
+                            path = %selected.resource.path.display(),
+                            %error,
+                            "skipping unreadable initial host player"
+                        );
+                        return None;
+                    }
+                },
+            };
+            Some((selected.resource.clone(), identity))
         })
-        .map(|(source, player)| {
-            validate_c4_network_name("local player name", &player.name, false)?;
-            Ok::<_, PrepareHostBootstrapError>((source, player))
+        .map(|(source, identity)| {
+            match &identity {
+                PreparedLocalPlayerIdentity::Configured(identity) => validate_network_name_bytes(
+                    "local player name",
+                    identity.player_name.as_bytes(),
+                    false,
+                )?,
+                PreparedLocalPlayerIdentity::Generic(player) => {
+                    validate_c4_network_name("local player name", &player.name, false)?;
+                }
+            }
+            Ok::<_, PrepareHostBootstrapError>((source, identity))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let resource_sources = resolve_host_game_resource_sources(
@@ -899,7 +1043,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
                 .map_err(|_| PrepareHostBootstrapError::DefinitionWireNameEncoding { index })
         })
         .collect::<Result<Vec<_>, _>>()?;
-
+    let group_maker = legacy_string(spec.group_maker);
     let host_name = legacy_string(spec.host_name);
     let host_nick = if spec.host_nick.is_empty() {
         host_name.clone()
@@ -942,12 +1086,11 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         rules: Vec::new(),
         goals: Vec::new(),
         league: LegacyCString::default(),
-        league_address: spec
-            .league
-            .filter(|league| league.league_server_signup)
-            .map(|league| legacy_string(&league.endpoint))
-            .unwrap_or_default(),
-        title: legacy_string(spec.scenario_title),
+        // Parameters.txt cannot compile LeagueAddress while a Scenario is
+        // supplied. Configured league signup installs it only after the
+        // initial dynamic has been created.
+        league_address: LegacyCString::default(),
+        title: scenario_title_native,
         scenario: NetworkResourceCore::default(),
         game_resources: Vec::new(),
         player_infos: initial_host_players,
@@ -963,18 +1106,44 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         &scenario_metadata,
         team_metadata.clone(),
     )?;
-    let max_players = usize::try_from(parameters.max_players)
-        .map_err(|_| PrepareHostBootstrapError::MaxPlayersOutOfRange(parameters.max_players))?;
+    if let Some(embedded) = embedded_parameters.as_ref() {
+        apply_embedded_game_parameters(&mut parameters, embedded)?;
+        // `League` is only the synchronized display name. Native's
+        // `isLeague()` tests `LeagueAddress`, which is not compiled while a
+        // scenario is supplied, so an embedded display name does not enforce
+        // league restrictions. InitLeague clears it after CreateDynamic;
+        // only configured league signup below installs an address and calls
+        // EnforceLeagueRules (C4GameParameters.h:173;
+        // C4GameParameters.cpp:362-471,575; C4Network2.cpp:2224-2246).
+    }
+    if is_save_game {
+        let restore_count = i32::try_from(restore_players.len()).unwrap_or(i32::MAX);
+        parameters.max_players = parameters.max_players.max(restore_count);
+    }
 
-    // Before InitGame, C++ runtime data is pristine apart from the stock
-    // `speed` message-board command installed by InitSystem. Any non-player
-    // Game.txt state was rejected above rather than silently discarded.
-    let game = InitialNetworkGameData::default();
+    // Every stored nonempty Game.txt is compiled, including an ordinary
+    // scenario whose component contains only the legacy [Player...] tail.
+    // That compile applies named defaults (not InitSystem's live defaults)
+    // before the initial save canonicalizes and re-appends the player tail.
+    let game = original_game_text
+        .as_deref()
+        .map(parse_initial_network_game_data)
+        .unwrap_or_default();
+    game.validate_runtime_application()?;
+    scenario.validate_initial_network_game_data(&game)?;
+    // InitHost snapshots the already-compiled runtime ControlTick into both
+    // its lobby status and CreateDynamic. ControlRate is still the stock one
+    // at this point, so getNextControlTick() is exactly ControlTick
+    // (src/C4Network2.cpp:222-230,1945-1971;
+    // src/C4GameControl.cpp:363-366).
+    let dynamic_tick = game.control_tick;
+    let host_start_tick = u32::try_from(dynamic_tick)
+        .map_err(|_| PrepareHostBootstrapError::ControlTickOutOfRange(dynamic_tick))?;
     let dynamic = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
         group_filename: &dynamic_group_filename,
-        maker: spec.group_maker,
+        maker: group_maker.as_bytes(),
         scenario: &scenario,
-        scenario_title: spec.scenario_title,
+        scenario_title: &scenario_title_c4,
         definition_modules: &definition_modules,
         scenario_origin: &scenario_origin,
         game: &game,
@@ -983,9 +1152,22 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         scenario_defaults: &scenario_defaults,
     })?;
 
+    // InitLeague runs after CreateDynamic. It clears any embedded display
+    // league, then configured league signup supplies the authoritative
+    // address and enforces the scenario's league restrictions.
+    parameters.league = LegacyCString::default();
+    parameters.league_address = LegacyCString::default();
+    if let Some(league) = spec.league.filter(|league| league.league_server_signup) {
+        parameters.league_address = legacy_string(&league.endpoint);
+        enforce_league_rules(&mut parameters, &mut team_metadata, max_players_league);
+        parameters.teams = join_team_list_snapshot(team_metadata.clone());
+    }
+    let max_players = usize::try_from(parameters.max_players)
+        .map_err(|_| PrepareHostBootstrapError::MaxPlayersOutOfRange(parameters.max_players))?;
+
     let mut publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
         network_directory: spec.network_directory.to_path_buf(),
-        group_maker: spec.group_maker.to_owned(),
+        group_maker: group_maker.clone(),
         max_load_file_size: spec.config.max_load_file_size,
         scenario: HostInitialResourceSource {
             path: spec.scenario_path.to_path_buf(),
@@ -1001,7 +1183,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         dynamic,
         dynamic_wire_name: dynamic_wire_name.clone(),
         parameters,
-        dynamic_tick: 0,
+        dynamic_tick,
     })?;
     let temporary_files = publication
         .resource_files
@@ -1010,29 +1192,51 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         .map(|resource| resource.path.clone())
         .collect();
     let temporary_files = PreparedTemporaryFiles::new(temporary_files);
-    let requested_player_count = local_players.len();
-    if publication.player_cores.len() != requested_player_count {
-        return Err(PrepareHostBootstrapError::LocalPlayerPublicationMissing);
-    }
-    let initial_players = local_players
+    let mut published_index = 0;
+    let published_local_players = local_players
         .iter()
-        .zip(&publication.player_cores)
-        .map(|((source, player), core)| {
-            let color = player.normalized_preferred_color();
+        .filter_map(|(source, player)| {
+            let (published_path, core) =
+                publication.player_resource_sources.get(published_index)?;
+            if published_path != &source.path || core.filename != source.wire_name {
+                return None;
+            }
+            published_index += 1;
+            Some((source, player, core))
+        })
+        .collect::<Vec<_>>();
+    debug_assert_eq!(published_index, publication.player_resource_sources.len());
+    let initial_players = published_local_players
+        .iter()
+        .map(|(source, identity, core)| {
+            let color = identity.network_color();
             ControlPlayerInfoEntry {
-                name: legacy_c4_string(&player.name),
+                name: identity.player_name(),
                 filename: source.wire_name.clone(),
                 flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
                 color,
                 original_color: color,
-                resource: Some(core.clone()),
+                resource: Some((**core).clone()),
                 ..ControlPlayerInfoEntry::default()
             }
         })
         .collect();
-    let defer_league_players = spec
-        .league
-        .is_some_and(|league| league.league_server_signup);
+    // AlternateColorDw is deliberately absent from C4PlayerInfo's wire
+    // compiler. Resource IDs survive league authentication, swap-removal and
+    // capacity pruning, so they provide the stable process-local identity
+    // needed when the host later resolves the admitted packet.
+    let alternate_colors_by_resource = published_local_players
+        .iter()
+        .filter_map(|(_, identity, core)| {
+            identity
+                .alternate_color()
+                .map(|alternate| (core.id, alternate))
+        })
+        .collect::<HashMap<_, _>>();
+    // Both master-reference and league signup run their Start transaction
+    // before Network.Players.Init. Its returned MaxPlayers must therefore be
+    // installed before local IDs, team assignment and slot pruning.
+    let defer_league_players = spec.league.is_some();
     let (
         initial_host_player_info_control,
         runtime_team_metadata,
@@ -1050,6 +1254,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             restore_player_infos.last_player_id,
             Some(PendingInitialLeaguePlayers {
                 players: initial_players,
+                alternate_colors_by_resource: alternate_colors_by_resource.clone(),
                 restore_players: restore_players.clone(),
                 restore_last_player_id: restore_player_infos.last_player_id,
                 team_metadata,
@@ -1058,6 +1263,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     } else {
         let (control, team_metadata, last_player_id) = finalize_initial_host_player_info(
             initial_players,
+            &alternate_colors_by_resource,
             restore_player_infos.last_player_id,
             max_players,
             &restore_players,
@@ -1077,22 +1283,21 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     };
     publication.join_snapshot.parameters.teams =
         join_team_list_snapshot(runtime_team_metadata.clone());
-    let local_player_resources = local_players
+    let local_player_resources = published_local_players
         .iter()
-        .zip(&publication.player_cores)
-        .map(|((source, _), core)| (core.clone(), source.path.clone()))
+        .map(|(source, _, core)| ((**core).clone(), source.path.clone()))
         .collect();
     let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
     let mut host_config = HostConfig {
         max_players,
-        start_tick: 0,
+        start_tick: host_start_tick,
         async_max_wait_frames: spec.config.async_max_wait,
         local_core,
-        group_maker: legacy_string(spec.group_maker),
+        group_maker,
         initial_status: NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: spec.config.control_mode,
-            target_tick: 0,
+            target_tick: game.control_tick,
         },
         password: LegacyCString::default(),
         allow_join: false,
@@ -1107,8 +1312,11 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
 
     Ok(PreparedHostBootstrap {
         host_config,
+        initial_game: game,
+        has_initial_game: original_game_text.is_some(),
         admission: PreparedHostAdmission {
-            max_players: scenario_metadata.max_players,
+            max_players: i32::try_from(max_players)
+                .expect("validated nonnegative C++ max-player value round-trips"),
             no_runtime_join: spec.config.no_runtime_join,
         },
         start_time: spec.start_unix_seconds as i32,
@@ -1123,6 +1331,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         league: spec.league.cloned(),
         stream_address: LegacyCString::default(),
         local_player_resources,
+        local_player_alternate_colors_by_resource: alternate_colors_by_resource,
         pending_initial_league_players,
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
@@ -1199,6 +1408,8 @@ mod definition_root_graphics_tests {
         parameters.league_address = legacy_string("https://league.example/");
         PreparedHostBootstrap {
             host_config,
+            initial_game: InitialNetworkGameData::default(),
+            has_initial_game: false,
             admission: PreparedHostAdmission {
                 max_players: 8,
                 no_runtime_join: false,
@@ -1233,6 +1444,7 @@ mod definition_root_graphics_tests {
             }),
             stream_address: legacy_string("old-stream"),
             local_player_resources: Vec::new(),
+            local_player_alternate_colors_by_resource: HashMap::new(),
             pending_initial_league_players: None,
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),
@@ -1244,6 +1456,7 @@ mod definition_root_graphics_tests {
     }
 
     #[test]
+
     fn league_start_applies_nonempty_overrides_and_forces_only_async_central() {
         let mut prepared = league_prepared_host(2);
         prepared
@@ -1255,7 +1468,6 @@ mod definition_root_graphics_tests {
                 ..LeagueStartResponse::default()
             })
             .expect("apply Start response");
-
         let parameters = &prepared
             .host_config()
             .initial_join_snapshot
@@ -1295,6 +1507,7 @@ mod definition_root_graphics_tests {
         let c = player("C", 0x0007_0809);
         prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
             players: vec![a, b.clone(), c.clone()],
+            alternate_colors_by_resource: HashMap::new(),
             restore_players: vec![script],
             restore_last_player_id: 40,
             team_metadata: prepared.runtime_team_metadata.clone(),
@@ -1331,10 +1544,56 @@ mod definition_root_graphics_tests {
                 .collect::<Vec<_>>(),
             vec![(b"C".as_slice(), 41), (b"B".as_slice(), 42)]
         );
-        let snapshot = prepared.host_config().initial_join_snapshot.as_ref().unwrap();
+
+        let snapshot = prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .unwrap();
         assert_eq!(snapshot.parameters.player_infos.last_player_id, 42);
         assert_eq!(snapshot.parameters.player_infos.clients[0].players.len(), 3);
         assert!(prepared.pending_initial_league_players().is_none());
+    }
+
+    #[test]
+    fn league_reordering_keeps_host_local_alternate_color_by_resource_identity() {
+        let mut prepared = league_prepared_host(1);
+        let player = |name: &str, resource_id: i32, color: u32, original_color: u32| {
+            ControlPlayerInfoEntry {
+                name: legacy_string(name),
+                color,
+                original_color,
+                resource: Some(NetworkResourceCore {
+                    id: resource_id,
+                    ..NetworkResourceCore::default()
+                }),
+                ..ControlPlayerInfoEntry::default()
+            }
+        };
+        let blocker = player("Blocker", 11, 0x00f4_0000, 0x00f4_0000);
+        let candidate = player("Candidate", 22, 0x0000_c800, 0x00f4_0000);
+        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
+            players: vec![blocker.clone(), candidate.clone()],
+            alternate_colors_by_resource: HashMap::from([(11, 0), (22, 0x0000_00e8)]),
+            restore_players: Vec::new(),
+            restore_last_player_id: 0,
+            team_metadata: prepared.runtime_team_metadata.clone(),
+        });
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
+
+        prepared
+            .finalize_initial_league_players(vec![candidate, blocker], &mut oracle, |_| true)
+            .expect("reordered authenticated players finalize");
+
+        let players = &prepared.initial_host_player_info_control().players;
+        assert_eq!(players[0].name.as_bytes(), b"Candidate");
+        assert_eq!(
+            players[0].resource.as_ref().map(|resource| resource.id),
+            Some(22)
+        );
+        assert_eq!(players[0].color, 0x0000_00e8);
+        assert_eq!(players[1].name.as_bytes(), b"Blocker");
+        assert_eq!(players[1].color, 0x00f4_0000);
     }
 
     #[test]
@@ -1350,6 +1609,7 @@ mod definition_root_graphics_tests {
         let c = player("C", 0x0004_0506);
         prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
             players: vec![c.clone(), b.clone()],
+            alternate_colors_by_resource: HashMap::new(),
             restore_players: Vec::new(),
             restore_last_player_id: 0,
             team_metadata: prepared.runtime_team_metadata.clone(),
@@ -1363,7 +1623,6 @@ mod definition_root_graphics_tests {
             .expect("apply Start capacity");
         let mut checked = Vec::new();
         let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
-
         prepared
             .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
                 checked.push(player.name.clone());
@@ -1470,23 +1729,18 @@ mod definition_root_graphics_tests {
 
 fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHostBootstrapError> {
     for source in spec.player_sources {
-        let wire_name = std::str::from_utf8(source.wire_name.as_bytes()).map_err(|_| {
-            PrepareHostBootstrapError::UnsupportedText {
-                field: "local player filename",
-            }
-        })?;
-        validate_ascii_text("local player filename", wire_name, false)?;
-        if wire_name.contains(';') {
+        let wire_name = source.resource.wire_name.as_bytes();
+        validate_native_text("local player filename", wire_name, false)?;
+        if wire_name.contains(&b';') {
             return Err(PrepareHostBootstrapError::UnsupportedText {
                 field: "local player filename",
             });
         }
     }
-    validate_scenario_title(spec.scenario_title)?;
-    validate_ascii_text("C4Group maker", spec.group_maker, true)?;
+    validate_c4_text("C4Group maker", spec.group_maker, true)?;
     validate_network_name("host network name", spec.host_name, false)?;
     validate_network_name("host network nick", spec.host_nick, true)?;
-    validate_ascii_text("network comment", spec.network_comment, true)?;
+    validate_c4_text("network comment", spec.network_comment, true)?;
     validate_ascii_text("netpuncher address", spec.netpuncher_address, true)?;
     if let Some(league) = spec.league {
         validate_ascii_text("league server address", &league.endpoint, false)?;
@@ -1505,13 +1759,17 @@ fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHo
 fn load_restore_player_infos(
     group: &Group,
     spec: &PreparedHostBootstrapSpec<'_>,
+    old_style_game_text: Option<&[u8]>,
 ) -> Result<PlayerInfoListSnapshot, PrepareHostBootstrapError> {
     let empty = || PlayerInfoListSnapshot {
         last_player_id: 0,
         clients: Vec::new(),
     };
+
     let Some(source) = read_direct_entry(group, "SavePlayerInfos.txt")? else {
-        return Ok(empty());
+        return Ok(old_style_game_text
+            .map(|source| load_old_style_restore_player_infos(group, spec, source))
+            .unwrap_or_else(empty));
     };
     // C4PlayerInfoList::Load treats an unreadable/empty group entry as an
     // absent list. The direct-entry read above has already distinguished a
@@ -1546,19 +1804,145 @@ fn load_restore_player_infos(
     })
 }
 
-fn validate_scenario_title(value: &str) -> Result<(), PrepareHostBootstrapError> {
-    validate_ascii_text("scenario title", value, false)?;
-    if value.len() > 120
-        || value.trim_matches(|character: char| character.is_ascii_whitespace()) != value
-        || value
-            .bytes()
-            .any(|byte| byte != b' ' && !byte.is_ascii_graphic())
-    {
-        return Err(PrepareHostBootstrapError::UnsupportedText {
-            field: "scenario title",
+/// `C4PlayerInfoList::LoadFromGameText` compatibility for savegames created
+/// before `SavePlayerInfos.txt`. The legacy `[PlayerFiles]` list names player
+/// groups embedded directly in the scenario; successfully loaded rows receive
+/// ascending IDs and joined game numbers before Parameters.txt is compiled.
+fn load_old_style_restore_player_infos(
+    group: &Group,
+    spec: &PreparedHostBootstrapSpec<'_>,
+    game_text: &[u8],
+) -> PlayerInfoListSnapshot {
+    let effective = &game_text[..game_text
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(game_text.len())];
+    let Some(marker) = effective
+        .windows(b"[PlayerFiles]".len())
+        .position(|window| window == b"[PlayerFiles]")
+    else {
+        return PlayerInfoListSnapshot {
+            last_player_id: 0,
+            clients: Vec::new(),
+        };
+    };
+
+    let mut position = marker + b"[PlayerFiles]".len();
+    let mut players = Vec::new();
+    loop {
+        while effective
+            .get(position)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            position += 1;
+        }
+        if position >= effective.len() {
+            break;
+        }
+        let line_end = effective[position..]
+            .iter()
+            .position(|byte| *byte == b'\r')
+            .map(|offset| position + offset)
+            .unwrap_or(effective.len());
+        let line = &effective[position..line_end];
+        position = line_end;
+        let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
+            break;
+        };
+        let key = &line[..equals];
+        if !key.starts_with(b"Player") {
+            break;
+        }
+        let filename = &line[equals + 1..];
+        let relative = legacy_group_path(filename);
+        let player = group
+            .open_child(&relative)
+            .ok()
+            .and_then(|player_group| PlayerFile::load(&player_group).ok());
+        let Some(player) = player else {
+            tracing::warn!(
+                filename = %String::from_utf8_lossy(filename),
+                "skipping unreadable old-style savegame player"
+            );
+            continue;
+        };
+
+        let section = [b"[".as_slice(), key, b"]".as_slice()].concat();
+        let game_number = effective
+            .windows(section.len())
+            .position(|window| window == section)
+            .and_then(|section_position| {
+                let tail = &effective[section_position + section.len()..];
+                tail.windows(b"Index=".len())
+                    .position(|window| window == b"Index=")
+                    .and_then(|index_position| {
+                        parse_leading_legacy_i32(&tail[index_position + b"Index=".len()..])
+                    })
+            })
+            .unwrap_or(-1);
+        let color = player.normalized_preferred_color();
+        let full_path = spec.scenario_path.join(&relative);
+        let id = i32::try_from(players.len())
+            .unwrap_or(i32::MAX)
+            .saturating_add(1);
+        players.push(ControlPlayerInfoEntry {
+            name: legacy_c4_string(&player.name),
+            filename: LegacyCString::from_bytes(full_path.as_os_str().as_encoded_bytes().to_vec())
+                .unwrap_or_default(),
+            flags: PLAYER_INFO_FLAG_JOINED,
+            id,
+            color,
+            original_color: color,
+            game_number,
+            game_join_frame: 0,
+            ..ControlPlayerInfoEntry::default()
         });
     }
-    Ok(())
+
+    let last_player_id = i32::try_from(players.len()).unwrap_or(i32::MAX);
+    PlayerInfoListSnapshot {
+        last_player_id,
+        clients: (!players.is_empty())
+            .then_some(ClientPlayerInfosSnapshot {
+                client_id: -1,
+                flags: 0,
+                players,
+            })
+            .into_iter()
+            .collect(),
+    }
+}
+
+#[cfg(unix)]
+fn legacy_group_path(bytes: &[u8]) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(OsString::from_vec(
+        bytes
+            .iter()
+            .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
+            .collect(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn legacy_group_path(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).replace('\\', "/"))
+}
+
+fn parse_leading_legacy_i32(bytes: &[u8]) -> Option<i32> {
+    let bytes = bytes.trim_ascii_start();
+    let length = bytes
+        .iter()
+        .enumerate()
+        .take_while(|(index, byte)| {
+            byte.is_ascii_digit() || (*index == 0 && matches!(**byte, b'+' | b'-'))
+        })
+        .count();
+    (length != 0)
+        .then(|| std::str::from_utf8(&bytes[..length]).ok()?.parse().ok())
+        .flatten()
 }
 
 fn validate_ascii_text(
@@ -1572,13 +1956,35 @@ fn validate_ascii_text(
     Ok(())
 }
 
+fn validate_native_text(
+    field: &'static str,
+    value: &[u8],
+    allow_empty: bool,
+) -> Result<(), PrepareHostBootstrapError> {
+    if (!allow_empty && value.is_empty()) || value.contains(&0) {
+        return Err(PrepareHostBootstrapError::UnsupportedText { field });
+    }
+    Ok(())
+}
+
+fn validate_c4_text(
+    field: &'static str,
+    value: &str,
+    allow_empty: bool,
+) -> Result<(), PrepareHostBootstrapError> {
+    let value = lc_resources::encode_legacy_script_text(value)
+        .ok_or(PrepareHostBootstrapError::UnsupportedText { field })?;
+    validate_native_text(field, &value, allow_empty)
+}
+
 fn validate_network_name(
     field: &'static str,
     value: &str,
     allow_empty: bool,
 ) -> Result<(), PrepareHostBootstrapError> {
-    validate_ascii_text(field, value, allow_empty)?;
-    validate_network_name_bytes(field, value.as_bytes(), allow_empty)
+    let value = lc_resources::encode_legacy_script_text(value)
+        .ok_or(PrepareHostBootstrapError::UnsupportedText { field })?;
+    validate_network_name_bytes(field, &value, allow_empty)
 }
 
 fn validate_c4_network_name(
@@ -1612,73 +2018,23 @@ fn validate_network_name_bytes(
 }
 
 fn validate_scenario_group(group: &Group) -> Result<Option<Vec<u8>>, PrepareHostBootstrapError> {
-    if let Some(parameters) = read_direct_entry(group, "Parameters.txt")? {
-        if !parameters.is_empty() {
-            return Err(PrepareHostBootstrapError::ScenarioParametersUnsupported);
-        }
-    }
-    if has_direct_entry(group, "PlayerInfos.txt")? || has_direct_entry(group, "RecPlayerInfos.txt")?
-    {
-        return Err(PrepareHostBootstrapError::ScenarioPlayerInfosUnsupported);
-    }
-
     let scenario_core = read_direct_entry(group, "Scenario.txt")?
         .ok_or(PrepareHostBootstrapError::ScenarioCoreMissing)?;
-    let scenario_core = std::str::from_utf8(&scenario_core)
-        .map_err(|_| PrepareHostBootstrapError::ScenarioCoreEncoding)?;
-    if scenario_head_flag(scenario_core, "SaveGame")? {
-        return Err(PrepareHostBootstrapError::SavegameUnsupported);
-    }
-    if scenario_head_flag(scenario_core, "Replay")? {
+    let scenario_core = decode_legacy_script_text(&scenario_core);
+    scenario_head_flag(&scenario_core, "SaveGame")?;
+    if scenario_head_flag(&scenario_core, "Replay")? {
         return Err(PrepareHostBootstrapError::ReplayUnsupported);
     }
-    if scenario_head_flag(scenario_core, "NetworkGame")? {
+    if scenario_head_flag(&scenario_core, "NetworkGame")? {
         return Err(PrepareHostBootstrapError::NetworkGameScenarioUnsupported);
     }
 
     let Some(game) = read_direct_entry(group, "Game.txt")? else {
         return Ok(None);
     };
-    let effective = &game[..game
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(game.len())];
-    let marker = effective
-        .windows(b"[Player".len())
-        .position(|window| window == b"[Player");
-    let non_player_prefix = marker.map_or(effective, |position| &effective[..position]);
-    if non_player_prefix
-        .iter()
-        .any(|byte| !byte.is_ascii_whitespace())
-    {
-        return Err(PrepareHostBootstrapError::ScenarioGameStateUnsupported);
-    }
-    if marker.is_some_and(|position| has_non_player_section(&effective[position..])) {
-        return Err(PrepareHostBootstrapError::ScenarioGameStateUnsupported);
-    }
-    Ok(marker.map(|_| game))
-}
-
-fn has_non_player_section(player_tail: &[u8]) -> bool {
-    player_tail
-        .split(|byte| matches!(*byte, b'\n' | b'\r'))
-        .any(|raw_line| {
-            let line = raw_line.trim_ascii();
-            let Some(section) = line.strip_prefix(b"[") else {
-                return false;
-            };
-            let Some(close) = section.iter().position(|byte| *byte == b']') else {
-                return false;
-            };
-            !section[..close].starts_with(b"Player")
-        })
-}
-
-fn has_direct_entry(
-    group: &Group,
-    expected: &'static str,
-) -> Result<bool, PrepareHostBootstrapError> {
-    Ok(direct_entry_path(group, expected)?.is_some())
+    // C4Group::LoadEntryString rejects a zero-byte component. Any stored
+    // nonzero byte count succeeds even when its C string is empty/whitespace.
+    Ok((!game.is_empty()).then_some(game))
 }
 
 fn read_direct_entry(
@@ -1833,8 +2189,11 @@ fn normalize_network_work_path(value: &str) -> Result<String, PrepareHostBootstr
 }
 
 fn legacy_string(value: &str) -> LegacyCString {
-    LegacyCString::from_bytes(value.as_bytes().to_vec())
-        .expect("validated supported text is NUL-free")
+    LegacyCString::from_bytes(
+        lc_resources::encode_legacy_script_text(value)
+            .expect("validated text is representable as Windows-1252"),
+    )
+    .expect("validated supported text is NUL-free")
 }
 
 fn legacy_c4_string(value: &str) -> LegacyCString {
