@@ -1254,6 +1254,33 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_mouse_controls(
+        &mut self,
+    ) -> (
+        Vec<(i32, ControlEvent, Tick)>,
+        Vec<(Tick, PlayerCommandControlData)>,
+        Vec<(Tick, PlayerSelectControlData)>,
+    ) {
+        let mut local = Vec::new();
+        let mut commands = Vec::new();
+        let mut selections = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                NetworkCommand::SubmitLocal { owner, event, tick } => {
+                    local.push((owner, event, tick));
+                }
+                NetworkCommand::SubmitPlayerCommand { tick, command } => {
+                    commands.push((tick, command));
+                }
+                NetworkCommand::SubmitPlayerSelect { tick, selection } => {
+                    selections.push((tick, selection));
+                }
+                _ => {}
+            }
+        }
+        (local, commands, selections)
+    }
+
     pub(crate) fn take_submitted_scripts(&mut self) -> Vec<(Tick, ScriptControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
