@@ -9900,6 +9900,9 @@ struct GameApp {
     /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
     ingame_gui_pointer: Option<GuiPoint>,
     ingame_pointer: Option<ViewportPointer>,
+    /// `C4MouseControl::InitCentered`: the first viewport move after `Init`
+    /// is evaluated at the viewport center, regardless of the platform point.
+    ingame_mouse_init_centered: bool,
     /// C4MouseControl::VpX/VpY and its physical viewport identity. These are
     /// retained even away from an edge so the native Tick5 synthetic Move
     /// can reevaluate regions and layout changes without a new OS event.
@@ -19098,6 +19101,7 @@ impl GameApp {
             auto_start_sandbox: false,
             ingame_gui_pointer: None,
             ingame_pointer: None,
+            ingame_mouse_init_centered: false,
             ingame_viewport_mouse: None,
             ingame_edge_scroll: None,
             running_pointer_position: None,
@@ -19935,7 +19939,7 @@ impl GameApp {
             .engine
             .register_player_with_runtime_control(config, control.runtime_control())
         {
-            self.local_controls.remove(self.local_owner);
+            self.remove_local_control_assignment(self.local_owner);
             return Err(error);
         }
         self.mouse_control = self.local_controls.mouse_owner().is_some();
@@ -20047,7 +20051,7 @@ impl GameApp {
         ) {
             Ok(joined) => joined,
             Err(error) => {
-                self.local_controls.remove(predicted_owner);
+                self.remove_local_control_assignment(predicted_owner);
                 return Err(error);
             }
         };
@@ -21061,6 +21065,7 @@ impl GameApp {
             return Ok(());
         }
         if self.mode == AppMode::Running {
+            self.initialize_ingame_mouse_for_wheel();
             if !self.mouse_control {
                 return Ok(());
             }
@@ -25368,11 +25373,9 @@ impl GameApp {
                         self.engine
                             .set_player_mouse_control(player, control.mouse)?;
                         self.mouse_control = self.local_controls.mouse_owner().is_some();
-                        self.ingame_viewport_mouse = None;
-                        self.ingame_edge_scroll = None;
                         // C4Player::ToggleMouseControl clears and defaults
                         // C4MouseControl whenever ownership is reinitialized.
-                        self.cancel_ingame_mouse_gestures();
+                        self.reset_ingame_mouse_control();
                     }
                 }
                 self.ingame_menu.replace(
@@ -30055,6 +30058,75 @@ impl GameApp {
                 .is_some_and(|state| state.motion.region_drag_started)
     }
 
+    fn active_ingame_mouse_viewport(&self) -> Option<ActiveViewportProjection> {
+        let projections = self.graphics.active_viewport_projections();
+        match self.local_controls.mouse_owner() {
+            Some(owner) => projections
+                .into_iter()
+                .find(|viewport| viewport.owner == owner),
+            None => projections
+                .into_iter()
+                .find(|viewport| viewport.is_no_owner_viewport),
+        }
+    }
+
+    fn reset_ingame_mouse_control(&mut self) {
+        self.ingame_mouse_init_centered = false;
+        self.ingame_pointer = None;
+        self.ingame_viewport_mouse = None;
+        self.ingame_edge_scroll = None;
+        self.cancel_ingame_mouse_gestures();
+    }
+
+    fn remove_local_control_assignment(&mut self, owner: i32) {
+        let previous_mouse_owner = self.local_controls.mouse_owner();
+        self.local_controls.remove(owner);
+        let mouse_owner = self.local_controls.mouse_owner();
+        if mouse_owner != previous_mouse_owner {
+            self.reset_ingame_mouse_control();
+        }
+        self.mouse_control = mouse_owner.is_some();
+    }
+
+    /// Consume C4MouseControl's first synthetic or button Move after `Init`.
+    /// Native runs this from Execute on Tick5 even if the OS has not emitted
+    /// motion, so later edge input must not be mistaken for the first move.
+    fn initialize_ingame_mouse_center(&mut self) -> Result<bool, EngineError> {
+        if self.ingame_mouse_init_centered
+            || self.mode != AppMode::Running
+            || !self.window_active
+            || !self.message_dialogs.is_empty()
+            || self.startup_player_properties_dialog.is_some()
+            || self.definition_selector.is_some()
+            || self.context_menu.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(viewport) = self.active_ingame_mouse_viewport() else {
+            return Ok(false);
+        };
+        let center = GuiPoint::new(
+            viewport.rect.x.saturating_add(
+                i32::try_from(viewport.rect.width / 2).unwrap_or(i32::MAX),
+            ) as f32,
+            viewport.rect.y.saturating_add(
+                i32::try_from(viewport.rect.height / 2).unwrap_or(i32::MAX),
+            ) as f32,
+        );
+        self.update_ingame_pointer(center)?;
+        Ok(self.ingame_mouse_init_centered)
+    }
+
+    /// Wheel skips C4MouseControl's position block, but the Move prologue
+    /// still consumes InitCentered before dispatching the wheel command.
+    fn initialize_ingame_mouse_for_wheel(&mut self) {
+        if !self.ingame_mouse_init_centered && self.active_ingame_mouse_viewport().is_some() {
+            self.ingame_mouse_init_centered = true;
+        }
+    }
+
     fn update_ingame_pointer(&mut self, point: GuiPoint) -> Result<(), EngineError> {
         // GraphicsSystem::MouseMove applies ceil after dividing by the
         // presentation scale, before clamping into the assigned viewport.
@@ -30063,23 +30135,30 @@ impl GameApp {
         // so a fractional outside position still reaches the exact inclusive
         // border pixel (C4GraphicsSystem.cpp:445-484).
         let point = GuiPoint::new(point.x.ceil(), point.y.ceil());
-        let projections = self.graphics.active_viewport_projections();
         let mouse_owner = self.local_controls.mouse_owner();
-        let viewport = match mouse_owner {
-            Some(owner) => projections
-                .iter()
-                .find(|viewport| viewport.owner == owner)
-                .copied(),
-            None => projections
-                .iter()
-                .find(|viewport| viewport.is_no_owner_viewport)
-                .copied(),
-        };
+        let viewport = self.active_ingame_mouse_viewport();
         let pointer = viewport.and_then(|viewport| {
+            let point = if self.ingame_mouse_init_centered {
+                point
+            } else {
+                // C4MouseControl::Move replaces the first coordinates after
+                // Init with ViewWdt/2, ViewHgt/2 before target/edge handling
+                // (C4MouseControl.cpp:216-239). SDL does not warp the OS
+                // cursor; only the retained gameplay point is centered.
+                GuiPoint::new(
+                    viewport.rect.x.saturating_add(
+                        i32::try_from(viewport.rect.width / 2).unwrap_or(i32::MAX),
+                    ) as f32,
+                    viewport.rect.y.saturating_add(
+                        i32::try_from(viewport.rect.height / 2).unwrap_or(i32::MAX),
+                    ) as f32,
+                )
+            };
             self.graphics
                 .viewport_output_point_for_index(viewport.index, point)
         });
         if let (Some(pointer), Some(viewport)) = (pointer, viewport) {
+            self.ingame_mouse_init_centered = true;
             let observer = mouse_owner.is_none() && viewport.is_no_owner_viewport;
             self.ingame_viewport_mouse = Some(RetainedViewportMouse {
                 viewport_index: viewport.index,
@@ -30925,6 +31004,7 @@ impl GameApp {
                     {
                         Ok(())
                     } else {
+                        self.initialize_ingame_mouse_center()?;
                         self.handle_ingame_right_mouse_button(button_state)
                     }
                 }
@@ -31007,6 +31087,9 @@ impl GameApp {
         }
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_middle_button(button_state);
+        }
+        if self.mode == AppMode::Running {
+            self.initialize_ingame_mouse_center()?;
         }
         Ok(())
     }
@@ -32448,6 +32531,7 @@ impl GameApp {
                 {
                     Ok(())
                 } else {
+                    self.initialize_ingame_mouse_center()?;
                     self.handle_ingame_mouse_button(button_state)
                 }
             }
@@ -41340,7 +41424,7 @@ impl GameApp {
         for (player_id, info_id) in runtime_players {
             match self.engine.remove_player(player_id) {
                 Ok(_) => {
-                    self.local_controls.remove(player_id);
+                    self.remove_local_control_assignment(player_id);
                     self.control_player_infos
                         .mark_removed(info_id, disconnected, game_part_frame);
                 }
@@ -41371,7 +41455,7 @@ impl GameApp {
         };
         let game_part_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
         self.engine.remove_player(control.player)?;
-        self.local_controls.remove(control.player);
+        self.remove_local_control_assignment(control.player);
         if info_id != 0
             && self.control_player_infos.mark_removed(
                 info_id,
@@ -41442,7 +41526,7 @@ impl GameApp {
         for (player_id, info_id) in runtime_players {
             match self.engine.remove_player(player_id) {
                 Ok(_) => {
-                    self.local_controls.remove(player_id);
+                    self.remove_local_control_assignment(player_id);
                     self.control_player_infos
                         .mark_removed(info_id, true, game_part_frame);
                 }
@@ -42860,6 +42944,7 @@ impl GameApp {
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         };
+        let previous_mouse_owner = self.local_controls.mouse_owner();
         let control = if locally_controlled {
             self.local_controls.initialize(control_init)
         } else {
@@ -42883,6 +42968,9 @@ impl GameApp {
                 );
                 if player_info_changed {
                     self.publish_current_host_player_infos();
+                }
+                if self.local_controls.mouse_owner() != previous_mouse_owner {
+                    self.reset_ingame_mouse_control();
                 }
                 self.mouse_control = self.local_controls.mouse_owner().is_some();
                 let mut local_players = self.engine.snapshot().hud.local_players;
@@ -42914,13 +43002,13 @@ impl GameApp {
             }
             Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
                 if locally_controlled {
-                    self.local_controls.remove(predicted_owner);
+                    self.remove_local_control_assignment(predicted_owner);
                 }
                 return Err(error);
             }
             Err(error) => {
                 if locally_controlled {
-                    self.local_controls.remove(predicted_owner);
+                    self.remove_local_control_assignment(predicted_owner);
                 }
                 tracing::warn!(info_id = join.info_id, %error, "player join failed");
             }
@@ -43140,7 +43228,11 @@ impl GameApp {
                 let player_view_scrolled = if self.ingame_edge_scroll.is_some() {
                     self.apply_ingame_edge_scroll()?
                 } else if self.engine.frame() % 5 == 0 {
-                    self.refresh_ingame_edge_scroll_tick5()?
+                    if self.initialize_ingame_mouse_center()? {
+                        false
+                    } else {
+                        self.refresh_ingame_edge_scroll_tick5()?
+                    }
                 } else {
                     false
                 };
@@ -48563,6 +48655,7 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.running_pointer_position = None;
@@ -49750,6 +49843,7 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.mouse_state = None;
@@ -49883,11 +49977,11 @@ impl GameApp {
                             joined_player_files.push(real_path);
                         }
                         Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
-                            self.local_controls.remove(predicted_owner);
+                            self.remove_local_control_assignment(predicted_owner);
                             return Err(scenario_activation_engine_error(&scenario.title, error));
                         }
                         Err(error) => {
-                            self.local_controls.remove(predicted_owner);
+                            self.remove_local_control_assignment(predicted_owner);
                             tracing::warn!(
                                 info_id = join.info_id,
                                 %error,
@@ -50118,6 +50212,7 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.mouse_state = None;
@@ -50528,6 +50623,7 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
         self.mouse_state = None;
@@ -60415,6 +60511,9 @@ mod tests {
         .unwrap_or_else(|error| panic!("load real {scenario_key}: {error}"));
         app.activate_loaded_scenario(scenario, scenario_data)
             .unwrap_or_else(|error| panic!("activate real {scenario_key}: {error}"));
+        // Physical-route scenario tests start after the native event loop has
+        // already delivered C4MouseControl's one-time centered move.
+        app.ingame_mouse_init_centered = true;
 
         RealTutorialApp {
             app,
@@ -89424,6 +89523,10 @@ ScenInfoArea=70,5,25,90
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
+        // Most running-input tests begin after native's one-time centered
+        // C4MouseControl move. Tests for that initialization explicitly clear
+        // this latch before sending their first platform event.
+        app.ingame_mouse_init_centered = true;
         app
     }
 
@@ -91009,13 +91112,52 @@ ScenInfoArea=70,5,25,90
     fn sandbox_mouse_toggle_updates_registry_and_reflected_player_state() {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
+        let view_mode = |app: &GameApp| {
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == owner)
+                .expect("sandbox player state")
+                .view_mode
+        };
         let player = app.engine.player(owner).expect("sandbox player");
         assert_eq!((player.control_set(), player.mouse_control()), (0, 1));
+        let scrolled_center = Vector2::new(240, 180);
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(scrolled_center)],
+            )
+            .expect("install camera state for the scrolling transition");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish mouse viewport");
+        let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(rect.x + rect.width as i32 / 2),
+            f64::from(rect.y + rect.height as i32 / 2),
+        ))
+        .expect("retain a pre-toggle gameplay pointer");
+        assert!(app.ingame_pointer.is_some());
+        app.engine
+            .scroll_player_view(owner, Vector2::ZERO, 320, 200, true)
+            .expect("enter scrolling mode before disabling mouse control");
+        assert_eq!(view_mode(&app), PLAYER_VIEW_MODE_SCROLLING);
 
         app.apply_ingame_menu_action_for_player(owner, MenuAction::ToggleMouseControl)
             .expect("disable mouse control");
         let player = app.engine.player(owner).expect("sandbox player");
         assert_eq!((player.control_set(), player.mouse_control()), (0, 0));
+        assert_eq!(view_mode(&app), lc_engine::PLAYER_VIEW_MODE_CURSOR);
+        assert_eq!(
+            player.viewports()[0].center,
+            scrolled_center,
+            "disabling mouse control changes only the camera mode"
+        );
+        assert!(!app.ingame_mouse_init_centered);
+        assert!(app.ingame_pointer.is_none());
+        assert!(app.ingame_edge_scroll.is_none());
         assert_eq!(app.local_controls.mouse_owner(), None);
         assert!(!app.mouse_control);
 
@@ -91379,6 +91521,150 @@ ScenInfoArea=70,5,25,90
         );
     }
 
+    fn establish_free_scroll_test_viewport(
+        app: &mut GameApp,
+    ) -> (i32, GuiPoint, GuiPoint, Vector2, Vector2) {
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![lc_engine::PlayerViewport::new(Vector2::new(800, 180))
+                    .with_focus(Some(focus))],
+            )
+            .expect("place camera away from every scroll bound");
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish mouse viewport");
+        let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
+        let left = GuiPoint::new(
+            rect.x as f32,
+            (rect.y + rect.height as i32 / 2) as f32,
+        );
+        let center = GuiPoint::new(
+            (rect.x + rect.width as i32 / 2) as f32,
+            (rect.y + rect.height as i32 / 2) as f32,
+        );
+        let before = app.engine.player(owner).unwrap().viewports()[0].center;
+        let retained_center = Vector2::new(rect.width as i32 / 2, rect.height as i32 / 2);
+        (owner, left, center, before, retained_center)
+    }
+
+    #[test]
+    fn first_mouse_move_after_init_centers_before_edge_scroll() {
+        let mut app = new_running_sandbox_app();
+        let (owner, left, _, before, retained_center) =
+            establish_free_scroll_test_viewport(&mut app);
+        app.ingame_mouse_init_centered = false;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("first move is evaluated at the viewport center");
+
+        assert!(app.ingame_mouse_init_centered);
+        assert_eq!(
+            app.ingame_viewport_mouse
+                .expect("centered gameplay point is retained")
+                .position,
+            retained_center
+        );
+        assert!(app.ingame_edge_scroll.is_none());
+        assert_eq!(app.engine.player(owner).unwrap().viewports()[0].center, before);
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("later edge move uses its physical viewport position");
+
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(before.x - 10, before.y)
+        );
+        assert_eq!(
+            app.ingame_edge_scroll
+                .expect("second edge move arms scrolling")
+                .edge
+                .cursor,
+            lc_frontend::MouseCursorPhase::Left
+        );
+    }
+
+    #[test]
+    fn tick5_initializes_mouse_before_a_later_edge_move() {
+        let mut app = new_running_sandbox_app();
+        let (owner, left, _, _, retained_center) =
+            establish_free_scroll_test_viewport(&mut app);
+        while app.engine.frame() % 5 != 4 {
+            app.update().expect("align next frame to native Tick5");
+        }
+        app.reset_ingame_mouse_control();
+
+        app.update()
+            .expect("Tick5 executes the first centered mouse move");
+
+        assert_eq!(app.engine.frame() % 5, 0);
+        assert!(app.ingame_mouse_init_centered);
+        assert_eq!(
+            app.ingame_viewport_mouse
+                .expect("Tick5 retains the centered mouse coordinate")
+                .position,
+            retained_center
+        );
+        assert!(app.ingame_edge_scroll.is_none());
+        let before = app.engine.player(owner).unwrap().viewports()[0].center;
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("post-Tick5 edge move is no longer swallowed by InitCentered");
+
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(before.x - 10, before.y)
+        );
+    }
+
+    #[test]
+    fn button_and_wheel_moves_consume_mouse_init_centering() {
+        let mut app = new_running_sandbox_app();
+        let (owner, left, _, _, retained_center) =
+            establish_free_scroll_test_viewport(&mut app);
+        app.reset_ingame_mouse_control();
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("button Move initializes the centered mouse coordinate");
+
+        assert!(app.ingame_mouse_init_centered);
+        assert_eq!(
+            app.ingame_viewport_mouse
+                .expect("button Move retains the centered coordinate")
+                .position,
+            retained_center
+        );
+        assert!(app.mouse_state.is_some());
+
+        app.reset_ingame_mouse_control();
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("wheel Move consumes InitCentered without replacing VpX/VpY");
+
+        assert!(app.ingame_mouse_init_centered);
+        assert!(app.ingame_viewport_mouse.is_none());
+        let before = app.engine.player(owner).unwrap().viewports()[0].center;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(left.x),
+            f64::from(left.y),
+        ))
+        .expect("edge motion after wheel uses the physical viewport point");
+        assert_eq!(
+            app.engine.player(owner).unwrap().viewports()[0].center,
+            Vector2::new(before.x - 10, before.y)
+        );
+    }
+
     #[test]
     fn mouse_viewport_edge_pan_repeats_until_an_interior_move() {
         // UpdateScrolling applies one ten-pixel step during the physical Move,
@@ -91389,6 +91675,7 @@ ScenInfoArea=70,5,25,90
         // C4Player.cpp:926-928,1491-1521,1692-1715).
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
+        app.graphics.set_scroll_smooth(1);
         let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
         app.engine
             .replace_player_viewports(
@@ -91442,6 +91729,23 @@ ScenInfoArea=70,5,25,90
                 Vector2::new(before.x - 10, before.y),
                 lc_engine::PLAYER_VIEW_MODE_SCROLLING,
             )
+        );
+        app.render(&mut frame)
+            .expect("render the scrolling-mode camera target");
+        let projection = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .find(|projection| projection.owner == owner)
+            .expect("mouse owner projection");
+        let scrolled_center = view_state(&app).0;
+        assert_eq!(
+            (projection.target_x, projection.target_y),
+            (
+                scrolled_center.x - projection.logical_width / 2,
+                scrolled_center.y - projection.logical_height / 2,
+            ),
+            "C4PVM_Scrolling removes the normal camera dead zone on both axes"
         );
 
         app.update().expect("first continuous edge-scroll tick");
