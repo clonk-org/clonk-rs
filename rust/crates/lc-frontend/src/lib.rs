@@ -7965,6 +7965,45 @@ impl GraphicsSystem {
         }
     }
 
+    /// Draw the final per-viewport Help/PlayerMenu/Chat controls after
+    /// menus and game messages, immediately before the mouse presentation
+    /// (`C4Viewport::DrawOverlay`, src/C4Viewport.cpp:863-880).
+    pub fn draw_viewport_control_overlays(
+        &mut self,
+        mouse_viewport_index: Option<usize>,
+        chat_active: bool,
+        gui_icons2: Option<&ImageData>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let viewports = self.active_viewports.clone();
+        for (viewport_index, viewport) in viewports.iter().enumerate() {
+            let player = self
+                .hud_players
+                .iter()
+                .find(|player| player.owner == viewport.owner);
+            let menu_key_label = player
+                .and_then(|player| player.control_key_labels.get(9))
+                .map(String::as_str)
+                .unwrap_or("");
+            // DrawCommandKey selects FontRegular when the 23px target cell
+            // is larger than C4MN_SymbolSize (16).
+            let font = hud::HudFont::from_set(self.clonk_fonts.as_deref(), self.font.as_ref());
+            hud::draw_viewport_buttons_with_gamma(
+                &mut self.surface,
+                &font,
+                &self.hud_graphics,
+                gui_icons2,
+                viewport.rect,
+                self.show_commands,
+                self.show_command_keys,
+                mouse_viewport_index == Some(viewport_index),
+                chat_active,
+                menu_key_label,
+                gamma,
+            );
+        }
+    }
+
     /// Message board, upper board and optional debug text. Keeping this phase
     /// separate lets its raster chrome occlude earlier scale-native HUD text.
     fn draw_hud_chrome(&mut self, gamma: Option<&lc_graphics::GammaRamp>) {

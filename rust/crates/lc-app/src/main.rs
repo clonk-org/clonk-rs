@@ -10119,6 +10119,9 @@ struct GameApp {
     /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
     ingame_gui_pointer: Option<GuiPoint>,
     ingame_pointer: Option<ViewportPointer>,
+    /// `C4MouseControl::Help`, activated locally by the viewport Help
+    /// button. L053 extends this seam with cursor and caption behavior.
+    ingame_mouse_help: bool,
     /// `C4MouseControl::InitCentered`: the first viewport move after `Init`
     /// is evaluated at the viewport center, regardless of the platform point.
     ingame_mouse_init_centered: bool,
@@ -12307,6 +12310,7 @@ enum IngameDragSelectionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IngameViewportRegion {
+    ViewportButton(lc_frontend::hud::ViewportButton),
     Command(u8),
     Inventory(ObjectId),
 }
@@ -12323,6 +12327,7 @@ enum IngameRegionDragCursor {
 impl IngameViewportRegion {
     fn control(self) -> (u8, i32) {
         match self {
+            Self::ViewportButton(button) => (button.command(), 0),
             Self::Command(command) => (command, 0),
             // COM_Contents (C4Constants.h:188); Data is the target number.
             Self::Inventory(target) => (9, target.as_u64() as i32),
@@ -19669,6 +19674,7 @@ impl GameApp {
             auto_start_sandbox: false,
             ingame_gui_pointer: None,
             ingame_pointer: None,
+            ingame_mouse_help: false,
             ingame_mouse_init_centered: false,
             ingame_viewport_mouse: None,
             ingame_edge_scroll: None,
@@ -25093,6 +25099,14 @@ impl GameApp {
                             ControlCommand::MenuClose,
                             CommandKind::Press,
                         )?;
+                    } else if self.ingame_menu_belongs_to(OWNER_NONE) {
+                        // C4FullScreen owns the observer menu under NO_OWNER;
+                        // closing it never queues a player control.
+                        self.handle_menu_command_failsafe(
+                            OWNER_NONE,
+                            ControlCommand::MenuClose,
+                            CommandKind::Press,
+                        )?;
                     } else {
                         return Err(classic_parity_engine_error(report_classic_parity_boundary(
                             ClassicParityBoundary::AbortDialog,
@@ -25750,6 +25764,16 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) || self.ingame_menu.contains(player) {
             return Ok(());
         }
+        self.activate_ingame_main_menu_for_player(player)
+    }
+
+    /// Mouse-region `COM_PlayerMenu` calls `C4Player::ActivateMenuMain`
+    /// directly: an existing menu is reinitialized to its main page instead
+    /// of following the keyboard command's open/close toggle.
+    fn activate_ingame_main_menu_for_player(&mut self, player: i32) -> Result<(), EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(());
+        }
         if player == self.local_owner {
             self.close_object_menu();
         }
@@ -25952,10 +25976,13 @@ impl GameApp {
             if self.ingame_menu_close_pointer_capture == Some(player) {
                 self.ingame_menu_close_pointer_capture = None;
             }
-            // C4MainMenu::OnClosed queues exactly one synchronized clear;
-            // teardown/reset calls use close_ingame_menu and stay silent
-            // (src/C4MainMenu.cpp:319-329; src/C4Player.cpp:1392-1395).
-            self.clear_local_control(player)?;
+            if player != OWNER_NONE {
+                // Player-owned C4MainMenu::OnClosed queues exactly one
+                // synchronized clear; C4FullScreen's NO_OWNER menu and
+                // silent teardown/reset paths do not
+                // (src/C4MainMenu.cpp:319-329; src/C4Player.cpp:1392-1395).
+                self.clear_local_control(player)?;
+            }
         }
         Ok(())
     }
@@ -31739,6 +31766,19 @@ impl GameApp {
         }
     }
 
+    fn ingame_mouse_controls_owner(&self, owner: i32) -> bool {
+        let Some(viewport) = self.active_ingame_mouse_viewport() else {
+            return false;
+        };
+        if viewport.owner != owner {
+            return false;
+        }
+        match self.local_controls.mouse_owner() {
+            Some(mouse_owner) => self.mouse_control && mouse_owner == owner,
+            None => owner == OWNER_NONE && viewport.is_no_owner_viewport,
+        }
+    }
+
     fn reset_ingame_mouse_control(&mut self) {
         self.ingame_mouse_init_centered = false;
         self.ingame_pointer = None;
@@ -32058,7 +32098,8 @@ impl GameApp {
                 if state.update_with_fog(pointer, fog_blocked) {
                     left_region_drag = state.motion.down_region.and_then(|region| match region {
                         IngameViewportRegion::Inventory(target) => Some(target),
-                        IngameViewportRegion::Command(_) => None,
+                        IngameViewportRegion::Command(_)
+                        | IngameViewportRegion::ViewportButton(_) => None,
                     });
                     if !state.down_region && !state.motion.selection_frame {
                         left_world_drag = state.down_target.map(|target| {
@@ -32078,7 +32119,8 @@ impl GameApp {
                     right_region_drag =
                         state.motion.down_region.and_then(|region| match region {
                             IngameViewportRegion::Inventory(target) => Some(target),
-                            IngameViewportRegion::Command(_) => None,
+                            IngameViewportRegion::Command(_)
+                            | IngameViewportRegion::ViewportButton(_) => None,
                         });
                     if !state.down_region && !state.motion.selection_frame {
                         right_world_drag = state.down_target.map(|target| {
@@ -32453,11 +32495,23 @@ impl GameApp {
         &self,
         point: GuiPoint,
     ) -> Option<(i32, IngameMenuPointerTarget)> {
-        if !self.mouse_control {
-            return None;
-        }
-        let player = self.local_controls.mouse_owner()?;
-        let area = self.graphics.viewport_rect(player)?;
+        let player = match self.local_controls.mouse_owner() {
+            Some(player) if self.mouse_control => player,
+            None
+                if self
+                    .active_ingame_mouse_viewport()
+                    .is_some_and(|viewport| viewport.is_no_owner_viewport) =>
+            {
+                OWNER_NONE
+            }
+            _ => return None,
+        };
+        let area = if player == OWNER_NONE {
+            let surface = self.graphics.surface();
+            Rect::new(0, 0, surface.width(), surface.height())
+        } else {
+            self.graphics.viewport_rect(player)?
+        };
         let menu = self.ingame_menu.get(player)?;
         let fallback = self.assets.font_arc();
         let font = lc_frontend::hud::HudFont::from_set(
@@ -32752,8 +32806,32 @@ impl GameApp {
         owner: i32,
         point: GuiPoint,
     ) -> Option<IngameViewportRegion> {
-        // DrawCommands registers after DrawIDList and C4RegionList::Add
-        // prepends, so command pairs win the unlikely overlap.
+        let viewport = self
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .rev()
+            .find(|viewport| {
+                viewport.owner == owner
+                    && viewport.contains_output_point((point.x, point.y))
+            })?;
+        let mouse_viewport = self
+            .active_ingame_mouse_viewport()
+            .is_some_and(|mouse| mouse.index == viewport.index);
+        // DrawMouseButtons runs after cursor info and C4RegionList::Add
+        // prepends, so these local controls win any unlikely overlap.
+        if let Some(button) = lc_frontend::hud::viewport_button_region(
+            viewport.rect,
+            point,
+            self.display_flags.show_commands
+                && !(self.engine.film() && self.engine.replay()),
+            mouse_viewport,
+            false, // External IRC chat is intentionally absent (M08-P4-L071).
+        ) {
+            return Some(IngameViewportRegion::ViewportButton(button));
+        }
+        // DrawCommands registers after DrawIDList, so command pairs win the
+        // remaining inventory overlap.
         if let Some(command) = self.ingame_command_region_at(owner, point) {
             return Some(IngameViewportRegion::Command(command));
         }
@@ -33239,7 +33317,8 @@ impl GameApp {
             let region = self.ingame_viewport_region(self.local_owner, pointer.screen);
             let region_target = region.and_then(|region| match region {
                 IngameViewportRegion::Inventory(target) => Some(target),
-                IngameViewportRegion::Command(_) => None,
+                IngameViewportRegion::Command(_)
+                | IngameViewportRegion::ViewportButton(_) => None,
             });
             let down_target = region_target.or_else(|| {
                 if region.is_some() {
@@ -33807,18 +33886,22 @@ impl GameApp {
     }
 
     fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
-        if !self.mouse_control {
-            self.cancel_ingame_mouse_gestures();
-            return Ok(());
-        }
         let Some(pointer) = self.ingame_pointer else {
             self.mouse_state = None;
             return Ok(());
         };
         let region = self.ingame_viewport_region(pointer.owner, pointer.screen);
+        if !self.ingame_mouse_controls_owner(pointer.owner)
+            || (!self.mouse_control
+                && !matches!(region, Some(IngameViewportRegion::ViewportButton(_))))
+        {
+            self.cancel_ingame_mouse_gestures();
+            return Ok(());
+        }
         let region_target = region.and_then(|region| match region {
             IngameViewportRegion::Inventory(target) => Some(target),
-            IngameViewportRegion::Command(_) => None,
+            IngameViewportRegion::Command(_)
+            | IngameViewportRegion::ViewportButton(_) => None,
         });
         let down_target = region_target.or_else(|| {
             region
@@ -33858,6 +33941,28 @@ impl GameApp {
         region: IngameViewportRegion,
         release: bool,
     ) -> Result<(), EngineError> {
+        if let IngameViewportRegion::ViewportButton(button) = region {
+            // These controls are C4MouseControl-local. In particular, raw
+            // COM_PlayerMenu would bypass the local menu handler and could
+            // leak into the synchronized queue in a network game.
+            if release {
+                return Ok(());
+            }
+            return match button {
+                lc_frontend::hud::ViewportButton::Help => {
+                    self.ingame_mouse_help = true;
+                    Ok(())
+                }
+                lc_frontend::hud::ViewportButton::PlayerMenu => {
+                    self.activate_ingame_main_menu_for_player(owner)
+                }
+                lc_frontend::hud::ViewportButton::Chat => {
+                    // The conditional C4ChatDlg/IRC row is never registered
+                    // without the intentionally dropped external IRC client.
+                    Ok(())
+                }
+            };
+        }
         let (command, data) = region.control();
         self.dispatch_control_event_for_local_player(
             owner,
@@ -33877,7 +33982,7 @@ impl GameApp {
             return Ok(());
         };
         let motion = drag.motion;
-        if self.local_controls.mouse_owner() != Some(motion.start.owner) {
+        if !self.ingame_mouse_controls_owner(motion.start.owner) {
             self.ingame_last_left_down = None;
             self.ingame_ignore_left_up = false;
             self.ingame_dragged_objects.clear();
@@ -51319,6 +51424,7 @@ impl GameApp {
             &self.snapshot,
             self.focus_id,
             &self.bindings,
+            &self.gamepad_bindings,
         );
         populate_crew_inventories(&self.engine, &self.snapshot, &mut players);
         self.populate_crew_infos(&mut players);
@@ -51753,6 +51859,21 @@ impl GameApp {
             )));
         }
         self.draw_classic_game_messages(&frame_gamma, defer_native_game_messages)?;
+
+        // C4Viewport draws this local control layer after menus and game
+        // messages. Classic Chat is the intentionally unsupported external
+        // IRC client, so its conditional row is inactive in this port.
+        if !(self.engine.film() && self.engine.replay()) {
+            let mouse_viewport_index = self
+                .active_ingame_mouse_viewport()
+                .map(|viewport| viewport.index);
+            self.graphics.draw_viewport_control_overlays(
+                mouse_viewport_index,
+                false,
+                None,
+                Some(&frame_gamma),
+            );
+        }
 
         // C4Viewport draws menus and game messages before C4MouseControl;
         // construction previews and selection frames therefore remain
@@ -53322,6 +53443,7 @@ impl GameApp {
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
+        self.ingame_mouse_help = false;
         self.ingame_mouse_init_centered = false;
         self.ingame_viewport_mouse = None;
         self.ingame_edge_scroll = None;
@@ -55819,6 +55941,7 @@ impl GameApp {
     }
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
+        self.ingame_mouse_help = false;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
         self.construction_menu_drag = None;
@@ -57591,6 +57714,7 @@ fn collect_player_overlays(
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
     bindings: &KeyboardBindings,
+    gamepad_bindings: &GamepadBindings,
 ) -> Vec<PlayerOverlay> {
     let detail_map: HashMap<_, _> = snapshot
         .players
@@ -57724,14 +57848,29 @@ fn collect_player_overlays(
             .get(&player.owner)
             .map(|state| state.control.last_com)
             .unwrap_or(0);
+        let control_set = detail_map
+            .get(&player.owner)
+            .map(|state| state.control_set)
+            .unwrap_or(-1);
         let control_key_labels = ControlBindingId::ALL
             .iter()
             .take(10)
-            .map(|binding| {
-                bindings
-                    .key_for(*binding)
-                    .map(format_key_label)
-                    .unwrap_or_default()
+            .map(|&binding| {
+                if (0..4).contains(&control_set) {
+                    bindings
+                        .key_for_set(control_set as usize, binding)
+                        .map(format_key_label)
+                        .unwrap_or_default()
+                } else if (4..8).contains(&control_set) {
+                    let gamepad_set = (control_set - 4) as usize;
+                    gamepad_bindings
+                        .raw_key_for_set(gamepad_set, binding)
+                        .map(|_| gamepad_bindings.key_label_for_set(gamepad_set, binding))
+                        .filter(|label| label != "invalid")
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                }
             })
             .collect();
         players.push(PlayerOverlay {
@@ -57750,10 +57889,7 @@ fn collect_player_overlays(
                 && detail_map
                     .get(&player.owner)
                     .is_some_and(|state| state.show_startup),
-            control_set: detail_map
-                .get(&player.owner)
-                .map(|state| state.control_set)
-                .unwrap_or(-1),
+            control_set,
             mouse_control: detail_map
                 .get(&player.owner)
                 .is_some_and(|state| state.mouse_control != 0),
@@ -63505,6 +63641,341 @@ mod tests {
         panic!("no visible region for COM {command}");
     }
 
+    fn viewport_button_point(
+        app: &GameApp,
+        owner: i32,
+        button: lc_frontend::hud::ViewportButton,
+    ) -> GuiPoint {
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("viewport button owner has a viewport");
+        let rect = lc_frontend::hud::viewport_button_rect(viewport, button);
+        GuiPoint::new(
+            rect.x as f32 + rect.width as f32 / 2.0,
+            rect.y as f32 + rect.height as f32 / 2.0,
+        )
+    }
+
+    #[test]
+    fn viewport_buttons_dispatch_help_and_player_menu_locally() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        render_mouse_test_app(&mut app);
+        assert_eq!(app.local_controls.mouse_owner(), Some(owner));
+
+        let help = viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::Help);
+        let menu =
+            viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::PlayerMenu);
+        let chat = viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::Chat);
+        assert_eq!(
+            app.ingame_viewport_region(owner, help),
+            Some(IngameViewportRegion::ViewportButton(
+                lc_frontend::hud::ViewportButton::Help,
+            ))
+        );
+        assert_eq!(
+            app.ingame_viewport_region(owner, menu),
+            Some(IngameViewportRegion::ViewportButton(
+                lc_frontend::hud::ViewportButton::PlayerMenu,
+            ))
+        );
+        assert_eq!(
+            app.ingame_viewport_region(owner, chat),
+            None,
+            "the deliberately absent external IRC client keeps Chat inactive"
+        );
+
+        let mut network_commands = install_mouse_network_capture(&mut app);
+        physical_left_click_with_modifiers(
+            &mut app,
+            help,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert!(app.ingame_mouse_help);
+        assert_eq!(
+            network_commands.take_submitted_player_inputs(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "COM_Help remains process-local"
+        );
+
+        app.ingame_mouse_help = false;
+        assert!(!app.ingame_menu_belongs_to(owner));
+        physical_left_click_with_modifiers(
+            &mut app,
+            menu,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert!(app.ingame_menu_belongs_to(owner));
+        assert_eq!(
+            network_commands.take_submitted_player_inputs(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "mouse COM_PlayerMenu is consumed by the local menu"
+        );
+
+        app.ingame_menu
+            .get_mut(owner)
+            .expect("mouse menu is open")
+            .set_selection(2);
+        physical_left_click_with_modifiers(
+            &mut app,
+            menu,
+            ModifiersState::empty(),
+            ModifiersState::empty(),
+        );
+        assert_eq!(
+            app.ingame_menu
+                .get(owner)
+                .expect("mouse menu remains open")
+                .selection(),
+            0,
+            "a second mouse activation reinitializes the main menu"
+        );
+        assert_eq!(
+            network_commands.take_submitted_player_inputs(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "reinitializing the mouse menu remains entirely local"
+        );
+
+        app.display_flags.show_commands = false;
+        assert_eq!(app.ingame_viewport_region(owner, help), None);
+        assert_eq!(app.ingame_viewport_region(owner, menu), None);
+    }
+
+    #[test]
+    fn viewport_buttons_use_only_the_exact_mouse_viewport() {
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
+        app.engine
+            .replace_player_viewports(
+                owner,
+                vec![
+                    lc_engine::PlayerViewport::new(Vector2::new(240, 180))
+                        .with_focus(Some(focus)),
+                    lc_engine::PlayerViewport::new(Vector2::new(720, 180))
+                        .with_focus(Some(focus)),
+                ],
+            )
+            .expect("install same-owner split viewports");
+        render_mouse_test_app(&mut app);
+
+        let viewports = app
+            .graphics
+            .active_viewport_projections()
+            .into_iter()
+            .filter(|viewport| viewport.owner == owner)
+            .collect::<Vec<_>>();
+        assert_eq!(viewports.len(), 2);
+        let point = |viewport: ActiveViewportProjection| {
+            let rect = lc_frontend::hud::viewport_button_rect(
+                viewport.rect,
+                lc_frontend::hud::ViewportButton::Help,
+            );
+            GuiPoint::new(rect.x as f32 + 1.0, rect.y as f32 + 1.0)
+        };
+        assert_eq!(
+            app.ingame_viewport_region(owner, point(viewports[0])),
+            Some(IngameViewportRegion::ViewportButton(
+                lc_frontend::hud::ViewportButton::Help,
+            ))
+        );
+        assert_eq!(
+            app.ingame_viewport_region(owner, point(viewports[1])),
+            None,
+            "the same player's second viewport gets only the keyboard menu hint"
+        );
+    }
+
+    #[test]
+    fn viewport_button_stack_is_wired_into_the_late_app_render() {
+        let mut app = new_running_sandbox_app();
+        app.display_flags.show_commands = false;
+        app.display_flags.show_command_keys = false;
+        render_mouse_test_app(&mut app);
+
+        let viewport = app
+            .active_ingame_mouse_viewport()
+            .expect("sandbox mouse viewport");
+        let gamma = app
+            .graphics
+            .active_gamma_ramp(&app.snapshot.environment.gamma);
+        app.graphics.update_overlay(&GraphicsOverlay {
+            frame_text: "",
+            status_text: "",
+            debug_hud: false,
+            players: Vec::new(),
+            game_time_seconds: 0,
+            message_board_line: None,
+            show_portraits: false,
+            show_commands: true,
+            show_command_keys: false,
+        });
+        app.graphics.surface_mut().fill(Color::transparent());
+        app.graphics.draw_viewport_control_overlays(
+            Some(viewport.index),
+            false,
+            None,
+            Some(&gamma),
+        );
+        let isolated = app.graphics.surface().pixels().to_vec();
+
+        app.display_flags.show_commands = true;
+        render_mouse_test_app(&mut app);
+        let rendered = app.graphics.surface().pixels();
+        let width = app.graphics.surface().width() as usize;
+        for button in [
+            lc_frontend::hud::ViewportButton::Help,
+            lc_frontend::hud::ViewportButton::PlayerMenu,
+        ] {
+            let rect = lc_frontend::hud::viewport_button_rect(viewport.rect, button);
+            let mut opaque_pixels = 0;
+            for y in rect.y..rect.y + rect.height as i32 {
+                for x in rect.x..rect.x + rect.width as i32 {
+                    let index = (y as usize * width + x as usize) * 4;
+                    if isolated[index + 3] == u8::MAX {
+                        opaque_pixels += 1;
+                        assert_eq!(
+                            &rendered[index..index + 4],
+                            &isolated[index..index + 4],
+                            "late app render omitted or obscured {button:?} at ({x},{y})"
+                        );
+                    }
+                }
+            }
+            assert!(
+                opaque_pixels > 100,
+                "the isolated {button:?} control must contain a substantial opaque facet"
+            );
+        }
+    }
+
+    #[test]
+    fn ownerless_mouse_viewport_buttons_remain_local_and_open_fullscreen_menu() {
+        let mut app = new_running_sandbox_app();
+        let removed_owner = app.local_owner;
+        app.engine
+            .remove_player(removed_owner)
+            .expect("remove local player for passive observer");
+        app.engine.set_local_players([]);
+        app.local_controls = LocalControlRegistry::default();
+        app.mouse_control = false;
+        render_mouse_test_app(&mut app);
+
+        let viewport = app
+            .active_ingame_mouse_viewport()
+            .expect("ownerless observer viewport");
+        assert_eq!(viewport.owner, OWNER_NONE);
+        let help_rect = lc_frontend::hud::viewport_button_rect(
+            viewport.rect,
+            lc_frontend::hud::ViewportButton::Help,
+        );
+        let menu_rect = lc_frontend::hud::viewport_button_rect(
+            viewport.rect,
+            lc_frontend::hud::ViewportButton::PlayerMenu,
+        );
+        let center = |rect: Rect| {
+            GuiPoint::new(
+                rect.x as f32 + rect.width as f32 / 2.0,
+                rect.y as f32 + rect.height as f32 / 2.0,
+            )
+        };
+
+        let world = GuiPoint::new(
+            viewport.rect.x as f32 + viewport.rect.width as f32 / 2.0,
+            viewport.rect.y as f32 + viewport.rect.height as f32 / 2.0,
+        );
+        assert_eq!(app.ingame_viewport_region(OWNER_NONE, world), None);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(world.x),
+            f64::from(world.y),
+        ))
+        .expect("move passive observer over world");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("passive world left-down remains inert");
+        assert!(
+            app.mouse_state.is_none(),
+            "passive observers never enter native DragNone world state"
+        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release inert passive world click");
+
+        let mut network_commands = install_mouse_network_capture(&mut app);
+        app.ingame_last_left_down = None;
+        let help = center(help_rect);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(help.x),
+            f64::from(help.y),
+        ))
+        .expect("move passive observer over Help");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press passive observer Help");
+        assert!(!app.ingame_mouse_help, "passive buttons wait for LeftUp");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release passive observer Help");
+        assert!(app.ingame_mouse_help);
+        assert!(app.ingame_menu.is_none());
+
+        app.ingame_last_left_down = None;
+        let menu = center(menu_rect);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(menu.x),
+            f64::from(menu.y),
+        ))
+        .expect("move passive observer over PlayerMenu");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press passive observer PlayerMenu");
+        assert!(app.ingame_menu.is_none(), "passive buttons wait for LeftUp");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release passive observer PlayerMenu");
+        assert!(app.ingame_menu_belongs_to(OWNER_NONE));
+        assert_eq!(
+            app.ingame_menu
+                .get(OWNER_NONE)
+                .expect("observer fullscreen menu")
+                .page(),
+            ingame_menu::MenuPage::Main
+        );
+
+        render_mouse_test_app(&mut app);
+        let surface = app.graphics.surface();
+        let menu_target = (0..surface.height())
+            .flat_map(|y| (0..surface.width()).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let point = GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5);
+                match app.ingame_menu_pointer_target(point) {
+                    Some((OWNER_NONE, IngameMenuPointerTarget::Item(index))) => {
+                        Some((point, index))
+                    }
+                    _ => None,
+                }
+            })
+            .expect("fullscreen observer menu exposes pointer-owned items");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(menu_target.0.x),
+            f64::from(menu_target.0.y),
+        ))
+        .expect("move over observer fullscreen menu");
+        assert_eq!(
+            app.ingame_menu
+                .get(OWNER_NONE)
+                .expect("observer menu remains open")
+                .selection(),
+            menu_target.1
+        );
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape closes observer fullscreen menu locally");
+        assert!(app.ingame_menu.is_none());
+        assert_eq!(
+            network_commands.take_submitted_player_inputs(),
+            (Vec::new(), Vec::new(), Vec::new()),
+            "observer button/menu input never enters synchronized player controls"
+        );
+    }
+
     fn command_bar_fixture(control_style: bool) -> (GameApp, i32, [(u8, GuiPoint); 4]) {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;
@@ -66215,8 +66686,13 @@ mod tests {
     }
 
     fn app_cursor_inventory_contains(app: &GameApp, clonk: ObjectId, definition: &str) -> bool {
-        let mut overlays =
-            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), &app.bindings);
+        let mut overlays = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            Some(clonk),
+            &app.bindings,
+            &app.gamepad_bindings,
+        );
         populate_crew_inventories(&app.engine, &app.snapshot, &mut overlays);
         overlays
             .iter()
@@ -71328,6 +71804,7 @@ func Award()
             &app.snapshot,
             Some(viewed_object),
             &app.bindings,
+            &app.gamepad_bindings,
         );
         let viewport_player = players
             .iter_mut()
@@ -72870,7 +73347,23 @@ func Award()
             ..PlayerState::default()
         });
 
-        let bindings = KeyboardBindings::load(None);
+        let mut bindings = KeyboardBindings::load(None);
+        assert!(bindings.rebind_for_set(
+            2,
+            ControlBindingId::PlayerMenu,
+            VirtualKeyCode::F8,
+        ));
+        let mut gamepad_bindings = GamepadBindings::default();
+        for (binding, button) in [
+            (ControlBindingId::Throw, 0),
+            (ControlBindingId::PlayerMenu, 1),
+        ] {
+            gamepad_bindings.rebind_raw(
+                2,
+                binding,
+                input::legacy_gamepad_button_key(2, button).expect("valid Gamepad3 button"),
+            );
+        }
         let mut engine = Engine::new();
         let mut clonk_definition =
             Definition::from_script("Clonk", "Clonk", "").expect("Clonk definition");
@@ -72887,7 +73380,13 @@ func Award()
                     .expect("Balloon definition"),
             )
             .expect("register Balloon definition");
-        let overlay = collect_player_overlays(&engine, &snapshot, Some(focus), &bindings);
+        let overlay = collect_player_overlays(
+            &engine,
+            &snapshot,
+            Some(focus),
+            &bindings,
+            &gamepad_bindings,
+        );
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
         assert_eq!(player.owner, 1);
@@ -72910,15 +73409,49 @@ func Award()
         assert_eq!(player.control_key_labels.len(), 10);
         assert_eq!(
             player.control_key_labels[3],
-            format_key_label(
-                bindings
-                    .key_for(ControlBindingId::Throw)
-                    .expect("throw has a default binding")
-            )
+            gamepad_bindings.key_label_for_set(2, ControlBindingId::Throw)
+        );
+        assert_eq!(
+            player.control_key_labels[9],
+            gamepad_bindings.key_label_for_set(2, ControlBindingId::PlayerMenu),
+            "the viewport menu hint follows the player's live Gamepad3 set"
         );
 
+        snapshot.players[0].control_set = 2;
+        let keyboard3 = collect_player_overlays(
+            &engine,
+            &snapshot,
+            Some(focus),
+            &bindings,
+            &gamepad_bindings,
+        );
+        assert_eq!(
+            keyboard3[0].control_key_labels[9],
+            format_key_label(VirtualKeyCode::F8),
+            "the viewport menu hint follows the player's live Keyboard3 set"
+        );
+        snapshot.players[0].control_set = 4;
+        let unassigned_gamepad = collect_player_overlays(
+            &engine,
+            &snapshot,
+            Some(focus),
+            &bindings,
+            &GamepadBindings::default(),
+        );
+        assert!(
+            unassigned_gamepad[0].control_key_labels[9].is_empty(),
+            "an undefined gamepad menu button draws no key text"
+        );
+        snapshot.players[0].control_set = 6;
+
         snapshot.hud.local_players.clear();
-        let remote_overlay = collect_player_overlays(&engine, &snapshot, Some(focus), &bindings);
+        let remote_overlay = collect_player_overlays(
+            &engine,
+            &snapshot,
+            Some(focus),
+            &bindings,
+            &gamepad_bindings,
+        );
         assert!(
             !remote_overlay[0].show_startup,
             "C++ suppresses startup hints for non-local players"
@@ -72960,7 +73493,13 @@ func Award()
 
         let raw_name = lc_script::c4_string_from_bytes(&[0xe9]);
         snapshot.players[0].name = raw_name;
-        let overlay = collect_player_overlays(&engine, &snapshot, Some(focus), &bindings);
+        let overlay = collect_player_overlays(
+            &engine,
+            &snapshot,
+            Some(focus),
+            &bindings,
+            &gamepad_bindings,
+        );
         assert_eq!(overlay[0].name, "\u{e9}");
         assert_eq!(
             lc_script::c4_string_bytes(&snapshot.players[0].name),
@@ -72970,7 +73509,13 @@ func Award()
 
         snapshot.hud.players[0].crew = vec![focus];
         snapshot.players[0].view_cursor = Some(teammate);
-        let overlay = collect_player_overlays(&engine, &snapshot, Some(teammate), &bindings);
+        let overlay = collect_player_overlays(
+            &engine,
+            &snapshot,
+            Some(teammate),
+            &bindings,
+            &gamepad_bindings,
+        );
         assert_eq!(overlay[0].cursor, Some(teammate));
         assert_eq!(overlay[0].crew_count, 1, "ViewCursor is not roster crew");
         assert_eq!(overlay[0].crew.len(), 2, "non-roster ViewCursor is projected");
@@ -73026,8 +73571,13 @@ func Award()
         assert_eq!(current_breath, 50_000, "CLNK keeps its birth breath");
         assert_eq!(capacity, 250_000, "Tutorial09 installs AquaClonk capacity");
 
-        let overlays =
-            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), &app.bindings);
+        let overlays = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            Some(clonk),
+            &app.bindings,
+            &app.gamepad_bindings,
+        );
         let crew = overlays
             .iter()
             .find(|player| player.owner == app.local_owner)
@@ -73238,8 +73788,13 @@ func Award()
         });
 
         let bindings = KeyboardBindings::load(None);
-        let mut overlays =
-            collect_player_overlays(&engine, &snapshot, Some(crew_id), &bindings);
+        let mut overlays = collect_player_overlays(
+            &engine,
+            &snapshot,
+            Some(crew_id),
+            &bindings,
+            &GamepadBindings::default(),
+        );
         populate_crew_inventories(&engine, &snapshot, &mut overlays);
 
         let inventory = &overlays[0].crew[0].inventory;
@@ -101795,6 +102350,7 @@ ScenInfoArea=70,5,25,90
             &app.snapshot,
             Some(object),
             &app.bindings,
+            &app.gamepad_bindings,
         );
         let crew = players
             .iter_mut()
@@ -101866,8 +102422,13 @@ ScenInfoArea=70,5,25,90
             .expect("native crew info restores");
         app.snapshot = app.engine.snapshot();
 
-        let mut players =
-            collect_player_overlays(&app.engine, &app.snapshot, Some(crew), &app.bindings);
+        let mut players = collect_player_overlays(
+            &app.engine,
+            &app.snapshot,
+            Some(crew),
+            &app.bindings,
+            &app.gamepad_bindings,
+        );
         app.display_flags.portraits = true;
         app.populate_crew_infos(&mut players);
         app.populate_crew_portraits(&mut players);

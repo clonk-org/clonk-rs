@@ -978,7 +978,12 @@ pub const COM_CURSOR_RIGHT: u8 = 13;
 pub const COM_CURSOR_TOGGLE: u8 = 14;
 pub const COM_CURSOR_FIRST: u8 = COM_CURSOR_LEFT;
 pub const COM_CURSOR_LAST: u8 = COM_CURSOR_TOGGLE;
+/// Mouse-region-only help control (C4Constants.h:237). C4MouseControl
+/// consumes this locally; it must not enter the synchronized player queue.
+pub const COM_HELP: u8 = 35;
 pub const COM_PLAYER_MENU: u8 = 36;
+/// Mouse-region-only external IRC chat control (C4Constants.h:239).
+pub const COM_CHAT: u8 = 37;
 pub const COM_MENU_ENTER: u8 = 38;
 pub const COM_MENU_ENTER_ALL: u8 = 39;
 pub const COM_MENU_CLOSE: u8 = 40;

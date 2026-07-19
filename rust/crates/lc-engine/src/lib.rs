@@ -77,11 +77,12 @@ pub use control::{
     CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
-    CLIENT_PLAYER_INFO_FLAG_UPDATED, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,
-    COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN,
-    COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
-    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
-    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
+    CLIENT_PLAYER_INFO_FLAG_UPDATED, COM_CHAT, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT,
+    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_HELP, COM_LEFT,
+    COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT,
+    COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU,
+    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
+    COM_WHEEL_DOWN, COM_WHEEL_UP,
     C4MN_ADJUST_POSITION, EMDT_BRUSH, EMDT_FILL, EMDT_LINE, EMDT_RECT, EMDT_SET_MODE,
     EMMO_DUPLICATE, EMMO_ENTER, EMMO_EXIT, EMMO_MOVE, EMMO_REMOVE, EMMO_SCRIPT,
     MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
@@ -23098,6 +23099,23 @@ impl Engine {
         matches!(
             self.scenario_values.get("Film", Some("Head"), 0),
             Some(scenario::ScenarioValue::Int(2))
+        )
+    }
+
+    /// C++ truthiness of `C4S.Head.Film`. Replays suppress ordinary viewport
+    /// overlays when this is set, including the local mouse-button stack.
+    pub fn film(&self) -> bool {
+        matches!(
+            self.scenario_values.get("Film", Some("Head"), 0),
+            Some(scenario::ScenarioValue::Int(value)) if *value != 0
+        )
+    }
+
+    /// C++ truthiness of the persistent `C4S.Head.Replay` scenario flag.
+    pub fn replay(&self) -> bool {
+        matches!(
+            self.scenario_values.get("Replay", Some("Head"), 0),
+            Some(scenario::ScenarioValue::Int(value)) if *value != 0
         )
     }
 

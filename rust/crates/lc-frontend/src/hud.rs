@@ -30,6 +30,8 @@ pub const UPPER_BOARD_HEIGHT: i32 = 50;
 /// `C4SymbolSize` / `C4SymbolBorder` (src/C4Constants.h:75-76).
 pub const SYMBOL_SIZE: i32 = 35;
 pub const SYMBOL_BORDER: i32 = 5;
+/// `C4Viewport::DrawMouseButtons` uses two-thirds-size command-key cells.
+pub const VIEWPORT_BUTTON_SIZE: i32 = 2 * SYMBOL_SIZE / 3;
 /// `DrawMessageOffset` (src/C4GameMessage.cpp:95).
 pub const DRAW_MESSAGE_OFFSET: i32 = -35;
 /// `fctKeyboard` cell inside Control.png (src/C4GraphicsResource.cpp:201).
@@ -1226,6 +1228,172 @@ fn draw_command_key_cell(
     }
 }
 
+/// The local controls registered by `C4Viewport::DrawMouseButtons`
+/// (src/C4Viewport.cpp:1511-1533). These controls are handled by the mouse
+/// layer and are never synchronized player commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewportButton {
+    Help,
+    PlayerMenu,
+    Chat,
+}
+
+impl ViewportButton {
+    pub const fn command(self) -> u8 {
+        match self {
+            Self::Help => lc_engine::COM_HELP,
+            Self::PlayerMenu => lc_engine::COM_PLAYER_MENU,
+            Self::Chat => lc_engine::COM_CHAT,
+        }
+    }
+}
+
+/// Exact 23px viewport-relative cell used by `DrawMouseButtons`. The menu
+/// hint deliberately remains in the second slot for keyboard viewports.
+pub fn viewport_button_rect(viewport: SurfaceRect, button: ViewportButton) -> SurfaceRect {
+    let row = match button {
+        ViewportButton::Help => 0,
+        ViewportButton::PlayerMenu => 1,
+        ViewportButton::Chat => 2,
+    };
+    SurfaceRect::new(
+        viewport.x + viewport.width as i32 - VIEWPORT_BUTTON_SIZE,
+        viewport.y + SYMBOL_SIZE + 2 * SYMBOL_BORDER + row * VIEWPORT_BUTTON_SIZE,
+        VIEWPORT_BUTTON_SIZE as u32,
+        VIEWPORT_BUTTON_SIZE as u32,
+    )
+}
+
+/// Hit-test for the clickable mouse-viewport stack. Keyboard/gamepad
+/// viewports draw the menu hint but C++ does not register a region for it.
+pub fn viewport_button_region(
+    viewport: SurfaceRect,
+    point: lc_gui::Point,
+    show_commands: bool,
+    mouse_viewport: bool,
+    chat_active: bool,
+) -> Option<ViewportButton> {
+    if !show_commands || !mouse_viewport {
+        return None;
+    }
+    let px = point.x.floor() as i32;
+    let py = point.y.floor() as i32;
+    [ViewportButton::Help, ViewportButton::PlayerMenu]
+        .into_iter()
+        .chain(chat_active.then_some(ViewportButton::Chat))
+        .find(|button| {
+            let rect = viewport_button_rect(viewport, *button);
+            px >= rect.x
+                && px < rect.x + rect.width as i32
+                && py >= rect.y
+                && py < rect.y + rect.height as i32
+        })
+}
+
+fn draw_viewport_button_cell(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    gui_icons2: Option<&ImageData>,
+    cell: SurfaceRect,
+    button: ViewportButton,
+    menu_key_label: &str,
+    show_command_keys: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    if let Some(control) = hud.control.as_ref() {
+        draw_scaled_region(
+            surface,
+            control,
+            SurfaceRect::new(0, 100, 64, 64),
+            cell,
+            gamma,
+        );
+        let symbol = match button {
+            // fctOKCancel phases (0,1) and (1,1).
+            ViewportButton::Help => Some(SurfaceRect::new(128, 132, 32, 32)),
+            ViewportButton::PlayerMenu => Some(SurfaceRect::new(160, 132, 32, 32)),
+            ViewportButton::Chat => None,
+        };
+        if let Some(symbol) = symbol {
+            draw_scaled_region(surface, control, symbol, cell, gamma);
+        }
+    }
+    if button == ViewportButton::Chat {
+        if let Some(gui_icons2) = gui_icons2 {
+            // Ico_Ex_Chat, extended icon phase 15 in the 4-column sheet.
+            draw_scaled_region(
+                surface,
+                gui_icons2,
+                SurfaceRect::new(192, 192, 64, 64),
+                cell,
+                gamma,
+            );
+        }
+    }
+    if button == ViewportButton::PlayerMenu
+        && show_command_keys
+        && !menu_key_label.is_empty()
+    {
+        font.draw_with_gamma(
+            surface,
+            cell.x + cell.width as i32 / 2,
+            cell.y + cell.height as i32 - font.line_height() - 2,
+            menu_key_label,
+            MESSAGE_COLOR,
+            TextAlign::Center,
+            gamma,
+        );
+    }
+}
+
+/// Draw the post-message viewport control layer from
+/// `C4Viewport::DrawOverlay` (src/C4Viewport.cpp:863-880,1511-1533).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_viewport_buttons_with_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    gui_icons2: Option<&ImageData>,
+    viewport: SurfaceRect,
+    show_commands: bool,
+    show_command_keys: bool,
+    mouse_viewport: bool,
+    chat_active: bool,
+    menu_key_label: &str,
+    gamma: Option<&GammaRamp>,
+) {
+    if !show_commands {
+        return;
+    }
+    let buttons: &[ViewportButton] = if mouse_viewport {
+        if chat_active {
+            &[
+                ViewportButton::Help,
+                ViewportButton::PlayerMenu,
+                ViewportButton::Chat,
+            ]
+        } else {
+            &[ViewportButton::Help, ViewportButton::PlayerMenu]
+        }
+    } else {
+        &[ViewportButton::PlayerMenu]
+    };
+    for &button in buttons {
+        draw_viewport_button_cell(
+            surface,
+            font,
+            hud,
+            gui_icons2,
+            viewport_button_rect(viewport, button),
+            button,
+            menu_key_label,
+            show_command_keys,
+            gamma,
+        );
+    }
+}
+
 /// The image cell of a command (src/C4Object.cpp:4050-4068 plus the
 /// caller-drawn composites).
 pub fn draw_command_image_cell(
@@ -2009,6 +2177,23 @@ mod tests {
         surface
     }
 
+    fn paint_rect(
+        pixels: &mut [u8],
+        width: u32,
+        x: u32,
+        y: u32,
+        rect_width: u32,
+        rect_height: u32,
+        color: [u8; 4],
+    ) {
+        for py in y..y + rect_height {
+            for px in x..x + rect_width {
+                let index = ((py * width + px) * 4) as usize;
+                pixels[index..index + 4].copy_from_slice(&color);
+            }
+        }
+    }
+
     fn bitmap_font() -> lc_graphics::BitmapFont {
         lc_graphics::BitmapFont::new()
     }
@@ -2165,6 +2350,161 @@ mod tests {
             }
         }
         ImageData::new(width, height, pixels)
+    }
+
+    fn viewport_button_control_sheet() -> ImageData {
+        let width = 256;
+        let height = 164;
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        paint_rect(
+            &mut pixels,
+            width,
+            0,
+            100,
+            64,
+            64,
+            [10, 10, 200, 255],
+        );
+        // Leave each symbol's left half transparent so the blue key cap
+        // proves the base facet was drawn before the symbol facet.
+        paint_rect(
+            &mut pixels,
+            width,
+            144,
+            132,
+            16,
+            32,
+            [200, 20, 20, 255],
+        );
+        paint_rect(
+            &mut pixels,
+            width,
+            176,
+            132,
+            16,
+            32,
+            [20, 200, 20, 255],
+        );
+        ImageData::new(width, height, pixels)
+    }
+
+    fn viewport_button_gui_icons2_sheet() -> ImageData {
+        let width = 256;
+        let height = 256;
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        paint_rect(
+            &mut pixels,
+            width,
+            224,
+            192,
+            32,
+            64,
+            [200, 200, 20, 255],
+        );
+        ImageData::new(width, height, pixels)
+    }
+
+    #[test]
+    fn viewport_button_regions_match_cpp_slots_and_mouse_gating() {
+        let viewport = SurfaceRect::new(10, 20, 200, 150);
+        assert_eq!(
+            viewport_button_rect(viewport, ViewportButton::Help),
+            SurfaceRect::new(187, 65, 23, 23)
+        );
+        assert_eq!(
+            viewport_button_rect(viewport, ViewportButton::PlayerMenu),
+            SurfaceRect::new(187, 88, 23, 23)
+        );
+        assert_eq!(
+            viewport_button_rect(viewport, ViewportButton::Chat),
+            SurfaceRect::new(187, 111, 23, 23)
+        );
+
+        let at = |x, y, mouse, chat| {
+            viewport_button_region(
+                viewport,
+                lc_gui::Point::new(x, y),
+                true,
+                mouse,
+                chat,
+            )
+        };
+        assert_eq!(at(187.0, 65.0, true, false), Some(ViewportButton::Help));
+        assert_eq!(
+            at(209.9, 110.9, true, false),
+            Some(ViewportButton::PlayerMenu),
+            "the final integer pixel remains inside the half-open cell"
+        );
+        assert_eq!(at(210.0, 88.0, true, false), None);
+        assert_eq!(at(187.0, 111.0, true, false), None);
+        assert_eq!(at(187.0, 111.0, true, true), Some(ViewportButton::Chat));
+        assert_eq!(at(187.0, 88.0, false, true), None);
+        assert_eq!(
+            viewport_button_region(
+                viewport,
+                lc_gui::Point::new(187.0, 65.0),
+                false,
+                true,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn viewport_button_stack_uses_cpp_facets_and_keyboard_menu_only() {
+        let viewport = SurfaceRect::new(10, 20, 200, 150);
+        let hud = HudGraphics {
+            control: Some(viewport_button_control_sheet()),
+            ..HudGraphics::default()
+        };
+        let gui_icons2 = viewport_button_gui_icons2_sheet();
+        let marker = MarkerFont;
+        let font = HudFont::Fallback(&marker);
+        let render = |show_commands, mouse_viewport, chat_active| {
+            let mut target = surface(220, 180);
+            draw_viewport_buttons_with_gamma(
+                &mut target,
+                &font,
+                &hud,
+                Some(&gui_icons2),
+                viewport,
+                show_commands,
+                true,
+                mouse_viewport,
+                chat_active,
+                "M",
+                None,
+            );
+            target
+        };
+
+        let mouse = render(true, true, true);
+        for y in [65, 88, 111] {
+            assert_eq!(
+                mouse.get_pixel(189, y + 11),
+                Some(Color::opaque(10, 10, 200)),
+                "transparent symbol half preserves the key cap in row {y}"
+            );
+        }
+        assert_eq!(mouse.get_pixel(207, 76), Some(Color::opaque(200, 20, 20)));
+        assert_eq!(mouse.get_pixel(207, 99), Some(Color::opaque(20, 200, 20)));
+        assert_eq!(mouse.get_pixel(207, 122), Some(Color::opaque(200, 200, 20)));
+
+        let keyboard = render(true, false, true);
+        assert_eq!(keyboard.get_pixel(207, 76), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(keyboard.get_pixel(207, 99), Some(Color::opaque(20, 200, 20)));
+        assert_eq!(keyboard.get_pixel(207, 122), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(
+            keyboard.get_pixel(198, 108),
+            Some(MESSAGE_COLOR),
+            "the keyboard PlayerMenu variant includes its configured key hint"
+        );
+
+        let hidden = render(false, true, true);
+        assert_eq!(hidden.get_pixel(207, 76), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(hidden.get_pixel(207, 99), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(hidden.get_pixel(207, 122), Some(Color::opaque(0, 0, 0)));
     }
 
     /// Transparent command symbols over blue unpressed and red pressed key
