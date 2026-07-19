@@ -137,10 +137,13 @@ pub enum ScenarioError {
 ///
 /// This preflight deliberately excludes definitions, materials and landscape
 /// creation so callers can admit configured players before constructing a
-/// `MapPlayerExtend` landscape.
+/// `MapPlayerExtend` landscape. `random_seed` is `Some` only when an existing
+/// Parameters.txt supplied the compiled seed; a missing component leaves the
+/// application to install C++'s time/LC_PIN_SEED default before map creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OfflineScenarioStartupPreflight {
     pub max_players: i32,
+    pub random_seed: Option<i32>,
 }
 
 /// Parameters that must be frozen before a replay's dynamic landscape is
@@ -1771,13 +1774,21 @@ impl Scenario {
             return Err(ScenarioError::OfflineStartupRestoreInfosUnsupported);
         }
 
-        let max_players = match read_optional_legacy_entry(group, "Parameters.txt")? {
-            Some(parameters) => {
-                parse_legacy_parameters_max_players(&parameters, manifest.core.head.max_player)?
-            }
-            None => manifest.core.head.max_player,
+        let (max_players, random_seed) = match read_optional_legacy_entry(group, "Parameters.txt")?
+        {
+            Some(parameters) => (
+                parse_legacy_parameters_max_players(&parameters, manifest.core.head.max_player)?,
+                Some(parse_legacy_parameters_random_seed(
+                    &parameters,
+                    manifest.core.head.random_seed,
+                )?),
+            ),
+            None => (manifest.core.head.max_player, None),
         };
-        Ok(OfflineScenarioStartupPreflight { max_players })
+        Ok(OfflineScenarioStartupPreflight {
+            max_players,
+            random_seed,
+        })
     }
 
     /// Reads replay-owned map inputs before definitions or landscape state
@@ -7042,6 +7053,21 @@ fn parse_legacy_parameters_max_players(
     bytes: &[u8],
     scenario_default: i32,
 ) -> Result<i32, ScenarioError> {
+    parse_legacy_parameters_i32(bytes, "MaxPlayers", scenario_default)
+}
+
+fn parse_legacy_parameters_random_seed(
+    bytes: &[u8],
+    scenario_default: i32,
+) -> Result<i32, ScenarioError> {
+    parse_legacy_parameters_i32(bytes, "RandomSeed", scenario_default)
+}
+
+fn parse_legacy_parameters_i32(
+    bytes: &[u8],
+    field: &str,
+    scenario_default: i32,
+) -> Result<i32, ScenarioError> {
     let text = String::from_utf8_lossy(bytes);
     let mut in_parameters = false;
     let mut saw_parameters = false;
@@ -7083,12 +7109,12 @@ fn parse_legacy_parameters_max_players(
         let Some(key) = stdcompiler_ini_name(raw_key.trim()) else {
             continue;
         };
-        if key != "MaxPlayers" {
+        if key != field {
             continue;
         }
         return parse_i32(raw_value.trim()).map_err(|error| {
             ScenarioError::LegacyParse(format!(
-                "invalid Parameters.txt MaxPlayers value `{}`: {error}",
+                "invalid Parameters.txt {field} value `{}`: {error}",
                 raw_value.trim()
             ))
         });
@@ -9118,9 +9144,9 @@ fn legacy_map_seed(random_seed: u64) -> i32 {
 /// `Game.FixRandom(Game.Parameters.RandomSeed)` before map creation
 /// (C4Landscape.cpp:578): the map creators draw from a freshly fixed
 /// ledger, and the bracket re-fixes afterwards (C4Landscape.cpp:734), so
-/// map creation never shifts the post-init synced ledger. Standalone runs
-/// use the engine's default seed 0; the shadow bridge can hand the C++
-/// RandomSeed across via env.
+/// map creation never shifts the post-init synced ledger. The caller supplies
+/// the established `Parameters.RandomSeed`; the env shadow remains a test
+/// bridge for comparison with the C++ engine.
 fn legacy_map_creation_rng(random_seed: u64) -> crate::rng::LcgRng {
     crate::rng::LcgRng::seed_from_u64(legacy_random_seed(random_seed))
 }
@@ -14979,16 +15005,38 @@ global func Step(state, frame, random)
         .expect("write scenario core");
         std::fs::write(
             dir.path().join("Parameters.txt"),
-            "[Parameters]\nMaxPlayers=2\n",
+            "[Parameters]\nRandomSeed=73\nMaxPlayers=2\n",
         )
         .expect("write parameters");
         let group = Group::open(dir.path()).expect("open scenario group");
 
-        let expected = OfflineScenarioStartupPreflight { max_players: 2 };
+        let expected = OfflineScenarioStartupPreflight {
+            max_players: 2,
+            random_seed: Some(73),
+        };
         assert_eq!(
             Scenario::preflight_offline_startup_from_group(&group)
                 .expect("group preflight succeeds"),
             expected,
+        );
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(dir.path())
+                .expect("path preflight succeeds"),
+            expected,
+        );
+
+        std::fs::remove_file(dir.path().join("Parameters.txt"))
+            .expect("remove parameter component");
+        let group = Group::open(dir.path()).expect("reopen scenario without parameters");
+        let expected = OfflineScenarioStartupPreflight {
+            max_players: 4,
+            random_seed: None,
+        };
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_group(&group)
+                .expect("missing-parameters preflight succeeds"),
+            expected,
+            "only a missing Parameters.txt requests the time/LC_PIN_SEED default",
         );
         assert_eq!(
             Scenario::preflight_offline_startup_from_path(dir.path())

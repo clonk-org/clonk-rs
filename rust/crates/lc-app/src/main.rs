@@ -523,6 +523,9 @@ struct ScenarioLoadingState {
     finished: bool,
     prepared_go: Option<PreparedGoLoadingState>,
     offline_startup_players: Option<OfflineStartupPlayers>,
+    /// Fresh local-round Parameters.RandomSeed, frozen before the async
+    /// loader creates the dynamic landscape and reused for Engine creation.
+    offline_random_seed: Option<u64>,
 }
 
 impl ScenarioLoadingState {
@@ -543,6 +546,7 @@ impl ScenarioLoadingState {
             finished: false,
             prepared_go: None,
             offline_startup_players: None,
+            offline_random_seed: None,
         }
     }
 
@@ -589,6 +593,7 @@ impl ScenarioLoadingState {
                 team_registry,
             }),
             offline_startup_players: None,
+            offline_random_seed: None,
         }
     }
 }
@@ -16893,6 +16898,69 @@ fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn normalize_cpp_random_seed(seed: i32) -> u64 {
+    u64::from(seed as u32)
+}
+
+/// C's `atoi` accepts leading ASCII whitespace and a signed decimal prefix,
+/// returns zero when there are no digits, and ignores the remaining suffix.
+fn legacy_atoi_i32(raw: &str) -> i32 {
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    let negative = match bytes.get(index) {
+        Some(b'-') => {
+            index += 1;
+            true
+        }
+        Some(b'+') => {
+            index += 1;
+            false
+        }
+        _ => false,
+    };
+    let digits_start = index;
+    let mut value = 0_i64;
+    while let Some(digit) = bytes.get(index).and_then(|byte| byte.is_ascii_digit().then_some(*byte))
+    {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i64::from(digit - b'0'));
+        index += 1;
+    }
+    if index == digits_start {
+        return 0;
+    }
+    if negative {
+        value = value.saturating_neg();
+    }
+    value as i32
+}
+
+fn resolve_offline_round_random_seed(
+    parameter_seed: Option<i32>,
+    unix_seconds: u64,
+    pin: Option<&str>,
+) -> u64 {
+    parameter_seed.map_or_else(
+        || match pin {
+            Some(pin) if !pin.is_empty() => normalize_cpp_random_seed(legacy_atoi_i32(pin)),
+            _ => u64::from(unix_seconds as u32),
+        },
+        normalize_cpp_random_seed,
+    )
+}
+
+fn current_offline_round_random_seed(parameter_seed: Option<i32>) -> u64 {
+    let pin = std::env::var_os("LC_PIN_SEED");
+    let pin = pin
+        .as_deref()
+        .map(|value| value.to_string_lossy());
+    resolve_offline_round_random_seed(parameter_seed, current_unix_timestamp(), pin.as_deref())
 }
 
 fn format_saved_timestamp(seconds: u64) -> String {
@@ -57024,9 +57092,12 @@ impl GameApp {
                 let selection = snapshot_configured_client_player_selection(paths)
                     .map_err(|error| error.to_string())?;
                 match preflight_offline_startup(&path) {
-                    Ok(preflight) => Ok(Some(OfflineStartupPlayers::new(
-                        load_snapshotted_client_players(paths, &selection),
-                        preflight.max_players,
+                    Ok(preflight) => Ok(Some((
+                        OfflineStartupPlayers::new(
+                            load_snapshotted_client_players(paths, &selection),
+                            preflight.max_players,
+                        ),
+                        preflight.random_seed,
                     ))),
                     // Scenario.json is a Rust-only fixture format. Keep its
                     // existing synthetic single-player path isolated from the
@@ -57045,11 +57116,27 @@ impl GameApp {
             .as_ref()
             .ok()
             .and_then(Option::as_ref)
-            .map(OfflineStartupPlayers::startup_player_count);
+            .map(|(startup, _)| startup.startup_player_count());
+        let offline_parameter_seed = offline_startup
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .and_then(|(_, seed)| *seed);
         let offline_startup_error = offline_startup.as_ref().err().cloned();
         let replay_startup_error = replay_startup.as_ref().err().cloned();
-        let offline_startup_players = offline_startup.ok().flatten();
+        let offline_startup_players = offline_startup
+            .ok()
+            .flatten()
+            .map(|(startup, _)| startup);
         let replay_startup = replay_startup.ok().flatten();
+        // C4GameParameters::Load freezes this before InitGameSecondPart calls
+        // FixRandom and Landscape.Init. Parameters.txt wins when present;
+        // only a fresh missing-Parameters round consults time/LC_PIN_SEED.
+        let offline_random_seed = (self.network.is_none()
+            && replay_startup_error.is_none()
+            && offline_startup_error.is_none()
+            && replay_startup.is_none())
+        .then(|| current_offline_round_random_seed(offline_parameter_seed));
 
         thread::spawn(move || {
             let resolver = InstallDefinitionResolver::new(resolver_paths);
@@ -57068,11 +57155,12 @@ impl GameApp {
                         .map_err(|error| error.to_string())
                     }
                     (None, Some(startup_player_count)) => {
-                        load_scenario_with_definition_load_and_startup_player_count(
+                        load_scenario_with_definition_load_and_seed_and_startup_player_count(
                             &path_for_thread,
                             &resolver,
                             &languages,
                             &definition_load,
+                            offline_random_seed.unwrap_or(0),
                             startup_player_count,
                         )
                         .map_err(|error| error.to_string())
@@ -57110,6 +57198,7 @@ impl GameApp {
         loading_state.refreshed_tooltip_font = loader_setup.refreshed_tooltip_font;
         loading_state.refreshed_native_font_source = loader_setup.refreshed_native_font_source;
         loading_state.offline_startup_players = offline_startup_players;
+        loading_state.offline_random_seed = offline_random_seed;
         self.loading_state = Some(loading_state);
         self.mode = AppMode::Loading;
         Ok(())
@@ -57158,6 +57247,10 @@ impl GameApp {
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|prepared| prepared.random_seed);
+        let offline_random_seed = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.offline_random_seed);
         let prepared_team_configuration = self
             .loading_state
             .as_ref()
@@ -57202,6 +57295,9 @@ impl GameApp {
             prepared_random_seed = replay_parameters
                 .as_ref()
                 .map(|parameters| u64::from(parameters.random_seed() as u32));
+        }
+        if prepared_random_seed.is_none() {
+            prepared_random_seed = offline_random_seed;
         }
         let replay_parameter_clients = replay_parameters
             .as_ref()
@@ -64619,6 +64715,47 @@ mod tests {
     }
 
     #[test]
+    fn l001_offline_seed_resolution_matches_cpp_time_pin_and_parameters() {
+        let first_second = 1_700_000_000_u64;
+        let next_second = first_second + 1;
+
+        assert_ne!(
+            resolve_offline_round_random_seed(None, first_second, None),
+            resolve_offline_round_random_seed(None, next_second, None),
+            "different C++ time(nullptr) seconds produce different fresh rounds",
+        );
+        assert_eq!(
+            resolve_offline_round_random_seed(None, first_second, Some("")),
+            first_second,
+            "an empty LC_PIN_SEED is ignored",
+        );
+        assert_eq!(
+            resolve_offline_round_random_seed(None, first_second, Some("0")),
+            0,
+        );
+        assert_eq!(
+            resolve_offline_round_random_seed(None, first_second, Some(" \t-7tail")),
+            u64::from((-7_i32) as u32),
+            "atoi accepts whitespace, sign, and a decimal prefix",
+        );
+        assert_eq!(
+            resolve_offline_round_random_seed(None, first_second, Some("not-a-number")),
+            0,
+            "a nonempty malformed atoi input pins zero instead of falling back to time",
+        );
+        assert_eq!(
+            resolve_offline_round_random_seed(None, first_second, Some("73")),
+            resolve_offline_round_random_seed(None, next_second, Some("73")),
+            "a pin reproduces the same round across different start times",
+        );
+        assert_eq!(
+            resolve_offline_round_random_seed(Some(44), first_second, Some("73")),
+            44,
+            "compiled Parameters.txt wins and bypasses LC_PIN_SEED",
+        );
+    }
+
+    #[test]
     fn optional_initial_network_game_source_distinguishes_missing_and_unreadable_entries() {
         let directory = tempdir().expect("scenario directory");
         let group = Group::open(directory.path()).expect("open scenario group");
@@ -71323,6 +71460,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn l001_pinned_offline_seed_reaches_dynamic_map_and_engine() {
+        let _pin_guard = EnvGuard::set(&[
+            ("LC_PIN_SEED", Some(Path::new("7"))),
+            ("LC_RUST_ENGINE_RANDOM_SEED", None),
+            ("LC_RUST_ENGINE_MAP_SEED", None),
+        ]);
+        let user_data = tempdir().expect("isolated offline seed user data");
+        let (_paths_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Seed parity".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize pinned offline app");
+        wait_for_menu(&mut app);
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "Tutorial.c4f/Tutorial07.c4s",
+        )
+        .expect("Tutorial07 is present in the real scenario catalog");
+
+        app.start_scenario(scenario)
+            .expect("start pinned offline Tutorial07");
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .and_then(|loading| loading.offline_random_seed),
+            Some(7),
+            "the main thread freezes LC_PIN_SEED before spawning the loader",
+        );
+        // This loads the shipped definition tree and dynamic landscape. Give
+        // the loader thread room to run alongside the parallel full suite.
+        wait_for_running_with_attempts(&mut app, 2_400);
+
+        assert_eq!(app.engine.random_seed(), 7);
+        assert_eq!(
+            app.engine
+                .landscape()
+                .expect("Tutorial07 dynamic landscape")
+                .map_seed(),
+            42_711,
+            "the dynamic map consumes seed 7 before activation (seed 0 would yield 59,893)",
+        );
+    }
+
     fn real_tutorial_app(tutorial: u8, player_name: &str) -> RealTutorialApp {
         real_installed_scenario_app(
             &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
@@ -72642,8 +72840,8 @@ func Award()
         }
     }
 
-    fn wait_for_running(app: &mut GameApp) {
-        for _ in 0..480 {
+    fn wait_for_running_with_attempts(app: &mut GameApp, attempts: usize) {
+        for _ in 0..attempts {
             if matches!(app.mode, AppMode::Running) {
                 return;
             }
@@ -72655,6 +72853,10 @@ func Award()
             "scenario did not enter running mode in time (mode={:?}, status={})",
             app.mode, app.status_text
         );
+    }
+
+    fn wait_for_running(app: &mut GameApp) {
+        wait_for_running_with_attempts(app, 480);
     }
 
     #[test]
@@ -99854,6 +100056,11 @@ ScenInfoArea=70,5,25,90
         app.poll_loading()
             .expect("initialize the retained prepared scenario");
         assert_eq!(
+            app.engine.random_seed(),
+            prepared_random_seed,
+            "the network host seed remains authoritative over offline defaults",
+        );
+        assert_eq!(
             (
                 app.engine.use_fair_crew(),
                 app.engine.fair_crew_strength(),
@@ -114612,6 +114819,11 @@ ScenInfoArea=70,5,25,90
         assert!(app.material_texture_images.contains_key("hosttexture"));
         assert!(!app.material_render_info.contains_key("fallbackonly"));
         assert!(!app.material_texture_images.contains_key("fallbacktexture"));
+        assert_eq!(
+            app.engine.random_seed(),
+            u64::from(network_random_seed as u32),
+            "JoinData remains authoritative over offline seed selection",
+        );
         // C4Game::InitGameSecondPart fixes the synchronized RNG from
         // Parameters.RandomSeed before the landscape/weather initialization
         // draws (pristine 9ffa0a5d src/C4Game.cpp:2617-2632;
@@ -118314,6 +118526,7 @@ protected func InputCallback(string answer, int player)
                 ],
             }),
             offline_startup_players: None,
+            offline_random_seed: None,
         });
         event_tx
             .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
@@ -137098,6 +137311,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 team_registry: Vec::new(),
             }),
             offline_startup_players: None,
+            offline_random_seed: None,
         });
 
         app.prepare_network_savegame_recreation();
