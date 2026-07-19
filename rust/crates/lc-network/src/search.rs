@@ -933,7 +933,9 @@ async fn run_game_search(
             }
         }
         while let Ok(query) = query_rx.try_recv() {
-            if (query.direct_request_id.is_none() && query.generation != generation)
+            // C4StartupNetDlg::DoRefresh deletes direct-query rows together
+            // with discovered rows, so every query belongs to its generation.
+            if query.generation != generation
                 || (query.source == ReferenceQuerySource::Masterserver
                     && (query.masterserver_generation != masterserver_generation
                         || !search.config.internet_enabled))
@@ -2207,7 +2209,7 @@ Build=362\n"
     }
 
     #[test]
-    fn startup_direct_query_survives_refresh_generation_change() {
+    fn startup_refresh_discards_inflight_direct_query_with_deleted_row() {
         use std::io::{Read as _, Write as _};
 
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -2264,35 +2266,22 @@ Build=362\n";
             }
         }
         release_response_tx.send(()).unwrap();
+        server.join().unwrap();
 
-        let mut tagged_completion = false;
-        for _ in 0..10 {
-            match search.events().recv_timeout(Duration::from_secs(1)) {
-                Ok(StartupGameSearchEvent::DirectQueryResolved {
-                    request_id,
-                    references,
-                    selected_index,
-                }) => {
-                    assert_eq!(request_id, 59);
-                    assert_eq!(selected_index, Some(0));
-                    assert_eq!(references[0].title, "Delayed direct");
-                    tagged_completion = true;
-                    break;
-                }
-                Ok(StartupGameSearchEvent::DirectQueryFailed { request_id, .. }) => {
-                    assert_eq!(request_id, 59);
-                    tagged_completion = true;
-                    break;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            match search
+                .events()
+                .recv_timeout(Duration::from_millis(100))
+            {
+                Ok(StartupGameSearchEvent::DirectQueryResolved { request_id, .. })
+                | Ok(StartupGameSearchEvent::DirectQueryFailed { request_id, .. }) => {
+                    panic!("refresh deleted direct-query row {request_id}, but it completed")
                 }
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-        assert!(
-            tagged_completion,
-            "refresh must not strand an in-flight tagged direct query"
-        );
-        server.join().unwrap();
     }
 
     #[test]
