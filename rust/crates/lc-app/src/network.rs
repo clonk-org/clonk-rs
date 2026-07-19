@@ -1054,7 +1054,10 @@ impl TestMasterserverSignupCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TestLobbyStartCommand {
     Countdown(lc_network::LobbyCountdownPacket),
-    Status(NetworkStatus),
+    BeginGo {
+        status: NetworkStatus,
+        join_allowed: bool,
+    },
 }
 
 #[cfg(test)]
@@ -1101,13 +1104,40 @@ impl TestNetworkCommands {
                 NetworkCommand::SubmitLobbyCountdown(packet) => {
                     observed.push(TestLobbyStartCommand::Countdown(packet));
                 }
-                NetworkCommand::ChangeStatus(status) => {
-                    observed.push(TestLobbyStartCommand::Status(status));
-                }
                 command => panic!("unexpected lobby-start command: {command:?}"),
             }
         }
         observed
+    }
+
+    pub(crate) fn complete_lobby_start(
+        &mut self,
+        result: std::result::Result<(), String>,
+    ) -> Vec<TestLobbyStartCommand> {
+        let mut observed = Vec::new();
+        loop {
+            match self.command_rx.blocking_recv() {
+                Some(NetworkCommand::SubmitLobbyCountdown(packet)) => {
+                    observed.push(TestLobbyStartCommand::Countdown(packet));
+                }
+                Some(NetworkCommand::BeginGo {
+                    status,
+                    join_allowed,
+                    completion,
+                }) => {
+                    observed.push(TestLobbyStartCommand::BeginGo {
+                        status,
+                        join_allowed,
+                    });
+                    completion
+                        .send(result)
+                        .expect("return atomic Go transition result");
+                    return observed;
+                }
+                Some(command) => panic!("unexpected lobby-start command: {command:?}"),
+                None => panic!("network command channel ended before atomic Go command"),
+            }
+        }
     }
 
     pub(crate) fn take_lobby_player_update_commands(
@@ -2175,6 +2205,11 @@ enum NetworkCommand {
     },
     ResetClientPerformance,
     ChangeStatus(NetworkStatus),
+    BeginGo {
+        status: NetworkStatus,
+        join_allowed: bool,
+        completion: Sender<std::result::Result<(), String>>,
+    },
     StatusReachedCurrent,
     StatusReached {
         status: NetworkStatus,
@@ -3171,6 +3206,29 @@ impl NetworkManager {
         applied
             .recv()
             .map_err(|_| anyhow!("network worker ended before confirming join admission"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    /// Leaves lobby mode by applying the authoritative Go barrier and the
+    /// runtime join policy in one acknowledged host-loop operation.
+    pub fn begin_go(&self, status: NetworkStatus, join_allowed: bool) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!("only the network host may begin the game"));
+        }
+        if status.state != lc_network::NETWORK_STATE_GO {
+            return Err(anyhow!("beginning the game requires a Go network status"));
+        }
+        let (completion, applied) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::BeginGo {
+                status,
+                join_allowed,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting the Go transition"))?;
+        applied
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before confirming the Go transition"))?
             .map_err(|message| anyhow!(message))
     }
 
@@ -5085,6 +5143,34 @@ async fn run_host_worker(
                             .await
                             .map_err(|err| anyhow!("host status change failed: {err}"))?;
                     }
+                    NetworkCommand::BeginGo {
+                        status,
+                        join_allowed,
+                        completion,
+                    } => {
+                        let result = match await_host_operation_while_forwarding_events(
+                            host.begin_go(status, join_allowed),
+                            &mut host_events,
+                            local_owner,
+                            &event_tx,
+                            &telemetry_tx,
+                            &mut player_info_echo_provenance,
+                            &netpuncher_state,
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => Ok(()),
+                            Ok(Err(error)) => {
+                                Err(format!("host Go transition failed: {error}"))
+                            }
+                            Err(error) => Err(format!("host Go transition failed: {error}")),
+                        };
+                        let failure = result.as_ref().err().cloned();
+                        let _ = completion.send(result);
+                        if let Some(message) = failure {
+                            return Err(anyhow!(message));
+                        }
+                    }
                     NetworkCommand::StatusReachedCurrent => {
                         host.status_reached_current()
                             .await
@@ -5517,6 +5603,7 @@ async fn run_client_worker(
                             let _ = completion.send(Err(unavailable));
                         }
                         NetworkCommand::RemoveResource { completion, .. }
+                        | NetworkCommand::BeginGo { completion, .. }
                         | NetworkCommand::SetJoinAllowed { completion, .. }
                         | NetworkCommand::SetHostPassword { completion, .. }
                         | NetworkCommand::GracefulPart { completion } => {
@@ -5943,6 +6030,12 @@ async fn run_client_worker(
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to change authoritative game status".to_string(),
                         ));
+                    }
+                    NetworkCommand::BeginGo { completion, .. } => {
+                        let message =
+                            "client attempted to begin the authoritative game".to_string();
+                        let _ = completion.send(Err(message.clone()));
+                        let _ = event_tx.send(NetworkEvent::Error(message));
                     }
                     NetworkCommand::StatusReachedCurrent | NetworkCommand::StatusReached { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
@@ -8741,6 +8834,46 @@ mod tests {
         );
         completion.send(Ok(())).expect("acknowledge closed gate");
         worker.join().expect("gate caller exits after both acks");
+    }
+
+    #[test]
+    fn host_manager_waits_for_atomic_go_and_surfaces_worker_failure() {
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        let caller = thread::spawn(move || {
+            let applied = manager.begin_go(status, false);
+            let rejected = manager.begin_go(status, true);
+            (applied, rejected)
+        });
+
+        assert_eq!(
+            commands.complete_lobby_start(Ok(())),
+            vec![TestLobbyStartCommand::BeginGo {
+                status,
+                join_allowed: false,
+            }]
+        );
+        assert!(
+            !caller.is_finished(),
+            "the second transition still awaits its worker result"
+        );
+        assert_eq!(
+            commands.complete_lobby_start(Err("host loop rejected Go".to_string())),
+            vec![TestLobbyStartCommand::BeginGo {
+                status,
+                join_allowed: true,
+            }]
+        );
+        let (applied, rejected) = caller.join().expect("Go caller");
+        applied.expect("first atomic transition applies");
+        assert_eq!(
+            rejected.expect_err("worker rejection reaches caller").to_string(),
+            "host loop rejected Go"
+        );
     }
 
     #[test]

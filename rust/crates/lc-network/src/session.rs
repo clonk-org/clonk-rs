@@ -701,6 +701,11 @@ pub enum HostEvent {
 #[derive(Debug)]
 pub enum HostCommand {
     ChangeStatus(NetworkStatus),
+    BeginGo {
+        status: NetworkStatus,
+        join_allowed: bool,
+        completion: oneshot::Sender<()>,
+    },
     BroadcastStatusAck(NetworkStatus),
     ControlTickReached {
         tick: Tick,
@@ -847,6 +852,26 @@ impl HostHandle {
             .send(HostCommand::ChangeStatus(status))
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    /// Applies the lobby's Go barrier and runtime admission policy as one
+    /// host-loop operation. No pending admission request can be processed
+    /// between the two state changes.
+    pub async fn begin_go(
+        &self,
+        status: NetworkStatus,
+        join_allowed: bool,
+    ) -> Result<(), HostError> {
+        let (completion, applied) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::BeginGo {
+                status,
+                join_allowed,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        applied.await.map_err(|_| HostError::HostLoopGone)
     }
 
     pub async fn broadcast_status_ack(&self, status: NetworkStatus) -> Result<(), HostError> {
@@ -5343,6 +5368,16 @@ async fn run_host(
                     HostCommand::ChangeStatus(status) => {
                         let effects = state.status_barrier.change_status(status);
                         apply_barrier_effects(effects, &mut state).await;
+                    }
+                    HostCommand::BeginGo {
+                        status,
+                        join_allowed,
+                        completion,
+                    } => {
+                        let effects = state.status_barrier.change_status(status);
+                        apply_barrier_effects(effects, &mut state).await;
+                        state.admission.set_allow_join(join_allowed);
+                        let _ = completion.send(());
                     }
                     HostCommand::BroadcastStatusAck(status) => {
                         broadcast_status(status, true, &mut state).await;
@@ -12773,6 +12808,77 @@ mod tests {
             .expect("gate acknowledgement");
     }
 
+    #[tokio::test]
+    async fn host_begin_go_carries_status_and_admission_in_one_acknowledged_command() {
+        let (command_tx, mut commands) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let handle = HostHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: tokio::spawn(async {}),
+            udp_local_addr: None,
+        };
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        let starter = tokio::spawn(async move { handle.begin_go(status, false).await });
+
+        let HostCommand::BeginGo {
+            status: requested_status,
+            join_allowed,
+            completion,
+        } = commands.recv().await.expect("atomic Go command")
+        else {
+            panic!("expected atomic Go command");
+        };
+        assert_eq!(requested_status, status);
+        assert!(!join_allowed);
+        assert!(
+            !starter.is_finished(),
+            "caller must wait until both host states have been applied"
+        );
+        completion.send(()).expect("acknowledge atomic transition");
+        starter
+            .await
+            .expect("starter task")
+            .expect("atomic transition acknowledgement");
+    }
+
+    #[tokio::test]
+    async fn host_begin_go_reports_a_dropped_apply_acknowledgement() {
+        let (command_tx, mut commands) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let handle = HostHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: tokio::spawn(async {}),
+            udp_local_addr: None,
+        };
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        let starter = tokio::spawn(async move { handle.begin_go(status, true).await });
+
+        let HostCommand::BeginGo { completion, .. } =
+            commands.recv().await.expect("atomic Go command")
+        else {
+            panic!("expected atomic Go command");
+        };
+        drop(completion);
+        assert!(matches!(
+            starter.await.expect("starter task"),
+            Err(HostError::HostLoopGone)
+        ));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn host_runtime_wait_uses_local_arrival_after_consumed_tick() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -17940,6 +18046,28 @@ mod tests {
         let error = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
             .expect_err("closed admission is not a password retry");
+        assert!(matches!(error, ClientError::Handshake(_)));
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_begin_go_acknowledgement_closes_admission_before_return() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+
+        host.begin_go(status, false).await.unwrap();
+        let error = connect_client(
+            address,
+            ClientConfig::new("Late join", ParticipantKind::Player),
+        )
+        .await
+        .expect_err("the acknowledged Go transition already closed admission");
         assert!(matches!(error, ClientError::Handshake(_)));
         host.shutdown().await.unwrap();
     }

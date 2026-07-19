@@ -109,8 +109,9 @@ use lc_frontend::game_lobby::{
     LobbyChatContextCommand, LobbyChatEditKey, LobbyChatEditView, LobbyChatKeyModifiers,
     LobbyChatRequest, LobbyClientRow, LobbyClientStatus, LobbyControl, LobbyGameOptionInput,
     LobbyHeaderRow, LobbyJoinedPlayerOverlay, LobbyLabels, LobbyLayout, LobbyLogLine,
-    LobbyPlayerRow, LobbyResourceRow, LobbyResources, LobbyRole, LobbyRosterHeader, LobbyRosterIcon,
-    LobbyRosterId, LobbyRosterLayout, LobbyRosterRow, LobbySheet, LobbySound, LobbyTeamValue,
+    LobbyOptionKind, LobbyOptionLabels, LobbyOptionRow, LobbyPlayerRow, LobbyResourceRow,
+    LobbyResources, LobbyRole, LobbyRosterHeader, LobbyRosterIcon, LobbyRosterId, LobbyRosterLayout,
+    LobbyRosterRow, LobbySheet, LobbySound, LobbyTeamValue, core_lobby_option_rows,
 };
 use lc_frontend::game_option_buttons::{
     FairCrewConstraint, GameOptionAction, GameOptionButton, GameOptionButtons, GameOptionContext,
@@ -8868,6 +8869,10 @@ struct ClassicHostLobbyState {
     controller: ClassicGameLobby,
     pointer: Option<GuiPoint>,
     chat_history_index: i32,
+    /// Retained Config.Network.NoRuntimeJoin inverse. Prepared hosts mirror
+    /// this into admission so lobby exit can apply the selection atomically
+    /// with its Go status request.
+    runtime_join_allowed: bool,
     /// C4Network2ResDlg keeps receiving network updates while inactive, but
     /// does not reconcile its visible rows until the sheet is activated.
     resource_rows: BTreeMap<i32, LobbyResourceRow>,
@@ -8955,6 +8960,8 @@ enum AppContextMenuCommand {
     OptionsFontSize(i32),
     OptionsDisplayMode(lc_frontend::startup_options_graphics::GraphicsDisplayMode),
     LobbyTeam { player_id: i32, team_id: i32 },
+    LobbyControlRate(i32),
+    LobbyRuntimeJoin(bool),
     LobbyPlayerRemove { client_id: i32, player_id: i32 },
     LobbyPlayerNewColor { client_id: i32, player_id: i32 },
     LobbyKick(i32),
@@ -10608,6 +10615,9 @@ struct GameApp {
     /// Player row whose C4GUI::ComboBox owns the shared context menu. This
     /// keeps the simple combo's arrow/highlight in its open phase.
     context_menu_lobby_team_player: Option<i32>,
+    /// Core option row whose C4GUI::ComboBox owns the shared context menu.
+    /// The frontend retains this identity to render its open arrow phase.
+    context_menu_lobby_option: Option<LobbyOptionKind>,
     /// Remote client row whose Kick popup owns the shared context menu. A
     /// synchronized removal closes this menu before input can target a row
     /// that no longer exists.
@@ -10619,6 +10629,7 @@ struct GameApp {
     /// outside-clicked menu. Retain that owner for the remainder of the same
     /// pointer-down so clicking the open combo closes instead of reopening it.
     context_menu_pointer_dismissed_lobby_team_player: Option<i32>,
+    context_menu_pointer_dismissed_lobby_option: Option<LobbyOptionKind>,
     /// A context action may close on pointer-down. Retain that button until
     /// release so the underlying screen cannot receive a synthetic click.
     context_menu_pointer_capture: Option<ContextMenuPointerButton>,
@@ -20361,9 +20372,11 @@ impl GameApp {
             game_option_input_dialog: None,
             context_menu: None,
             context_menu_lobby_team_player: None,
+            context_menu_lobby_option: None,
             context_menu_lobby_kick_client: None,
             context_menu_lobby_player: None,
             context_menu_pointer_dismissed_lobby_team_player: None,
+            context_menu_pointer_dismissed_lobby_option: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
             definition_selector_consumed_keys: HashSet::new(),
@@ -25259,6 +25272,7 @@ impl GameApp {
             self.menu_frame_cache = None;
         }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
+        self.context_menu_pointer_dismissed_lobby_option = None;
         if state == ElementState::Released && self.chat_paste_consumed_keys.remove(&key) {
             return Ok(());
         }
@@ -29379,23 +29393,6 @@ impl GameApp {
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_target_tick(None);
         }
-        if status.state == lc_network::NETWORK_STATE_GO {
-            let runtime_join_allowed = self.network_mode.as_ref().and_then(|mode| match mode {
-                NetworkMode::Host(HostSettings {
-                    prepared: Some(prepared),
-                    ..
-                }) => Some(prepared.admission().runtime_join_allowed()),
-                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
-            });
-            if let Some(Err(error)) = runtime_join_allowed.and_then(|allowed| {
-                self.network
-                    .as_ref()
-                    .map(|network| network.set_join_allowed(allowed))
-            }) {
-                self.status_text = format!("Unable to apply runtime join policy: {error}");
-                return Ok(());
-            }
-        }
         // Clear the completed barrier before synchronized controls execute.
         // A VoteEnd control may synchronously open the follow-up Go barrier;
         // that newer transition must own the final running/reference state.
@@ -32066,6 +32063,7 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.note_classic_host_lobby_non_pointer_input();
         self.context_menu_pointer_dismissed_lobby_team_player = None;
+        self.context_menu_pointer_dismissed_lobby_option = None;
         match event {
             GamepadEvent::Direction {
                 slot,
@@ -36949,6 +36947,7 @@ impl GameApp {
         self.guard_classic_global_gui_bootstrap()?;
         self.primary_pointer_left_down = button_state == ElementState::Pressed;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
+        self.context_menu_pointer_dismissed_lobby_option = None;
         self.mark_menu_dirty();
         self.startup_tooltip.note_pointer_button();
         if self.startup_network_transition_blocks_input() {
@@ -37641,6 +37640,7 @@ impl GameApp {
             self.running_pointer_position = Some(position);
         }
         self.context_menu_pointer_dismissed_lobby_team_player = None;
+        self.context_menu_pointer_dismissed_lobby_option = None;
         if self.startup_network_transition_blocks_input() {
             return Ok(());
         }
@@ -40384,6 +40384,7 @@ impl GameApp {
         labels.players_template = resource("IDS_DLG_PLAYERS", "&Players (%d/%d)")
             .replacen("%d", "{active}", 1)
             .replacen("%d", "{maximum}", 1);
+        labels.options = resource("IDS_DLG_OPTIONS", &labels.options);
         labels.chat = resource("IDS_CTL_CHAT", &labels.chat);
         labels.exit = resource("IDS_DLG_EXIT", &labels.exit);
         labels.start = resource("IDS_DLG_GAMEGO", &labels.start);
@@ -40413,6 +40414,110 @@ impl GameApp {
         labels.tooltip_replay_players =
             resource("IDS_MSG_REPLAYPLRS_DESC", &labels.tooltip_replay_players);
         labels
+    }
+
+    fn classic_lobby_option_labels(&self) -> LobbyOptionLabels {
+        let mut labels = LobbyOptionLabels::default();
+        let resource = |key, fallback: &str| self.runtime_resource_text(key, fallback);
+        labels.control_mode = resource("IDS_TEXT_CONTROLMODE", &labels.control_mode);
+        labels.control_mode_tooltip = resource(
+            "IDS_DESC_CHANGESTHEWAYCONTROLDATAI",
+            &labels.control_mode_tooltip,
+        );
+        labels.control_mode_central = resource(
+            "IDS_NET_CTRLMODE_CENTRAL",
+            &labels.control_mode_central,
+        );
+        labels.control_mode_decentral = resource(
+            "IDS_NET_CTRLMODE_DECENTRAL",
+            &labels.control_mode_decentral,
+        );
+        labels.control_mode_none =
+            resource("IDS_NET_CTRLMODE_NONE", &labels.control_mode_none);
+        labels.control_rate = resource("IDS_CTL_CONTROLRATE", &labels.control_rate);
+        labels.control_rate_tooltip =
+            resource("IDS_CTL_CONTROLRATE_DESC", &labels.control_rate_tooltip);
+        labels.runtime_join = resource("IDS_NET_RUNTIMEJOIN", &labels.runtime_join);
+        labels.runtime_join_tooltip =
+            resource("IDS_NET_RUNTIMEJOIN_DESC", &labels.runtime_join_tooltip);
+        labels.runtime_join_barred = resource(
+            "IDS_NET_RUNTIMEJOINBARRED",
+            &labels.runtime_join_barred,
+        );
+        labels.runtime_join_free =
+            resource("IDS_NET_RUNTIMEJOINFREE", &labels.runtime_join_free);
+        labels.select_template = resource("IDS_MSG_SELECT", &labels.select_template);
+        labels
+    }
+
+    fn classic_lobby_option_rows_for(
+        &self,
+        mode: &NetworkMode,
+        control_rate: i32,
+        runtime_join_allowed: bool,
+    ) -> Vec<LobbyOptionRow> {
+        let (role, control_mode) = match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => (
+                LobbyRole::Host,
+                prepared.host_config().initial_status.control_mode,
+            ),
+            NetworkMode::Host(_) => (LobbyRole::Host, 0),
+            NetworkMode::Client(_) => (
+                LobbyRole::Client,
+                self.pending_network_join_data
+                    .as_ref()
+                    .map_or(-1, |join| join.status.control_mode),
+            ),
+        };
+        core_lobby_option_rows(
+            role,
+            &self.classic_lobby_option_labels(),
+            control_mode,
+            control_rate,
+            runtime_join_allowed,
+        )
+    }
+
+    fn current_classic_lobby_option_rows(&self) -> Option<Vec<LobbyOptionRow>> {
+        let mode = self.network_mode.as_ref()?;
+        let runtime_join_allowed = self
+            .classic_host_lobby
+            .as_ref()
+            .map_or(false, |lobby| lobby.runtime_join_allowed);
+        let control_rate = self
+            .network_control_clock
+            .map(NetworkControlClock::control_rate)
+            .unwrap_or_else(|| self.engine.control_rate());
+        Some(self.classic_lobby_option_rows_for(
+            mode,
+            control_rate,
+            runtime_join_allowed,
+        ))
+    }
+
+    /// Mirrors `C4GameOptionsList::Activate`/its one-second callback. An
+    /// activation calls through even when values compare equal; inactive
+    /// sheets retain their last projection and do no periodic work.
+    fn refresh_classic_lobby_options(&mut self, force: bool) -> bool {
+        if !self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            lobby.controller.active_sheet() == LobbySheet::Options
+        }) {
+            return false;
+        }
+        let Some(rows) = self.current_classic_lobby_option_rows() else {
+            return false;
+        };
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return false;
+        };
+        let changed = lobby.controller.option_rows() != rows;
+        if force || changed {
+            lobby.controller.set_option_rows(rows);
+        }
+        changed
     }
 
     fn classic_host_lobby_roster_rows(
@@ -40773,6 +40878,18 @@ impl GameApp {
             rows,
         );
         controller.set_labels(self.classic_lobby_labels());
+        let runtime_join_allowed = settings
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.admission().runtime_join_allowed());
+        let control_rate = initial_network_control_clock(Some(mode))
+            .map(NetworkControlClock::control_rate)
+            .unwrap_or_else(|| self.engine.control_rate());
+        controller.set_option_rows(self.classic_lobby_option_rows_for(
+            mode,
+            control_rate,
+            runtime_join_allowed,
+        ));
         controller.set_league_mode(initial_network_is_league(Some(mode)));
         let mut values = staged.options.clone();
         values.lobby_is_league = initial_network_is_league(Some(mode));
@@ -40803,6 +40920,7 @@ impl GameApp {
                 controller,
                 pointer: None,
                 chat_history_index: -1,
+                runtime_join_allowed,
                 resource_rows,
             },
             options,
@@ -41454,6 +41572,13 @@ impl GameApp {
         }
     }
 
+    fn set_context_menu_lobby_option(&mut self, option: Option<LobbyOptionKind>) {
+        self.context_menu_lobby_option = option;
+        if let Some(lobby) = self.classic_host_lobby.as_mut() {
+            lobby.controller.set_open_option_combo(option);
+        }
+    }
+
     fn close_stale_classic_lobby_team_combo(&mut self) {
         let roster_active = self
             .classic_host_lobby
@@ -41487,7 +41612,13 @@ impl GameApp {
                         })
                     })
             });
-        if stale_team_combo || stale_kick || stale_player {
+        let stale_option = self.context_menu_lobby_option.is_some_and(|option| {
+            !self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+                lobby.controller.active_sheet() == LobbySheet::Options
+                    && lobby.controller.open_option_combo() == Some(option)
+            })
+        });
+        if stale_team_combo || stale_kick || stale_player || stale_option {
             // ComboBox::SetReadOnly aborts its menu without a DoorClose sound.
             self.close_context_menu_silently();
         }
@@ -41524,6 +41655,7 @@ impl GameApp {
         self.context_menu = Some(menu);
         self.context_menu_lobby_kick_client = None;
         self.context_menu_lobby_player = None;
+        self.set_context_menu_lobby_option(None);
         self.set_context_menu_lobby_team_player(lobby_team_player);
         self.process_context_menu_outcome(outcome)?;
         Ok(true)
@@ -41920,7 +42052,7 @@ impl GameApp {
     }
 
     fn select_classic_lobby_sheet(&mut self, sheet: LobbySheet) -> bool {
-        if matches!(sheet, LobbySheet::Options | LobbySheet::Scenario) {
+        if sheet == LobbySheet::Scenario {
             return false;
         }
         let has_teams = self
@@ -41930,21 +42062,27 @@ impl GameApp {
         if sheet == LobbySheet::Teams && !has_teams {
             return false;
         }
-        if !sheet.is_roster()
+        if (!sheet.is_roster()
             && (self.context_menu_lobby_team_player.is_some()
                 || self.context_menu_lobby_kick_client.is_some()
-                || self.context_menu_lobby_player.is_some())
+                || self.context_menu_lobby_player.is_some()))
+            || (sheet != LobbySheet::Options && self.context_menu_lobby_option.is_some())
         {
             self.close_context_menu_silently();
         }
-        let Some(lobby) = self.classic_host_lobby.as_mut() else {
-            return false;
-        };
-        lobby.controller.set_active_sheet(sheet);
-        if sheet == LobbySheet::Resources {
-            lobby
-                .controller
-                .set_resource_rows(lobby.resource_rows.values().cloned().collect());
+        {
+            let Some(lobby) = self.classic_host_lobby.as_mut() else {
+                return false;
+            };
+            lobby.controller.set_active_sheet(sheet);
+            if sheet == LobbySheet::Resources {
+                lobby
+                    .controller
+                    .set_resource_rows(lobby.resource_rows.values().cloned().collect());
+            }
+        }
+        if sheet == LobbySheet::Options {
+            let _ = self.refresh_classic_lobby_options(true);
         }
         if sheet.is_roster() {
             self.sync_classic_lobby_roster();
@@ -42488,6 +42626,149 @@ impl GameApp {
         )
     }
 
+    fn classic_lobby_option_is_editable(&self, option: LobbyOptionKind) -> bool {
+        self.classic_host_lobby.as_ref().is_some_and(|lobby| {
+            lobby.controller.active_sheet() == LobbySheet::Options
+                && lobby
+                    .controller
+                    .option_rows()
+                    .iter()
+                    .any(|row| row.kind == option && row.editable)
+        })
+    }
+
+    fn open_classic_lobby_option_combo(
+        &mut self,
+        option: LobbyOptionKind,
+        anchor: GuiPoint,
+        minimum_width: i32,
+    ) -> Result<bool, EngineError> {
+        if self.context_menu_pointer_dismissed_lobby_option.take() == Some(option) {
+            // The outside click which closed this ComboBox is still being
+            // delivered to the underlying sheet; do not reopen it.
+            return Ok(false);
+        }
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::NetworkLobby
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+            || option == LobbyOptionKind::ControlMode
+        {
+            return Ok(false);
+        }
+        let Some(choices) = self.classic_host_lobby.as_ref().and_then(|lobby| {
+            (lobby.controller.active_sheet() == LobbySheet::Options)
+                .then(|| {
+                    lobby
+                        .controller
+                        .option_rows()
+                        .iter()
+                        .find(|row| row.kind == option && row.editable)
+                        .map(|row| row.choices.clone())
+                })
+                .flatten()
+        }) else {
+            return Ok(false);
+        };
+        let entries = choices
+            .into_iter()
+            .map(|choice| {
+                let command = match option {
+                    LobbyOptionKind::ControlRate => {
+                        AppContextMenuCommand::LobbyControlRate(choice.id)
+                    }
+                    LobbyOptionKind::RuntimeJoin => {
+                        AppContextMenuCommand::LobbyRuntimeJoin(choice.id != 0)
+                    }
+                    LobbyOptionKind::ControlMode => unreachable!("read-only lobby option"),
+                };
+                ContextMenuEntry::new(choice.label)
+                    .with_tooltip(choice.tooltip)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(command)
+            })
+            .collect();
+        let opened = self.open_context_menu_at_with_minimum_width(
+            entries,
+            anchor,
+            minimum_width,
+            None,
+        )?;
+        if opened {
+            self.set_context_menu_lobby_option(Some(option));
+        }
+        Ok(opened)
+    }
+
+    fn submit_classic_lobby_control_rate(&mut self, selected: i32) {
+        if !(1..=9).contains(&selected)
+            || !self.classic_lobby_option_is_editable(LobbyOptionKind::ControlRate)
+            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self
+                .network
+                .as_ref()
+                .is_some_and(|network| network.local_client_id() == 0)
+        {
+            return;
+        }
+        // Native re-reads ControlRate when the menu action activates. A
+        // control echoed before this click therefore changes the submitted
+        // relative adjustment instead of applying a stale absolute value.
+        let current = self
+            .network_control_clock
+            .map(NetworkControlClock::control_rate)
+            .unwrap_or_else(|| self.engine.control_rate());
+        if selected == current {
+            return;
+        }
+        let result = self.network.as_ref().map(|network| {
+            network.submit_control_set(lc_network::LegacyControlSet {
+                value_type: 0,
+                data: selected - current,
+                by_client: 0,
+            })
+        });
+        if let Some(Err(error)) = result {
+            tracing::error!(%error, "failed to submit lobby control-rate adjustment");
+            self.report_classic_lobby_error(format!(
+                "Unable to change the control rate: {error}"
+            ));
+        }
+    }
+
+    fn set_classic_lobby_runtime_join(&mut self, allowed: bool) {
+        if !self.classic_lobby_option_is_editable(LobbyOptionKind::RuntimeJoin)
+            || !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self
+                .network
+                .as_ref()
+                .is_some_and(|network| network.local_client_id() == 0)
+        {
+            return;
+        }
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return;
+        };
+        lobby.runtime_join_allowed = allowed;
+        if let Some(NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        })) = self.network_mode.as_mut()
+        {
+            prepared.set_runtime_join_allowed(allowed);
+        }
+        self.persist_game_option_value(
+            "Network",
+            "NoRuntimeJoin",
+            if allowed { "0" } else { "1" }.to_string(),
+        );
+        // Lobby admission deliberately remains open. The retained prepared
+        // policy is queued immediately after the Go status request when the
+        // lobby exits, matching DoLobby's post-status admission update.
+        let _ = self.refresh_classic_lobby_options(true);
+    }
+
     fn classic_lobby_team_change_is_allowed(&self, player_id: i32, client_id: i32) -> bool {
         let player_is_eligible = self
             .control_player_infos
@@ -42892,6 +43173,7 @@ impl GameApp {
                     self.note_classic_host_lobby_non_pointer_input();
                     self.context_menu = None;
                     self.set_context_menu_lobby_team_player(None);
+                    self.set_context_menu_lobby_option(None);
                     self.context_menu_lobby_kick_client = None;
                     self.context_menu_lobby_player = None;
                 }
@@ -42996,6 +43278,12 @@ impl GameApp {
                     }
                     AppContextMenuCommand::LobbyTeam { player_id, team_id } => {
                         self.submit_classic_lobby_team_selection(player_id, team_id);
+                    }
+                    AppContextMenuCommand::LobbyControlRate(control_rate) => {
+                        self.submit_classic_lobby_control_rate(control_rate);
+                    }
+                    AppContextMenuCommand::LobbyRuntimeJoin(allowed) => {
+                        self.set_classic_lobby_runtime_join(allowed);
                     }
                     AppContextMenuCommand::LobbyPlayerRemove {
                         client_id,
@@ -43319,15 +43607,19 @@ impl GameApp {
             ElementState::Pressed => menu.handle_pointer_down(point, button),
             ElementState::Released => menu.handle_pointer_up(point, button),
         };
-        let dismissed_lobby_team_player = (state == ElementState::Pressed
+        let dismissed_combo = state == ElementState::Pressed
             && button == ContextMenuPointerButton::Left
             && outcome.pass_through
             && outcome
                 .events
                 .iter()
-                .any(|event| matches!(event, ContextMenuEvent::Closed)))
-        .then_some(self.context_menu_lobby_team_player)
-        .flatten();
+                .any(|event| matches!(event, ContextMenuEvent::Closed));
+        let dismissed_lobby_team_player = dismissed_combo
+            .then_some(self.context_menu_lobby_team_player)
+            .flatten();
+        let dismissed_lobby_option = dismissed_combo
+            .then_some(self.context_menu_lobby_option)
+            .flatten();
         let captured = outcome.captured && !outcome.pass_through;
         if state == ElementState::Pressed && captured {
             self.context_menu_pointer_capture = Some(button);
@@ -43335,6 +43627,9 @@ impl GameApp {
         self.process_context_menu_outcome(outcome)?;
         if let Some(player_id) = dismissed_lobby_team_player {
             self.context_menu_pointer_dismissed_lobby_team_player = Some(player_id);
+        }
+        if let Some(option) = dismissed_lobby_option {
+            self.context_menu_pointer_dismissed_lobby_option = Some(option);
         }
         Ok(captured || retained_release)
     }
@@ -43418,18 +43713,22 @@ impl GameApp {
     fn close_context_menu_silently(&mut self) {
         let Some(mut menu) = self.context_menu.take() else {
             self.set_context_menu_lobby_team_player(None);
+            self.set_context_menu_lobby_option(None);
             self.context_menu_lobby_kick_client = None;
             self.context_menu_lobby_player = None;
             self.context_menu_pointer_dismissed_lobby_team_player = None;
+            self.context_menu_pointer_dismissed_lobby_option = None;
             return;
         };
         let _ = menu.dismiss(false);
         self.startup_tooltip.pointer_left();
         self.note_classic_host_lobby_non_pointer_input();
         self.set_context_menu_lobby_team_player(None);
+        self.set_context_menu_lobby_option(None);
         self.context_menu_lobby_kick_client = None;
         self.context_menu_lobby_player = None;
         self.context_menu_pointer_dismissed_lobby_team_player = None;
+        self.context_menu_pointer_dismissed_lobby_option = None;
         self.context_menu_pointer_capture = None;
         self.mark_menu_dirty();
     }
@@ -45513,9 +45812,9 @@ impl GameApp {
                     "Unable to start prepared host: initial JoinData is missing".to_string();
                 return Ok(());
             };
-            // C++ leaves the lobby through Network.Start: close or
-            // preserve admission from NoRuntimeJoin, commit GS_Go,
-            // and initialize the already-opened scenario
+            // C++ leaves the lobby through Network.Start: request GS_Go,
+            // then apply NoRuntimeJoin admission during DoLobby teardown and
+            // initialize the already-opened scenario
             // (src/C4Network2.cpp:510-530;
             // src/C4GameLobby.cpp:442-472). Reopening the source here
             // would diverge from the JoinData already sent to peers.
@@ -45541,12 +45840,24 @@ impl GameApp {
                 self.status_text = "Prepared host network is unavailable".to_string();
                 return Ok(());
             };
-            if let Err(error) = network.change_status(status) {
+            // One host-loop command owns both the Go barrier and the policy
+            // installed as the lobby closes. Separate FIFO commands leave an
+            // admission branch able to accept a late join between them.
+            if let Err(error) = network.begin_go(
+                status,
+                prepared.admission().runtime_join_allowed(),
+            ) {
                 self.status_text = format!("Unable to start prepared host: {error}");
                 return Ok(());
             }
             if let Some(clock) = self.network_control_clock.as_mut() {
                 clock.set_target_tick(Some(target_tick));
+            }
+            if classic_start {
+                // Deleting the native lobby also deletes any ComboBox-owned
+                // recursive menu. Do this before dropping the controller so
+                // no invisible popup can retain input during Loading.
+                self.close_context_menu_silently();
             }
             if !classic_start {
                 self.play_ui_sound("Click");
@@ -46667,6 +46978,13 @@ impl GameApp {
                 }
                 ClassicLobbyAction::TeamSelectionRequested { player_id } => {
                     self.open_classic_lobby_team_combo(player_id)?;
+                }
+                ClassicLobbyAction::OptionSelectionRequested {
+                    option,
+                    anchor,
+                    minimum_width,
+                } => {
+                    self.open_classic_lobby_option_combo(option, anchor, minimum_width)?;
                 }
                 ClassicLobbyAction::Chat(request) => {
                     self.process_classic_lobby_chat_request(request)?;
@@ -49893,6 +50211,16 @@ impl GameApp {
                     snapshot.parameters.control_rate = control_rate;
                     host_snapshot_changed = true;
                 }
+                if matches!(runtime_network_role, RuntimeNetworkRole::Host) {
+                    self.persist_game_option_value(
+                        "Network",
+                        "ControlRate",
+                        control_rate.to_string(),
+                    );
+                }
+                if self.refresh_classic_lobby_options(false) {
+                    self.mark_menu_dirty();
+                }
             }
             // C4CVT_DisableDebug has no HostControl gate.
             1 => {
@@ -51502,6 +51830,7 @@ impl GameApp {
         let lobby_countdown_changed = self.tick_network_lobby_countdown();
         let ready_check_changed = self.tick_lobby_ready_check_prompt();
         let scale_test_changed = self.tick_options_scale_test_prompt();
+        let lobby_options_changed = self.refresh_classic_lobby_options(false);
         let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
         let vote_timeout_changed = self.tick_host_league_vote_timeout_at(now);
         let before = self.engine.game_time();
@@ -51523,6 +51852,7 @@ impl GameApp {
             || lobby_countdown_changed
             || ready_check_changed
             || scale_test_changed
+            || lobby_options_changed
             || vote_timeout_changed
             || client_list_changed
             || after != before)
@@ -84668,6 +84998,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             ),
             pointer: None,
             chat_history_index: -1,
+            runtime_join_allowed: false,
             resource_rows: BTreeMap::new(),
         });
         app.scenario_game_options =
@@ -85615,10 +85946,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 "RosterContext",
             ),
             (
-                ClassicLobbyAction::SheetRequested(LobbySheet::Options),
-                "Options",
-            ),
-            (
                 ClassicLobbyAction::SheetRequested(LobbySheet::Scenario),
                 "Scenario",
             ),
@@ -85655,6 +85982,157 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (manager, events, commands) = NetworkManager::test_stub_with_commands();
         app.network = Some(manager);
         (events, commands)
+    }
+
+    #[test]
+    fn l085_lobby_options_refresh_only_while_the_sheet_is_active() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, _commands) = install_classic_host_network_stub(&mut app);
+        app.engine.set_control_rate(4);
+        app.network_control_clock = Some(NetworkControlClock::new(0, 4));
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::SheetRequested(
+            LobbySheet::Options,
+        )])
+        .expect("activate the Options list");
+        let option_value = |app: &GameApp, kind| {
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .option_rows()
+                .iter()
+                .find(|row| row.kind == kind)
+                .unwrap()
+                .value
+                .clone()
+        };
+        assert_eq!(option_value(&app, LobbyOptionKind::ControlRate), "4");
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::SheetRequested(
+            LobbySheet::Players,
+        )])
+        .expect("deactivate the Options list");
+        app.network_control_clock
+            .as_mut()
+            .unwrap()
+            .set_control_rate(7);
+        app.sec1_timer().expect("pulse the inactive second timer");
+        assert_eq!(
+            option_value(&app, LobbyOptionKind::ControlRate),
+            "4",
+            "inactive options retain their last snapshot"
+        );
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::SheetRequested(
+            LobbySheet::Options,
+        )])
+        .expect("reactivation forces an immediate update");
+        assert_eq!(option_value(&app, LobbyOptionKind::ControlRate), "7");
+
+        app.network_control_clock
+            .as_mut()
+            .unwrap()
+            .set_control_rate(8);
+        app.sec1_timer().expect("pulse the active second timer");
+        assert_eq!(option_value(&app, LobbyOptionKind::ControlRate), "8");
+    }
+
+    #[test]
+    fn l085_control_rate_submits_relative_set_and_waits_for_echo() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated control-rate user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        app.engine.set_control_rate(4);
+        app.network_control_clock = Some(NetworkControlClock::new(0, 4));
+        assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
+
+        app.submit_classic_lobby_control_rate(7);
+        let sets = commands.take_submitted_control_sets();
+        assert_eq!(
+            sets,
+            [lc_network::LegacyControlSet {
+                value_type: 0,
+                data: 3,
+                by_client: 0,
+            }]
+        );
+        assert_eq!(app.engine.control_rate(), 4);
+        assert_eq!(
+            app.network_control_clock.unwrap().control_rate(),
+            4,
+            "the menu selection is not an optimistic clock mutation"
+        );
+        assert!(app.classic_host_lobby.as_ref().unwrap().controller.option_rows().iter().any(
+            |row| row.kind == LobbyOptionKind::ControlRate && row.value == "4"
+        ));
+
+        app.execute_control_set(sets[0]);
+        assert_eq!(app.engine.control_rate(), 7);
+        assert_eq!(app.network_control_clock.unwrap().control_rate(), 7);
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload echoed control rate")
+                .get_in(Some("Network"), "ControlRate"),
+            Some("7"),
+            "only the authoritative host echo writes the next-session setting"
+        );
+        assert!(app.classic_host_lobby.as_ref().unwrap().controller.option_rows().iter().any(
+            |row| row.kind == LobbyOptionKind::ControlRate && row.value == "7"
+        ));
+
+        app.submit_classic_lobby_control_rate(7);
+        app.submit_classic_lobby_control_rate(10);
+        assert!(commands.take_submitted_control_sets().is_empty());
+    }
+
+    #[test]
+    fn l085_runtime_join_persists_inverse_policy_and_refreshes_the_host_row() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated lobby-option user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
+
+        app.set_classic_lobby_runtime_join(true);
+        assert!(
+            commands.take_lobby_start_commands().is_empty(),
+            "changing the future policy must not close current lobby admission"
+        );
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .is_some_and(|lobby| lobby.runtime_join_allowed));
+        assert!(app.classic_host_lobby.as_ref().unwrap().controller.option_rows().iter().any(
+            |row| row.kind == LobbyOptionKind::RuntimeJoin
+                && row.value == "Runtime join allowed"
+        ));
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload enabled runtime-join policy")
+                .get_in(Some("Network"), "NoRuntimeJoin"),
+            Some("0")
+        );
+
+        app.set_classic_lobby_runtime_join(false);
+        assert!(
+            commands.take_lobby_start_commands().is_empty(),
+            "the prohibited policy is applied only when the lobby exits"
+        );
+        assert!(!app
+            .classic_host_lobby
+            .as_ref()
+            .is_some_and(|lobby| lobby.runtime_join_allowed));
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload prohibited runtime-join policy")
+                .get_in(Some("Network"), "NoRuntimeJoin"),
+            Some("1")
+        );
     }
 
     #[test]
@@ -86345,6 +86823,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         generic_lobby.select_scenario(&scenario.identifier, &scenario.title);
         app.network_lobby = Some(generic_lobby);
         install_test_classic_host_lobby(&mut app);
+        let go_observer = thread::spawn(move || commands.complete_lobby_start(Ok(())));
 
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
             countdown_seconds: 0,
@@ -86354,8 +86833,11 @@ public func Grant(password) { return GainMissionAccess(password); }
         .expect("start prepared host immediately");
 
         assert_eq!(
-            commands.take_lobby_start_commands(),
-            vec![network::TestLobbyStartCommand::Status(expected_go)]
+            go_observer.join().expect("atomic Go observer"),
+            vec![network::TestLobbyStartCommand::BeginGo {
+                status: expected_go,
+                join_allowed: false,
+            }]
         );
         assert!(app.host_lobby_countdown.is_none());
         assert!(matches!(app.mode, AppMode::Loading));
@@ -86364,6 +86846,67 @@ public func Grant(password) { return GainMissionAccess(password); }
             .network_start_wait
             .as_ref()
             .is_some_and(|wait| !wait.visible));
+    }
+
+    #[test]
+    fn l085_atomic_go_worker_failure_is_reported_before_lobby_teardown() {
+        let _lock = env_lock().lock();
+        let mut app = new_discovered_menu_app(640, 480);
+        let scenario = app
+            .scenario_catalog
+            .values()
+            .find(|scenario| {
+                scenario
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.ends_with("Tutorial.c4f/Tutorial01.c4s"))
+            })
+            .cloned()
+            .expect("Tutorial01 is in the startup catalog");
+        let prepared = build_network_host_preparation(&app, &scenario)
+            .expect("build prepared host inputs")
+            .prepare()
+            .expect("prepare retained host scenario");
+        let expected_go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: prepared.host_config().initial_status.control_mode,
+            target_tick: 0,
+        };
+        app.host_join_snapshot = prepared.host_config().initial_join_snapshot.clone();
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+            prepared: Some(prepared),
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let mut generic_lobby = NetworkLobbyState::new(0, "Exact Host".to_string(), true);
+        generic_lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(generic_lobby);
+        install_test_classic_host_lobby(&mut app);
+        let go_observer = thread::spawn(move || {
+            commands.complete_lobby_start(Err("host loop rejected Go".to_string()))
+        });
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 0,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("report rejected atomic Go transition");
+
+        assert_eq!(
+            go_observer.join().expect("atomic Go observer"),
+            vec![network::TestLobbyStartCommand::BeginGo {
+                status: expected_go,
+                join_allowed: false,
+            }]
+        );
+        assert!(!matches!(app.mode, AppMode::Loading));
+        assert!(app.loading_state.is_none());
+        assert!(app.classic_host_lobby.is_some());
+        assert!(app.network_lobby.is_some());
+        assert!(app.status_text.contains("host loop rejected Go"));
     }
 
     #[test]
@@ -103478,6 +104021,22 @@ ScenInfoArea=70,5,25,90
             confirm_unassociated_savegame_players: false,
         }])
         .expect("prepared classic host starts the C++ countdown");
+        assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::OptionSelectionRequested {
+            option: LobbyOptionKind::ControlRate,
+            anchor: GuiPoint::new(400.0, 240.0),
+            minimum_width: 120,
+        }])
+        .expect("open an option ComboBox during the countdown");
+        assert!(app.context_menu.is_some());
+        assert_eq!(
+            app.context_menu_lobby_option,
+            Some(LobbyOptionKind::ControlRate)
+        );
+        let go_observer = thread::spawn(move || {
+            let observed = commands.complete_lobby_start(Ok(()));
+            (commands, observed)
+        });
         for _ in 0..DEFAULT_LOBBY_COUNTDOWN_SECONDS {
             assert!(
                 app.sec1_timer().expect("advance global second timer"),
@@ -103492,8 +104051,10 @@ ScenInfoArea=70,5,25,90
                 countdown,
             ))
         };
+        let (mut commands, observed_start) =
+            go_observer.join().expect("atomic Go observer");
         assert_eq!(
-            commands.take_lobby_start_commands(),
+            observed_start,
             vec![
                 countdown_command(5),
                 countdown_command(4),
@@ -103501,7 +104062,10 @@ ScenInfoArea=70,5,25,90
                 countdown_command(2),
                 countdown_command(1),
                 countdown_command(0),
-                network::TestLobbyStartCommand::Status(expected_go),
+                network::TestLobbyStartCommand::BeginGo {
+                    status: expected_go,
+                    join_allowed: false,
+                },
             ]
         );
         assert!(
@@ -103515,6 +104079,8 @@ ScenInfoArea=70,5,25,90
         );
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.context_menu_lobby_option, None);
         assert!(app
             .network_start_wait
             .as_ref()
@@ -103592,20 +104158,6 @@ ScenInfoArea=70,5,25,90
             app.engine.snapshot().players.is_empty(),
             "network InitPlayers must not directly join the local player before host-issued JoinPlr controls"
         );
-
-        // DoLobby applies !Config.Network.NoRuntimeJoin only after the Go
-        // status has ended the lobby, before gameplay proceeds (pristine
-        // 9ffa0a5d src/C4Network2.cpp:445-523).
-        let (join_gate_tx, join_gate_rx) = std::sync::mpsc::channel();
-        let join_gate_worker = std::thread::spawn(move || {
-            let (allowed, completion) = commands.receive_join_allowed();
-            completion
-                .send(Ok(()))
-                .expect("acknowledge runtime join gate");
-            join_gate_tx
-                .send(allowed)
-                .expect("report runtime join gate");
-        });
 
         events
             .send(NetworkEvent::StatusCommitted(expected_go))
@@ -103753,14 +104305,6 @@ ScenInfoArea=70,5,25,90
             0
         );
         assert!(live_player.resource.is_some());
-        assert_eq!(
-            join_gate_rx.recv_timeout(Duration::from_millis(100)),
-            Ok(false),
-            "NoRuntimeJoin=true must close admission as the lobby ends"
-        );
-        join_gate_worker
-            .join()
-            .expect("runtime join gate worker exits");
     }
 
     #[test]

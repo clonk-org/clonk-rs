@@ -356,6 +356,14 @@ impl PreparedHostBootstrap {
         self.admission
     }
 
+    /// Updates the policy which C++ applies when the lobby transitions to
+    /// gameplay. The Options sheet may change `NoRuntimeJoin` after the host
+    /// bootstrap has already been prepared, so this retained admission value
+    /// must remain mutable until the lobby ends.
+    pub fn set_runtime_join_allowed(&mut self, allowed: bool) {
+        self.admission.no_runtime_join = !allowed;
+    }
+
     pub fn league_config(&self) -> Option<&PreparedLeagueHostConfig> {
         self.league.as_ref()
     }
@@ -1505,6 +1513,18 @@ mod definition_root_graphics_tests {
                 initial_player_info_installed: AtomicBool::new(false),
             }),
         }
+    }
+
+    #[test]
+    fn l085_lobby_runtime_join_choice_updates_retained_admission_policy() {
+        let mut prepared = league_prepared_host(1);
+        assert!(prepared.admission().runtime_join_allowed());
+
+        prepared.set_runtime_join_allowed(false);
+        assert!(!prepared.admission().runtime_join_allowed());
+
+        prepared.set_runtime_join_allowed(true);
+        assert!(prepared.admission().runtime_join_allowed());
     }
 
     #[test]

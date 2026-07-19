@@ -1,5 +1,5 @@
-//! Classic `C4GameLobby::MainDlg` frontend for the initially visible
-//! Players/Clients sheet.
+//! Classic `C4GameLobby::MainDlg` frontend, including its roster, resources
+//! and core Options sheets.
 //!
 //! The fullscreen lobby is a transparent overlay: the C++ dialog deliberately
 //! leaves the loader/game background in place.  This module therefore draws
@@ -31,6 +31,7 @@ const ICON_EXTENT: i32 = 64;
 const TAB_ICON_EXTENT: i32 = 16;
 const SCROLLBAR_EXTENT: i32 = 16;
 const TAB_SHEET_MARGIN: i32 = 4;
+const LIST_BOX_MARGIN: i32 = 3;
 const CLIENT_ROW_SPACING: i32 = 8;
 const DEFAULT_ROW_SPACING: i32 = 1;
 const PLAYER_ROW_INDENT: i32 = 3;
@@ -82,8 +83,8 @@ impl LobbyRole {
     }
 }
 
-/// A right-side sheet. Players/Teams and Resources have exact frontend
-/// presentations; the remaining sheets stay typed app-owned requests.
+/// A right-side sheet. Scenario remains a typed app-owned request; the other
+/// sheets have frontend presentation state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LobbySheet {
     Players,
@@ -91,6 +92,159 @@ pub enum LobbySheet {
     Resources,
     Options,
     Scenario,
+}
+
+/// One of the always-defined core rows in the lobby Options sheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LobbyOptionKind {
+    ControlMode,
+    ControlRate,
+    RuntimeJoin,
+}
+
+/// One selectable value supplied to the app-owned classic context menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LobbyOptionChoice {
+    pub id: i32,
+    pub label: String,
+    pub tooltip: String,
+}
+
+/// Localized strings needed to construct the three core lobby options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LobbyOptionLabels {
+    pub control_mode: String,
+    pub control_mode_tooltip: String,
+    pub control_mode_central: String,
+    pub control_mode_decentral: String,
+    pub control_mode_async: String,
+    pub control_mode_none: String,
+    pub control_rate: String,
+    pub control_rate_tooltip: String,
+    pub runtime_join: String,
+    pub runtime_join_tooltip: String,
+    pub runtime_join_barred: String,
+    pub runtime_join_free: String,
+    /// Named-brace or native `%s` template used by context-menu entries.
+    pub select_template: String,
+}
+
+impl Default for LobbyOptionLabels {
+    fn default() -> Self {
+        Self {
+            control_mode: "Control mode".into(),
+            control_mode_tooltip:
+                "Changes the way control data is exchanged between network clients.".into(),
+            control_mode_central: "Central control".into(),
+            control_mode_decentral: "Decentral control".into(),
+            control_mode_async: "[!]Asynchroner Netzwerkmodus (experimentell!)".into(),
+            control_mode_none: "No control mode".into(),
+            control_rate: "Control rate".into(),
+            control_rate_tooltip:
+                "Specifies the time interval in frames, at which control data is being exchanged via network"
+                    .into(),
+            runtime_join: "Runtime join".into(),
+            runtime_join_tooltip:
+                "Specifies whether additional computers may connect to the game after start.".into(),
+            runtime_join_barred: "Runtime join prohibited".into(),
+            runtime_join_free: "Runtime join allowed".into(),
+            select_template: "Select {value}".into(),
+        }
+    }
+}
+
+impl LobbyOptionLabels {
+    fn select_tooltip(&self, value: &str) -> String {
+        if self.select_template.contains("{value}") {
+            self.select_template.replace("{value}", value)
+        } else {
+            self.select_template.replacen("%s", value, 1)
+        }
+    }
+}
+
+/// Renderable state for one `C4GameOptionsList::OptionDropdown`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LobbyOptionRow {
+    pub kind: LobbyOptionKind,
+    pub caption: String,
+    pub value: String,
+    pub tooltip: String,
+    pub editable: bool,
+    pub choices: Vec<LobbyOptionChoice>,
+}
+
+/// Construct the core non-runtime options in native add order.
+///
+/// Control mode is always read-only in the lobby. Control rate is editable
+/// only for the control host, and Runtime join exists only for the host.
+pub fn core_lobby_option_rows(
+    role: LobbyRole,
+    labels: &LobbyOptionLabels,
+    control_mode: i32,
+    control_rate: i32,
+    runtime_join_allowed: bool,
+) -> Vec<LobbyOptionRow> {
+    let control_mode = match control_mode {
+        0 => labels.control_mode_decentral.clone(),
+        1 => labels.control_mode_central.clone(),
+        2 => labels.control_mode_async.clone(),
+        _ => labels.control_mode_none.clone(),
+    };
+    let rate_choices = (1..10)
+        .map(|rate| {
+            let label = rate.to_string();
+            LobbyOptionChoice {
+                id: rate,
+                tooltip: labels.select_tooltip(&label),
+                label,
+            }
+        })
+        .collect();
+    let mut rows = vec![
+        LobbyOptionRow {
+            kind: LobbyOptionKind::ControlMode,
+            caption: labels.control_mode.clone(),
+            value: control_mode,
+            tooltip: labels.control_mode_tooltip.clone(),
+            editable: false,
+            choices: Vec::new(),
+        },
+        LobbyOptionRow {
+            kind: LobbyOptionKind::ControlRate,
+            caption: labels.control_rate.clone(),
+            value: control_rate.to_string(),
+            tooltip: labels.control_rate_tooltip.clone(),
+            editable: role == LobbyRole::Host,
+            choices: rate_choices,
+        },
+    ];
+    if role == LobbyRole::Host {
+        let choices = [
+            (0, labels.runtime_join_barred.clone()),
+            (1, labels.runtime_join_free.clone()),
+        ]
+        .into_iter()
+        .map(|(id, label)| LobbyOptionChoice {
+            id,
+            tooltip: labels.select_tooltip(&label),
+            label,
+        })
+        .collect();
+        rows.push(LobbyOptionRow {
+            kind: LobbyOptionKind::RuntimeJoin,
+            caption: labels.runtime_join.clone(),
+            value: if runtime_join_allowed {
+                labels.runtime_join_free.clone()
+            } else {
+                labels.runtime_join_barred.clone()
+            },
+            tooltip: labels.runtime_join_tooltip.clone(),
+            editable: true,
+            choices,
+        });
+    }
+    rows
 }
 
 impl LobbySheet {
@@ -591,6 +745,12 @@ pub enum LobbyAction {
     TeamSelectionRequested {
         player_id: i32,
     },
+    /// Open the app-owned context menu used as this ComboBox's dropdown.
+    OptionSelectionRequested {
+        option: LobbyOptionKind,
+        anchor: GuiPoint,
+        minimum_width: i32,
+    },
     Chat(LobbyChatRequest),
     GameOptions(LobbyGameOptionInput),
     FocusChanged(LobbyControl),
@@ -612,6 +772,8 @@ pub enum LobbyControl {
     Roster,
     RosterTeam,
     RosterAddPlayer,
+    OptionsList,
+    Option(LobbyOptionKind),
     Exit,
     GameOption(GameOptionButton),
     Run,
@@ -663,6 +825,8 @@ pub struct LobbyRosterRowLayout {
     pub icon: IntRect,
     pub add_player: Option<IntRect>,
     pub team: Option<IntRect>,
+    /// Stacked ComboBox bounds for an Options-sheet row.
+    pub option_value: Option<IntRect>,
     pub rank: Option<IntRect>,
     pub collapsed: bool,
 }
@@ -1135,6 +1299,8 @@ enum HitTarget {
     RightListInert,
     AddPlayer(usize),
     Team(usize),
+    OptionRow(usize),
+    OptionValue(usize),
     RosterScrollTop,
     RosterScrollBottom,
     RosterScrollTrack,
@@ -1191,6 +1357,7 @@ pub struct GameLobby {
     countdown: LobbyCountdownState,
     rows: Vec<LobbyRosterRow>,
     resource_rows: Vec<LobbyResourceRow>,
+    option_rows: Vec<LobbyOptionRow>,
     client_sound_status: HashMap<i32, (bool, Instant)>,
     logs: Vec<LobbyLogLine>,
     chat_edit: LobbyChatEditView,
@@ -1208,13 +1375,18 @@ pub struct GameLobby {
     key_pressed: Option<(LobbyControl, KeyCode)>,
     selected_row: Option<usize>,
     selected_roster_id: Option<LobbyRosterId>,
+    selected_option: Option<LobbyOptionKind>,
     open_team_combo_player: Option<i32>,
+    open_option_combo: Option<LobbyOptionKind>,
     roster_scroll: i32,
     roster_max_scroll: i32,
     roster_scroll_pin: i32,
     resource_scroll: i32,
     resource_max_scroll: i32,
     resource_scroll_pin: i32,
+    option_scroll: i32,
+    option_max_scroll: i32,
+    option_scroll_pin: i32,
     scrollbar_drag: Option<ScrollbarDrag>,
     collapsed_roster: bool,
     collapse_player_limit: usize,
@@ -1252,6 +1424,7 @@ impl GameLobby {
             countdown: LobbyCountdownState::None,
             rows,
             resource_rows: Vec::new(),
+            option_rows: Vec::new(),
             client_sound_status: HashMap::new(),
             logs: Vec::new(),
             chat_edit: LobbyChatEditView::default(),
@@ -1269,13 +1442,18 @@ impl GameLobby {
             key_pressed: None,
             selected_row: None,
             selected_roster_id: None,
+            selected_option: None,
             open_team_combo_player: None,
+            open_option_combo: None,
             roster_scroll: 0,
             roster_max_scroll: 0,
             roster_scroll_pin: 0,
             resource_scroll: 0,
             resource_max_scroll: 0,
             resource_scroll_pin: 0,
+            option_scroll: 0,
+            option_max_scroll: 0,
+            option_scroll_pin: 0,
             scrollbar_drag: None,
             collapsed_roster: false,
             collapse_player_limit: usize::MAX,
@@ -1296,12 +1474,17 @@ impl GameLobby {
         matches!(self.active_sheet, LobbySheet::Resources)
     }
 
+    pub const fn option_sheet_active(&self) -> bool {
+        matches!(self.active_sheet, LobbySheet::Options)
+    }
+
     pub fn set_active_sheet(&mut self, sheet: LobbySheet) {
         if self.active_sheet == sheet {
             return;
         }
         self.active_sheet = sheet;
         self.open_team_combo_player = None;
+        self.open_option_combo = None;
         self.scrollbar_drag = None;
         if matches!(
             self.hovered,
@@ -1310,6 +1493,8 @@ impl GameLobby {
                 | HitTarget::RightListInert
                 | HitTarget::AddPlayer(_)
                 | HitTarget::Team(_)
+                | HitTarget::OptionRow(_)
+                | HitTarget::OptionValue(_)
                 | HitTarget::RosterScrollTop
                 | HitTarget::RosterScrollBottom
                 | HitTarget::RosterScrollTrack
@@ -1325,6 +1510,8 @@ impl GameLobby {
                     | HitTarget::RightListInert
                     | HitTarget::AddPlayer(_)
                     | HitTarget::Team(_)
+                    | HitTarget::OptionRow(_)
+                    | HitTarget::OptionValue(_)
                     | HitTarget::RosterScrollTop
                     | HitTarget::RosterScrollBottom
                     | HitTarget::RosterScrollTrack
@@ -1338,6 +1525,15 @@ impl GameLobby {
             && matches!(
                 self.focus,
                 LobbyControl::Roster | LobbyControl::RosterTeam | LobbyControl::RosterAddPlayer
+            )
+        {
+            self.focus = LobbyControl::ChatInput;
+            self.key_pressed = None;
+        }
+        if sheet != LobbySheet::Options
+            && matches!(
+                self.focus,
+                LobbyControl::OptionsList | LobbyControl::Option(_)
             )
         {
             self.focus = LobbyControl::ChatInput;
@@ -1367,6 +1563,53 @@ impl GameLobby {
 
     pub fn resource_rows(&self) -> &[LobbyResourceRow] {
         &self.resource_rows
+    }
+
+    pub fn option_rows(&self) -> &[LobbyOptionRow] {
+        &self.option_rows
+    }
+
+    /// Installs a live options snapshot while retaining semantic selection,
+    /// focus and open state when the same row still exists.
+    pub fn set_option_rows(&mut self, mut rows: Vec<LobbyOptionRow>) -> bool {
+        let mut seen = Vec::with_capacity(rows.len());
+        rows.retain(|row| {
+            if seen.contains(&row.kind) {
+                false
+            } else {
+                seen.push(row.kind);
+                true
+            }
+        });
+        let changed = self.option_rows != rows;
+        self.option_rows = rows;
+        self.open_option_combo = self.open_option_combo.filter(|kind| {
+            self.option_rows
+                .iter()
+                .any(|row| row.kind == *kind && row.editable)
+        });
+        self.selected_option = self.selected_option.filter(|kind| {
+            self.option_rows.iter().any(|row| row.kind == *kind)
+        });
+        if let LobbyControl::Option(kind) = self.focus {
+            if !self.option_rows.iter().any(|row| row.kind == kind) {
+                self.focus = LobbyControl::OptionsList;
+                self.key_pressed = None;
+            }
+        }
+        changed
+    }
+
+    pub fn set_open_option_combo(&mut self, option: Option<LobbyOptionKind>) {
+        self.open_option_combo = option.filter(|kind| {
+            self.option_rows
+                .iter()
+                .any(|row| row.kind == *kind && row.editable)
+        });
+    }
+
+    pub const fn open_option_combo(&self) -> Option<LobbyOptionKind> {
+        self.open_option_combo
     }
 
     /// Installs the current resource-list snapshot. Native lookup begins at
@@ -1446,10 +1689,18 @@ impl GameLobby {
         self.resource_scroll
     }
 
+    pub const fn option_scroll(&self) -> i32 {
+        self.option_scroll
+    }
+
     /// Restores app-owned scroll state before a transient controller is
     /// laid out. `roster_layout` applies the current content clamp and pin.
     pub fn set_resource_scroll(&mut self, scroll: i32) {
         self.resource_scroll = scroll.max(0);
+    }
+
+    pub fn set_option_scroll(&mut self, scroll: i32) {
+        self.option_scroll = scroll.max(0);
     }
 
     pub fn set_rows(&mut self, rows: Vec<LobbyRosterRow>) {
@@ -1648,6 +1899,18 @@ impl GameLobby {
             .tab_buttons
             .iter_mut()
             .for_each(|tab| tab.selected = tab.sheet == Some(self.active_sheet));
+        if self.active_sheet == LobbySheet::Options {
+            // C4GUI::ListBox adds three-pixel margins inside the Tabular
+            // sheet before its ScrollWindow and scrollbar.
+            layout.roster_client.x += LIST_BOX_MARGIN;
+            layout.roster_client.y += LIST_BOX_MARGIN;
+            layout.roster_client.w = (layout.roster_client.w - 2 * LIST_BOX_MARGIN).max(0);
+            layout.roster_client.h = (layout.roster_client.h - 2 * LIST_BOX_MARGIN).max(0);
+            layout.roster_scrollbar.x -= LIST_BOX_MARGIN;
+            layout.roster_scrollbar.y += LIST_BOX_MARGIN;
+            layout.roster_scrollbar.h =
+                (layout.roster_scrollbar.h - 2 * LIST_BOX_MARGIN).max(0);
+        }
         layout
     }
 
@@ -1658,6 +1921,9 @@ impl GameLobby {
     ) -> LobbyRosterLayout {
         if self.active_sheet == LobbySheet::Resources {
             return self.resource_list_layout(layout, text_line_height);
+        }
+        if self.active_sheet == LobbySheet::Options {
+            return self.option_list_layout(layout, text_line_height);
         }
         if !self.active_sheet.is_roster() {
             return LobbyRosterLayout {
@@ -1742,6 +2008,83 @@ impl GameLobby {
                     },
                     add_player: None,
                     team: None,
+                    option_value: None,
+                    rank: None,
+                    collapsed: false,
+                }
+            })
+            .collect();
+        LobbyRosterLayout {
+            rows,
+            content_height,
+            max_scroll,
+            collapsed: false,
+        }
+    }
+
+    fn option_list_layout(
+        &mut self,
+        layout: &LobbyLayout,
+        text_line_height: i32,
+    ) -> LobbyRosterLayout {
+        // OptionDropdown's non-tabular constructor uses a caption line, the
+        // TextFont+4 ComboBox height and one-pixel margins around each part.
+        let caption_height = text_line_height.max(1);
+        let combo_height = caption_height.saturating_add(4);
+        let row_height = caption_height
+            .saturating_add(combo_height)
+            .saturating_add(4);
+        let row_count = i32::try_from(self.option_rows.len()).unwrap_or(i32::MAX);
+        let row_pitch = row_height.saturating_add(DEFAULT_ROW_SPACING);
+        let content_height = row_count
+            .saturating_mul(row_height)
+            .saturating_add(
+                row_count
+                    .saturating_sub(1)
+                    .max(0)
+                    .saturating_mul(DEFAULT_ROW_SPACING),
+            );
+        let max_scroll = (content_height - layout.roster_client.h).max(0);
+        self.option_scroll = self.option_scroll.clamp(0, max_scroll);
+        if max_scroll != self.option_max_scroll {
+            self.option_scroll_pin = scroll_to_pin(
+                self.option_scroll,
+                max_scroll,
+                scrollbar_max_pin(layout.roster_scrollbar),
+            );
+            self.option_max_scroll = max_scroll;
+        }
+        let rows = self
+            .option_rows
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let y = i32::try_from(index)
+                    .unwrap_or(i32::MAX)
+                    .saturating_mul(row_pitch);
+                let rect = IntRect {
+                    x: layout.roster_client.x,
+                    y: layout.roster_client.y + y - self.option_scroll,
+                    w: layout.roster_client.w,
+                    h: row_height,
+                };
+                LobbyRosterRowLayout {
+                    index,
+                    rect,
+                    icon: IntRect {
+                        x: rect.x,
+                        y: rect.y,
+                        w: 0,
+                        h: 0,
+                    },
+                    add_player: None,
+                    team: None,
+                    option_value: Some(IntRect {
+                        x: rect.x + 6,
+                        y: rect.y + caption_height + 3,
+                        w: (rect.w - 7).max(0),
+                        h: combo_height,
+                    }),
                     rank: None,
                     collapsed: false,
                 }
@@ -1912,6 +2255,7 @@ impl GameLobby {
                 icon,
                 add_player,
                 team,
+                option_value: None,
                 rank,
                 collapsed,
             });
@@ -2066,6 +2410,36 @@ impl GameLobby {
                             player_id: player.id,
                         });
                     }
+                }
+                self.append_game_option_focus_clear(previous_focus, &mut actions);
+                return actions;
+            }
+            HitTarget::OptionRow(index) | HitTarget::OptionValue(index) => {
+                let Some(kind) = self.option_rows.get(index).map(|row| row.kind) else {
+                    return Vec::new();
+                };
+                let control = LobbyControl::Option(kind);
+                let changed = self.focus != control;
+                self.change_focus(control, false);
+                self.select_option(Some(kind), true, layout, roster);
+                let mut actions = if hit == HitTarget::OptionValue(index) {
+                    self.option_selection_request_by_index(index, roster)
+                } else {
+                    Vec::new()
+                };
+                if changed {
+                    actions.insert(0, LobbyAction::FocusChanged(control));
+                }
+                self.append_game_option_focus_clear(previous_focus, &mut actions);
+                return actions;
+            }
+            HitTarget::RightListInert if self.active_sheet == LobbySheet::Options => {
+                let changed = self.focus != LobbyControl::OptionsList;
+                self.change_focus(LobbyControl::OptionsList, false);
+                self.select_option(None, true, layout, roster);
+                let mut actions = Vec::new();
+                if changed {
+                    actions.push(LobbyAction::FocusChanged(LobbyControl::OptionsList));
                 }
                 self.append_game_option_focus_clear(previous_focus, &mut actions);
                 return actions;
@@ -2469,6 +2843,10 @@ impl GameLobby {
                 self.resource_scroll = (self.resource_scroll - delta).clamp(0, roster.max_scroll);
                 self.resource_scroll_pin =
                     scroll_to_pin(self.resource_scroll, roster.max_scroll, max_pin);
+            } else if self.active_sheet == LobbySheet::Options {
+                self.option_scroll = (self.option_scroll - delta).clamp(0, roster.max_scroll);
+                self.option_scroll_pin =
+                    scroll_to_pin(self.option_scroll, roster.max_scroll, max_pin);
             } else if self.active_sheet.is_roster() {
                 self.roster_scroll = (self.roster_scroll - delta).clamp(0, roster.max_scroll);
                 self.roster_scroll_pin =
@@ -2534,6 +2912,22 @@ impl GameLobby {
                 KeyCode::Down => return self.move_selection(1, layout, roster),
                 _ => {}
             },
+            LobbyControl::OptionsList => match key {
+                KeyCode::Up => return self.move_option_selection(-1, layout, roster),
+                KeyCode::Down => return self.move_option_selection(1, layout, roster),
+                KeyCode::Space => return Vec::new(),
+                _ => {}
+            },
+            LobbyControl::Option(option) if matches!(key, KeyCode::Down | KeyCode::Space) => {
+                let actions = self.option_selection_request(option, roster);
+                if !actions.is_empty() || key == KeyCode::Space {
+                    return actions;
+                }
+                return self.move_option_selection(1, layout, roster);
+            }
+            LobbyControl::Option(_) if key == KeyCode::Up => {
+                return self.move_option_selection(-1, layout, roster)
+            }
             LobbyControl::Ready if key == KeyCode::Space => return self.try_toggle_ready(now),
             LobbyControl::GameOption(_) => {
                 return vec![LobbyAction::GameOptions(LobbyGameOptionInput::KeyDown {
@@ -2794,6 +3188,21 @@ impl GameLobby {
                 },
             )];
         }
+        if self.focus == LobbyControl::OptionsList && vertical != 0 {
+            return self.move_option_selection(vertical.signum() as i32, layout, roster);
+        }
+        if let LobbyControl::Option(option) = self.focus {
+            if vertical > 0 {
+                let actions = self.option_selection_request(option, roster);
+                if !actions.is_empty() {
+                    return actions;
+                }
+                return self.move_option_selection(1, layout, roster);
+            }
+            if vertical < 0 {
+                return self.move_option_selection(-1, layout, roster);
+            }
+        }
         if self.active_sheet.is_roster() && self.focus == LobbyControl::Roster && vertical != 0 {
             return self.move_selection(vertical.signum() as i32, layout, roster);
         }
@@ -2958,6 +3367,15 @@ impl GameLobby {
                 }
             }
         }
+        if self.active_sheet == LobbySheet::Options {
+            order.push(LobbyControl::OptionsList);
+            if let Some(kind) = self
+                .selected_option
+                .filter(|kind| self.option_rows.iter().any(|row| row.kind == *kind))
+            {
+                order.push(LobbyControl::Option(kind));
+            }
+        }
         order.push(LobbyControl::Exit);
         order.extend(
             self.role
@@ -2998,6 +3416,16 @@ impl GameLobby {
             self.selected_roster_id = self.rows.first().map(LobbyRosterRow::id);
             selected_on_focus = self.selected_roster_id.clone();
         }
+        if control == LobbyControl::OptionsList
+            && self.selected_option.is_none()
+            && !self.option_rows.is_empty()
+        {
+            // ListBox::OnGetFocus selects and scrolls the first item only for
+            // keyboard focus. Pointer selection is handled by MouseInput.
+            self.selected_option = self.option_rows.first().map(|row| row.kind);
+            self.option_scroll = 0;
+            self.option_scroll_pin = 0;
+        }
         let mut actions = vec![LobbyAction::FocusChanged(control)];
         if let Some(selected) = selected_on_focus {
             actions.push(LobbyAction::RosterSelectionChanged(Some(selected)));
@@ -3032,6 +3460,75 @@ impl GameLobby {
             && !matches!(self.focus, LobbyControl::GameOption(_))
         {
             actions.push(LobbyAction::GameOptions(LobbyGameOptionInput::ClearFocus));
+        }
+    }
+
+    fn select_option(
+        &mut self,
+        selected: Option<LobbyOptionKind>,
+        by_user: bool,
+        layout: &LobbyLayout,
+        roster: &LobbyRosterLayout,
+    ) {
+        if self.active_sheet != LobbySheet::Options || self.selected_option == selected {
+            return;
+        }
+        self.selected_option = selected;
+        if by_user && selected.is_some() {
+            self.sounds.push(LobbySound::Command);
+        }
+        let Some(index) = selected.and_then(|kind| {
+            self.option_rows
+                .iter()
+                .position(|row| row.kind == kind)
+        }) else {
+            return;
+        };
+        if let Some(row) = roster.rows.iter().find(|row| row.index == index) {
+            let content_top = row.rect.y - layout.roster_client.y + self.option_scroll;
+            if content_top < self.option_scroll {
+                self.option_scroll = content_top;
+            } else if content_top + row.rect.h
+                > self.option_scroll + layout.roster_client.h
+            {
+                self.option_scroll = content_top + row.rect.h - layout.roster_client.h;
+            }
+            self.option_scroll = self.option_scroll.clamp(0, roster.max_scroll);
+            self.option_scroll_pin = scroll_to_pin(
+                self.option_scroll,
+                roster.max_scroll,
+                scrollbar_max_pin(layout.roster_scrollbar),
+            );
+        }
+    }
+
+    fn move_option_selection(
+        &mut self,
+        direction: i32,
+        layout: &LobbyLayout,
+        roster: &LobbyRosterLayout,
+    ) -> Vec<LobbyAction> {
+        if self.active_sheet != LobbySheet::Options || self.option_rows.is_empty() {
+            return Vec::new();
+        }
+        let current = self.selected_option.and_then(|kind| {
+            self.option_rows
+                .iter()
+                .position(|row| row.kind == kind)
+        });
+        let next = match current {
+            Some(current) if direction < 0 => current.saturating_sub(1),
+            Some(current) => (current + 1).min(self.option_rows.len() - 1),
+            None if direction < 0 => self.option_rows.len() - 1,
+            None => 0,
+        };
+        let kind = self.option_rows[next].kind;
+        self.select_option(Some(kind), true, layout, roster);
+        if matches!(self.focus, LobbyControl::Option(_)) {
+            self.change_focus(LobbyControl::OptionsList, false);
+            vec![LobbyAction::FocusChanged(LobbyControl::OptionsList)]
+        } else {
+            Vec::new()
         }
     }
 
@@ -3137,6 +3634,48 @@ impl GameLobby {
             },
             _ => Vec::new(),
         }
+    }
+
+    fn option_selection_request_by_index(
+        &self,
+        index: usize,
+        layout: &LobbyRosterLayout,
+    ) -> Vec<LobbyAction> {
+        let Some(row) = self.option_rows.get(index) else {
+            return Vec::new();
+        };
+        self.option_selection_request(row.kind, layout)
+    }
+
+    fn option_selection_request(
+        &self,
+        option: LobbyOptionKind,
+        layout: &LobbyRosterLayout,
+    ) -> Vec<LobbyAction> {
+        if self.active_sheet != LobbySheet::Options {
+            return Vec::new();
+        }
+        let Some((index, row)) = self
+            .option_rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.kind == option && row.editable && !row.choices.is_empty())
+        else {
+            return Vec::new();
+        };
+        let Some(combo) = layout
+            .rows
+            .iter()
+            .find(|row| row.index == index)
+            .and_then(|row| row.option_value)
+        else {
+            return Vec::new();
+        };
+        vec![LobbyAction::OptionSelectionRequested {
+            option: row.kind,
+            anchor: GuiPoint::new(combo.x as f32, (combo.y + combo.h) as f32),
+            minimum_width: combo.w,
+        }]
     }
 
     fn activate_control(&mut self, control: LobbyControl) -> Vec<LobbyAction> {
@@ -3254,6 +3793,9 @@ impl GameLobby {
         if self.active_sheet == LobbySheet::Resources {
             self.resource_scroll_pin = pin;
             self.resource_scroll = scroll;
+        } else if self.active_sheet == LobbySheet::Options {
+            self.option_scroll_pin = pin;
+            self.option_scroll = scroll;
         } else if self.active_sheet.is_roster() {
             self.roster_scroll_pin = pin;
             self.roster_scroll = scroll;
@@ -3297,6 +3839,10 @@ impl GameLobby {
                     self.resource_scroll_pin = (self.resource_scroll_pin - 1).max(0);
                     self.resource_scroll =
                         pin_to_scroll(self.resource_scroll_pin, roster_max_scroll, max_pin);
+                } else if self.active_sheet == LobbySheet::Options {
+                    self.option_scroll_pin = (self.option_scroll_pin - 1).max(0);
+                    self.option_scroll =
+                        pin_to_scroll(self.option_scroll_pin, roster_max_scroll, max_pin);
                 } else if self.active_sheet.is_roster() {
                     self.roster_scroll_pin = (self.roster_scroll_pin - 1).max(0);
                     self.roster_scroll =
@@ -3309,6 +3855,10 @@ impl GameLobby {
                     self.resource_scroll_pin = (self.resource_scroll_pin + 1).min(max_pin);
                     self.resource_scroll =
                         pin_to_scroll(self.resource_scroll_pin, roster_max_scroll, max_pin);
+                } else if self.active_sheet == LobbySheet::Options {
+                    self.option_scroll_pin = (self.option_scroll_pin + 1).min(max_pin);
+                    self.option_scroll =
+                        pin_to_scroll(self.option_scroll_pin, roster_max_scroll, max_pin);
                 } else if self.active_sheet.is_roster() {
                     self.roster_scroll_pin = (self.roster_scroll_pin + 1).min(max_pin);
                     self.roster_scroll =
@@ -3322,8 +3872,9 @@ impl GameLobby {
     const fn right_list_scroll_pin(&self) -> i32 {
         match self.active_sheet {
             LobbySheet::Resources => self.resource_scroll_pin,
+            LobbySheet::Options => self.option_scroll_pin,
             LobbySheet::Players | LobbySheet::Teams => self.roster_scroll_pin,
-            LobbySheet::Options | LobbySheet::Scenario => 0,
+            LobbySheet::Scenario => 0,
         }
     }
 
@@ -3375,6 +3926,26 @@ impl GameLobby {
                 }
                 if contains(layout.roster_client, point) && contains(row.rect, point) {
                     return HitTarget::RosterRow(row.index);
+                }
+            }
+        }
+        if self.active_sheet == LobbySheet::Options {
+            for row_layout in &roster.rows {
+                if !contains(layout.roster_client, point) {
+                    break;
+                }
+                let Some(row) = self.option_rows.get(row_layout.index) else {
+                    continue;
+                };
+                if row.editable
+                    && row_layout
+                        .option_value
+                        .is_some_and(|rect| contains(rect, point))
+                {
+                    return HitTarget::OptionValue(row_layout.index);
+                }
+                if contains(row_layout.rect, point) {
+                    return HitTarget::OptionRow(row_layout.index);
                 }
             }
         }
@@ -3467,6 +4038,9 @@ impl GameLobby {
                     },
                     _ => return None,
                 }
+            }
+            HitTarget::OptionRow(index) | HitTarget::OptionValue(index) => {
+                self.option_rows.get(index).map(|row| row.tooltip.clone())?
             }
             _ => return None,
         };
@@ -3685,7 +4259,10 @@ impl GameLobby {
             LobbySheet::Resources => {
                 self.draw_resource_rows(surface, &layout, &roster, resources, gamma)
             }
-            LobbySheet::Options | LobbySheet::Scenario => {}
+            LobbySheet::Options => {
+                self.draw_option_rows(surface, &layout, &roster, resources, active, gamma)
+            }
+            LobbySheet::Scenario => {}
         }
         draw_scrollbar(
             surface,
@@ -3957,6 +4534,119 @@ impl GameLobby {
                     gamma,
                     layout.roster_client,
                 );
+            }
+        }
+    }
+
+    fn draw_option_rows(
+        &self,
+        surface: &mut Surface,
+        layout: &LobbyLayout,
+        option_layout: &LobbyRosterLayout,
+        resources: &LobbyResources<'_>,
+        active: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        for row_layout in &option_layout.rows {
+            if !intersects(row_layout.rect, layout.roster_client) {
+                continue;
+            }
+            let Some(row) = self.option_rows.get(row_layout.index) else {
+                continue;
+            };
+            if self.selected_option == Some(row.kind) {
+                let selected = intersection(row_layout.rect, layout.roster_client);
+                draw_engine_box(
+                    surface,
+                    selected.x,
+                    selected.y,
+                    selected.x + selected.w - 1,
+                    selected.y + selected.h - 1,
+                    if active && self.focus == LobbyControl::OptionsList {
+                        LIST_SELECTION
+                    } else {
+                        LIST_INACTIVE_SELECTION
+                    },
+                    gamma,
+                );
+            }
+            let caption = format!("{}:", crate::c4_presentation_text(&row.caption));
+            draw_clipped_text(
+                surface,
+                &resources.fonts.text,
+                row_layout.rect.x + 1,
+                row_layout.rect.y + 1,
+                &caption,
+                COLOR_WHITE,
+                TextAlign::Left,
+                gamma,
+                layout.roster_client,
+            );
+            let Some(combo) = row_layout.option_value else {
+                continue;
+            };
+            let arrow_x = combo.x + combo.w - CONTEXT_HEIGHT as i32 - 1;
+            let open = self.open_option_combo == Some(row.kind);
+            if row.editable {
+                with_surface_clip(surface, layout.roster_client, |surface| {
+                    draw_engine_box(
+                        surface,
+                        combo.x,
+                        combo.y,
+                        combo.x + combo.w - 1,
+                        combo.y + combo.h - 1,
+                        STANDARD_BACKGROUND_COLOR,
+                        gamma,
+                    );
+                    draw_3d_frame(surface, combo, gamma);
+                });
+                draw_source_clipped(
+                    surface,
+                    resources.context,
+                    (
+                        u32::from(open) * CONTEXT_HEIGHT,
+                        0,
+                        CONTEXT_HEIGHT,
+                        CONTEXT_HEIGHT,
+                    ),
+                    IntRect {
+                        x: arrow_x,
+                        y: combo.y + (combo.h - CONTEXT_HEIGHT as i32) / 2,
+                        w: CONTEXT_HEIGHT as i32,
+                        h: CONTEXT_HEIGHT as i32,
+                    },
+                    layout.roster_client,
+                    gamma,
+                );
+            }
+            draw_clipped_text(
+                surface,
+                &resources.fonts.text,
+                combo.x + CONTEXT_HEIGHT as i32 + 2,
+                combo.y + (combo.h - resources.fonts.text.line_height) / 2,
+                &crate::c4_presentation_text(&row.value),
+                COLOR_WHITE,
+                TextAlign::Left,
+                gamma,
+                intersection(
+                    layout.roster_client,
+                    IntRect {
+                        x: combo.x,
+                        y: combo.y,
+                        w: (arrow_x - combo.x).max(0),
+                        h: combo.h,
+                    },
+                ),
+            );
+            if active
+                && row.editable
+                && (open
+                    || self.hovered == HitTarget::OptionValue(row_layout.index)
+                    || self.focus == LobbyControl::Option(row.kind))
+            {
+                with_surface_clip(surface, layout.roster_client, |surface| {
+                    draw_highlight(surface, combo, &resources.button_highlight, gamma);
+                });
             }
         }
     }
@@ -4434,6 +5124,36 @@ fn draw_clipped_text_mode(
             (bottom - top) as u32,
         ));
         font.draw_with_gamma(surface, x, y, text, color, align, markup, gamma);
+    }
+    if let Some(existing) = previous {
+        surface.set_clip(existing);
+    } else {
+        surface.clear_clip();
+    }
+}
+
+fn with_surface_clip(surface: &mut Surface, clip: IntRect, draw: impl FnOnce(&mut Surface)) {
+    let previous = surface.clip();
+    let mut left = i64::from(clip.x).max(0);
+    let mut top = i64::from(clip.y).max(0);
+    let mut right = (i64::from(clip.x) + i64::from(clip.w.max(0)))
+        .min(i64::from(surface.width().min(i32::MAX as u32)));
+    let mut bottom = (i64::from(clip.y) + i64::from(clip.h.max(0)))
+        .min(i64::from(surface.height().min(i32::MAX as u32)));
+    if let Some(existing) = previous {
+        left = left.max(i64::from(existing.x));
+        top = top.max(i64::from(existing.y));
+        right = right.min(i64::from(existing.x) + i64::from(existing.width));
+        bottom = bottom.min(i64::from(existing.y) + i64::from(existing.height));
+    }
+    if left < right && top < bottom {
+        surface.set_clip(lc_graphics::Rect::new(
+            left as i32,
+            top as i32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ));
+        draw(surface);
     }
     if let Some(existing) = previous {
         surface.set_clip(existing);
@@ -5480,6 +6200,276 @@ mod tests {
         assert!(!lobby.set_resource_progress(77, 10));
         assert!(lobby.remove_resource_row(9));
         assert!(!lobby.remove_resource_row(9));
+    }
+
+    #[test]
+    fn l085_core_option_rows_follow_host_client_gates_and_choices() {
+        let mut labels = LobbyOptionLabels::default();
+        labels.select_template = "Choose %s".into();
+        let host = core_lobby_option_rows(LobbyRole::Host, &labels, 1, 7, true);
+        assert_eq!(
+            host.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            [
+                LobbyOptionKind::ControlMode,
+                LobbyOptionKind::ControlRate,
+                LobbyOptionKind::RuntimeJoin,
+            ]
+        );
+        assert_eq!(host[0].value, labels.control_mode_central);
+        assert!(!host[0].editable);
+        assert!(host[0].choices.is_empty());
+        assert_eq!(host[1].value, "7");
+        assert!(host[1].editable);
+        assert_eq!(
+            host[1]
+                .choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            (1..10).collect::<Vec<_>>()
+        );
+        assert_eq!(host[1].choices[3].tooltip, "Choose 4");
+        assert_eq!(host[2].value, labels.runtime_join_free);
+        assert!(host[2].editable);
+        assert_eq!(
+            host[2]
+                .choices
+                .iter()
+                .map(|choice| (choice.id, choice.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, labels.runtime_join_barred.as_str()),
+                (1, labels.runtime_join_free.as_str()),
+            ]
+        );
+
+        let client = core_lobby_option_rows(LobbyRole::Client, &labels, 2, 20, false);
+        assert_eq!(client.len(), 2);
+        assert_eq!(client[0].value, labels.control_mode_async);
+        assert!(client.iter().all(|row| !row.editable));
+        assert!(!client
+            .iter()
+            .any(|row| row.kind == LobbyOptionKind::RuntimeJoin));
+        assert_eq!(client[1].value, "20");
+    }
+
+    #[test]
+    fn l085_options_sheet_uses_stacked_scrollable_layout() {
+        let fonts = endeavour_font_set();
+        let mut empty = lobby(LobbyRole::Host, vec![]);
+        empty.set_active_sheet(LobbySheet::Options);
+        let empty_layout = empty.layout(1280, 720, &fonts);
+        let empty_options = empty.roster_layout(&empty_layout, fonts.text.line_height);
+        assert_eq!(empty_options.content_height, 0);
+        assert_eq!(empty_options.max_scroll, 0);
+        assert!(empty.focus_order().contains(&LobbyControl::OptionsList));
+        empty.focus = LobbyControl::ScenarioTab;
+        assert_eq!(
+            empty.focus_next(false),
+            [LobbyAction::FocusChanged(LobbyControl::OptionsList)]
+        );
+        assert_eq!(empty.selected_option, None);
+
+        let mut lobby = lobby(LobbyRole::Host, vec![]);
+        lobby.set_option_rows(core_lobby_option_rows(
+            LobbyRole::Host,
+            &LobbyOptionLabels::default(),
+            0,
+            3,
+            false,
+        ));
+        lobby.set_active_sheet(LobbySheet::Options);
+        assert!(lobby.option_sheet_active());
+
+        let line_height = fonts.text.line_height;
+        let row_height = 2 * line_height + 8;
+        let mut layout = lobby.layout(1280, 720, &fonts);
+        assert_eq!(layout.roster_client.x, layout.roster.x + LIST_BOX_MARGIN);
+        assert_eq!(layout.roster_client.y, layout.roster.y + LIST_BOX_MARGIN);
+        assert_eq!(
+            layout.roster_client.w + layout.roster_scrollbar.w,
+            layout.roster.w - 2 * LIST_BOX_MARGIN
+        );
+        assert_eq!(
+            layout.roster_scrollbar.x + layout.roster_scrollbar.w,
+            layout.roster.x + layout.roster.w - LIST_BOX_MARGIN
+        );
+        layout.roster_client.h = 2 * row_height;
+        let options = lobby.roster_layout(&layout, line_height);
+        assert_eq!(options.content_height, 3 * row_height + 2);
+        assert_eq!(options.max_scroll, row_height + 2);
+        assert_eq!(options.rows[0].rect.h, row_height);
+        assert_eq!(
+            options.rows[1].rect.y,
+            options.rows[0].rect.y + row_height + 1
+        );
+        let combo = options.rows[0].option_value.expect("stacked ComboBox");
+        assert_eq!(combo.x, options.rows[0].rect.x + 6);
+        assert_eq!(combo.y, options.rows[0].rect.y + line_height + 3);
+        assert_eq!(combo.w, options.rows[0].rect.w - 7);
+        assert_eq!(combo.h, line_height + 4);
+        assert!(options.rows.iter().all(|row| {
+            row.icon.w == 0
+                && row.add_player.is_none()
+                && row.team.is_none()
+                && row.option_value.is_some()
+                && row.rank.is_none()
+        }));
+
+        lobby.selected_option = Some(LobbyOptionKind::ControlRate);
+        lobby.focus = LobbyControl::OptionsList;
+        assert!(lobby
+            .move_option_selection(1, &layout, &options)
+            .is_empty());
+        assert_eq!(
+            lobby.selected_option,
+            Some(LobbyOptionKind::RuntimeJoin)
+        );
+        assert_eq!(lobby.option_scroll(), options.max_scroll);
+        lobby.set_option_scroll(0);
+        let options = lobby.roster_layout(&layout, line_height);
+
+        let point = GuiPoint::new(
+            (layout.roster_client.x + 1) as f32,
+            (layout.roster_client.y + 1) as f32,
+        );
+        assert!(lobby.wheel(point, -7, &layout, &options));
+        assert_eq!(lobby.option_scroll(), 7);
+        assert_eq!(lobby.resource_scroll(), 0);
+        assert_eq!(lobby.roster_scroll(), 0);
+    }
+
+    #[test]
+    fn l085_option_combo_pointer_keyboard_gamepad_and_open_presentation() {
+        let fonts = endeavour_font_set();
+        let labels = LobbyOptionLabels::default();
+        let mut lobby = lobby(LobbyRole::Host, vec![]);
+        lobby.set_option_rows(core_lobby_option_rows(
+            LobbyRole::Host,
+            &labels,
+            0,
+            3,
+            false,
+        ));
+        lobby.set_active_sheet(LobbySheet::Options);
+        let layout = lobby.layout(1280, 720, &fonts);
+        let options = lobby.roster_layout(&layout, fonts.text.line_height);
+        let order = lobby.focus_order();
+        assert!(order.contains(&LobbyControl::OptionsList));
+        assert!(!order
+            .iter()
+            .any(|control| matches!(control, LobbyControl::Option(_))));
+        lobby.focus = LobbyControl::ScenarioTab;
+        assert_eq!(
+            lobby.focus_next(false),
+            [LobbyAction::FocusChanged(LobbyControl::OptionsList)]
+        );
+        assert_eq!(lobby.selected_option, Some(LobbyOptionKind::ControlMode));
+        let order = lobby.focus_order();
+        assert!(order.contains(&LobbyControl::OptionsList));
+        assert!(order.contains(&LobbyControl::Option(LobbyOptionKind::ControlMode)));
+        assert!(!order.contains(&LobbyControl::Option(LobbyOptionKind::ControlRate)));
+        assert!(!order.contains(&LobbyControl::Option(LobbyOptionKind::RuntimeJoin)));
+        lobby.focus = LobbyControl::Option(LobbyOptionKind::ControlMode);
+        assert_eq!(
+            lobby.key_down(KeyCode::Down, false, &layout, &options, Instant::now()),
+            [LobbyAction::FocusChanged(LobbyControl::OptionsList)]
+        );
+        assert_eq!(lobby.selected_option, Some(LobbyOptionKind::ControlRate));
+
+        let mode_combo = options.rows[0].option_value.expect("mode value");
+        let mode_point = GuiPoint::new((mode_combo.x + 1) as f32, (mode_combo.y + 1) as f32);
+        assert_eq!(
+            lobby.pointer_down(mode_point, &layout, &options),
+            [LobbyAction::FocusChanged(LobbyControl::Option(
+                LobbyOptionKind::ControlMode
+            ))]
+        );
+        assert_eq!(lobby.selected_option, Some(LobbyOptionKind::ControlMode));
+
+        let rate_combo = options.rows[1].option_value.expect("rate combo");
+        let expected = LobbyAction::OptionSelectionRequested {
+            option: LobbyOptionKind::ControlRate,
+            anchor: GuiPoint::new(rate_combo.x as f32, (rate_combo.y + rate_combo.h) as f32),
+            minimum_width: rate_combo.w,
+        };
+        let rate_point = GuiPoint::new((rate_combo.x + 1) as f32, (rate_combo.y + 1) as f32);
+        assert_eq!(
+            lobby.pointer_down(rate_point, &layout, &options),
+            [
+                LobbyAction::FocusChanged(LobbyControl::Option(
+                    LobbyOptionKind::ControlRate
+                )),
+                expected.clone(),
+            ]
+        );
+        // ComboBox itself declines focus-on-click, but the parent Option
+        // control and ListBox selection retain focus for the active row.
+        assert_eq!(
+            lobby.focus(),
+            LobbyControl::Option(LobbyOptionKind::ControlRate)
+        );
+        assert_eq!(lobby.selected_option, Some(LobbyOptionKind::ControlRate));
+        lobby.change_focus(LobbyControl::ChatInput, false);
+        assert_eq!(lobby.selected_option, Some(LobbyOptionKind::ControlRate));
+
+        let order = lobby.focus_order();
+        assert!(order.contains(&LobbyControl::OptionsList));
+        assert!(!order.contains(&LobbyControl::Option(LobbyOptionKind::ControlMode)));
+        assert!(order.contains(&LobbyControl::Option(LobbyOptionKind::ControlRate)));
+        assert!(!order.contains(&LobbyControl::Option(LobbyOptionKind::RuntimeJoin)));
+        lobby.focus = LobbyControl::Option(LobbyOptionKind::ControlRate);
+        assert_eq!(
+            lobby.key_down(KeyCode::Down, false, &layout, &options, Instant::now()),
+            [expected.clone()]
+        );
+        assert_eq!(
+            lobby.gamepad_low_down(Instant::now(), &layout, &options),
+            [expected.clone()]
+        );
+        assert_eq!(lobby.gamepad_direction(0, 1, &layout, &options), [expected]);
+
+        lobby.set_open_option_combo(Some(LobbyOptionKind::ControlRate));
+        assert_eq!(
+            lobby.open_option_combo(),
+            Some(LobbyOptionKind::ControlRate)
+        );
+        lobby.set_open_option_combo(Some(LobbyOptionKind::ControlMode));
+        assert_eq!(lobby.open_option_combo(), None);
+        lobby.set_open_option_combo(Some(LobbyOptionKind::RuntimeJoin));
+        lobby.set_active_sheet(LobbySheet::Players);
+        assert_eq!(lobby.open_option_combo(), None);
+
+        lobby.set_active_sheet(LobbySheet::Options);
+        let layout = lobby.layout(1280, 720, &fonts);
+        let options = lobby.roster_layout(&layout, fonts.text.line_height);
+        let caption_point = GuiPoint::new(
+            (options.rows[2].rect.x + 1) as f32,
+            (options.rows[2].rect.y + 1) as f32,
+        );
+        assert_eq!(
+            lobby.pointer_down(caption_point, &layout, &options),
+            [LobbyAction::FocusChanged(LobbyControl::Option(
+                LobbyOptionKind::RuntimeJoin
+            ))]
+        );
+        assert_eq!(lobby.selected_option, Some(LobbyOptionKind::RuntimeJoin));
+        let _ = lobby.pointer_move(caption_point, &layout, &options);
+        assert_eq!(
+            lobby
+                .tooltip_state_at(lobby.hover_since + TOOLTIP_DELAY)
+                .map(|tooltip| tooltip.text),
+            Some(labels.runtime_join_tooltip)
+        );
+        let blank_point = GuiPoint::new(
+            (layout.roster_client.x + 1) as f32,
+            (layout.roster_client.y + layout.roster_client.h - 1) as f32,
+        );
+        assert_eq!(
+            lobby.pointer_down(blank_point, &layout, &options),
+            [LobbyAction::FocusChanged(LobbyControl::OptionsList)]
+        );
+        assert_eq!(lobby.selected_option, None);
     }
 
     #[test]
