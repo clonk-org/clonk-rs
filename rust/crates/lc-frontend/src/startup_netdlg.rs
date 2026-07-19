@@ -31,6 +31,7 @@ const CLR_YELLOW: [u8; 4] = [0xff, 0xff, 0x00, 0xff];
 const CLR_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 const CLR_DISABLED: [u8; 4] = [0xaf, 0xaf, 0xaf, 0xff];
 const CLR_HYPERLINK: [u8; 4] = [0x80, 0x80, 0xff, 0xff];
+const CLR_ERROR: [u8; 4] = [0xff, 0x60, 0x60, 0xff];
 /// ListBox background / C4GUI_EditBGColor.
 const CLR_DARK_BG: u32 = 0x7f00_0000;
 const CLR_EDIT_SELECTION: u32 = 0x7f7f_7f00;
@@ -576,6 +577,158 @@ pub enum NetDlgMode {
     Chat,
 }
 
+/// Which half of the classic `C4ChatControl` is currently visible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetDlgChatPage {
+    #[default]
+    Login,
+    Chats,
+}
+
+/// Editable field on the IRC login page. The server is supplied by config,
+/// just as in `C4ChatControl::OnConnectBtn`, and is therefore not an edit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetDlgChatLoginField {
+    #[default]
+    Nick,
+    Password,
+    RealName,
+    Channel,
+}
+
+impl NetDlgChatLoginField {
+    const ALL: [Self; 4] = [Self::Nick, Self::Password, Self::RealName, Self::Channel];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Nick => 0,
+            Self::Password => 1,
+            Self::RealName => 2,
+            Self::Channel => 3,
+        }
+    }
+}
+
+/// Values submitted by the classic IRC login form. Passwords remain
+/// transient; the application decides which other fields are persisted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgChatLogin {
+    pub server: String,
+    pub nick: String,
+    pub password: String,
+    pub real_name: String,
+    pub channel: String,
+}
+
+impl Default for NetDlgChatLogin {
+    fn default() -> Self {
+        Self {
+            server: "irc.euirc.net".to_string(),
+            nick: String::new(),
+            password: String::new(),
+            real_name: String::new(),
+            channel: "#clonken,#legacyclonk".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetDlgChatConnectionState {
+    #[default]
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgChatMessageKind {
+    Server,
+    Status,
+    Message,
+    Notice,
+    Action,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgChatMessage {
+    pub kind: NetDlgChatMessageKind,
+    pub source: String,
+    pub target: String,
+    pub text: String,
+    pub is_channel: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgChatUser {
+    pub prefix: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgChatChannel {
+    pub name: String,
+    pub topic: String,
+    pub users: Vec<NetDlgChatUser>,
+}
+
+/// Dependency-free projection of `lc_network::irc::IrcClientSnapshot`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgChatSnapshot {
+    pub connection_state: NetDlgChatConnectionState,
+    pub server: String,
+    pub nick: String,
+    pub channels: Vec<NetDlgChatChannel>,
+    pub messages: Vec<NetDlgChatMessage>,
+    pub unread_index: usize,
+    pub last_error: Option<String>,
+}
+
+impl Default for NetDlgChatSnapshot {
+    fn default() -> Self {
+        Self {
+            connection_state: NetDlgChatConnectionState::Disconnected,
+            server: NetDlgChatLogin::default().server,
+            nick: String::new(),
+            channels: Vec::new(),
+            messages: Vec::new(),
+            unread_index: 0,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDlgChatSheetKind {
+    Server,
+    Channel,
+    Query,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgChatSheet {
+    pub kind: NetDlgChatSheetKind,
+    pub title: String,
+    pub ident: String,
+    pub topic: String,
+    pub users: Vec<NetDlgChatUser>,
+    pub lines: Vec<String>,
+}
+
+/// Commands parsed from the classic slash-command language. These mirror the
+/// network crate's transport commands while keeping `lc-frontend` independent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetDlgChatCommand {
+    Quit { reason: String },
+    Join { channel: String },
+    Part { channel: String },
+    Message { target: String, text: String },
+    Notice { target: String, text: String },
+    Action { target: String, text: String },
+    Raw(String),
+    ChangeNick { nick: String },
+    OpenQuery { nick: String },
+}
+
 /// Focusable controls and callback buttons in C++ traversal order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetDlgControl {
@@ -597,6 +750,7 @@ pub enum NetDlgControl {
 pub enum NetDlgSound {
     ArrowHit,
     Command,
+    Error,
 }
 
 /// Cursor operations registered by `C4GUI::Edit` for every modifier state.
@@ -674,6 +828,13 @@ pub enum NetDlgAction {
     },
     OpenUrl(String),
     GuiSound(NetDlgSound),
+    ChatConnect(NetDlgChatLogin),
+    ChatCommand(NetDlgChatCommand),
+    ChatDisconnect,
+    ChatSelectSheet {
+        kind: NetDlgChatSheetKind,
+        ident: String,
+    },
 }
 
 /// Capture metadata for edit-only routes that otherwise fall through to the
@@ -1011,6 +1172,20 @@ pub struct NetDlgController {
     config: NetDlgConfig,
     mode: NetDlgMode,
     join_edit: NetDlgEditState,
+    chat_server: String,
+    chat_login_edits: [NetDlgEditState; 4],
+    chat_login_field: NetDlgChatLoginField,
+    chat_connect_focused: bool,
+    chat_login_error: Option<String>,
+    chat_connection_state: NetDlgChatConnectionState,
+    chat_page: NetDlgChatPage,
+    chat_initial_messages_received: bool,
+    chat_sheets: Vec<NetDlgChatSheet>,
+    chat_active_sheet: usize,
+    chat_edit: NetDlgEditState,
+    chat_history: Vec<String>,
+    chat_history_index: Option<usize>,
+    chat_pressed: Option<NetDlgChatHit>,
     focus: NetDlgControl,
     pointer_position: Option<GuiPoint>,
     hovered: Option<NetDlgControl>,
@@ -1024,6 +1199,28 @@ pub struct NetDlgController {
     scrollbar_dragging: bool,
     scrollbar_arrow_captured: bool,
     scrollbar_arrow: i8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetDlgChatHit {
+    LoginField(NetDlgChatLoginField),
+    Connect,
+    Tab(usize),
+    Input,
+    User(usize),
+}
+
+#[derive(Clone, Debug)]
+struct NetDlgChatLayout {
+    group: IntRect,
+    login_labels: [IntRect; 4],
+    login_edits: [IntRect; 4],
+    connect: IntRect,
+    tabs: Vec<IntRect>,
+    transcript: IntRect,
+    users: Option<IntRect>,
+    input_label: Option<IntRect>,
+    input: IntRect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1051,6 +1248,13 @@ struct NetDlgRowLayout {
 
 impl NetDlgController {
     pub fn new(config: NetDlgConfig, metrics: NetDlgFontMetrics) -> Self {
+        let login = NetDlgChatLogin::default();
+        let mut chat_login_edits: [NetDlgEditState; 4] =
+            std::array::from_fn(|_| Default::default());
+        chat_login_edits[NetDlgChatLoginField::Nick.index()].set_text(&login.nick);
+        chat_login_edits[NetDlgChatLoginField::Password.index()].set_text(&login.password);
+        chat_login_edits[NetDlgChatLoginField::RealName.index()].set_text(&login.real_name);
+        chat_login_edits[NetDlgChatLoginField::Channel.index()].set_text(&login.channel);
         Self {
             metrics,
             text_font: None,
@@ -1059,6 +1263,27 @@ impl NetDlgController {
             config,
             mode: NetDlgMode::GameList,
             join_edit: NetDlgEditState::default(),
+            chat_server: login.server.clone(),
+            chat_login_edits,
+            chat_login_field: NetDlgChatLoginField::Nick,
+            chat_connect_focused: false,
+            chat_login_error: None,
+            chat_connection_state: NetDlgChatConnectionState::Disconnected,
+            chat_page: NetDlgChatPage::Login,
+            chat_initial_messages_received: false,
+            chat_sheets: vec![NetDlgChatSheet {
+                kind: NetDlgChatSheetKind::Server,
+                title: "Server".to_string(),
+                ident: login.server,
+                topic: String::new(),
+                users: Vec::new(),
+                lines: Vec::new(),
+            }],
+            chat_active_sheet: 0,
+            chat_edit: NetDlgEditState::default(),
+            chat_history: Vec::new(),
+            chat_history_index: None,
+            chat_pressed: None,
             // C4StartupNetDlg.cpp:734 / GetDlgModeFocusControl: game list.
             focus: NetDlgControl::GameList,
             pointer_position: None,
@@ -1095,6 +1320,275 @@ impl NetDlgController {
 
     pub const fn config(&self) -> NetDlgConfig {
         self.config
+    }
+
+    pub fn set_chat_login(&mut self, login: NetDlgChatLogin) {
+        self.chat_server = login.server;
+        self.chat_login_edits[NetDlgChatLoginField::Nick.index()].set_text(&login.nick);
+        self.chat_login_edits[NetDlgChatLoginField::Password.index()].set_text(&login.password);
+        self.chat_login_edits[NetDlgChatLoginField::RealName.index()].set_text(&login.real_name);
+        self.chat_login_edits[NetDlgChatLoginField::Channel.index()].set_text(&login.channel);
+        if let Some(server) = self.chat_sheets.first_mut() {
+            server.ident.clone_from(&self.chat_server);
+        }
+    }
+
+    pub fn chat_login(&self) -> NetDlgChatLogin {
+        NetDlgChatLogin {
+            server: self.chat_server.clone(),
+            nick: self.chat_login_edits[NetDlgChatLoginField::Nick.index()]
+                .text
+                .clone(),
+            password: self.chat_login_edits[NetDlgChatLoginField::Password.index()]
+                .text
+                .clone(),
+            real_name: self.chat_login_edits[NetDlgChatLoginField::RealName.index()]
+                .text
+                .clone(),
+            channel: self.chat_login_edits[NetDlgChatLoginField::Channel.index()]
+                .text
+                .clone(),
+        }
+    }
+
+    pub const fn chat_page(&self) -> NetDlgChatPage {
+        self.chat_page
+    }
+
+    pub const fn chat_connection_state(&self) -> NetDlgChatConnectionState {
+        self.chat_connection_state
+    }
+
+    pub const fn chat_login_field(&self) -> NetDlgChatLoginField {
+        self.chat_login_field
+    }
+
+    pub fn chat_input(&self) -> &str {
+        match self.chat_page() {
+            NetDlgChatPage::Login => &self.chat_login_edits[self.chat_login_field.index()].text,
+            NetDlgChatPage::Chats => &self.chat_edit.text,
+        }
+    }
+
+    pub fn chat_sheets(&self) -> &[NetDlgChatSheet] {
+        &self.chat_sheets
+    }
+
+    pub fn active_chat_sheet(&self) -> Option<&NetDlgChatSheet> {
+        self.chat_sheets.get(self.chat_active_sheet)
+    }
+
+    /// Returns to the login form after an explicit user disconnect (or a
+    /// cancelled host-side connection warning). Transport shutdown remains an
+    /// application side effect.
+    pub fn show_chat_login(&mut self) {
+        self.chat_page = NetDlgChatPage::Login;
+        self.chat_connection_state = NetDlgChatConnectionState::Disconnected;
+        self.chat_initial_messages_received = false;
+        self.chat_connect_focused = false;
+    }
+
+    pub fn request_chat_disconnect(&mut self) -> Vec<NetDlgAction> {
+        self.show_chat_login();
+        vec![NetDlgAction::ChatDisconnect]
+    }
+
+    pub fn close_active_chat_sheet(&mut self) -> Vec<NetDlgAction> {
+        let Some(sheet) = self.active_chat_sheet().cloned() else {
+            return Vec::new();
+        };
+        match sheet.kind {
+            NetDlgChatSheetKind::Server => self.request_chat_disconnect(),
+            NetDlgChatSheetKind::Channel => {
+                vec![NetDlgAction::ChatCommand(NetDlgChatCommand::Part {
+                    channel: sheet.ident,
+                })]
+            }
+            NetDlgChatSheetKind::Query => {
+                self.chat_sheets.remove(self.chat_active_sheet);
+                self.chat_active_sheet = self
+                    .chat_active_sheet
+                    .min(self.chat_sheets.len().saturating_sub(1));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Rebuilds the visible classic server/channel/query tabs from a backend
+    /// snapshot. Existing manually opened query tabs and the active tab survive
+    /// refreshes, while parted channels disappear as in `C4ChatControl::Update`.
+    pub fn sync_chat_snapshot(&mut self, snapshot: NetDlgChatSnapshot) {
+        let previous_page = self.chat_page;
+        let has_error = snapshot
+            .last_error
+            .as_ref()
+            .is_some_and(|error| !error.is_empty());
+        let new_connection = self.chat_connection_state == NetDlgChatConnectionState::Disconnected
+            && snapshot.connection_state != NetDlgChatConnectionState::Disconnected;
+        let active = self
+            .active_chat_sheet()
+            .map(|sheet| (sheet.kind, sheet.ident.clone()));
+        let old_sheets = self.chat_sheets.clone();
+        let existing_channels = old_sheets
+            .iter()
+            .filter(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+            .map(|sheet| sheet.ident.clone())
+            .collect::<Vec<_>>();
+        if new_connection {
+            self.chat_initial_messages_received = false;
+            self.chat_page = NetDlgChatPage::Chats;
+        } else if snapshot.connection_state != NetDlgChatConnectionState::Disconnected {
+            self.chat_page = NetDlgChatPage::Chats;
+        } else if has_error {
+            self.chat_page = NetDlgChatPage::Chats;
+        }
+        if previous_page != NetDlgChatPage::Chats && self.chat_page == NetDlgChatPage::Chats {
+            self.chat_connect_focused = false;
+            for edit in &mut self.chat_login_edits {
+                edit.blur();
+            }
+            if self.focus == NetDlgControl::ChatInput {
+                self.chat_edit.focus();
+            }
+        }
+        if !snapshot.server.is_empty() {
+            self.chat_server.clone_from(&snapshot.server);
+        }
+
+        let mut sheets = vec![NetDlgChatSheet {
+            kind: NetDlgChatSheetKind::Server,
+            title: "Server".to_string(),
+            ident: self.chat_server.clone(),
+            topic: self.chat_server.clone(),
+            users: Vec::new(),
+            lines: if new_connection {
+                Vec::new()
+            } else {
+                old_sheets
+                    .iter()
+                    .find(|sheet| sheet.kind == NetDlgChatSheetKind::Server)
+                    .map_or_else(Vec::new, |sheet| sheet.lines.clone())
+            },
+        }];
+        let mut newest_channel = None;
+        for channel in snapshot.channels {
+            let lines = old_sheets
+                .iter()
+                .find(|sheet| {
+                    !new_connection
+                        && sheet.kind == NetDlgChatSheetKind::Channel
+                        && sheet.ident.eq_ignore_ascii_case(&channel.name)
+                })
+                .map_or_else(Vec::new, |sheet| sheet.lines.clone());
+            sheets.push(NetDlgChatSheet {
+                kind: NetDlgChatSheetKind::Channel,
+                title: channel.name.clone(),
+                ident: channel.name,
+                topic: channel.topic,
+                users: channel.users,
+                lines,
+            });
+            if !existing_channels
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&sheets.last().unwrap().ident))
+            {
+                newest_channel = Some(sheets.len() - 1);
+            }
+        }
+        if !new_connection {
+            sheets.extend(
+                old_sheets
+                    .iter()
+                    .filter(|sheet| sheet.kind == NetDlgChatSheetKind::Query)
+                    .cloned(),
+            );
+        }
+        if new_connection {
+            sheets[0]
+                .lines
+                .push(format!("Connecting to {}...", self.chat_server));
+        }
+
+        let message_start = if self.chat_initial_messages_received {
+            snapshot.unread_index.min(snapshot.messages.len())
+        } else {
+            0
+        };
+        for message in snapshot.messages.into_iter().skip(message_start) {
+            let source_nick = message
+                .source
+                .split_once('!')
+                .map_or(message.source.as_str(), |(nick, _)| nick);
+            let target = if matches!(message.kind, NetDlgChatMessageKind::Server) {
+                0
+            } else if message.is_channel {
+                sheets
+                    .iter()
+                    .position(|sheet| {
+                        sheet.kind == NetDlgChatSheetKind::Channel
+                            && sheet.ident.eq_ignore_ascii_case(&message.target)
+                    })
+                    .unwrap_or(0)
+            } else if Self::is_irc_service(source_nick)
+                || source_nick.is_empty()
+                || matches!(message.kind, NetDlgChatMessageKind::Status)
+            {
+                0
+            } else if matches!(message.kind, NetDlgChatMessageKind::Notice) {
+                active
+                    .as_ref()
+                    .and_then(|(kind, ident)| {
+                        sheets.iter().position(|sheet| {
+                            sheet.kind == *kind && sheet.ident.eq_ignore_ascii_case(ident)
+                        })
+                    })
+                    .unwrap_or(0)
+            } else {
+                let outgoing = source_nick.eq_ignore_ascii_case(&snapshot.nick);
+                let query = if outgoing {
+                    message.target.as_str()
+                } else {
+                    source_nick
+                };
+                if Self::is_irc_service(query) {
+                    0
+                } else {
+                    let ident = if outgoing {
+                        query
+                    } else {
+                        message.source.as_str()
+                    };
+                    Self::ensure_query_sheet(&mut sheets, query, ident)
+                }
+            };
+            sheets[target].lines.push(Self::format_chat_message(
+                &message,
+                source_nick,
+                &snapshot.nick,
+            ));
+        }
+        if let Some(error) = snapshot.last_error.filter(|error| !error.is_empty()) {
+            let line = format!("Error: {error}");
+            if sheets[0].lines.last() != Some(&line) {
+                sheets[0].lines.push(line);
+            }
+        }
+
+        self.chat_initial_messages_received = true;
+        self.chat_connection_state = snapshot.connection_state;
+        self.chat_sheets = sheets;
+        self.chat_active_sheet = newest_channel.unwrap_or_else(|| {
+            if new_connection {
+                return 0;
+            }
+            active
+                .and_then(|(kind, ident)| {
+                    self.chat_sheets.iter().position(|sheet| {
+                        sheet.kind == kind && sheet.ident.eq_ignore_ascii_case(&ident)
+                    })
+                })
+                .unwrap_or(0)
+        });
     }
 
     /// Mirrors the config-facing part of `C4StartupNetDlg::OnShown` calling
@@ -1181,6 +1675,11 @@ impl NetDlgController {
         if position.is_none() {
             self.pointer_pressed = None;
             self.join_edit.drag_anchor = None;
+            for edit in &mut self.chat_login_edits {
+                edit.drag_anchor = None;
+            }
+            self.chat_edit.drag_anchor = None;
+            self.chat_pressed = None;
             self.scrollbar_dragging = false;
             self.scrollbar_arrow_captured = false;
             self.scrollbar_arrow = 0;
@@ -1305,7 +1804,12 @@ impl NetDlgController {
     /// focus. `KeyCode` intentionally contains navigation keys only, so text
     /// input is a separate operation just like C4GUI::Edit::CharIn.
     pub fn handle_text_input(&mut self, text: &str, font: &ClonkFont) -> Vec<NetDlgAction> {
-        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+        let editing_join =
+            self.focus == NetDlgControl::JoinAddress && self.mode == NetDlgMode::GameList;
+        let editing_chat = self.focus == NetDlgControl::ChatInput
+            && self.mode == NetDlgMode::Chat
+            && !self.chat_connect_focused;
+        if !editing_join && !editing_chat {
             return Vec::new();
         }
         let filtered: String = text
@@ -1322,13 +1826,21 @@ impl NetDlgController {
         if filtered.is_empty() {
             return Vec::new();
         }
-        let changed = self.join_edit.insert_raw_text(&filtered);
-        self.join_edit
-            .ensure_cursor_in_view(self.layout().join_edit, font);
-        changed
-            .then(|| NetDlgAction::JoinAddressChanged(self.join_edit.text.clone()))
-            .into_iter()
-            .collect()
+        if editing_chat {
+            let rect = self.active_chat_edit_rect();
+            let edit = self.active_chat_edit_mut();
+            edit.insert_raw_text(&filtered);
+            edit.ensure_cursor_in_view(rect, font);
+            Vec::new()
+        } else {
+            let changed = self.join_edit.insert_raw_text(&filtered);
+            self.join_edit
+                .ensure_cursor_in_view(self.layout().join_edit, font);
+            changed
+                .then(|| NetDlgAction::JoinAddressChanged(self.join_edit.text.clone()))
+                .into_iter()
+                .collect()
+        }
     }
 
     pub fn handle_edit_key_down(
@@ -1337,8 +1849,19 @@ impl NetDlgController {
         modifiers: NetDlgEditModifiers,
         font: &ClonkFont,
     ) -> NetDlgEditInputOutcome {
-        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+        let editing_join =
+            self.focus == NetDlgControl::JoinAddress && self.mode == NetDlgMode::GameList;
+        let editing_chat = self.focus == NetDlgControl::ChatInput
+            && self.mode == NetDlgMode::Chat
+            && !self.chat_connect_focused;
+        if !editing_join && !editing_chat {
             return NetDlgEditInputOutcome::passed();
+        }
+        if editing_chat {
+            let rect = self.active_chat_edit_rect();
+            self.active_chat_edit_mut()
+                .handle_key(key, modifiers, rect, font);
+            return NetDlgEditInputOutcome::captured(Vec::new());
         }
         let changed = self
             .join_edit
@@ -1366,7 +1889,12 @@ impl NetDlgController {
         clipboard_text: Option<&str>,
         font: &ClonkFont,
     ) -> NetDlgEditInputOutcome {
-        if self.focus != NetDlgControl::JoinAddress || self.mode != NetDlgMode::GameList {
+        let editing_join =
+            self.focus == NetDlgControl::JoinAddress && self.mode == NetDlgMode::GameList;
+        let editing_chat = self.focus == NetDlgControl::ChatInput
+            && self.mode == NetDlgMode::Chat
+            && !self.chat_connect_focused;
+        if !editing_join && !editing_chat {
             return NetDlgEditInputOutcome::passed();
         }
         let command = match shortcut {
@@ -1384,6 +1912,51 @@ impl NetDlgController {
         clipboard_text: Option<&str>,
         font: &ClonkFont,
     ) -> Vec<NetDlgAction> {
+        let editing_chat = self.mode == NetDlgMode::Chat
+            && self.focus == NetDlgControl::ChatInput
+            && !self.chat_connect_focused;
+        if editing_chat {
+            let rect = self.active_chat_edit_rect();
+            match command {
+                NetDlgEditContextCommand::Copy => return self.begin_clipboard_transfer(false),
+                NetDlgEditContextCommand::Cut => return self.begin_clipboard_transfer(true),
+                NetDlgEditContextCommand::Paste => {
+                    let Some(text) = clipboard_text.filter(|text| !text.is_empty()) else {
+                        return Vec::new();
+                    };
+                    let filtered = text
+                        .chars()
+                        .take_while(|character| !matches!(character, '\r' | '\n'))
+                        .filter(|character| !character.is_control() && *character != '\u{7f}')
+                        .map(|character| {
+                            if character == '|' {
+                                '\u{a6}'
+                            } else {
+                                character
+                            }
+                        })
+                        .collect::<String>();
+                    let edit = self.active_chat_edit_mut();
+                    edit.insert_raw_text(&filtered);
+                    edit.ensure_cursor_in_view(rect, font);
+                    return Vec::new();
+                }
+                NetDlgEditContextCommand::Clear => {
+                    let edit = self.active_chat_edit_mut();
+                    edit.pending_cut = None;
+                    edit.delete_selection();
+                    edit.ensure_cursor_in_view(rect, font);
+                    return Vec::new();
+                }
+                NetDlgEditContextCommand::SelectAll => {
+                    let edit = self.active_chat_edit_mut();
+                    edit.pending_cut = None;
+                    edit.caret = edit.text.len();
+                    edit.selection = (!edit.text.is_empty()).then_some((0, edit.text.len()));
+                    return Vec::new();
+                }
+            }
+        }
         if self.mode != NetDlgMode::GameList {
             return Vec::new();
         }
@@ -1418,6 +1991,21 @@ impl NetDlgController {
     /// Completes a pending cut only after the host successfully wrote the
     /// matching selection to the native clipboard.
     pub fn confirm_clipboard_cut(&mut self, font: &ClonkFont) -> Vec<NetDlgAction> {
+        if self.mode == NetDlgMode::Chat && self.focus == NetDlgControl::ChatInput {
+            let rect = self.active_chat_edit_rect();
+            let Some(pending) = self.active_chat_edit_mut().pending_cut.take() else {
+                return Vec::new();
+            };
+            let edit = self.active_chat_edit_mut();
+            if edit.selected_range() != Some(pending.range)
+                || edit.text.get(pending.range.0..pending.range.1) != Some(pending.text.as_str())
+                || !edit.delete_selection()
+            {
+                return Vec::new();
+            }
+            edit.ensure_cursor_in_view(rect, font);
+            return Vec::new();
+        }
         let Some(pending) = self.join_edit.pending_cut.take() else {
             return Vec::new();
         };
@@ -1444,6 +2032,19 @@ impl NetDlgController {
     ) -> NetDlgEditInputOutcome {
         self.pointer_position = Some(point);
         self.hovered = self.hit_button(point);
+        if self.mode == NetDlgMode::Chat {
+            match self.chat_hit(point) {
+                Some(NetDlgChatHit::LoginField(field)) => self.select_chat_login_field(field),
+                Some(NetDlgChatHit::Input) => {}
+                _ => return NetDlgEditInputOutcome::passed(),
+            }
+            self.chat_connect_focused = false;
+            let mut actions = self.change_focus(NetDlgControl::ChatInput);
+            let request =
+                Self::edit_context_request(self.active_chat_edit_mut(), point, clipboard_has_text);
+            actions.push(NetDlgAction::OpenJoinAddressContextMenu(request));
+            return NetDlgEditInputOutcome::captured(actions);
+        }
         let layout = self.layout();
         if self.mode != NetDlgMode::GameList || !contains(layout.join_edit, point) {
             return NetDlgEditInputOutcome::passed();
@@ -1457,6 +2058,20 @@ impl NetDlgController {
         &mut self,
         clipboard_has_text: bool,
     ) -> NetDlgEditInputOutcome {
+        if self.mode == NetDlgMode::Chat
+            && self.focus == NetDlgControl::ChatInput
+            && !self.chat_connect_focused
+        {
+            let edit = self.active_chat_edit_rect();
+            let anchor = GuiPoint::new((edit.x + edit.w / 2) as f32, (edit.y + edit.h / 2) as f32);
+            return NetDlgEditInputOutcome::captured(vec![
+                NetDlgAction::OpenJoinAddressContextMenu(Self::edit_context_request(
+                    self.active_chat_edit_mut(),
+                    anchor,
+                    clipboard_has_text,
+                )),
+            ]);
+        }
         if self.mode != NetDlgMode::GameList || self.focus != NetDlgControl::JoinAddress {
             return NetDlgEditInputOutcome::passed();
         }
@@ -1477,6 +2092,25 @@ impl NetDlgController {
     ) -> NetDlgEditInputOutcome {
         self.pointer_position = Some(point);
         self.hovered = self.hit_button(point);
+        if self.mode == NetDlgMode::Chat {
+            match self.chat_hit(point) {
+                Some(NetDlgChatHit::LoginField(field)) => self.select_chat_login_field(field),
+                Some(NetDlgChatHit::Input) => {}
+                _ => return NetDlgEditInputOutcome::passed(),
+            }
+            self.chat_connect_focused = false;
+            let actions = self.change_focus(NetDlgControl::ChatInput);
+            let edit_rect = self.active_chat_edit_rect();
+            let edit = self.active_chat_edit_mut();
+            edit.pending_cut = None;
+            edit.caret = edit.character_at(point.x, edit_rect, font);
+            edit.selection = Some((edit.caret, edit.caret));
+            if let Some(text) = primary_selection.filter(|text| !text.is_empty()) {
+                edit.insert_raw_text(text);
+            }
+            edit.ensure_cursor_in_view(edit_rect, font);
+            return NetDlgEditInputOutcome::captured(actions);
+        }
         let edit = self.layout().join_edit;
         if self.mode != NetDlgMode::GameList || !contains(edit, point) {
             return NetDlgEditInputOutcome::passed();
@@ -1510,6 +2144,16 @@ impl NetDlgController {
             self.join_edit
                 .drag_pointer_selection(character, layout.join_edit, font);
         }
+        if self.mode == NetDlgMode::Chat && self.focus == NetDlgControl::ChatInput {
+            let edit_rect = self.active_chat_edit_rect();
+            if self.active_chat_edit_mut().drag_anchor.is_some() {
+                let character = self
+                    .active_chat_edit_mut()
+                    .character_at(position.x, edit_rect, font);
+                self.active_chat_edit_mut()
+                    .drag_pointer_selection(character, edit_rect, font);
+            }
+        }
         if self.scrollbar_dragging {
             self.set_scroll_from_pointer(position, &layout);
         } else if self.scrollbar_arrow_captured {
@@ -1531,6 +2175,37 @@ impl NetDlgController {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         self.pointer_pressed = self.hovered;
+
+        if self.mode == NetDlgMode::Chat {
+            self.chat_pressed = self.chat_hit(position);
+            if let Some(hit) = self.chat_pressed {
+                let mut actions = self.change_focus(NetDlgControl::ChatInput);
+                match hit {
+                    NetDlgChatHit::LoginField(field) => {
+                        self.select_chat_login_field(field);
+                        self.chat_connect_focused = false;
+                        let edit_rect = self.active_chat_edit_rect();
+                        let character = self
+                            .active_chat_edit_mut()
+                            .character_at(position.x, edit_rect, font);
+                        self.active_chat_edit_mut()
+                            .begin_pointer_selection(character, edit_rect, font);
+                    }
+                    NetDlgChatHit::Input => {
+                        self.chat_connect_focused = false;
+                        let edit_rect = self.active_chat_edit_rect();
+                        let character = self
+                            .active_chat_edit_mut()
+                            .character_at(position.x, edit_rect, font);
+                        self.active_chat_edit_mut()
+                            .begin_pointer_selection(character, edit_rect, font);
+                    }
+                    NetDlgChatHit::Connect => self.chat_connect_focused = true,
+                    NetDlgChatHit::Tab(_) | NetDlgChatHit::User(_) => {}
+                }
+                return std::mem::take(&mut actions);
+            }
+        }
 
         let layout = self.layout();
         if self.mode == NetDlgMode::GameList
@@ -1575,6 +2250,23 @@ impl NetDlgController {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);
         self.join_edit.drag_anchor = None;
+        for edit in &mut self.chat_login_edits {
+            edit.drag_anchor = None;
+        }
+        self.chat_edit.drag_anchor = None;
+        if self.mode == NetDlgMode::Chat {
+            if let Some(pressed) = self.chat_pressed.take() {
+                if self.chat_hit(position) == Some(pressed) {
+                    return match pressed {
+                        NetDlgChatHit::Connect => self.submit_chat_login(),
+                        NetDlgChatHit::Tab(index) => self.select_chat_sheet(index),
+                        NetDlgChatHit::LoginField(_)
+                        | NetDlgChatHit::Input
+                        | NetDlgChatHit::User(_) => Vec::new(),
+                    };
+                }
+            }
+        }
         if self.scrollbar_dragging {
             let layout = self.layout();
             self.set_scroll_from_pointer(position, &layout);
@@ -1612,6 +2304,33 @@ impl NetDlgController {
         self.hovered = self.hit_button(position);
         self.pointer_pressed = None;
         let layout = self.layout();
+        if self.mode == NetDlgMode::Chat {
+            if let Some(NetDlgChatHit::User(index)) = self.chat_hit(position) {
+                let Some(user) = self
+                    .active_chat_sheet()
+                    .and_then(|sheet| sheet.users.get(index))
+                    .cloned()
+                else {
+                    return Vec::new();
+                };
+                let query = Self::ensure_query_sheet(&mut self.chat_sheets, &user.name, &user.name);
+                self.chat_active_sheet = query;
+                return vec![NetDlgAction::ChatCommand(NetDlgChatCommand::OpenQuery {
+                    nick: user.name,
+                })];
+            }
+            let Some(NetDlgChatHit::LoginField(_) | NetDlgChatHit::Input) = self.chat_hit(position)
+            else {
+                return Vec::new();
+            };
+            let edit_rect = self.active_chat_edit_rect();
+            let character = self
+                .active_chat_edit_mut()
+                .character_at(position.x, edit_rect, font);
+            self.active_chat_edit_mut()
+                .select_word_at(character, edit_rect, font);
+            return self.change_focus(NetDlgControl::ChatInput);
+        }
         if self.mode == NetDlgMode::GameList && contains(layout.join_edit, position) {
             let actions = self.change_focus(NetDlgControl::JoinAddress);
             let character = self
@@ -1670,6 +2389,76 @@ impl NetDlgController {
         key: KeyCode,
         backwards: bool,
     ) -> Vec<NetDlgAction> {
+        if self.mode == NetDlgMode::Chat && self.focus == NetDlgControl::ChatInput {
+            match key {
+                KeyCode::Tab if self.chat_page() == NetDlgChatPage::Login => {
+                    if self.chat_connect_focused {
+                        if backwards {
+                            self.chat_connect_focused = false;
+                            self.select_chat_login_field(NetDlgChatLoginField::Channel);
+                            return Vec::new();
+                        }
+                        return self.move_focus(false);
+                    }
+                    let index = self.chat_login_field.index();
+                    if backwards && index == 0 {
+                        return self.move_focus(true);
+                    }
+                    if !backwards && index == NetDlgChatLoginField::ALL.len() - 1 {
+                        self.chat_connect_focused = true;
+                        self.chat_login_edits[index].blur();
+                        return Vec::new();
+                    }
+                    let next = if backwards { index - 1 } else { index + 1 };
+                    self.select_chat_login_field(NetDlgChatLoginField::ALL[next]);
+                    return Vec::new();
+                }
+                KeyCode::Enter if self.chat_page() == NetDlgChatPage::Login => {
+                    if self.chat_connect_focused {
+                        return self.submit_chat_login();
+                    }
+                    let index = self.chat_login_field.index();
+                    if index + 1 < NetDlgChatLoginField::ALL.len() {
+                        self.select_chat_login_field(NetDlgChatLoginField::ALL[index + 1]);
+                    } else {
+                        self.chat_login_edits[index].blur();
+                        self.chat_connect_focused = true;
+                    }
+                    return Vec::new();
+                }
+                KeyCode::Enter if self.chat_page() == NetDlgChatPage::Chats => {
+                    return self.submit_chat_input();
+                }
+                KeyCode::Up if self.chat_page() == NetDlgChatPage::Chats => {
+                    if self.chat_history.is_empty() {
+                        return Vec::new();
+                    }
+                    let index = self
+                        .chat_history_index
+                        .map_or(self.chat_history.len() - 1, |index| index.saturating_sub(1));
+                    self.chat_history_index = Some(index);
+                    self.chat_edit.set_text(&self.chat_history[index]);
+                    self.chat_edit.selection = Some((0, self.chat_edit.text.len()));
+                    return Vec::new();
+                }
+                KeyCode::Down if self.chat_page() == NetDlgChatPage::Chats => {
+                    let Some(index) = self.chat_history_index else {
+                        return Vec::new();
+                    };
+                    if index + 1 >= self.chat_history.len() {
+                        self.chat_history_index = None;
+                        self.chat_edit.set_text("");
+                    } else {
+                        let next = index + 1;
+                        self.chat_history_index = Some(next);
+                        self.chat_edit.set_text(&self.chat_history[next]);
+                        self.chat_edit.selection = Some((0, self.chat_edit.text.len()));
+                    }
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
         match key {
             KeyCode::Escape => vec![NetDlgAction::Back],
             // StartupNetBack binds Left, but an edit/chat input consumes it
@@ -1730,15 +2519,19 @@ impl NetDlgController {
     }
 
     fn begin_clipboard_transfer(&mut self, cut: bool) -> Vec<NetDlgAction> {
-        let Some((range, text)) = self
-            .join_edit
+        let edit = if self.mode == NetDlgMode::Chat && self.focus == NetDlgControl::ChatInput {
+            self.active_chat_edit_mut()
+        } else {
+            &mut self.join_edit
+        };
+        let Some((range, text)) = edit
             .selected_range()
-            .zip(self.join_edit.selected_text().map(str::to_string))
+            .zip(edit.selected_text().map(str::to_string))
         else {
-            self.join_edit.pending_cut = None;
+            edit.pending_cut = None;
             return Vec::new();
         };
-        self.join_edit.pending_cut = cut.then(|| PendingClipboardCut {
+        edit.pending_cut = cut.then(|| PendingClipboardCut {
             range,
             text: text.clone(),
         });
@@ -1790,7 +2583,15 @@ impl NetDlgController {
         anchor: GuiPoint,
         clipboard_has_text: bool,
     ) -> NetDlgEditContextRequest {
-        let has_selection = self.join_edit.selected_range().is_some();
+        Self::edit_context_request(&self.join_edit, anchor, clipboard_has_text)
+    }
+
+    fn edit_context_request(
+        edit: &NetDlgEditState,
+        anchor: GuiPoint,
+        clipboard_has_text: bool,
+    ) -> NetDlgEditContextRequest {
+        let has_selection = edit.selected_range().is_some();
         let item = |command, label: &str, tooltip: &str| NetDlgEditContextItem {
             command,
             label: label.to_string(),
@@ -1823,9 +2624,8 @@ impl NetDlgController {
                 "Clears the selection.",
             ));
         }
-        let whole_text_selected =
-            self.join_edit.selected_range() == Some((0, self.join_edit.text.len()));
-        if !self.join_edit.text.is_empty() && !whole_text_selected {
+        let whole_text_selected = edit.selected_range() == Some((0, edit.text.len()));
+        if !edit.text.is_empty() && !whole_text_selected {
             items.push(item(
                 NetDlgEditContextCommand::SelectAll,
                 "Select all",
@@ -1833,6 +2633,441 @@ impl NetDlgController {
             ));
         }
         NetDlgEditContextRequest { anchor, items }
+    }
+
+    fn ensure_query_sheet(sheets: &mut Vec<NetDlgChatSheet>, title: &str, ident: &str) -> usize {
+        if let Some(index) = sheets.iter().position(|sheet| {
+            sheet.kind == NetDlgChatSheetKind::Query
+                && (sheet.title.eq_ignore_ascii_case(title)
+                    || (!ident.is_empty() && sheet.ident.eq_ignore_ascii_case(ident)))
+        }) {
+            sheets[index].title = title.to_string();
+            if !ident.is_empty() {
+                sheets[index].ident = ident.to_string();
+            }
+            return index;
+        }
+        sheets.push(NetDlgChatSheet {
+            kind: NetDlgChatSheetKind::Query,
+            title: title.to_string(),
+            ident: if ident.is_empty() { title } else { ident }.to_string(),
+            topic: title.to_string(),
+            users: Vec::new(),
+            lines: Vec::new(),
+        });
+        sheets.len() - 1
+    }
+
+    fn is_irc_service(name: &str) -> bool {
+        ["NickServ", "ChanServ", "MemoServ", "HelpServ", "Global"]
+            .iter()
+            .any(|service| service.eq_ignore_ascii_case(name))
+    }
+
+    fn valid_irc_nick(nick: &str) -> bool {
+        let bytes = nick.as_bytes();
+        let valid_first = |byte: u8| {
+            byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'^' | b'{' | b'[' | b']' | b'}')
+        };
+        let valid_rest =
+            |byte: u8| valid_first(byte) || byte.is_ascii_digit() || matches!(byte, b'|' | b'-');
+        (2..=30).contains(&bytes.len())
+            && bytes.first().copied().is_some_and(valid_first)
+            && bytes[1..].iter().copied().all(valid_rest)
+            && !["NickServ", "ChanServ", "MemoServ", "OperServ", "HelpServ"]
+                .iter()
+                .any(|service| service.eq_ignore_ascii_case(nick))
+    }
+
+    fn valid_irc_password(password: &str) -> bool {
+        password.is_empty()
+            || ((2..=31).contains(&password.len()) && !password.as_bytes().contains(&b' '))
+    }
+
+    fn valid_irc_channel(channel: &str) -> bool {
+        channel.is_empty()
+            || ((2..=32).contains(&channel.len())
+                && matches!(channel.as_bytes().first(), Some(b'#' | b'+'))
+                && !channel.as_bytes().contains(&b' '))
+    }
+
+    fn format_chat_message(message: &NetDlgChatMessage, source: &str, own_nick: &str) -> String {
+        match message.kind {
+            NetDlgChatMessageKind::Server | NetDlgChatMessageKind::Status => {
+                format!("- {}", message.text)
+            }
+            NetDlgChatMessageKind::Notice if source.is_empty() => {
+                format!("* {}", message.text)
+            }
+            NetDlgChatMessageKind::Notice if source.eq_ignore_ascii_case(own_nick) => {
+                format!("-> -{}- {}", message.target, message.text)
+            }
+            NetDlgChatMessageKind::Notice => format!("-{source}- {}", message.text),
+            NetDlgChatMessageKind::Message if source.is_empty() => {
+                format!("* {}", message.text)
+            }
+            NetDlgChatMessageKind::Message
+                if source.eq_ignore_ascii_case(own_nick)
+                    && Self::is_irc_service(&message.target) =>
+            {
+                format!("-> *{}* {}", message.target, message.text)
+            }
+            NetDlgChatMessageKind::Message if source.eq_ignore_ascii_case(own_nick) => {
+                format!("<{source}> {}", message.text)
+            }
+            NetDlgChatMessageKind::Message => format!("<{source}> {}", message.text),
+            NetDlgChatMessageKind::Action if source.is_empty() => {
+                format!("* {}", message.text)
+            }
+            NetDlgChatMessageKind::Action => format!("* {source} {}", message.text),
+        }
+    }
+
+    fn chat_title(&self) -> String {
+        if self.chat_page() == NetDlgChatPage::Login {
+            return "Not connected".to_string();
+        }
+        let Some(sheet) = self.active_chat_sheet() else {
+            return String::new();
+        };
+        match sheet.kind {
+            NetDlgChatSheetKind::Server => self.chat_server.clone(),
+            NetDlgChatSheetKind::Channel if !sheet.topic.is_empty() => {
+                format!("{}: {}", sheet.ident, sheet.topic)
+            }
+            NetDlgChatSheetKind::Channel | NetDlgChatSheetKind::Query => {
+                if sheet.topic.is_empty() {
+                    sheet.title.clone()
+                } else {
+                    sheet.topic.clone()
+                }
+            }
+        }
+    }
+
+    fn chat_layout(&self) -> NetDlgChatLayout {
+        let layout = self.layout();
+        let group = IntRect {
+            x: layout.game_list.x,
+            y: layout.game_list.y,
+            w: layout.game_list.w,
+            h: layout.join_edit.y + layout.join_edit.h - layout.game_list.y,
+        };
+        let inner = IntRect {
+            x: group.x + 3,
+            y: group.y + 3,
+            w: (group.w - 6).max(0),
+            h: (group.h - 6).max(0),
+        };
+        let label_h = self.metrics.text_line_height;
+        let edit_h = self.metrics.text_line_height.max(23);
+        let gap = 5;
+        let connect_h = 32;
+        let login_h = 4 * (label_h + edit_h) + 7 * gap + connect_h;
+        let login_w = 320.min(inner.w);
+        let login_x = inner.x + (inner.w - login_w) / 2;
+        let mut y = inner.y + (inner.h - login_h).max(0) / 2;
+        let mut login_labels = [IntRect::default(); 4];
+        let mut login_edits = [IntRect::default(); 4];
+        for field in NetDlgChatLoginField::ALL {
+            login_labels[field.index()] = IntRect {
+                x: login_x,
+                y,
+                w: login_w,
+                h: label_h,
+            };
+            y += label_h;
+            login_edits[field.index()] = IntRect {
+                x: login_x,
+                y,
+                w: login_w,
+                h: edit_h,
+            };
+            y += edit_h + gap;
+        }
+        let connect = IntRect {
+            x: login_x + (login_w - 120) / 2,
+            y: y + gap,
+            w: 120.min(login_w),
+            h: connect_h,
+        };
+
+        let tab_h = (self.metrics.text_line_height + 8).max(23);
+        let tab_count = self.chat_sheets.len().max(1) as i32;
+        let tab_w = (inner.w / tab_count).clamp(1, 140);
+        let tabs = (0..self.chat_sheets.len())
+            .map(|index| IntRect {
+                x: inner.x + i32::try_from(index).unwrap_or(i32::MAX) * tab_w,
+                y: inner.y,
+                w: tab_w,
+                h: tab_h,
+            })
+            .collect();
+        let input_h = edit_h;
+        let input_row = IntRect {
+            x: inner.x,
+            y: inner.y + inner.h - input_h,
+            w: inner.w,
+            h: input_h,
+        };
+        let active_kind = self.active_chat_sheet().map(|sheet| sheet.kind);
+        let users_w = if active_kind == Some(NetDlgChatSheetKind::Channel) {
+            (inner.w / 5).max(100).min(inner.w)
+        } else {
+            0
+        };
+        let users = (users_w > 0).then_some(IntRect {
+            x: inner.x + inner.w - users_w,
+            y: inner.y + tab_h,
+            w: users_w,
+            h: (inner.h - tab_h - input_h).max(0),
+        });
+        let input_label = (active_kind != Some(NetDlgChatSheetKind::Server)).then_some(IntRect {
+            x: input_row.x,
+            y: input_row.y,
+            w: 40,
+            h: input_row.h,
+        });
+        let label_w = input_label.map_or(0, |label| label.w);
+        NetDlgChatLayout {
+            group,
+            login_labels,
+            login_edits,
+            connect,
+            tabs,
+            transcript: IntRect {
+                x: inner.x,
+                y: inner.y + tab_h,
+                w: (inner.w - users_w).max(0),
+                h: (inner.h - tab_h - input_h).max(0),
+            },
+            users,
+            input_label,
+            input: IntRect {
+                x: input_row.x + label_w,
+                y: input_row.y,
+                w: (input_row.w - label_w).max(0),
+                h: input_row.h,
+            },
+        }
+    }
+
+    fn chat_hit(&self, point: GuiPoint) -> Option<NetDlgChatHit> {
+        let layout = self.chat_layout();
+        match self.chat_page() {
+            NetDlgChatPage::Login => {
+                for field in NetDlgChatLoginField::ALL {
+                    if contains(layout.login_edits[field.index()], point) {
+                        return Some(NetDlgChatHit::LoginField(field));
+                    }
+                }
+                contains(layout.connect, point).then_some(NetDlgChatHit::Connect)
+            }
+            NetDlgChatPage::Chats => layout
+                .tabs
+                .iter()
+                .position(|rect| contains(*rect, point))
+                .map(NetDlgChatHit::Tab)
+                .or_else(|| contains(layout.input, point).then_some(NetDlgChatHit::Input))
+                .or_else(|| {
+                    let users = layout.users?;
+                    if !contains(users, point) {
+                        return None;
+                    }
+                    let row = ((point.y.floor() as i32 - users.y)
+                        / self.metrics.text_line_height.max(1))
+                    .max(0);
+                    usize::try_from(row).ok().map(NetDlgChatHit::User)
+                }),
+        }
+    }
+
+    fn active_chat_edit_rect(&self) -> IntRect {
+        let layout = self.chat_layout();
+        match self.chat_page() {
+            NetDlgChatPage::Login => layout.login_edits[self.chat_login_field.index()],
+            NetDlgChatPage::Chats => layout.input,
+        }
+    }
+
+    fn active_chat_edit_mut(&mut self) -> &mut NetDlgEditState {
+        match self.chat_page() {
+            NetDlgChatPage::Login => &mut self.chat_login_edits[self.chat_login_field.index()],
+            NetDlgChatPage::Chats => &mut self.chat_edit,
+        }
+    }
+
+    fn select_chat_login_field(&mut self, field: NetDlgChatLoginField) {
+        if self.chat_login_field == field {
+            return;
+        }
+        self.chat_login_edits[self.chat_login_field.index()].blur();
+        self.chat_login_field = field;
+        self.chat_login_edits[field.index()].focus();
+    }
+
+    fn select_chat_sheet(&mut self, index: usize) -> Vec<NetDlgAction> {
+        let Some(sheet) = self.chat_sheets.get(index) else {
+            return Vec::new();
+        };
+        self.chat_active_sheet = index;
+        vec![NetDlgAction::ChatSelectSheet {
+            kind: sheet.kind,
+            ident: sheet.ident.clone(),
+        }]
+    }
+
+    pub fn submit_chat_login(&mut self) -> Vec<NetDlgAction> {
+        let login = self.chat_login();
+        let invalid = if !Self::valid_irc_nick(&login.nick) {
+            Some((NetDlgChatLoginField::Nick, "Invalid nickname"))
+        } else if !Self::valid_irc_password(&login.password) {
+            Some((
+                NetDlgChatLoginField::Password,
+                "Invalid password (2-31 characters, no spaces)",
+            ))
+        } else if !Self::valid_irc_channel(&login.channel) {
+            Some((NetDlgChatLoginField::Channel, "Invalid channel name"))
+        } else {
+            None
+        };
+        if let Some((field, error)) = invalid {
+            self.chat_connect_focused = false;
+            self.select_chat_login_field(field);
+            self.chat_login_error = Some(error.to_string());
+            return vec![NetDlgAction::GuiSound(NetDlgSound::Error)];
+        }
+        self.chat_login_error = None;
+        vec![NetDlgAction::ChatConnect(login)]
+    }
+
+    fn chat_error(&mut self, error: impl Into<String>) -> Vec<NetDlgAction> {
+        let error = error.into();
+        if let Some(sheet) = self.chat_sheets.get_mut(self.chat_active_sheet) {
+            sheet.lines.push(format!("Error: {error}"));
+        }
+        vec![NetDlgAction::GuiSound(NetDlgSound::Error)]
+    }
+
+    pub fn submit_chat_input(&mut self) -> Vec<NetDlgAction> {
+        let input = std::mem::take(&mut self.chat_edit.text);
+        self.chat_edit.set_text("");
+        self.chat_history_index = None;
+        if input.is_empty() {
+            return self.chat_error("No message entered");
+        }
+        if let Some(existing) = self.chat_history.iter().position(|entry| entry == &input) {
+            self.chat_history.remove(existing);
+        }
+        self.chat_history.push(input.clone());
+        if self.chat_history.len() > 20 {
+            self.chat_history.remove(0);
+        }
+        if self.chat_connection_state != NetDlgChatConnectionState::Connected {
+            return self.chat_error("Not connected to a server");
+        }
+
+        let active = self.active_chat_sheet().cloned();
+        let command =
+            if input.starts_with('/') && !input[1..].to_ascii_lowercase().starts_with("me ") {
+                let command_line = &input[1..];
+                let (name, parameter) = command_line
+                    .split_once(' ')
+                    .map_or((command_line, ""), |(name, parameter)| {
+                        (name, parameter.trim_start())
+                    });
+                match name.to_ascii_lowercase().as_str() {
+                    "quit" => NetDlgChatCommand::Quit {
+                        reason: parameter.to_string(),
+                    },
+                    "part" => NetDlgChatCommand::Part {
+                        channel: if parameter.is_empty()
+                            && active
+                                .as_ref()
+                                .is_some_and(|sheet| sheet.kind == NetDlgChatSheetKind::Channel)
+                        {
+                            active.as_ref().unwrap().ident.clone()
+                        } else {
+                            parameter.to_string()
+                        },
+                    },
+                    "join" | "j" => NetDlgChatCommand::Join {
+                        channel: if parameter.is_empty() {
+                            self.chat_login().channel
+                        } else {
+                            parameter.to_string()
+                        },
+                    },
+                    "notice" | "msg" => {
+                        let Some((target, text)) = parameter.split_once(' ') else {
+                            return self.chat_error(format!("Insufficient parameters for /{name}"));
+                        };
+                        if text.is_empty() {
+                            return self.chat_error(format!("Insufficient parameters for /{name}"));
+                        }
+                        if name.eq_ignore_ascii_case("msg") {
+                            NetDlgChatCommand::Message {
+                                target: target.to_string(),
+                                text: text.to_string(),
+                            }
+                        } else {
+                            NetDlgChatCommand::Notice {
+                                target: target.to_string(),
+                                text: text.to_string(),
+                            }
+                        }
+                    }
+                    "raw" if !parameter.is_empty() => NetDlgChatCommand::Raw(parameter.to_string()),
+                    "raw" => return self.chat_error("Insufficient parameters for /raw"),
+                    "ns" | "cs" | "ms" if !parameter.is_empty() => NetDlgChatCommand::Message {
+                        target: match name.to_ascii_lowercase().as_str() {
+                            "ns" => "NickServ",
+                            "cs" => "ChanServ",
+                            _ => "MemoServ",
+                        }
+                        .to_string(),
+                        text: parameter.to_string(),
+                    },
+                    "ns" | "cs" | "ms" => {
+                        return self.chat_error(format!("Insufficient parameters for /{name}"));
+                    }
+                    "query" | "q" if !parameter.is_empty() => {
+                        let index =
+                            Self::ensure_query_sheet(&mut self.chat_sheets, parameter, parameter);
+                        self.chat_active_sheet = index;
+                        NetDlgChatCommand::OpenQuery {
+                            nick: parameter.to_string(),
+                        }
+                    }
+                    "query" | "q" => {
+                        return self.chat_error(format!("Insufficient parameters for /{name}"));
+                    }
+                    "nick" if Self::valid_irc_nick(parameter) => NetDlgChatCommand::ChangeNick {
+                        nick: parameter.to_string(),
+                    },
+                    "nick" => return self.chat_error("Invalid nickname"),
+                    _ => return self.chat_error(format!("Unknown command: {name}")),
+                }
+            } else {
+                let Some(active) = active else {
+                    return self.chat_error("Not on a channel");
+                };
+                if active.kind == NetDlgChatSheetKind::Server {
+                    return self.chat_error("Not on a channel");
+                }
+                if input.to_ascii_lowercase().starts_with("/me ") {
+                    NetDlgChatCommand::Action {
+                        target: active.title,
+                        text: input[4..].to_string(),
+                    }
+                } else {
+                    NetDlgChatCommand::Message {
+                        target: active.title,
+                        text: input,
+                    }
+                }
+            };
+        vec![NetDlgAction::ChatCommand(command)]
     }
 
     fn layout(&self) -> NetDlgLayout {
@@ -1939,9 +3174,15 @@ impl NetDlgController {
         if self.focus == NetDlgControl::JoinAddress {
             self.join_edit.blur();
         }
+        if self.focus == NetDlgControl::ChatInput {
+            self.active_chat_edit_mut().blur();
+        }
         self.focus = focus;
         if focus == NetDlgControl::JoinAddress {
             self.join_edit.focus();
+        }
+        if focus == NetDlgControl::ChatInput && !self.chat_connect_focused {
+            self.active_chat_edit_mut().focus();
         }
         self.key_pressed = None;
         vec![NetDlgAction::FocusChanged(focus)]
@@ -3038,7 +4279,15 @@ impl NetDlgScreen {
                 }
             }
         } else {
-            Self::draw_chat_sheet(surface, fonts, &classic_skin, gamma, layout);
+            Self::draw_chat_sheet(
+                surface,
+                fonts,
+                &classic_skin,
+                gamma,
+                layout,
+                controller,
+                draw_focus,
+            );
         }
 
         // ⑥⑦ Right icon buttons, config-driven (C4StartupNetDlg.cpp:710-717)
@@ -3374,11 +4623,14 @@ impl NetDlgScreen {
         classic_skin: &ClassicGuiSkin<'_>,
         gamma: Option<&GammaRamp>,
         layout: NetDlgLayout,
+        controller: Option<&NetDlgController>,
+        draw_focus: bool,
     ) {
+        let title = controller.map_or_else(|| "Chat".to_string(), NetDlgController::chat_title);
         classic_skin.draw_caption(
             surface,
             layout.game_list_caption,
-            "Chat",
+            &title,
             &fonts.text,
             CLR_YELLOW,
             TextAlign::Left,
@@ -3400,6 +4652,216 @@ impl NetDlgScreen {
             gamma,
         );
         draw_3d_frame(surface, chat, gamma);
+
+        let Some(controller) = controller else {
+            return;
+        };
+        let chat_layout = controller.chat_layout();
+        if controller.chat_page() == NetDlgChatPage::Login {
+            let labels = [
+                "Nickname:",
+                "Password (optional):",
+                "Real name:",
+                "Channel:",
+            ];
+            for (index, label) in labels.into_iter().enumerate() {
+                let label_rect = chat_layout.login_labels[index];
+                fonts.text.draw_with_gamma(
+                    surface,
+                    label_rect.x,
+                    label_rect.y,
+                    label,
+                    CLR_WHITE,
+                    TextAlign::Left,
+                    true,
+                    gamma,
+                );
+                let field = NetDlgChatLoginField::ALL[index];
+                let focused = draw_focus
+                    && controller.focus == NetDlgControl::ChatInput
+                    && controller.chat_login_field == field
+                    && !controller.chat_connect_focused;
+                Self::draw_chat_edit(
+                    surface,
+                    &fonts.text,
+                    gamma,
+                    chat_layout.login_edits[index],
+                    &controller.chat_login_edits[index],
+                    field == NetDlgChatLoginField::Password,
+                    focused,
+                );
+            }
+            classic_skin.draw_button(
+                surface,
+                chat_layout.connect,
+                "Connect",
+                fonts,
+                ClassicButtonState {
+                    pressed: controller.chat_pressed == Some(NetDlgChatHit::Connect),
+                    highlighted: draw_focus
+                        && controller.focus == NetDlgControl::ChatInput
+                        && controller.chat_connect_focused,
+                },
+                gamma,
+            );
+            if let Some(error) = controller.chat_login_error.as_deref() {
+                draw_clipped_text(
+                    surface,
+                    &fonts.text,
+                    chat_layout.group.x + chat_layout.group.w / 2,
+                    chat_layout.connect.y + chat_layout.connect.h + 3,
+                    error,
+                    CLR_ERROR,
+                    TextAlign::Center,
+                    gamma,
+                    chat_layout.group,
+                );
+            }
+            return;
+        }
+
+        for (index, tab) in chat_layout.tabs.iter().copied().enumerate() {
+            let selected = index == controller.chat_active_sheet;
+            let title = controller
+                .chat_sheets
+                .get(index)
+                .map_or("", |sheet| sheet.title.as_str());
+            classic_skin.draw_caption(
+                surface,
+                tab,
+                title,
+                &fonts.text,
+                if selected { CLR_YELLOW } else { CLR_WHITE },
+                TextAlign::Center,
+                gamma,
+            );
+        }
+
+        draw_engine_box(
+            surface,
+            chat_layout.transcript.x,
+            chat_layout.transcript.y,
+            chat_layout.transcript.x + chat_layout.transcript.w - 1,
+            chat_layout.transcript.y + chat_layout.transcript.h - 1,
+            CLR_DARK_BG,
+            gamma,
+        );
+        let line_h = fonts.text.line_height.max(1);
+        if let Some(sheet) = controller.active_chat_sheet() {
+            let visible = usize::try_from((chat_layout.transcript.h / line_h).max(0)).unwrap_or(0);
+            let start = sheet.lines.len().saturating_sub(visible);
+            for (row, line) in sheet.lines[start..].iter().enumerate() {
+                draw_clipped_text(
+                    surface,
+                    &fonts.text,
+                    chat_layout.transcript.x + 3,
+                    chat_layout.transcript.y + i32::try_from(row).unwrap_or(i32::MAX) * line_h,
+                    line,
+                    CLR_WHITE,
+                    TextAlign::Left,
+                    gamma,
+                    chat_layout.transcript,
+                );
+            }
+            if let Some(users) = chat_layout.users {
+                draw_engine_box(
+                    surface,
+                    users.x,
+                    users.y,
+                    users.x + users.w - 1,
+                    users.y + users.h - 1,
+                    CLR_DARK_BG,
+                    gamma,
+                );
+                for (row, user) in sheet
+                    .users
+                    .iter()
+                    .take(usize::try_from((users.h / line_h).max(0)).unwrap_or(0))
+                    .enumerate()
+                {
+                    fonts.text.draw_with_gamma(
+                        surface,
+                        users.x + 3,
+                        users.y + i32::try_from(row).unwrap_or(i32::MAX) * line_h,
+                        &format!("{}{}", user.prefix, user.name),
+                        CLR_WHITE,
+                        TextAlign::Left,
+                        true,
+                        gamma,
+                    );
+                }
+                draw_3d_frame(surface, users, gamma);
+            }
+        }
+        draw_3d_frame(surface, chat_layout.transcript, gamma);
+        if let Some(label) = chat_layout.input_label {
+            classic_skin.draw_caption(
+                surface,
+                label,
+                "Chat",
+                &fonts.text,
+                CLR_WHITE,
+                TextAlign::Center,
+                gamma,
+            );
+        }
+        Self::draw_chat_edit(
+            surface,
+            &fonts.text,
+            gamma,
+            chat_layout.input,
+            &controller.chat_edit,
+            false,
+            draw_focus && controller.focus == NetDlgControl::ChatInput,
+        );
+    }
+
+    fn draw_chat_edit(
+        surface: &mut Surface,
+        font: &ClonkFont,
+        gamma: Option<&GammaRamp>,
+        rect: IntRect,
+        state: &NetDlgEditState,
+        password: bool,
+        focused: bool,
+    ) {
+        let client = edit_client(rect);
+        draw_engine_box(
+            surface,
+            rect.x,
+            rect.y,
+            rect.x + rect.w - 1,
+            rect.y + rect.h - 1,
+            CLR_DARK_BG,
+            gamma,
+        );
+        draw_3d_frame(surface, rect, gamma);
+        let display = if password {
+            "*".repeat(state.text.chars().count())
+        } else {
+            state.text.clone()
+        };
+        let text_y = client.y + (client.h - font.line_height).max(0) / 2;
+        draw_clipped_text(
+            surface,
+            font,
+            client.x - state.horizontal_scroll,
+            text_y,
+            &display,
+            CLR_WHITE,
+            TextAlign::Left,
+            gamma,
+            client,
+        );
+        if focused && state.cursor_visible() {
+            let caret_text = if password {
+                "*".repeat(state.text[..state.caret].chars().count())
+            } else {
+                state.text[..state.caret].to_string()
+            };
+            let caret_x = client.x + font.measure(&caret_text, false).0 - state.horizontal_scroll;
+            draw_scaled_caret(surface, font, caret_x, text_y, client, gamma);
+        }
     }
 }
 
@@ -5447,6 +6909,277 @@ mod tests {
                 .all(|command| command.clip == Some(expected)),
             "every native game-row text command must retain the viewport clip"
         );
+    }
+
+    fn chat_login() -> NetDlgChatLogin {
+        NetDlgChatLogin {
+            server: "irc.example.test".into(),
+            nick: "Clonker".into(),
+            password: "secret".into(),
+            real_name: "Clonk Player".into(),
+            channel: "#clonken".into(),
+        }
+    }
+
+    fn chat_snapshot(
+        state: NetDlgChatConnectionState,
+        messages: Vec<NetDlgChatMessage>,
+        unread_index: usize,
+    ) -> NetDlgChatSnapshot {
+        NetDlgChatSnapshot {
+            connection_state: state,
+            server: "irc.example.test".into(),
+            nick: "Clonker".into(),
+            channels: vec![NetDlgChatChannel {
+                name: "#clonken".into(),
+                topic: "Legacy Clonk".into(),
+                users: vec![NetDlgChatUser {
+                    prefix: "@".into(),
+                    name: "Keeper".into(),
+                }],
+            }],
+            messages,
+            unread_index,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn chat_login_enter_traversal_validates_and_submits_without_game_controls() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.set_chat_login(chat_login());
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        assert_eq!(
+            click(&mut controller, layout.btn_chat),
+            vec![
+                NetDlgAction::ModeChanged(NetDlgMode::Chat),
+                NetDlgAction::FocusChanged(NetDlgControl::ChatInput),
+            ]
+        );
+        assert_eq!(controller.chat_page(), NetDlgChatPage::Login);
+        assert!(click(&mut controller, layout.btn_internet).is_empty());
+        assert!(click(&mut controller, layout.buttons[1]).is_empty());
+        assert!(click(&mut controller, layout.buttons[2]).is_empty());
+
+        for expected in [
+            NetDlgChatLoginField::Password,
+            NetDlgChatLoginField::RealName,
+            NetDlgChatLoginField::Channel,
+        ] {
+            assert!(controller.handle_key_down(KeyCode::Enter).is_empty());
+            assert_eq!(controller.chat_login_field(), expected);
+        }
+        assert!(controller.handle_key_down(KeyCode::Enter).is_empty());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Enter),
+            vec![NetDlgAction::ChatConnect(chat_login())]
+        );
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            Vec::new(),
+            0,
+        ));
+        controller.handle_text_input("after connect", text_font());
+        assert_eq!(controller.chat_input(), "after connect");
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Enter),
+            vec![NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
+                target: "#clonken".into(),
+                text: "after connect".into(),
+            })]
+        );
+
+        let mut invalid = chat_login();
+        invalid.nick = "NickServ".into();
+        controller.show_chat_login();
+        controller.set_chat_login(invalid);
+        assert_eq!(
+            controller.submit_chat_login(),
+            vec![NetDlgAction::GuiSound(NetDlgSound::Error)]
+        );
+        assert_eq!(controller.chat_login_field(), NetDlgChatLoginField::Nick);
+    }
+
+    #[test]
+    fn chat_snapshot_builds_tabs_routes_messages_and_appends_only_unread_suffix() {
+        let first = NetDlgChatMessage {
+            kind: NetDlgChatMessageKind::Message,
+            source: "Keeper!ident@example".into(),
+            target: "#clonken".into(),
+            text: "Welcome".into(),
+            is_channel: true,
+        };
+        let second = NetDlgChatMessage {
+            kind: NetDlgChatMessageKind::Action,
+            source: "Keeper!ident@example".into(),
+            target: "#clonken".into(),
+            text: "waves".into(),
+            is_channel: true,
+        };
+        assert_eq!(
+            NetDlgController::format_chat_message(
+                &NetDlgChatMessage {
+                    kind: NetDlgChatMessageKind::Message,
+                    source: "Clonker!ident@example".into(),
+                    target: "#clonken".into(),
+                    text: "local echo".into(),
+                    is_channel: true,
+                },
+                "Clonker",
+                "Clonker",
+            ),
+            "<Clonker> local echo"
+        );
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connecting,
+            Vec::new(),
+            0,
+        ));
+        assert_eq!(controller.chat_page(), NetDlgChatPage::Chats);
+        assert_eq!(
+            controller.chat_sheets()[0].lines,
+            vec!["Connecting to irc.example.test..."]
+        );
+
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            vec![first.clone()],
+            0,
+        ));
+        let channel = controller.active_chat_sheet().expect("channel tab");
+        assert_eq!(channel.kind, NetDlgChatSheetKind::Channel);
+        assert_eq!(channel.topic, "Legacy Clonk");
+        assert_eq!(channel.users[0].name, "Keeper");
+        assert_eq!(channel.lines, vec!["<Keeper> Welcome"]);
+
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            vec![first, second],
+            1,
+        ));
+        assert_eq!(
+            controller.active_chat_sheet().unwrap().lines,
+            vec!["<Keeper> Welcome", "* Keeper waves"]
+        );
+        assert_eq!(
+            controller.chat_sheets()[0].lines,
+            vec!["Connecting to irc.example.test..."]
+        );
+    }
+
+    #[test]
+    fn connected_chat_enter_routes_messages_commands_and_history() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            Vec::new(),
+            0,
+        ));
+        controller.mode = NetDlgMode::Chat;
+        controller.focus = NetDlgControl::ChatInput;
+
+        assert!(controller
+            .handle_text_input("hello channel", text_font())
+            .is_empty());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Enter),
+            vec![NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
+                target: "#clonken".into(),
+                text: "hello channel".into(),
+            })]
+        );
+        controller.handle_text_input("/me waves", text_font());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Enter),
+            vec![NetDlgAction::ChatCommand(NetDlgChatCommand::Action {
+                target: "#clonken".into(),
+                text: "waves".into(),
+            })]
+        );
+        controller.handle_text_input("/part", text_font());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Enter),
+            vec![NetDlgAction::ChatCommand(NetDlgChatCommand::Part {
+                channel: "#clonken".into(),
+            })]
+        );
+        assert!(controller.handle_key_down(KeyCode::Up).is_empty());
+        assert_eq!(controller.chat_input(), "/part");
+        assert!(controller.handle_key_down(KeyCode::Down).is_empty());
+        assert_eq!(controller.chat_input(), "");
+        controller.handle_text_input("Grüße", text_font());
+        assert_eq!(
+            controller.handle_key_down(KeyCode::Enter),
+            vec![NetDlgAction::ChatCommand(NetDlgChatCommand::Message {
+                target: "#clonken".into(),
+                text: "Grüße".into(),
+            })]
+        );
+    }
+
+    #[test]
+    fn chat_edit_keys_clipboard_and_rendered_tabs_are_functional() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        controller.sync_chat_snapshot(chat_snapshot(
+            NetDlgChatConnectionState::Connected,
+            vec![NetDlgChatMessage {
+                kind: NetDlgChatMessageKind::Message,
+                source: "Keeper!ident@example".into(),
+                target: "#clonken".into(),
+                text: "Welcome".into(),
+                is_channel: true,
+            }],
+            0,
+        ));
+        controller.mode = NetDlgMode::Chat;
+        controller.focus = NetDlgControl::ChatInput;
+        controller.handle_text_input("copy me", text_font());
+        assert!(
+            controller
+                .handle_clipboard_shortcut(
+                    NetDlgEditClipboardShortcut::SelectAll,
+                    None,
+                    text_font(),
+                )
+                .captured
+        );
+        assert_eq!(
+            controller
+                .handle_clipboard_shortcut(NetDlgEditClipboardShortcut::Copy, None, text_font())
+                .actions,
+            vec![NetDlgAction::ClipboardTransfer {
+                text: "copy me".into(),
+                cut: false,
+            }]
+        );
+        assert!(
+            controller
+                .handle_edit_key_down(
+                    NetDlgEditKey::Backspace,
+                    NetDlgEditModifiers::default(),
+                    text_font(),
+                )
+                .captured
+        );
+        assert_eq!(controller.chat_input(), "");
+
+        let fonts = endeavour_font_set();
+        let assets = net_assets();
+        let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        surface.begin_clonk_text_capture();
+        NetDlgScreen::render_controller(&mut surface, &assets, &fonts, None, &controller, 0);
+        let texts = surface
+            .take_clonk_text_capture()
+            .into_iter()
+            .map(|command| command.text)
+            .collect::<Vec<_>>();
+        assert!(texts.iter().any(|text| text == "#clonken"));
+        assert!(texts.iter().any(|text| text == "<Keeper> Welcome"));
+        assert!(texts.iter().any(|text| text == "@Keeper"));
     }
 
     /// Renders the dialog at 1280x720 with the final whole-surface gamma pass

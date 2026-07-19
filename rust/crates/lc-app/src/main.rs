@@ -10245,6 +10245,11 @@ struct GameApp {
     /// the 500ms stillness delay are global.
     startup_tooltip: ClassicTooltipTracker,
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
+    /// Process-global C4Network2IRC analogue. Native retains the IRC client
+    /// independently of the startup network dialog, so changing startup
+    /// screens must not tear down a live connection.
+    startup_irc_client: Option<lc_network::IrcClientHandle>,
+    startup_irc_server: String,
     startup_game_search: Option<lc_network::StartupGameSearch>,
     #[cfg(test)]
     startup_game_search_test_events: VecDeque<lc_network::StartupGameSearchEvent>,
@@ -11470,7 +11475,6 @@ enum ClassicGameLobbyBoundary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClassicStartupSubscreen {
     Options(lc_frontend::startup_options_dlg::OptionsSheet),
-    NetworkGameChat,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11913,10 +11917,6 @@ impl fmt::Display for ClassicParityBoundary {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Self::StartupSubscreen(ClassicStartupSubscreen::NetworkGameChat) => write!(
-                f,
-                "classic IRC Chat frontend is not implemented yet; refusing an incomplete startup Chat pane"
-            ),
             Self::StartupSubscreen(subscreen) => write!(
                 f,
                 "classic startup subscreen {subscreen:?} is not implemented; refusing incomplete Rust pane"
@@ -12031,7 +12031,7 @@ impl fmt::Display for ClassicParityBoundary {
             ),
             Self::RuntimeIrcChatToggle => write!(
                 f,
-                "classic IRC Chat frontend is not implemented yet; refusing the runtime Alt+C toggle"
+                "classic standalone IRC Chat dialog is not wired yet; refusing the runtime Alt+C toggle"
             ),
             Self::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable) => write!(
                 f,
@@ -12096,7 +12096,7 @@ impl fmt::Display for ClassicParityBoundary {
                 ClassicGameLobbyChild::ExternalIrcChat,
             )) => write!(
                 f,
-                "classic IRC Chat frontend is not implemented yet; refusing the game-lobby IRC button"
+                "classic standalone IRC Chat dialog is not wired yet; refusing the game-lobby IRC button"
             ),
             Self::GameLobby(ClassicGameLobbyBoundary::Child(child)) => write!(
                 f,
@@ -19873,6 +19873,95 @@ fn configured_control_key_names(
         .collect()
 }
 
+fn project_startup_irc_snapshot(
+    server: &str,
+    snapshot: lc_network::IrcClientSnapshot,
+) -> lc_frontend::startup_netdlg::NetDlgChatSnapshot {
+    use lc_frontend::startup_netdlg::{
+        NetDlgChatChannel, NetDlgChatConnectionState, NetDlgChatMessage, NetDlgChatMessageKind,
+        NetDlgChatSnapshot, NetDlgChatUser,
+    };
+
+    let unread_index = snapshot.unread_index;
+    let connection_state = match snapshot.connection_state {
+        lc_network::IrcConnectionState::Disconnected => NetDlgChatConnectionState::Disconnected,
+        lc_network::IrcConnectionState::Connecting => NetDlgChatConnectionState::Connecting,
+        lc_network::IrcConnectionState::Connected => NetDlgChatConnectionState::Connected,
+    };
+    let channels = snapshot
+        .channels
+        .into_iter()
+        .map(|channel| NetDlgChatChannel {
+            name: channel.name,
+            topic: channel.topic,
+            users: channel
+                .users
+                .into_iter()
+                .map(|user| NetDlgChatUser {
+                    prefix: user.prefix,
+                    name: user.name,
+                })
+                .collect(),
+        })
+        .collect();
+    let messages = snapshot
+        .messages
+        .into_iter()
+        .map(|message| {
+            let is_channel = message.is_channel();
+            let kind = match message.message_type {
+                lc_network::IrcMessageType::Server => NetDlgChatMessageKind::Server,
+                lc_network::IrcMessageType::Status => NetDlgChatMessageKind::Status,
+                lc_network::IrcMessageType::Message => NetDlgChatMessageKind::Message,
+                lc_network::IrcMessageType::Notice => NetDlgChatMessageKind::Notice,
+                lc_network::IrcMessageType::Action => NetDlgChatMessageKind::Action,
+            };
+            NetDlgChatMessage {
+                kind,
+                source: message.source,
+                target: message.target,
+                text: message.data,
+                is_channel,
+            }
+        })
+        .collect();
+    NetDlgChatSnapshot {
+        connection_state,
+        server: server.to_string(),
+        nick: snapshot.nick,
+        channels,
+        messages,
+        unread_index,
+        last_error: snapshot.last_error,
+    }
+}
+
+fn project_startup_irc_command(
+    command: lc_frontend::startup_netdlg::NetDlgChatCommand,
+) -> Option<lc_network::IrcCommand> {
+    use lc_frontend::startup_netdlg::NetDlgChatCommand;
+
+    Some(match command {
+        NetDlgChatCommand::Quit { reason } => lc_network::IrcCommand::Quit { reason },
+        NetDlgChatCommand::Join { channel } => lc_network::IrcCommand::Join { channel },
+        NetDlgChatCommand::Part { channel } => lc_network::IrcCommand::Part { channel },
+        NetDlgChatCommand::Message { target, text } => {
+            lc_network::IrcCommand::Message { target, text }
+        }
+        NetDlgChatCommand::Notice { target, text } => {
+            lc_network::IrcCommand::Notice { target, text }
+        }
+        NetDlgChatCommand::Action { target, text } => {
+            lc_network::IrcCommand::Action { target, text }
+        }
+        NetDlgChatCommand::Raw(line) => lc_network::IrcCommand::Raw(line),
+        NetDlgChatCommand::ChangeNick { nick } => lc_network::IrcCommand::ChangeNick { nick },
+        // Opening a query tab is presentation-only; the first message is sent
+        // separately if the user enters one.
+        NetDlgChatCommand::OpenQuery { .. } => return None,
+    })
+}
+
 impl GameApp {
     fn new(
         width: u32,
@@ -20199,6 +20288,8 @@ impl GameApp {
             main_menu_state,
             startup_tooltip: ClassicTooltipTracker::new(),
             startup_network_dialog: None,
+            startup_irc_client: None,
+            startup_irc_server: String::new(),
             startup_game_search: None,
             #[cfg(test)]
             startup_game_search_test_events: VecDeque::new(),
@@ -22825,7 +22916,7 @@ impl GameApp {
         Ok(true)
     }
 
-    fn handle_network_join_edit_key(
+    fn handle_network_edit_key(
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
@@ -22846,10 +22937,12 @@ impl GameApp {
 
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        let edit_focused = self
-            .startup_network_dialog
-            .as_ref()
-            .is_some_and(|dialog| dialog.focused_control() == NetDlgControl::JoinAddress);
+        let edit_focused = self.startup_network_dialog.as_ref().is_some_and(|dialog| {
+            matches!(
+                dialog.focused_control(),
+                NetDlgControl::JoinAddress | NetDlgControl::ChatInput
+            )
+        });
         // Both StartupNetBack and the Edit cursor bindings use exact modifier
         // masks. Modified Back/Left outside the edit, and Alt-modified ones
         // inside it, must not fall through to the modifier-blind GUI mapping.
@@ -25724,7 +25817,7 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                if self.handle_network_join_edit_key(key, state)? {
+                if self.handle_network_edit_key(key, state)? {
                     return Ok(());
                 }
                 if self.startup_view == StartupView::PlayerSelection
@@ -39931,6 +40024,119 @@ impl GameApp {
         Ok(())
     }
 
+    fn sync_startup_irc_projection(
+        &mut self,
+        snapshot: lc_frontend::startup_netdlg::NetDlgChatSnapshot,
+    ) {
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.sync_chat_snapshot(snapshot);
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn sync_startup_irc_snapshot(&mut self) {
+        let Some(client) = self.startup_irc_client.as_ref() else {
+            return;
+        };
+        let snapshot = if self.startup_network_dialog.is_some() {
+            client.snapshot_and_mark_message_log_read()
+        } else {
+            client.snapshot()
+        };
+        let snapshot = project_startup_irc_snapshot(&self.startup_irc_server, snapshot);
+        self.sync_startup_irc_projection(snapshot);
+    }
+
+    fn connect_startup_irc(&mut self, login: lc_frontend::startup_netdlg::NetDlgChatLogin) {
+        if let Some(mut client) = self.startup_irc_client.take() {
+            if let Err(error) = client.close() {
+                tracing::warn!(%error, "failed to close the previous IRC connection");
+            }
+        }
+
+        self.startup_irc_server.clone_from(&login.server);
+        self.sync_startup_irc_projection(lc_frontend::startup_netdlg::NetDlgChatSnapshot {
+            server: login.server.clone(),
+            nick: login.nick.clone(),
+            ..Default::default()
+        });
+        let mut config = lc_network::IrcConnectConfig::new(
+            login.server.clone(),
+            login.nick.clone(),
+            login.real_name,
+        );
+        config.password = (!login.password.is_empty()).then_some(login.password);
+        config.auto_join = (!login.channel.is_empty()).then_some(login.channel);
+        match lc_network::IrcClientHandle::connect(config) {
+            Ok(client) => {
+                self.startup_irc_client = Some(client);
+                self.sync_startup_irc_snapshot();
+            }
+            Err(error) => {
+                let snapshot = lc_frontend::startup_netdlg::NetDlgChatSnapshot {
+                    server: login.server,
+                    nick: login.nick,
+                    last_error: Some(error.to_string()),
+                    ..Default::default()
+                };
+                self.sync_startup_irc_projection(snapshot);
+            }
+        }
+    }
+
+    fn disconnect_startup_irc(&mut self) {
+        let Some(mut client) = self.startup_irc_client.take() else {
+            return;
+        };
+        let close_error = client.close().err().map(|error| error.to_string());
+        let mut snapshot =
+            project_startup_irc_snapshot(&self.startup_irc_server, client.snapshot());
+        if close_error.is_some() {
+            snapshot.last_error = close_error;
+        }
+        self.sync_startup_irc_projection(snapshot);
+    }
+
+    fn dispatch_startup_irc_command(
+        &mut self,
+        command: lc_frontend::startup_netdlg::NetDlgChatCommand,
+    ) {
+        let Some(command) = project_startup_irc_command(command) else {
+            return;
+        };
+        let result = self
+            .startup_irc_client
+            .as_ref()
+            .ok_or(lc_network::IrcClientError::NotConnected)
+            .and_then(|client| client.queue_command(command));
+        if let Err(error) = result {
+            tracing::warn!(%error, "failed to queue IRC command");
+            if let Some(client) = self.startup_irc_client.as_ref() {
+                let snapshot = if self.startup_network_dialog.is_some() {
+                    client.snapshot_and_mark_message_log_read()
+                } else {
+                    client.snapshot()
+                };
+                let mut snapshot =
+                    project_startup_irc_snapshot(&self.startup_irc_server, snapshot);
+                snapshot.last_error = Some(error.to_string());
+                self.sync_startup_irc_projection(snapshot);
+            }
+        }
+    }
+
+    fn poll_startup_irc(&mut self) {
+        let mut changed = false;
+        if let Some(client) = self.startup_irc_client.as_ref() {
+            while client.try_recv_event().is_ok() {
+                changed = true;
+            }
+        }
+        if changed {
+            self.sync_startup_irc_snapshot();
+        }
+    }
+
     fn process_network_dialog_actions(
         &mut self,
         actions: Vec<lc_frontend::startup_netdlg::NetDlgAction>,
@@ -39943,14 +40149,12 @@ impl GameApp {
 
         for action in actions {
             match action {
-                NetDlgAction::ModeChanged(lc_frontend::startup_netdlg::NetDlgMode::Chat) => {
-                    return Err(classic_startup_subscreen_error(
-                        ClassicStartupSubscreen::NetworkGameChat,
-                    ));
-                }
                 NetDlgAction::FocusChanged(_)
                 | NetDlgAction::ModeChanged(lc_frontend::startup_netdlg::NetDlgMode::GameList)
                 | NetDlgAction::JoinAddressChanged(_) => {}
+                NetDlgAction::ModeChanged(lc_frontend::startup_netdlg::NetDlgMode::Chat) => {
+                    self.sync_startup_irc_snapshot();
+                }
                 NetDlgAction::OpenJoinAddressContextMenu(request) => {
                     let entries = request
                         .items
@@ -40029,7 +40233,14 @@ impl GameApp {
                 NetDlgAction::GuiSound(sound) => self.play_ui_sound(match sound {
                     lc_frontend::startup_netdlg::NetDlgSound::ArrowHit => "ArrowHit",
                     lc_frontend::startup_netdlg::NetDlgSound::Command => "Command",
+                    lc_frontend::startup_netdlg::NetDlgSound::Error => "Error",
                 }),
+                NetDlgAction::ChatConnect(login) => self.connect_startup_irc(login),
+                NetDlgAction::ChatCommand(command) => self.dispatch_startup_irc_command(command),
+                NetDlgAction::ChatDisconnect => self.disconnect_startup_irc(),
+                NetDlgAction::ChatSelectSheet { .. } => {
+                    self.sync_startup_irc_snapshot();
+                }
                 NetDlgAction::Back => {
                     self.begin_startup_dialog_fade(StartupDialog::MainMenu);
                     self.show_main_menu();
@@ -49111,6 +49322,7 @@ impl GameApp {
         };
         self.startup_network_dialog = Some(dialog);
         self.replace_startup_dialog(StartupView::NetworkGame, StartupDialog::NetworkGame);
+        self.sync_startup_irc_snapshot();
         self.startup_network_last_refresh = Some(Instant::now());
         if self.startup_game_search.is_some() {
             self.status_text = "Querying game infos…".to_string();
@@ -51684,6 +51896,7 @@ impl GameApp {
             }
         }
         self.poll_startup_game_search()?;
+        self.poll_startup_irc();
         self.poll_startup_network_connection();
         self.poll_live_masterserver_signup()?;
         self.process_network_events()?;
@@ -56180,10 +56393,7 @@ impl GameApp {
         let subscreen = match self.startup_view {
             StartupView::Options => None,
             StartupView::About => None,
-            StartupView::NetworkGame => self.startup_network_dialog.as_ref().and_then(|dialog| {
-                (dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat)
-                    .then_some(ClassicStartupSubscreen::NetworkGameChat)
-            }),
+            StartupView::NetworkGame => None,
             _ => None,
         };
         let Some(subscreen) = subscreen else {
@@ -84787,7 +84997,11 @@ public func Grant(password) { return GainMissionAccess(password); }
             assert_eq!(dialog.mode(), lc_frontend::startup_netdlg::NetDlgMode::Chat);
             assert_eq!(
                 dialog.focused_control(),
-                lc_frontend::startup_netdlg::NetDlgControl::CreateGame
+                lc_frontend::startup_netdlg::NetDlgControl::ChatInput
+            );
+            assert_eq!(
+                dialog.chat_login_field(),
+                lc_frontend::startup_netdlg::NetDlgChatLoginField::RealName
             );
         }
         app.open_network_host_scenario_browser();
@@ -84816,7 +85030,11 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         assert_eq!(
             retained.focused_control(),
-            lc_frontend::startup_netdlg::NetDlgControl::CreateGame
+            lc_frontend::startup_netdlg::NetDlgControl::ChatInput
+        );
+        assert_eq!(
+            retained.chat_login_field(),
+            lc_frontend::startup_netdlg::NetDlgChatLoginField::RealName
         );
 
         app.open_network_host_scenario_browser();
@@ -94306,7 +94524,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("global GUI fixture sheet")
     }
 
-    fn activate_startup_network_chat(app: &mut GameApp) -> EngineError {
+    fn activate_startup_network_chat(app: &mut GameApp) {
         let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
             caption_back_extent: 51,
             text_ip_extent: 18,
@@ -94324,7 +94542,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press Chat");
         app.handle_mouse_button(ElementState::Released)
-            .expect_err("dropped Chat page must fail on entry")
+            .expect("open the retained Chat page");
     }
 
     fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartupSubscreen) {
@@ -94348,58 +94566,180 @@ public func Grant(password) { return GainMissionAccess(password); }
                     }
                 }
             }
-            ClassicStartupSubscreen::NetworkGameChat => {
-                app.open_network_game_dialog();
-                let error = activate_startup_network_chat(app);
-                assert_engine_parity_boundary(
-                    error,
-                    ClassicParityBoundary::StartupSubscreen(
-                        ClassicStartupSubscreen::NetworkGameChat,
-                    ),
-                );
-            }
         }
     }
 
     #[test]
-    fn irc_frontend_stays_fail_closed_while_the_backend_is_wired() {
-        let mut app = new_real_classic_menu_app(640, 480);
-        let boundary = ClassicParityBoundary::StartupSubscreen(
-            ClassicStartupSubscreen::NetworkGameChat,
-        );
-        let expected = boundary.to_string();
-        assert_eq!(
-            expected,
-            "classic IRC Chat frontend is not implemented yet; refusing an incomplete startup Chat pane"
-        );
+    fn startup_irc_frontend_switches_and_renders_without_a_fail_closed_boundary() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback IRC");
+        let address = listener.local_addr().expect("loopback IRC address");
+        let server = thread::spawn(move || {
+            use std::io::Read as _;
 
+            let (mut stream, _) = listener.accept().expect("accept loopback IRC client");
+            let mut buffer = [0_u8; 512];
+            while stream.read(&mut buffer).is_ok_and(|read| read != 0) {}
+        });
+        let handle = lc_network::IrcClientHandle::connect_with_timeout(
+            lc_network::IrcConnectConfig::new(address.to_string(), "Clonker", "Clonker"),
+            Duration::from_secs(2),
+        )
+        .expect("start loopback IRC client");
+        assert!(matches!(
+            handle.recv_event_timeout(Duration::from_secs(2)),
+            Ok(lc_network::IrcClientEvent::Connected)
+        ));
+
+        let mut app = new_real_classic_menu_app(640, 480);
+        app.startup_irc_server = address.to_string();
+        app.startup_irc_client = Some(handle);
         app.open_network_game_dialog();
         let browser_status = app.status_text.clone();
-        let error = activate_startup_network_chat(&mut app);
-        match &error {
-            EngineError::ClassicMenuParityBoundary { detail } => {
-                assert_eq!(detail, &expected);
-            }
-            other => panic!("unexpected engine error: {other}"),
-        }
+        activate_startup_network_chat(&mut app);
         assert!(app.network.is_none());
         assert_eq!(app.status_text, browser_status);
         assert_eq!(
             app.startup_network_dialog.as_ref().unwrap().mode(),
             lc_frontend::startup_netdlg::NetDlgMode::Chat
         );
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .chat_connection_state(),
+            lc_frontend::startup_netdlg::NetDlgChatConnectionState::Connected
+        );
 
         let mut frame = vec![0xa5; 640 * 480 * 4];
-        let render_error = app
-            .render(&mut frame)
-            .expect_err("pending IRC frontend must be rejected before pixels");
-        assert_eq!(
-            render_error.downcast_ref::<ClassicParityBoundary>(),
-            Some(&boundary)
-        );
-        assert_eq!(render_error.to_string(), expected);
-        assert!(frame.iter().all(|byte| *byte == 0xa5));
+        app.render(&mut frame)
+            .expect("the classic startup Chat sheet renders");
+        assert!(frame.iter().any(|byte| *byte != 0xa5));
 
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let button = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics).btn_game_list;
+        let point = PhysicalPosition::new(
+            f64::from(button.x + button.w / 2),
+            f64::from(button.y + button.h / 2),
+        );
+        app.handle_cursor_moved(point).expect("hover Games");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Games");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("return to the game list");
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().mode(),
+            lc_frontend::startup_netdlg::NetDlgMode::GameList
+        );
+
+        app.show_main_menu();
+        app.open_network_game_dialog();
+        activate_startup_network_chat(&mut app);
+        assert!(app.startup_irc_client.is_some());
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .chat_connection_state(),
+            lc_frontend::startup_netdlg::NetDlgChatConnectionState::Connected,
+            "the process-global IRC client survives startup-screen replacement"
+        );
+        drop(app);
+        server.join().expect("join loopback IRC server");
+    }
+
+    #[test]
+    fn startup_irc_command_projection_covers_the_frontend_command_language() {
+        use lc_frontend::startup_netdlg::NetDlgChatCommand as Frontend;
+        use lc_network::IrcCommand as Backend;
+
+        let cases = [
+            (
+                Frontend::Quit {
+                    reason: "bye".into(),
+                },
+                Backend::Quit {
+                    reason: "bye".into(),
+                },
+            ),
+            (
+                Frontend::Join {
+                    channel: "#clonk".into(),
+                },
+                Backend::Join {
+                    channel: "#clonk".into(),
+                },
+            ),
+            (
+                Frontend::Part {
+                    channel: "#clonk".into(),
+                },
+                Backend::Part {
+                    channel: "#clonk".into(),
+                },
+            ),
+            (
+                Frontend::Message {
+                    target: "#clonk".into(),
+                    text: "hello".into(),
+                },
+                Backend::Message {
+                    target: "#clonk".into(),
+                    text: "hello".into(),
+                },
+            ),
+            (
+                Frontend::Notice {
+                    target: "Clonker".into(),
+                    text: "notice".into(),
+                },
+                Backend::Notice {
+                    target: "Clonker".into(),
+                    text: "notice".into(),
+                },
+            ),
+            (
+                Frontend::Action {
+                    target: "#clonk".into(),
+                    text: "waves".into(),
+                },
+                Backend::Action {
+                    target: "#clonk".into(),
+                    text: "waves".into(),
+                },
+            ),
+            (
+                Frontend::Raw("WHOIS Clonker".into()),
+                Backend::Raw("WHOIS Clonker".into()),
+            ),
+            (
+                Frontend::ChangeNick {
+                    nick: "Clonker_".into(),
+                },
+                Backend::ChangeNick {
+                    nick: "Clonker_".into(),
+                },
+            ),
+        ];
+        for (frontend, backend) in cases {
+            assert_eq!(project_startup_irc_command(frontend), Some(backend));
+        }
+        assert_eq!(
+            project_startup_irc_command(Frontend::OpenQuery {
+                nick: "Clonker".into(),
+            }),
+            None,
+            "query tabs are a frontend-only operation"
+        );
+    }
+
+    #[test]
+    fn non_startup_irc_entry_points_keep_their_existing_scoped_behavior() {
         let mut lobby_app = new_real_menu_app(640, 480);
         install_test_classic_host_lobby(&mut lobby_app);
         lobby_app
@@ -94425,7 +94765,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             let runtime_expected = runtime_boundary.to_string();
             assert_eq!(
                 runtime_expected,
-                "classic IRC Chat frontend is not implemented yet; refusing the runtime Alt+C toggle"
+                "classic standalone IRC Chat dialog is not wired yet; refusing the runtime Alt+C toggle"
             );
             for _ in 0..2 {
                 let runtime_error = runtime_app
@@ -94520,51 +94860,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 ),
             ),
             RetainedStartupChild::AboutLicenses => enter_about_licenses(app),
-        }
-    }
-
-    #[test]
-    fn unported_startup_subscreens_precede_status_and_matching_cache_pixels() {
-        let mut app = new_real_classic_menu_app(640, 480);
-        let cases = [ClassicStartupSubscreen::NetworkGameChat];
-
-        for (index, subscreen) in cases.into_iter().enumerate() {
-            enter_unported_startup_subscreen(&mut app, subscreen);
-            let cached = vec![0x20 + index as u8; 640 * 480 * 4];
-            app.menu_frame_cache = Some(MenuFrameCache {
-                view: app.startup_view,
-                version: app.menu_render_version,
-                width: 640,
-                height: 480,
-                native_text_deferred: false,
-                frame: cached.clone(),
-            });
-            app.status_text = format!("must not mask {subscreen:?}");
-            let mut frame = vec![0xa5; 640 * 480 * 4];
-
-            let error = app
-                .render(&mut frame)
-                .expect_err("subscreen must fail before matching-cache replay");
-            assert_eq!(
-                error.downcast_ref::<ClassicParityBoundary>(),
-                Some(&ClassicParityBoundary::StartupSubscreen(subscreen))
-            );
-            assert!(frame.iter().all(|byte| *byte == 0xa5));
-            assert_eq!(
-                app.menu_frame_cache.as_ref().expect("cache retained").frame,
-                cached
-            );
-
-            let mut native = vec![0x6d; 1280 * 960 * 4];
-            let native_error = app
-                .render_native_main_menu_text(&mut native, 1280, 960)
-                .expect_err("native pass must run the same subscreen preflight");
-            assert_eq!(
-                native_error.downcast_ref::<ClassicParityBoundary>(),
-                Some(&ClassicParityBoundary::StartupSubscreen(subscreen))
-            );
-            assert!(native.iter().all(|byte| *byte == 0x6d));
-            app.show_main_menu();
         }
     }
 
@@ -96485,7 +96780,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("dialog Back returns to Main");
         assert_eq!(app.startup_view, StartupView::MainMenu);
 
-        enter_unported_startup_subscreen(&mut app, ClassicStartupSubscreen::NetworkGameChat);
+        app.open_network_game_dialog();
+        activate_startup_network_chat(&mut app);
         let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
             caption_back_extent: 51,
             text_ip_extent: 18,
@@ -96508,7 +96804,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             lc_frontend::startup_netdlg::NetDlgMode::GameList
         );
 
-        enter_unported_startup_subscreen(&mut app, ClassicStartupSubscreen::NetworkGameChat);
+        app.open_network_game_dialog();
+        activate_startup_network_chat(&mut app);
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("Network Back returns to retained Main");
         assert_eq!(app.startup_view, StartupView::MainMenu);
@@ -97217,7 +97514,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 lc_frontend::startup_options_dlg::OptionsSheet::Network,
             )),
             RetainedStartupChild::AboutLicenses,
-            RetainedStartupChild::Unported(ClassicStartupSubscreen::NetworkGameChat),
         ];
         for child in children {
             let mut app = new_classic_menu_app(640, 480);
@@ -98027,7 +98323,6 @@ public func Grant(password) { return GainMissionAccess(password); }
             )),
             RetainedStartupChild::OptionsSound,
             RetainedStartupChild::AboutLicenses,
-            RetainedStartupChild::Unported(ClassicStartupSubscreen::NetworkGameChat),
         ] {
             enter_retained_startup_child(&mut app, child);
             let removed = Arc::get_mut(&mut app.assets)
@@ -138712,11 +139007,13 @@ func ControlDig() { dig_count = 1; return(1); }
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
             )),
             RetainedStartupChild::AboutLicenses,
-            RetainedStartupChild::Unported(ClassicStartupSubscreen::NetworkGameChat),
         ] {
             enter_retained_startup_child(&mut app, child);
             app.show_main_menu();
         }
+        app.open_network_game_dialog();
+        activate_startup_network_chat(&mut app);
+        app.show_main_menu();
         app.open_player_selection_dialog();
         app.show_main_menu();
         assert_eq!(

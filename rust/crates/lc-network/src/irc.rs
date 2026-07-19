@@ -344,6 +344,12 @@ impl IrcClientState {
         }
     }
 
+    fn snapshot_and_mark_message_log_read(&mut self) -> IrcClientSnapshot {
+        let snapshot = self.snapshot();
+        self.mark_message_log_read();
+        snapshot
+    }
+
     pub fn begin_connect(&mut self, mut config: IrcConnectConfig) {
         if self.is_active() {
             self.close();
@@ -1097,6 +1103,13 @@ impl IrcClientHandle {
 
     pub fn snapshot(&self) -> IrcClientSnapshot {
         lock_state(&self.state).snapshot()
+    }
+
+    /// Copies the complete visible log and advances its read boundary while
+    /// holding the reducer lock once. This prevents a worker message from
+    /// being marked read between a UI snapshot and its acknowledgement.
+    pub fn snapshot_and_mark_message_log_read(&self) -> IrcClientSnapshot {
+        lock_state(&self.state).snapshot_and_mark_message_log_read()
     }
 
     pub fn is_active(&self) -> bool {
@@ -1893,6 +1906,39 @@ mod tests {
         assert!(!messages[2].is_channel());
         state.clear_message_log();
         assert_eq!(state.messages().count(), 0);
+    }
+
+    #[test]
+    fn snapshot_and_mark_read_returns_every_message_before_advancing_the_boundary() {
+        let mut state = IrcClientState::with_log_limits(3, 2);
+        for index in 0..3 {
+            state.push_message(IrcMessageType::Message, "A", "#room", &index.to_string());
+        }
+
+        let snapshot = state.snapshot_and_mark_message_log_read();
+        assert_eq!(snapshot.unread_index, 0);
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .map(|message| message.data.as_str())
+                .collect::<Vec<_>>(),
+            ["0", "1", "2"]
+        );
+        assert_eq!(state.unread_messages().count(), 0);
+        assert_eq!(
+            state
+                .messages()
+                .map(|message| message.data.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+
+        state.push_message(IrcMessageType::Message, "A", "#room", "3");
+        let snapshot = state.snapshot_and_mark_message_log_read();
+        assert_eq!(snapshot.unread_index, 2);
+        assert_eq!(snapshot.messages[2].data, "3");
+        assert_eq!(state.unread_messages().count(), 0);
     }
 
     #[test]
